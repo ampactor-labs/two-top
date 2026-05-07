@@ -25,7 +25,7 @@ Hard rules. Violations cause subtle bugs that are expensive to find. The CI and 
 - **`length_sq` for distance comparisons, `length` only when the magnitude is needed.** Avoiding sqrt is performance and precision win.
 - **Squared values use `wide_mul` internally.** `length_sq` does this; if you write your own squared-magnitude code, use `wide_mul`.
 - **Always normalize angles to ±π before trig calls.** Wrap any direct trig in helper functions in `fixed_math`.
-- **No `From<f32> for Fix`.** Constants only via `const_fixed_from_int!` or `Fix::from_num(integer)`.
+- **No `From<f32> for Fix`.** Constants only via `Fix::const_from_int(integer_literal)` (or `Fix::lit("…")` for non-integer constants). `const_fixed_from_int!` is deprecated in `fixed` 1.20.
 
 ## Render Layer Rules
 
@@ -55,6 +55,7 @@ Hard rules. Violations cause subtle bugs that are expensive to find. The CI and 
 - **`Cargo.lock` is committed.**
 - **`--locked` is used in CI.**
 - **`rust-toolchain.toml` pins exact stable version.** Toolchain drift is itself a determinism risk.
+- **Bevy is pinned with `=` to a single patch version** (e.g. `bevy = "=0.18.1"`). Do not bump until `bevy_ggrs`, `bevy_roll_safe`, and `bevy_matchbox` have all shipped releases compatible with the new Bevy. Downstream rollback crates lag main `bevy` releases — chasing latest first guarantees broken determinism CI.
 - **`clippy -D warnings` is enforced** in the `ci` workflow.
 - **No `unsafe` in `sim` or `fixed_math` crates** without an `// SAFETY:` comment block explaining why.
 - **All public types in `sim` and `fixed_math` derive `Debug`.**

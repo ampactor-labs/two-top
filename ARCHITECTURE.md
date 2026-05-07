@@ -14,7 +14,7 @@ Networking is GGRS-style rollback peer-to-peer with WebRTC transport via Matchbo
 |---|---|
 | Engine | `bevy` |
 | Rollback netcode | `bevy_ggrs` (built on `ggrs`) |
-| Transport | `matchbox_socket` + signaling server |
+| Transport | `matchbox_socket` + `bevy_matchbox` (Bevy resource pump) + signaling server |
 | Fixed-point math | `fixed` (Q16.16 via `FixedI32<U16>`) |
 | Trig / sqrt | `cordic` |
 | Deterministic RNG | `rand_xoshiro` (`Xoshiro256StarStar`) |
@@ -23,6 +23,8 @@ Networking is GGRS-style rollback peer-to-peer with WebRTC transport via Matchbo
 | Logging | `tracing` + `tracing-subscriber` |
 | Property testing | `proptest` |
 | Cross-target build | `cross` / `taiki-e/setup-cross-toolchain-action` |
+| Wire-format POD | `bytemuck` (`Pod` / `Zeroable` derives for `PlayerInput`) |
+| Audio | `bevy_audio` (ships with default Bevy features) |
 
 ## Workspace Layout
 (Use two_top for Rust crate names since hyphens aren't valid there.)
@@ -110,7 +112,7 @@ pub const HALF_PI: Fix;
 
 **Unit convention:** 1 unit = 1 centimeter. Arena dimensions, velocities, hitbox radii all in cm.
 
-**No `From<f32> for Fix`.** Constants must be built at compile time via `const_fixed_from_int!` or `Fix::from_num(integer_literal)`.
+**No `From<f32> for Fix`.** Constants must be built at compile time via `Fix::const_from_int(integer_literal)` (or `Fix::lit("…")` for non-integer constants). The `const_fixed_from_int!` macro was deprecated in `fixed` 1.20 and is slated for removal.
 
 **`length_sq` is the default for distance comparisons.** `length()` only when the magnitude is genuinely needed.
 
@@ -146,7 +148,7 @@ Rolled-back resources:
 - `FrameCount(u32)`
 - `PreviousInputs { per_player: [PlayerInput; 2] }`
 - `SimRng(Xoshiro256StarStar)`
-- `MatchState` (via `bevy_roll_safe::init_ggrs_state`)
+- `MatchState` (via `bevy_roll_safe::RollApp::init_roll_state`)
 - `MatchScore { p0: u8, p1: u8 }`
 
 Registration in app setup:
@@ -194,7 +196,7 @@ app
 8. `animation_advance` — increment `AnimState.frame`, transition states
 9. `audio_tag` — spawn `RollbackSound` entities for events that just occurred
 10. `commit_inputs` — write `CurrentInputs` → `PreviousInputs` for next tick
-11. `record_last_tick_time` — runs in `AdvanceWorldSystems::Last`, writes `LastSimTickTime`
+11. `record_last_tick_time` — runs in the `AdvanceWorld` schedule under `AdvanceWorldSystems::Last` (not `GgrsSchedule`), writes `LastSimTickTime`
 
 `Update` (render, f32 allowed):
 

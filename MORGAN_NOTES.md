@@ -38,6 +38,10 @@ Rollback netcode is *itself* a form of forward prediction at the input layer. Ad
 
 Both serialize Rust types compactly. `postcard` is no_std-friendly, smaller wire format, embedded-Rust ecosystem default, and has a more stable schema story. We don't need no_std today, but we might if we ever do anything with hardware (Daisy Seed integration, anyone?), and the embedded ecosystem alignment is the kind of "future you will thank present you" decision that costs nothing now.
 
+## Why `cordic`, knowing it's frozen
+
+`cordic` 0.1.5 hasn't shipped a release since May 2021. We use it anyway because the algorithm itself is mathematically stable, its API (`sin`/`cos`/`sin_cos`/`atan2`/`sqrt`) is exactly what `fixed_math` needs, and the cross-platform bit-identical determinism we need from trig is a property of the CORDIC algorithm, not the maintainer's release cadence. Pin the version, don't chase updates. If `cordic` ever breaks against a `fixed`-major bump or a Rust-edition transition, migrate to `fixed-trig` — actively maintained, overlapping API surface. Don't preemptively switch: the determinism property tests landing in Phase 1 will surface any real defect, and switching today means re-validating bit-identical trig results across the cross-platform CI matrix for no current benefit.
+
 ## Why level signals only in the wire format
 
 If we encoded "just_pressed" / "just_released" bits and sent them, then under rollback resimulation we'd lose them — the bits would have already been consumed when we predicted. Edges have to be derived inside the sim, from the diff against `PreviousInputs`, which is rolled back. This is the same architectural shape fighting games use. It's tighter, smaller wire format, and inherently rollback-correct.
