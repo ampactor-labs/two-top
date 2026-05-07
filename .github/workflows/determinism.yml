@@ -36,4 +36,4 @@ jobs:
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-nextest
-      - run: cargo nextest run -p fixed_math --target ${{ matrix.target }} --locked
+      - run: cargo nextest run --workspace --target ${{ matrix.target }} --locked
