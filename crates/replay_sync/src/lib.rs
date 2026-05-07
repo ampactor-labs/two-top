@@ -26,6 +26,8 @@ use sim::{GgrsCfg, Player, PlayerInput, PositionF, SimPlugin, VelocityF};
 use std::fmt::Write as _;
 use std::path::PathBuf;
 
+pub mod fuzz;
+
 pub const TSV_HEADER: &str = "frame\ttotal_checksum\tpositionf_part\tvelocityf_part";
 
 // ---- Canonical demo (Phase 5) ----

@@ -1,0 +1,88 @@
+name: Fuzz Soak
+
+on:
+  # Nightly at 04:00 UTC (~9pm PT). Adjust if it conflicts with the
+  # cross-platform Determinism matrix's busy windows.
+  schedule:
+    - cron: '0 4 * * *'
+  # Manual trigger for verification and ad-hoc soaks.
+  workflow_dispatch:
+    inputs:
+      seed_count:
+        description: 'Number of seeds to run'
+        required: false
+        default: '100'
+      base_seed:
+        description: 'Base seed (offset from 0 used for each run)'
+        required: false
+        default: '0'
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  fuzz:
+    name: nightly fuzz
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: fuzz-soak
+      - name: Build replay_sync (release)
+        run: cargo build -p replay_sync --release --locked
+      - name: Run seeded fuzz batch
+        id: fuzz
+        # workflow_dispatch inputs are routed through env vars to defang
+        # any injection vector — bash sees only validated integers.
+        env:
+          INPUT_SEED_COUNT: ${{ github.event.inputs.seed_count || '100' }}
+          INPUT_BASE_SEED: ${{ github.event.inputs.base_seed || '0' }}
+        run: |
+          set -uo pipefail
+          # Validate inputs are unsigned integers before using them.
+          if ! [[ "$INPUT_SEED_COUNT" =~ ^[0-9]+$ ]]; then
+            echo "seed_count must be a non-negative integer, got: $INPUT_SEED_COUNT" >&2
+            exit 2
+          fi
+          if ! [[ "$INPUT_BASE_SEED" =~ ^[0-9]+$ ]]; then
+            echo "base_seed must be a non-negative integer, got: $INPUT_BASE_SEED" >&2
+            exit 2
+          fi
+          SEED_COUNT="$INPUT_SEED_COUNT"
+          BASE_SEED="$INPUT_BASE_SEED"
+
+          mkdir -p regressions
+          failed=()
+          BIN=./target/release/replay_sync
+          for i in $(seq 0 $((SEED_COUNT - 1))); do
+            seed=$((BASE_SEED + i))
+            log="regressions/${seed}.log"
+            bmrg="regressions/${seed}.bmrg"
+            # --emit-bmrg writes the seed's replay before running so a
+            # divergence is reproducible from the artifact alone.
+            if "$BIN" --fuzz "$seed" --emit-bmrg "$bmrg" --output /dev/null \
+                 >"$log" 2>&1; then
+                # Success — drop the bmrg/log so we only ship divergences.
+                rm -f "$bmrg" "$log"
+            else
+                echo "::warning::seed $seed diverged"
+                failed+=("$seed")
+            fi
+          done
+
+          if [ "${#failed[@]}" -gt 0 ]; then
+            printf 'Failed seeds (%d): %s\n' "${#failed[@]}" "${failed[*]}"
+            printf '%s\n' "${failed[@]}" > regressions/failed_seeds.txt
+            echo "fuzz_failed=true" >> "$GITHUB_OUTPUT"
+            exit 1
+          fi
+          echo "All $SEED_COUNT seeds passed."
+      - name: Upload regression artifacts
+        if: failure() && steps.fuzz.outputs.fuzz_failed == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-regressions
+          path: regressions/
+          if-no-files-found: warn
+          retention-days: 30

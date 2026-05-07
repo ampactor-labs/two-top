@@ -1,12 +1,20 @@
-//! Phase 5 CLI. Loads a `.bmrg` replay and either:
-//!   * `--output <path.tsv>` — writes per-frame, per-component checksum TSV
-//!     for the cross-platform diff job to consume, or
-//!   * `--dump-state-at <frame>` — pretty-prints the full sim state at the
-//!     requested frame, used by `scripts/diagnose_desync.sh`.
+//! Phase 5/6 CLI. Two input sources:
+//!   * `--demo <path.bmrg>` — load a saved replay from disk.
+//!   * `--fuzz <seed>` — generate a deterministic replay from a u64 seed
+//!     (Phase 6 fuzzer).
 //!
-//! With no `--output` flag the TSV is streamed to stdout.
+//! Output modes (apply to both input sources):
+//!   * `--output <path.tsv>` — write the per-frame checksum TSV.
+//!   * `--dump-state-at <frame>` — print sim state at the given frame.
+//!   * `--emit-bmrg <path>` — write the (loaded or generated) `.bmrg` to
+//!     disk before running. Used by the fuzz_soak workflow to preserve a
+//!     reproducible artifact for any seed that produces a divergence.
+//!
+//! With no output flag the TSV is streamed to stdout. The exit code is
+//! `0` on success, non-zero on parse/load/encode/decode/sim error.
 
-use replay::decode_for_sim_version;
+use replay::{decode_for_sim_version, encode};
+use replay_sync::fuzz::{fuzz_replay, run_replay_caught};
 use replay_sync::{compute_checksum_tsv, dump_state_at};
 use std::fs;
 use std::io::Write as _;
@@ -15,29 +23,47 @@ use std::process::ExitCode;
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().collect();
-    let Some(demo_path) = arg_value::<String>(&args, "--demo") else {
-        eprintln!(
-            "usage: replay_sync --demo <path.bmrg> [--output <path.tsv> | --dump-state-at <frame>]"
-        );
-        return ExitCode::from(2);
-    };
-    let demo_path = PathBuf::from(demo_path);
 
-    let bytes = match fs::read(&demo_path) {
-        Ok(b) => b,
-        Err(e) => {
-            eprintln!("replay_sync: failed to read {}: {}", demo_path.display(), e);
-            return ExitCode::FAILURE;
+    // Resolve the input replay from --demo or --fuzz. Mutually exclusive;
+    // neither set is a usage error.
+    let replay_result = match (
+        arg_value::<String>(&args, "--demo"),
+        arg_value::<u64>(&args, "--fuzz"),
+    ) {
+        (Some(_), Some(_)) => {
+            eprintln!("replay_sync: --demo and --fuzz are mutually exclusive");
+            return ExitCode::from(2);
+        }
+        (Some(path), None) => load_demo(&PathBuf::from(path)),
+        (None, Some(seed)) => Ok(fuzz_replay(seed)),
+        (None, None) => {
+            eprintln!(
+                "usage: replay_sync (--demo <path.bmrg> | --fuzz <seed>) \
+                 [--output <path.tsv>] [--dump-state-at <frame>] \
+                 [--emit-bmrg <path>]"
+            );
+            return ExitCode::from(2);
         }
     };
 
-    let replay = match decode_for_sim_version(&bytes, sim::SIM_VERSION) {
+    let replay = match replay_result {
         Ok(r) => r,
-        Err(e) => {
-            eprintln!("replay_sync: failed to decode: {e}");
+        Err(code) => return code,
+    };
+
+    if let Some(out) = arg_value::<String>(&args, "--emit-bmrg") {
+        let bytes = match encode(&replay) {
+            Ok(b) => b,
+            Err(e) => {
+                eprintln!("replay_sync: failed to encode bmrg: {e}");
+                return ExitCode::FAILURE;
+            }
+        };
+        if let Err(e) = fs::write(&out, bytes) {
+            eprintln!("replay_sync: failed to write {out}: {e}");
             return ExitCode::FAILURE;
         }
-    };
+    }
 
     if let Some(frame) = arg_value::<u32>(&args, "--dump-state-at") {
         let dump = dump_state_at(&replay, frame);
@@ -45,7 +71,21 @@ fn main() -> ExitCode {
         return ExitCode::SUCCESS;
     }
 
-    let tsv = compute_checksum_tsv(&replay);
+    // For --fuzz, catch SyncTest panics via run_replay_caught so the
+    // workflow's bash loop sees a clean non-zero exit instead of a stack
+    // trace. For --demo, run compute_checksum_tsv directly — a failing
+    // canonical demo *should* panic loudly and immediately.
+    let tsv = if arg_value::<u64>(&args, "--fuzz").is_some() {
+        match run_replay_caught(&replay) {
+            Ok(tsv) => tsv,
+            Err(e) => {
+                eprintln!("replay_sync: fuzz divergence — {e}");
+                return ExitCode::FAILURE;
+            }
+        }
+    } else {
+        compute_checksum_tsv(&replay)
+    };
 
     if let Some(out_path) = arg_value::<String>(&args, "--output") {
         match fs::File::create(&out_path).and_then(|mut f| f.write_all(tsv.as_bytes())) {
@@ -64,6 +104,17 @@ fn main() -> ExitCode {
         print!("{tsv}");
     }
     ExitCode::SUCCESS
+}
+
+fn load_demo(path: &PathBuf) -> Result<replay::Replay, ExitCode> {
+    let bytes = fs::read(path).map_err(|e| {
+        eprintln!("replay_sync: failed to read {}: {}", path.display(), e);
+        ExitCode::FAILURE
+    })?;
+    decode_for_sim_version(&bytes, sim::SIM_VERSION).map_err(|e| {
+        eprintln!("replay_sync: failed to decode: {e}");
+        ExitCode::FAILURE
+    })
 }
 
 fn arg_value<T: std::str::FromStr>(args: &[String], flag: &str) -> Option<T> {
