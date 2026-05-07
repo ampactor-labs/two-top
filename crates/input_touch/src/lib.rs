@@ -19,10 +19,17 @@
 //!     `MOUSE_TOUCH_ID`, merged into the touch event stream so the
 //!     same stick/throw logic drives it. Lets developers and CI
 //!     exercise the input layer without a touchscreen.
+//!   * cycle 5: quantization to wire-format `PlayerInput` and the
+//!     `TouchInputsPlugin` that wires `read_local_touch_inputs` into
+//!     GGRS's `ReadInputs` schedule. This is the moment touch state
+//!     becomes a 4-byte deterministic input that flows into sim.
 
 use bevy::input::mouse::MouseButton;
 use bevy::input::touch::Touches;
 use bevy::prelude::*;
+use bevy_ggrs::prelude::ReadInputs;
+use bevy_ggrs::{LocalInputs, LocalPlayers};
+use sim::{GgrsCfg, PlayerInput};
 
 // ---- Cycle 2 tunables ----
 
@@ -371,6 +378,70 @@ pub fn update_throw_state(mut state: ResMut<TouchState>, window: Res<WindowSize>
     }
 }
 
+/// Quantize an aim angle from radians (atan2 range, [-π, π]) to a u8
+/// covering one full turn. Wraps so π and -π collapse onto the same
+/// byte, matching the cyclic nature of the angle. Out-of-range inputs
+/// are clamped — atan2 itself never produces them, but defensive
+/// math here is cheap and prevents pathological wire values.
+pub fn quantize_angle(rad: f32) -> u8 {
+    use core::f32::consts::PI;
+    let normalized = (rad + PI) / (2.0 * PI); // [0, 1] for rad in [-π, π]
+    let scaled = (normalized * 256.0).floor();
+    scaled.clamp(0.0, 255.0) as u8
+}
+
+/// Pure quantization from `TouchState` to the 4-byte wire-format
+/// `PlayerInput`. Stick components are scaled to i8 in [-127, 127];
+/// stick_y is negated because Bevy reports y-down screen coords but
+/// the wire format follows game-space (y-up) convention so sim's
+/// movement code can use stick_y as a velocity multiplier directly.
+pub fn quantize_inputs(state: &TouchState) -> PlayerInput {
+    let stick = state.stick.unwrap_or(Vec2::ZERO);
+    let stick_x = (stick.x * 127.0).round().clamp(-127.0, 127.0) as i8;
+    let stick_y = (-stick.y * 127.0).round().clamp(-127.0, 127.0) as i8;
+
+    let aim_angle = if state.aim_active {
+        quantize_angle(state.aim_angle_rad)
+    } else {
+        0
+    };
+
+    let mut buttons = 0u8;
+    if state.throw_held {
+        buttons |= PlayerInput::THROW_DOWN;
+    }
+    if state.aim_active {
+        buttons |= PlayerInput::AIM_ACTIVE;
+    }
+    // DASH_DOWN, TAUNT_DOWN: deferred — no UI affordance yet.
+
+    PlayerInput {
+        stick_x,
+        stick_y,
+        aim_angle,
+        buttons,
+    }
+}
+
+/// `ReadInputs` system: reads the local `TouchState` and writes the
+/// same quantized `PlayerInput` for every local handle into
+/// `LocalInputs<GgrsCfg>`. SyncTest mode has both players local; in
+/// online mode only the actual local player is in `LocalPlayers`.
+/// Mirrors `sim::read_local_inputs` shape so it's a drop-in
+/// replacement for `DefaultInputsPlugin` at the app boundary.
+pub fn read_local_touch_inputs(
+    mut commands: Commands,
+    touch_state: Res<TouchState>,
+    local_players: Res<LocalPlayers>,
+) {
+    let input = quantize_inputs(&touch_state);
+    let mut map = bevy::platform::collections::HashMap::default();
+    for handle in &local_players.0 {
+        map.insert(*handle, input);
+    }
+    commands.insert_resource(LocalInputs::<GgrsCfg>(map));
+}
+
 pub struct InputTouchPlugin;
 
 impl Plugin for InputTouchPlugin {
@@ -382,6 +453,19 @@ impl Plugin for InputTouchPlugin {
                 PreUpdate,
                 (update_touch_state, update_virtual_stick, update_throw_state).chain(),
             );
+    }
+}
+
+/// Production input source: `InputTouchPlugin` plus the GGRS
+/// `ReadInputs` hookup. The app installs this in place of
+/// `sim::DefaultInputsPlugin`. Two input plugins must not coexist —
+/// they would race over `LocalInputs<GgrsCfg>`.
+pub struct TouchInputsPlugin;
+
+impl Plugin for TouchInputsPlugin {
+    fn build(&self, app: &mut App) {
+        app.add_plugins(InputTouchPlugin)
+            .add_systems(ReadInputs, read_local_touch_inputs);
     }
 }
 
@@ -1021,5 +1105,104 @@ mod tests {
         // sentinel sits at u64::MAX so it cannot collide.
         assert_eq!(MOUSE_TOUCH_ID, u64::MAX);
         assert!(MOUSE_TOUCH_ID > 1_000_000_000);
+    }
+
+    // ---- Cycle 5: angle quantization ----
+
+    #[test]
+    fn quantize_angle_wraps_negative_pi_to_zero() {
+        // rad = -π → normalized 0 → byte 0.
+        assert_eq!(quantize_angle(-core::f32::consts::PI), 0);
+    }
+
+    #[test]
+    fn quantize_angle_zero_is_midpoint() {
+        // rad = 0 → normalized 0.5 → byte 128.
+        assert_eq!(quantize_angle(0.0), 128);
+    }
+
+    #[test]
+    fn quantize_angle_half_pi_is_three_quarter() {
+        // rad = π/2 → normalized 0.75 → byte 192.
+        assert_eq!(quantize_angle(core::f32::consts::FRAC_PI_2), 192);
+    }
+
+    #[test]
+    fn quantize_angle_just_below_pi_saturates_at_max() {
+        // rad just below π → normalized just below 1 → byte 255.
+        let v = quantize_angle(core::f32::consts::PI - 1e-3);
+        assert_eq!(v, 255);
+    }
+
+    #[test]
+    fn quantize_angle_clamps_out_of_range() {
+        // atan2 cannot produce these in practice, but defensive
+        // clamping prevents pathological wire values.
+        assert_eq!(quantize_angle(-10.0), 0);
+        assert_eq!(quantize_angle(10.0), 255);
+    }
+
+    // ---- Cycle 5: input quantization ----
+
+    #[test]
+    fn quantize_inputs_idle_state_is_all_zero() {
+        let s = TouchState::default();
+        let p = quantize_inputs(&s);
+        assert_eq!(p.stick_x, 0);
+        assert_eq!(p.stick_y, 0);
+        assert_eq!(p.aim_angle, 0);
+        assert_eq!(p.buttons, 0);
+    }
+
+    #[test]
+    fn quantize_inputs_unit_right_stick() {
+        let mut s = TouchState::default();
+        s.stick = Some(Vec2::new(1.0, 0.0));
+        let p = quantize_inputs(&s);
+        assert_eq!(p.stick_x, 127);
+        assert_eq!(p.stick_y, 0);
+    }
+
+    #[test]
+    fn quantize_inputs_negates_y_for_game_space() {
+        // Bevy y-down: positive bevy stick.y means finger dragged
+        // downward. Wire convention is y-up, so this should flip to
+        // a negative stick_y.
+        let mut s = TouchState::default();
+        s.stick = Some(Vec2::new(0.0, 1.0));
+        let p = quantize_inputs(&s);
+        assert_eq!(p.stick_y, -127);
+    }
+
+    #[test]
+    fn quantize_inputs_throw_held_sets_throw_down_bit() {
+        let mut s = TouchState::default();
+        s.throw_held = true;
+        let p = quantize_inputs(&s);
+        assert!(p.buttons & PlayerInput::THROW_DOWN != 0);
+        assert!(p.buttons & PlayerInput::AIM_ACTIVE == 0);
+    }
+
+    #[test]
+    fn quantize_inputs_aim_active_sets_aim_active_bit_and_angle() {
+        let mut s = TouchState::default();
+        s.throw_held = true;
+        s.aim_active = true;
+        s.aim_angle_rad = 0.0; // Game-space "right" → byte 128.
+        let p = quantize_inputs(&s);
+        assert!(p.buttons & PlayerInput::THROW_DOWN != 0);
+        assert!(p.buttons & PlayerInput::AIM_ACTIVE != 0);
+        assert_eq!(p.aim_angle, 128);
+    }
+
+    #[test]
+    fn quantize_inputs_aim_inactive_zeroes_angle() {
+        // Even if aim_angle_rad has lingering data, when aim_active
+        // is false the wire byte is 0 to keep the message clean.
+        let mut s = TouchState::default();
+        s.aim_angle_rad = 1.5;
+        s.aim_active = false;
+        let p = quantize_inputs(&s);
+        assert_eq!(p.aim_angle, 0);
     }
 }

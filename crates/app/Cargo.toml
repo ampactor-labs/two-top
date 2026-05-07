@@ -34,11 +34,13 @@ bevy = { version = "=0.18.1", default-features = false, features = [
     "bevy_render",
     "bevy_core_pipeline",
     "bevy_sprite",
+    "bevy_text",
     "default_font",
     "x11",
 ] }
 bevy_ggrs = "=0.21"
 fixed_math = { path = "../fixed_math" }
+input_touch = { path = "../input_touch" }
 render = { path = "../render" }
 sim = { path = "../sim" }
 

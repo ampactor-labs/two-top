@@ -8,6 +8,7 @@ use bytemuck::{Pod, Zeroable};
 use core::net::SocketAddr;
 use fixed_math::{Fix, Vec2F};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
 // ---- Wire input ----
 
@@ -105,6 +106,77 @@ pub struct LastSimTickTime(pub f64);
 #[derive(Resource, Default)]
 pub struct SynthesizedInputs(pub PlayerInput);
 
+/// Length of the per-player input ring. 8 ticks (~133ms at 60Hz) covers
+/// the standard 100ms forgiveness window with headroom for sequence
+/// detection (e.g. dash-cancel into throw).
+pub const INPUT_HISTORY_LEN: usize = 8;
+
+/// Per-handle ring buffer of the last `INPUT_HISTORY_LEN` ticks of
+/// inputs. Index 0 is oldest, INPUT_HISTORY_LEN-1 is newest. Pushed
+/// at the END of each `GgrsSchedule` tick by `advance_input_history`,
+/// so during edge consumers in tick N the ring's last entry is tick
+/// N-1's input — i.e. "previous" from the consumer's POV. Edges are
+/// derived by comparing `PlayerInputs<GgrsCfg>` (= current tick) to
+/// the ring's last entry.
+///
+/// Rolled back so resimulation reconstructs the same forgiveness
+/// state as live play. `BTreeMap` (not `HashMap`) per CONVENTIONS to
+/// keep iteration order portable across hosts.
+#[derive(Resource, Clone, Debug, Default, PartialEq, Eq, Hash)]
+pub struct InputHistory(pub BTreeMap<usize, [PlayerInput; INPUT_HISTORY_LEN]>);
+
+/// Push `curr` onto the end of `ring`, dropping the oldest entry. Pure
+/// helper so cycle 6's logic is testable without a Bevy app.
+pub fn push_history(ring: &mut [PlayerInput; INPUT_HISTORY_LEN], curr: PlayerInput) {
+    ring.copy_within(1.., 0);
+    ring[INPUT_HISTORY_LEN - 1] = curr;
+}
+
+/// "Previous tick" from the consumer's POV, given the convention that
+/// `advance_input_history` runs at the end of `GgrsSchedule`.
+pub fn previous_input(ring: &[PlayerInput; INPUT_HISTORY_LEN]) -> PlayerInput {
+    ring[INPUT_HISTORY_LEN - 1]
+}
+
+/// Rising edge: bit was low last tick and is high this tick.
+pub fn just_pressed(curr: PlayerInput, prev: PlayerInput, mask: u8) -> bool {
+    (curr.buttons & mask != 0) && (prev.buttons & mask == 0)
+}
+
+/// Falling edge: bit was high last tick and is low this tick.
+pub fn just_released(curr: PlayerInput, prev: PlayerInput, mask: u8) -> bool {
+    (curr.buttons & mask == 0) && (prev.buttons & mask != 0)
+}
+
+/// Was a rising edge present in the last `n` adjacent-pair transitions
+/// of the ring? `n=1` checks only the very last transition; larger n
+/// values widen the forgiveness window.
+pub fn pressed_within(ring: &[PlayerInput; INPUT_HISTORY_LEN], n: usize, mask: u8) -> bool {
+    let n = n.min(INPUT_HISTORY_LEN - 1);
+    for i in 0..n {
+        let newer = INPUT_HISTORY_LEN - 1 - i;
+        let older = newer - 1;
+        if (ring[older].buttons & mask == 0) && (ring[newer].buttons & mask != 0) {
+            return true;
+        }
+    }
+    false
+}
+
+/// Was a falling edge present in the last `n` adjacent-pair transitions
+/// of the ring? Mirrors `pressed_within`.
+pub fn released_within(ring: &[PlayerInput; INPUT_HISTORY_LEN], n: usize, mask: u8) -> bool {
+    let n = n.min(INPUT_HISTORY_LEN - 1);
+    for i in 0..n {
+        let newer = INPUT_HISTORY_LEN - 1 - i;
+        let older = newer - 1;
+        if (ring[older].buttons & mask != 0) && (ring[newer].buttons & mask == 0) {
+            return true;
+        }
+    }
+    false
+}
+
 pub fn read_local_inputs(
     mut commands: Commands,
     synthesized: Res<SynthesizedInputs>,
@@ -159,6 +231,27 @@ pub fn record_last_tick_time(time: Res<Time<Real>>, mut last: ResMut<LastSimTick
     last.0 = time.elapsed_secs_f64();
 }
 
+/// Last system in `GgrsSchedule`: pushes the current tick's inputs
+/// onto each player's history ring. Must run AFTER all edge consumers
+/// so they see history's last entry as "previous tick". Iterates
+/// `Player` components rather than `LocalPlayers` so the ring is
+/// populated for both local and remote players (relevant once
+/// networking lands in Phase 11).
+pub fn advance_input_history(
+    inputs: Res<PlayerInputs<GgrsCfg>>,
+    mut history: ResMut<InputHistory>,
+    players: Query<&Player>,
+) {
+    for player in &players {
+        let (current_input, _status) = inputs[player.handle];
+        let entry = history
+            .0
+            .entry(player.handle)
+            .or_insert([PlayerInput::default(); INPUT_HISTORY_LEN]);
+        push_history(entry, current_input);
+    }
+}
+
 // ---- Plugin ----
 
 /// Adds the sim's rollback registrations, schedules, and gameplay systems.
@@ -175,6 +268,7 @@ impl Plugin for SimPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<FrameCount>()
             .init_resource::<LastSimTickTime>()
+            .init_resource::<InputHistory>()
             .insert_resource(RollbackFrameRate(TICK_HZ));
 
         // Rollback registrations
@@ -183,7 +277,8 @@ impl Plugin for SimPlugin {
             .rollback_component_with_copy::<VelocityF>()
             .rollback_component_with_copy::<Player>()
             .rollback_component_with_copy::<NoInterpolate>()
-            .rollback_resource_with_copy::<FrameCount>();
+            .rollback_resource_with_copy::<FrameCount>()
+            .rollback_resource_with_clone::<InputHistory>();
 
         // Checksums — required for SyncTest to detect divergence beyond
         // entity-count mismatches. PreviousPositionF participates because
@@ -192,14 +287,24 @@ impl Plugin for SimPlugin {
         app.checksum_component_with_hash::<PositionF>()
             .checksum_component_with_hash::<PreviousPositionF>()
             .checksum_component_with_hash::<VelocityF>()
-            .checksum_resource_with_hash::<FrameCount>();
+            .checksum_resource_with_hash::<FrameCount>()
+            .checksum_resource_with_hash::<InputHistory>();
 
         // Sim systems — explicitly ordered per CONVENTIONS.md.
         // snapshot_previous runs FIRST so the PositionF copy it captures
         // is the value at the start of this tick (== end of prior tick).
+        // advance_input_history runs LAST so edge consumers see the
+        // ring's last entry as "previous tick" until end-of-tick rolls
+        // it forward.
         app.add_systems(
             GgrsSchedule,
-            (snapshot_previous, player_movement, advance_frame_count).chain(),
+            (
+                snapshot_previous,
+                player_movement,
+                advance_frame_count,
+                advance_input_history,
+            )
+                .chain(),
         );
 
         // Wall-clock timestamp captured after each tick.

@@ -11,3 +11,5 @@ rust-version.workspace = true
 # wire-format `PlayerInput` (cycle 5). Per CONVENTIONS, `TouchState` is
 # never rolled back and never serialized — pure local state.
 bevy = { version = "=0.18.1", default-features = false, features = ["std", "touch", "mouse"] }
+bevy_ggrs = "=0.21"
+sim = { path = "../sim" }

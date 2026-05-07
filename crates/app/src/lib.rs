@@ -16,11 +16,12 @@ use bevy::prelude::*;
 use bevy_ggrs::GgrsPlugin;
 use bevy_ggrs::prelude::*;
 use fixed_math::Vec2F;
+use input_touch::{CursorPosition, TouchInputsPlugin, WindowSize, update_touch_state};
 use render::RenderSyncPlugin;
-use sim::{
-    DefaultInputsPlugin, GgrsCfg, Player, PlayerInput, PositionF, PreviousPositionF, SimPlugin,
-    SynthesizedInputs, VelocityF,
-};
+use sim::{GgrsCfg, Player, PositionF, PreviousPositionF, SimPlugin, VelocityF};
+
+mod debug_overlay;
+use debug_overlay::DebugInputOverlayPlugin;
 
 pub fn run() {
     let mut sb = SessionBuilder::<GgrsCfg>::new()
@@ -37,11 +38,12 @@ pub fn run() {
         .add_plugins(DefaultPlugins)
         .add_plugins(GgrsPlugin::<GgrsCfg>::default())
         .add_plugins(SimPlugin)
-        .add_plugins(DefaultInputsPlugin)
+        .add_plugins(TouchInputsPlugin)
         .add_plugins(RenderSyncPlugin)
+        .add_plugins(DebugInputOverlayPlugin)
         .insert_resource(Session::SyncTest(session))
         .add_systems(Startup, setup)
-        .add_systems(Update, drive_inputs)
+        .add_systems(PreUpdate, update_window_metrics.before(update_touch_state))
         .run();
 }
 
@@ -80,13 +82,20 @@ fn setup(mut commands: Commands) {
     ));
 }
 
-fn drive_inputs(time: Res<Time<Real>>, mut synthesized: ResMut<SynthesizedInputs>) {
-    let phase = (time.elapsed_secs_f64() % 2.0) / 2.0;
-    let dir = if phase < 0.5 { 100i8 } else { -100i8 };
-    synthesized.0 = PlayerInput {
-        stick_x: dir,
-        stick_y: 0,
-        aim_angle: 0,
-        buttons: 0,
-    };
+/// Mirrors the primary `Window`'s logical size and cursor position into
+/// the resources `input_touch` reads. Lives in the app crate (not
+/// `input_touch`) because only the app pulls in `bevy_window` —
+/// `input_touch` stays headless-friendly for tests and CI.
+/// Ordered before `input_touch::update_touch_state` so the same-frame
+/// touch sync sees fresh metrics.
+fn update_window_metrics(
+    window: Query<&Window>,
+    mut window_size: ResMut<WindowSize>,
+    mut cursor_pos: ResMut<CursorPosition>,
+) {
+    let Ok(w) = window.single() else { return };
+    window_size.0 = Vec2::new(w.width(), w.height());
+    if let Some(pos) = w.cursor_position() {
+        cursor_pos.0 = pos;
+    }
 }
