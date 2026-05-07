@@ -75,6 +75,10 @@ cargo run -p replay_sync -- --fuzz <seed>
 
 `Cargo.lock` is committed and `--locked` is enforced everywhere. `rust-toolchain.toml` pins the exact stable version — toolchain drift is itself a determinism risk, so don't loosen the pin without reason.
 
+## Tooling conventions
+
+This repo is opted in to the AI-assisted dev protocol (`~/.claude/protocol/PROTOCOL.md`). Per-repo state lives in `.protocol/`, git hooks (commit-msg + pre-commit) are active. Disclosure conventions are in `CONTRIBUTING.md`; the PR self-review checklist is at `.github/PR_SELF_REVIEW.md`.
+
 ## Phased-build discipline
 
 `BUILD_PLAN.md` is sequenced for a reason: each phase's exit criteria depend on the prior phase's verifiable artifacts. The cross-platform determinism guarantee is built incrementally and would be much harder to retrofit. Don't propose work that crosses phase boundaries (e.g., starting boomerang physics in Phase 9 before Phase 7's sim/render boundary lands) without an explicit case for why the order should change.

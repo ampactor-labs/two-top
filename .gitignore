@@ -11,3 +11,25 @@
 *.bmrg.log
 
 *.local
+
+# >>> claude-protocol >>>
+# AI-tool artifacts (never tracked)
+.claude/
+.cursor/
+.aider*
+.continue/
+CLAUDE.local.md
+AGENTS.override.md
+*.transcript
+*.tmp.md
+.protocol/
+
+# Secret patterns (defense-in-depth; presence on disk is also blocked by the Claude-side hook)
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+credentials.json
+secrets.json
+# <<< claude-protocol <<<
