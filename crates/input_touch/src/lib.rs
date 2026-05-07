@@ -1102,9 +1102,12 @@ mod tests {
     #[test]
     fn mouse_id_does_not_collide_with_real_touch_ids() {
         // Real touchscreen ids are small monotonic integers; the
-        // sentinel sits at u64::MAX so it cannot collide.
+        // sentinel sits at u64::MAX so it cannot collide. The
+        // headroom check is a const block so clippy doesn't flag it
+        // as an assertion-on-constant — the point of the test is to
+        // freeze that headroom into the compile-time contract.
+        const _HEADROOM: () = assert!(MOUSE_TOUCH_ID > 1_000_000_000);
         assert_eq!(MOUSE_TOUCH_ID, u64::MAX);
-        assert!(MOUSE_TOUCH_ID > 1_000_000_000);
     }
 
     // ---- Cycle 5: angle quantization ----
@@ -1156,8 +1159,10 @@ mod tests {
 
     #[test]
     fn quantize_inputs_unit_right_stick() {
-        let mut s = TouchState::default();
-        s.stick = Some(Vec2::new(1.0, 0.0));
+        let s = TouchState {
+            stick: Some(Vec2::new(1.0, 0.0)),
+            ..Default::default()
+        };
         let p = quantize_inputs(&s);
         assert_eq!(p.stick_x, 127);
         assert_eq!(p.stick_y, 0);
@@ -1168,16 +1173,20 @@ mod tests {
         // Bevy y-down: positive bevy stick.y means finger dragged
         // downward. Wire convention is y-up, so this should flip to
         // a negative stick_y.
-        let mut s = TouchState::default();
-        s.stick = Some(Vec2::new(0.0, 1.0));
+        let s = TouchState {
+            stick: Some(Vec2::new(0.0, 1.0)),
+            ..Default::default()
+        };
         let p = quantize_inputs(&s);
         assert_eq!(p.stick_y, -127);
     }
 
     #[test]
     fn quantize_inputs_throw_held_sets_throw_down_bit() {
-        let mut s = TouchState::default();
-        s.throw_held = true;
+        let s = TouchState {
+            throw_held: true,
+            ..Default::default()
+        };
         let p = quantize_inputs(&s);
         assert!(p.buttons & PlayerInput::THROW_DOWN != 0);
         assert!(p.buttons & PlayerInput::AIM_ACTIVE == 0);
@@ -1185,10 +1194,12 @@ mod tests {
 
     #[test]
     fn quantize_inputs_aim_active_sets_aim_active_bit_and_angle() {
-        let mut s = TouchState::default();
-        s.throw_held = true;
-        s.aim_active = true;
-        s.aim_angle_rad = 0.0; // Game-space "right" → byte 128.
+        let s = TouchState {
+            throw_held: true,
+            aim_active: true,
+            aim_angle_rad: 0.0, // Game-space "right" → byte 128.
+            ..Default::default()
+        };
         let p = quantize_inputs(&s);
         assert!(p.buttons & PlayerInput::THROW_DOWN != 0);
         assert!(p.buttons & PlayerInput::AIM_ACTIVE != 0);
@@ -1199,9 +1210,11 @@ mod tests {
     fn quantize_inputs_aim_inactive_zeroes_angle() {
         // Even if aim_angle_rad has lingering data, when aim_active
         // is false the wire byte is 0 to keep the message clean.
-        let mut s = TouchState::default();
-        s.aim_angle_rad = 1.5;
-        s.aim_active = false;
+        let s = TouchState {
+            aim_angle_rad: 1.5,
+            aim_active: false,
+            ..Default::default()
+        };
         let p = quantize_inputs(&s);
         assert_eq!(p.aim_angle, 0);
     }

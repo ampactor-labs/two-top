@@ -37,8 +37,8 @@ fn push_history_shifts_oldest_out_and_appends_newest() {
         push_history(&mut ring, input_with_buttons(i + 1));
     }
     // After N pushes the ring should hold 1..=N in order.
-    for i in 0..INPUT_HISTORY_LEN {
-        assert_eq!(ring[i].buttons, i as u8 + 1, "ring slot {i}");
+    for (i, slot) in ring.iter().enumerate() {
+        assert_eq!(slot.buttons, i as u8 + 1, "ring slot {i}");
     }
     // One more push: newest = N+1, oldest (was 1) is gone.
     push_history(&mut ring, input_with_buttons(99));
@@ -107,8 +107,8 @@ fn pressed_within_clamps_n_to_history_size() {
 #[test]
 fn released_within_finds_recent_falling_edge() {
     let mut ring = [PlayerInput::default(); INPUT_HISTORY_LEN];
-    for i in 0..6 {
-        ring[i] = input_with_buttons(PlayerInput::THROW_DOWN);
+    for slot in ring.iter_mut().take(6) {
+        *slot = input_with_buttons(PlayerInput::THROW_DOWN);
     }
     ring[6] = input_with_buttons(0);
     ring[7] = input_with_buttons(0);
