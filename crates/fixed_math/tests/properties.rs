@@ -42,6 +42,24 @@ fn length_sq_of_zero_is_zero() {
 }
 
 #[test]
+fn length_sq_saturates_for_large_vectors() {
+    // 1000 cm * 1000 cm = 1_000_000, far above Fix::MAX (~32767).
+    // length_sq saturates; length_sq_wide does not.
+    let v = Vec2F::from_cm(1000, 0);
+    assert_eq!(v.length_sq(), Fix::MAX);
+    let wide_expected: fixed_math::FixWide = fixed_math::FixWide::const_from_int(1_000_000);
+    assert_eq!(v.length_sq_wide(), wide_expected);
+}
+
+#[test]
+fn length_sq_wide_arena_diagonal() {
+    // Arena-scale ranking case: ~3000 cm vector.
+    let v = Vec2F::from_cm(3000, 0);
+    let expected = fixed_math::FixWide::const_from_int(9_000_000);
+    assert_eq!(v.length_sq_wide(), expected);
+}
+
+#[test]
 fn length_of_3_4_is_5() {
     let v = Vec2F::from_cm(3, 4);
     let len = v.length();

@@ -26,20 +26,32 @@ impl Sub for Vec2F {
 }
 
 impl Vec2F {
+    /// Squared magnitude as `Fix`, **saturating** at `Fix::MAX` (~32767).
+    ///
+    /// Use for radius-scale comparisons (collision, hit-radii) where both
+    /// sides are guaranteed small. For arena-scale distance ranking
+    /// (e.g. "which player is closer to the pickup?") use
+    /// [`Vec2F::length_sq_wide`] — this method silently saturates above
+    /// vector magnitudes of ~181 cm.
     pub fn length_sq(self) -> Fix {
-        let xx: FixWide = self.x.wide_mul(self.x);
-        let yy: FixWide = self.y.wide_mul(self.y);
-        Fix::saturating_from_num(xx + yy)
+        Fix::saturating_from_num(self.length_sq_wide())
     }
 
-    pub fn length(self) -> Fix {
-        // Compute length_sq in FixWide so we don't saturate before sqrt and so
-        // cordic::sqrt has the headroom it needs. cordic's iterative algorithm
-        // squares candidates internally, which overflows Fix near Fix::MAX even
-        // for inputs whose true sqrt fits.
+    /// Squared magnitude as `FixWide`. Does not saturate within any
+    /// reasonable arena range. Use for arena-scale distance comparisons
+    /// or whenever inputs may exceed ~181 cm.
+    pub fn length_sq_wide(self) -> FixWide {
         let xx: FixWide = self.x.wide_mul(self.x);
         let yy: FixWide = self.y.wide_mul(self.y);
-        Fix::saturating_from_num(cordic::sqrt(xx + yy))
+        xx + yy
+    }
+
+    /// Magnitude as `Fix`. Internally widens through `FixWide` because
+    /// `cordic::sqrt` squares candidates during its iterative
+    /// approximation and overflows `Fix` near `Fix::MAX` even when the
+    /// mathematical result fits.
+    pub fn length(self) -> Fix {
+        Fix::saturating_from_num(cordic::sqrt(self.length_sq_wide()))
     }
 
     pub fn dot(self, other: Vec2F) -> Fix {
@@ -132,6 +144,12 @@ impl Vec2F {
         Vec2F { x, y }
     }
 
+    /// Construct from integer centimeter coordinates.
+    ///
+    /// Panics at compile or runtime if either component does not fit in
+    /// `Fix`'s integer range (±32767 cm). Caller-side responsibility — our
+    /// arenas are bounded to a few thousand cm, so this is unreachable in
+    /// practice.
     pub const fn from_cm(x: i32, y: i32) -> Self {
         Vec2F {
             x: Fix::const_from_int(x),

@@ -88,8 +88,9 @@ impl Vec2F {
     pub const fn new(x: Fix, y: Fix) -> Self;
     pub fn from_cm(x: i32, y: i32) -> Self;
 
-    pub fn length_sq(self) -> Fix;       // wide_mul internally
-    pub fn length(self) -> Fix;          // cordic::sqrt
+    pub fn length_sq(self) -> Fix;       // wide_mul; saturates at Fix::MAX (~181cm magnitude)
+    pub fn length_sq_wide(self) -> FixWide;  // for arena-scale ranking, no saturation
+    pub fn length(self) -> Fix;          // cordic::sqrt via FixWide intermediate
     pub fn normalize(self) -> Vec2F;     // returns ZERO on zero input
     pub fn dot(self, other: Vec2F) -> Fix;
     pub fn cross(self, other: Vec2F) -> Fix;  // 2D scalar cross

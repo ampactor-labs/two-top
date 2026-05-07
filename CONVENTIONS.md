@@ -22,7 +22,7 @@ Hard rules. Violations cause subtle bugs that are expensive to find. The CI and 
 
 ## Math and Geometry
 
-- **`length_sq` for distance comparisons, `length` only when the magnitude is needed.** Avoiding sqrt is performance and precision win.
+- **`length_sq` for distance comparisons, `length` only when the magnitude is needed.** Avoiding sqrt is performance and precision win. **For arena-scale comparisons (vector magnitudes potentially > 181 cm) use `length_sq_wide`** — plain `length_sq` saturates at `Fix::MAX` and silently returns wrong rankings for distant pairs.
 - **Squared values use `wide_mul` internally.** `length_sq` does this; if you write your own squared-magnitude code, use `wide_mul`.
 - **Always normalize angles to ±π before trig calls.** Wrap any direct trig in helper functions in `fixed_math`.
 - **No `From<f32> for Fix`.** Constants only via `Fix::const_from_int(integer_literal)` (or `Fix::lit("…")` for non-integer constants). `const_fixed_from_int!` is deprecated in `fixed` 1.20.
