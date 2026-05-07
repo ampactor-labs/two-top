@@ -12,3 +12,16 @@ serde = { version = "1", default-features = false, features = ["derive"] }
 bevy = { version = "=0.18.1", default-features = false, features = ["std", "bevy_log"] }
 bevy_ggrs = "=0.21"
 fixed_math = { path = "../fixed_math" }
+
+# Android workaround. bevy_internal force-pulls bevy_android under
+# `cfg(target_os = "android")`, which depends on `android-activity = "0.6"`
+# without enabling either of its mutually-exclusive `game-activity` /
+# `native-activity` features. android-activity emits a compile_error
+# unless one is set. Adding android-activity here as a target-gated
+# direct dep with `game-activity` enabled unifies the feature across the
+# dep graph for android builds and is a no-op on every other target.
+# This unblocks sim/replay/replay_sync/render/sync_test for android in
+# the determinism matrix; full app windowing still requires bevy_winit
+# and is its own packaging story (see app/Cargo.toml).
+[target.'cfg(target_os = "android")'.dependencies]
+android-activity = { version = "0.6", features = ["game-activity"] }

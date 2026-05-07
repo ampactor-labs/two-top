@@ -35,16 +35,17 @@ jobs:
             runs-on: macos-14
             pkg-args: --workspace --exclude app
             replay-sync: true
-          # aarch64-linux-android: fixed_math only. bevy 0.18 force-pulls
-          # bevy_android via cfg(target_os="android"), which depends on
-          # android-activity requiring game-activity or native-activity
-          # features that bevy_internal doesn't expose for headless builds.
-          # aarch64 instruction-set determinism is still covered by
-          # aarch64-unknown-linux-gnu and aarch64-apple-darwin. Revisit when
-          # NDK build infra lands later in BUILD_PLAN.
+          # aarch64-linux-android: Phase 7.5 expanded scope from
+          # `-p fixed_math` to `--workspace --exclude app`. The sim/replay/
+          # render/sync_test/replay_sync crates compile for android via
+          # the android-activity feature workaround in crates/sim/Cargo.toml.
+          # `app` stays excluded — full bevy_winit + wgpu cross-build is
+          # its own packaging story; locally use
+          # `cargo apk run -p app --target aarch64-linux-android` once
+          # the NDK and cargo-apk are installed (see SIDELOAD.md).
           - target: aarch64-linux-android
             runs-on: ubuntu-latest
-            pkg-args: -p fixed_math
+            pkg-args: --workspace --exclude app
             replay-sync: false
     steps:
       - uses: actions/checkout@v5
@@ -57,7 +58,17 @@ jobs:
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-nextest
-      - run: cargo nextest run ${{ matrix.pkg-args }} --target ${{ matrix.target }} --locked
+      # Non-android targets: build + run the test suite under nextest.
+      - name: Run tests
+        if: matrix.target != 'aarch64-linux-android'
+        run: cargo nextest run ${{ matrix.pkg-args }} --target ${{ matrix.target }} --locked
+      # Android: build-only via cargo build --tests. nextest can't *run*
+      # tests under aarch64-linux-android without an android runtime, but
+      # `cargo build --tests` exercises every test target's compilation
+      # — which is the property the matrix is gating against.
+      - name: Build tests (android)
+        if: matrix.target == 'aarch64-linux-android'
+        run: cargo build ${{ matrix.pkg-args }} --target ${{ matrix.target }} --locked --tests
 
       # Phase 5: per-frame, per-component checksum TSV from the canonical
       # demo. The matrix runs identical input through identical sim code on

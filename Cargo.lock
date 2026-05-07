@@ -84,6 +84,7 @@ dependencies = [
  "ndk-context",
  "ndk-sys",
  "num_enum",
+ "simd_cesu8",
  "thiserror 2.0.18",
 ]
 
@@ -3502,6 +3503,7 @@ checksum = "0fda2ff0d084019ba4d7c6f371c95d8fd75ce3524c3cb8fb653a3023f6323e64"
 name = "sim"
 version = "0.0.0"
 dependencies = [
+ "android-activity",
  "bevy",
  "bevy_ggrs",
  "bytemuck",
