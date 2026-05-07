@@ -21,13 +21,19 @@ jobs:
             runs-on: ubuntu-latest
             pkg-args: --workspace
             replay-sync: true
+          # Phase 7: `app` is excluded from non-native cross-builds —
+          # bevy/wgpu pulls target-side X11/Wayland libs that the qemu and
+          # macOS aarch64 cross-toolchains don't ship. The determinism
+          # property is about sim, not render; render-layer rendering is
+          # explicitly allowed to be platform-dependent (CONVENTIONS § Render
+          # Layer Rules). Linux-x64 still builds the full workspace.
           - target: aarch64-unknown-linux-gnu
             runs-on: ubuntu-latest
-            pkg-args: --workspace
+            pkg-args: --workspace --exclude app
             replay-sync: true
           - target: aarch64-apple-darwin
             runs-on: macos-14
-            pkg-args: --workspace
+            pkg-args: --workspace --exclude app
             replay-sync: true
           # aarch64-linux-android: fixed_math only. bevy 0.18 force-pulls
           # bevy_android via cfg(target_os="android"), which depends on

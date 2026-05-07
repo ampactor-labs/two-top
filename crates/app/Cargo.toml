@@ -5,3 +5,27 @@ version.workspace = true
 license.workspace = true
 publish.workspace = true
 rust-version.workspace = true
+
+[dependencies]
+# `app` is the only crate in the workspace that needs windowing,
+# rendering, and font/text infra. CONVENTIONS keeps these features out
+# of `sim` and `render` so the determinism core stays headless. The
+# Linux platform list intentionally pins x11 only — adding wayland pulls
+# in `wayland-client.pc` which most CI runners (and many dev boxes)
+# don't ship by default. Local Wayland users can rebuild with
+# `--features bevy/wayland`.
+bevy = { version = "=0.18.1", default-features = false, features = [
+    "std",
+    "bevy_log",
+    "bevy_window",
+    "bevy_winit",
+    "bevy_render",
+    "bevy_core_pipeline",
+    "bevy_sprite",
+    "default_font",
+    "x11",
+] }
+bevy_ggrs = "=0.21"
+fixed_math = { path = "../fixed_math" }
+render = { path = "../render" }
+sim = { path = "../sim" }

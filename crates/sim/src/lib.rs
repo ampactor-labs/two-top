@@ -54,6 +54,15 @@ pub const SIM_VERSION: u32 = u32::MAX;
 #[require(Rollback)]
 pub struct PositionF(pub Vec2F);
 
+/// Snapshot of `PositionF` taken at the *start* of each `GgrsSchedule`
+/// tick. Render-side `sync_transforms_from_sim` lerps between this and the
+/// current `PositionF` using `LastSimTickTime` + tick rate. Maintaining
+/// this lag is the contract that lets the visual layer run at any frame
+/// rate while the sim stays at 60 Hz.
+#[derive(Component, Clone, Copy, PartialEq, Eq, Hash, Debug)]
+#[require(Rollback)]
+pub struct PreviousPositionF(pub Vec2F);
+
 #[derive(Component, Clone, Copy, PartialEq, Eq, Hash, Debug)]
 #[require(Rollback)]
 pub struct VelocityF(pub Vec2F);
@@ -63,6 +72,15 @@ pub struct VelocityF(pub Vec2F);
 pub struct Player {
     pub handle: usize,
 }
+
+/// Marker: render-side `sync_transforms_from_sim` skips interpolation for
+/// entities carrying this component and uses `PositionF` directly. Useful
+/// for entities whose sim-side position changes shouldn't smear on screen
+/// (UI overlays, fixed-position decals, debug indicators). Rolled back so
+/// the marker's presence/absence is consistent during resimulation.
+#[derive(Component, Clone, Copy, PartialEq, Eq, Hash, Debug)]
+#[require(Rollback)]
+pub struct NoInterpolate;
 
 // ---- Resources ----
 
@@ -120,6 +138,23 @@ pub fn advance_frame_count(mut frame: ResMut<FrameCount>) {
     frame.0 = frame.0.wrapping_add(1);
 }
 
+/// First system in `GgrsSchedule`: copy each entity's `PositionF` into
+/// `PreviousPositionF` so subsequent systems' updates to `PositionF`
+/// leave the snapshot intact for the render-side interpolator.
+pub fn snapshot_previous(mut q: Query<(&PositionF, &mut PreviousPositionF)>) {
+    for (pos, mut prev) in &mut q {
+        prev.0 = pos.0;
+    }
+}
+
+/// Teleport helper: collapses `prev` and `pos` to the same target so the
+/// render-side lerp emits no motion. Use whenever the new sim position
+/// isn't continuous with the old one (respawns, stage transitions, etc).
+pub fn snap_position(pos: &mut PositionF, prev: &mut PreviousPositionF, new: Vec2F) {
+    pos.0 = new;
+    prev.0 = new;
+}
+
 pub fn record_last_tick_time(time: Res<Time<Real>>, mut last: ResMut<LastSimTickTime>) {
     last.0 = time.elapsed_secs_f64();
 }
@@ -144,20 +179,27 @@ impl Plugin for SimPlugin {
 
         // Rollback registrations
         app.rollback_component_with_copy::<PositionF>()
+            .rollback_component_with_copy::<PreviousPositionF>()
             .rollback_component_with_copy::<VelocityF>()
             .rollback_component_with_copy::<Player>()
+            .rollback_component_with_copy::<NoInterpolate>()
             .rollback_resource_with_copy::<FrameCount>();
 
         // Checksums — required for SyncTest to detect divergence beyond
-        // entity-count mismatches.
+        // entity-count mismatches. PreviousPositionF participates because
+        // a desync in the snapshot value would surface as a stuttering
+        // visual even when the live position recovers.
         app.checksum_component_with_hash::<PositionF>()
+            .checksum_component_with_hash::<PreviousPositionF>()
             .checksum_component_with_hash::<VelocityF>()
             .checksum_resource_with_hash::<FrameCount>();
 
         // Sim systems — explicitly ordered per CONVENTIONS.md.
+        // snapshot_previous runs FIRST so the PositionF copy it captures
+        // is the value at the start of this tick (== end of prior tick).
         app.add_systems(
             GgrsSchedule,
-            (player_movement, advance_frame_count).chain(),
+            (snapshot_previous, player_movement, advance_frame_count).chain(),
         );
 
         // Wall-clock timestamp captured after each tick.

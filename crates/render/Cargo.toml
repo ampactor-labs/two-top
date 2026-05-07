@@ -5,3 +5,8 @@ version.workspace = true
 license.workspace = true
 publish.workspace = true
 rust-version.workspace = true
+
+[dependencies]
+bevy = { version = "=0.18.1", default-features = false, features = ["std", "bevy_log"] }
+fixed_math = { path = "../fixed_math" }
+sim = { path = "../sim" }
