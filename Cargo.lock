@@ -2187,6 +2187,9 @@ dependencies = [
 [[package]]
 name = "input_touch"
 version = "0.0.0"
+dependencies = [
+ "bevy",
+]
 
 [[package]]
 name = "instant"

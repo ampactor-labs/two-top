@@ -5,3 +5,9 @@ version.workspace = true
 license.workspace = true
 publish.workspace = true
 rust-version.workspace = true
+
+[dependencies]
+# input_touch consumes Bevy's `Touches` resource (PreUpdate) and emits
+# wire-format `PlayerInput` (cycle 5). Per CONVENTIONS, `TouchState` is
+# never rolled back and never serialized — pure local state.
+bevy = { version = "=0.18.1", default-features = false, features = ["std", "touch", "mouse"] }
