@@ -318,7 +318,7 @@ Three-layer determinism defense:
 
 **Layer 1: SyncTestSession.** Single-machine. Runs every CI job. `check_distance: 7`, `input_delay: 0`. Catches intra-machine non-determinism.
 
-**Layer 2: Cross-platform replay matrix.** `replay_sync` binary runs `canonical_match.bin` headlessly on each platform, dumps per-frame per-component checksum log. Diff job compares all logs against linux-x64 baseline. Platforms: linux-x64, linux-aarch64 (qemu), macos-14 (native ARM), aarch64-linux-android.
+**Layer 2: Cross-platform replay matrix.** `replay_sync` binary runs `tests/demos/canonical/match_v1.bmrg` headlessly on each platform, dumps per-frame per-component checksum log. Diff job compares all logs against linux-x64 baseline. Platforms: linux-x64, linux-aarch64 (qemu), macos-14 (native ARM), aarch64-linux-android (currently scoped to `fixed_math` only — see `.github/workflows/determinism.yml`).
 
 **Layer 3: Per-component checksum dump for diagnostics.** When the diff job finds a divergence, the log already says which component column differs at which frame. `scripts/diagnose_desync.sh` re-runs `replay_sync --dump-state-at <frame>` on both platforms and prints a side-by-side comparison.
 

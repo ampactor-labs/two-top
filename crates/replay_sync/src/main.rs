@@ -6,7 +6,7 @@
 //!
 //! With no `--output` flag the TSV is streamed to stdout.
 
-use replay::decode;
+use replay::decode_for_sim_version;
 use replay_sync::{compute_checksum_tsv, dump_state_at};
 use std::fs;
 use std::io::Write as _;
@@ -31,7 +31,7 @@ fn main() -> ExitCode {
         }
     };
 
-    let replay = match decode(&bytes) {
+    let replay = match decode_for_sim_version(&bytes, sim::SIM_VERSION) {
         Ok(r) => r,
         Err(e) => {
             eprintln!("replay_sync: failed to decode: {e}");

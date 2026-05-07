@@ -40,6 +40,7 @@ pub enum ReplayError {
     Postcard(postcard::Error),
     InvalidMagic([u8; 4]),
     UnsupportedFormatVersion(u16),
+    SimVersionMismatch { expected: u32, got: u32 },
 }
 
 impl core::fmt::Display for ReplayError {
@@ -51,6 +52,12 @@ impl core::fmt::Display for ReplayError {
             }
             ReplayError::UnsupportedFormatVersion(v) => {
                 write!(f, "unsupported replay format version: {v}")
+            }
+            ReplayError::SimVersionMismatch { expected, got } => {
+                write!(
+                    f,
+                    "sim_version mismatch: replay was recorded with {got}, this binary is {expected}"
+                )
             }
         }
     }
@@ -84,6 +91,27 @@ pub fn decode(bytes: &[u8]) -> Result<Replay, ReplayError> {
         return Err(ReplayError::UnsupportedFormatVersion(
             replay.header.format_version,
         ));
+    }
+    Ok(replay)
+}
+
+/// Decode and additionally enforce strict `sim_version` match against the
+/// running binary's version. Per ARCHITECTURE.md § Replay Format and
+/// CONVENTIONS § Replay and Logging: replays only load if `sim_version`
+/// matches binary. Old replays are viewed via archived git-tagged binaries —
+/// no migration code lives in the codec.
+///
+/// Both sides will normally pass `sim::SIM_VERSION`. A binary built from
+/// main carries `u32::MAX` (the dev sentinel); release tags carry a real
+/// version. A dev replay loaded into a release binary, or vice versa, is
+/// rejected here.
+pub fn decode_for_sim_version(bytes: &[u8], expected: u32) -> Result<Replay, ReplayError> {
+    let replay = decode(bytes)?;
+    if replay.header.sim_version != expected {
+        return Err(ReplayError::SimVersionMismatch {
+            expected,
+            got: replay.header.sim_version,
+        });
     }
     Ok(replay)
 }

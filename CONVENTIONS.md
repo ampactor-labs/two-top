@@ -63,12 +63,14 @@ Hard rules. Violations cause subtle bugs that are expensive to find. The CI and 
 ## Module Boundaries
 
 - `fixed_math` depends on `fixed`, `cordic`, `serde`. Nothing else.
-- `sim` depends on `fixed_math`, `bevy` (no `bevy_render`), `bevy_ggrs`, `bevy_roll_safe`, `rand_xoshiro`, `serde`, `tracing`.
+- `sim` depends on `fixed_math`, `bevy` (no `bevy_render`), `bevy_ggrs`, `bytemuck`, `serde` (and once landed: `bevy_roll_safe`, `rand_xoshiro`, `tracing`).
 - `render` depends on `sim`, `bevy` (full), `bevy_audio`. No reverse dependency.
 - `net` depends on `sim`, `matchbox_socket`, `bevy_ggrs`.
-- `replay` depends on `sim`, `postcard`, `serde`.
+- `replay` depends on `sim`, `bevy` (no `bevy_render`), `bevy_ggrs`, `postcard`, `serde`. The codec (`encode`/`decode`) is pure; the `RecordPlugin` / `ReplayPlaybackPlugin` are why `bevy` and `bevy_ggrs` are direct deps.
 - `app` depends on everything.
-- `sync_test`, `replay_sync`, `replay_viewer` depend on `sim` + `replay` (+ `render` for viewer).
+- `sync_test` depends on `sim`, `fixed_math`, `bevy` (no `bevy_render`), `bevy_ggrs`. (No `replay` dep — capture is in `replay_sync`.)
+- `replay_sync` depends on `sim`, `replay`, `fixed_math`, `bevy` (no `bevy_render`), `bevy_ggrs`.
+- `replay_viewer` depends on `sim`, `replay`, `render` (and Bevy+ggrs transitively).
 
 If you find yourself wanting to break one of these rules, stop and re-read `MORGAN_NOTES.md` first.
 

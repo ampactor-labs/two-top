@@ -41,6 +41,13 @@ pub type GgrsCfg = GgrsConfig<PlayerInput, SocketAddr>;
 pub const TICK_HZ: usize = 60;
 pub const TICK_DT: Fix = Fix::lit("0.01666666666");
 
+/// Strict-match version stamped on `.bmrg` replays. `u32::MAX` is the dev
+/// sentinel — every commit on `main` carries it. A release tag bumps this
+/// to a real number so old replays are routed back to their tagged binary
+/// rather than silently loaded into a binary with different sim semantics.
+/// See `replay::decode_for_sim_version` for the gate.
+pub const SIM_VERSION: u32 = u32::MAX;
+
 // ---- Components ----
 
 #[derive(Component, Clone, Copy, PartialEq, Eq, Hash, Debug)]

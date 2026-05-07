@@ -1,4 +1,7 @@
-use replay::{decode, encode, Replay, ReplayError, ReplayHeader, DEV_SIM_VERSION, FORMAT_VERSION, MAGIC};
+use replay::{
+    decode, decode_for_sim_version, encode, Replay, ReplayError, ReplayHeader, DEV_SIM_VERSION,
+    FORMAT_VERSION, MAGIC,
+};
 use sim::PlayerInput;
 
 fn sample_replay() -> Replay {
@@ -87,4 +90,27 @@ fn empty_inputs_roundtrip() {
 #[test]
 fn magic_constant_is_bmrg() {
     assert_eq!(&MAGIC, b"BMRG");
+}
+
+#[test]
+fn decode_for_sim_version_accepts_match() {
+    let mut replay = sample_replay();
+    replay.header.sim_version = 42;
+    let bytes = encode(&replay).unwrap();
+    let recovered = decode_for_sim_version(&bytes, 42).expect("decode succeeds");
+    assert_eq!(recovered.header.sim_version, 42);
+}
+
+#[test]
+fn decode_for_sim_version_rejects_mismatch() {
+    let mut replay = sample_replay();
+    replay.header.sim_version = 42;
+    let bytes = encode(&replay).unwrap();
+    match decode_for_sim_version(&bytes, 43) {
+        Err(ReplayError::SimVersionMismatch { expected, got }) => {
+            assert_eq!(expected, 43);
+            assert_eq!(got, 42);
+        }
+        other => panic!("expected SimVersionMismatch, got {other:?}"),
+    }
 }
