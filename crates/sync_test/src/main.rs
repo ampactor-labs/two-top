@@ -4,7 +4,10 @@ use bevy_ggrs::prelude::*;
 use bevy_ggrs::GgrsPlugin;
 use core::time::Duration;
 use fixed_math::Vec2F;
-use sim::{GgrsCfg, Player, PlayerInput, PositionF, SimPlugin, SynthesizedInputs, VelocityF};
+use sim::{
+    DefaultInputsPlugin, GgrsCfg, Player, PlayerInput, PositionF, SimPlugin, SynthesizedInputs,
+    VelocityF,
+};
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
@@ -38,6 +41,7 @@ fn main() {
     )));
     app.add_plugins(GgrsPlugin::<GgrsCfg>::default());
     app.add_plugins(SimPlugin);
+    app.add_plugins(DefaultInputsPlugin);
     app.insert_resource(Session::SyncTest(session));
 
     // Spawn one entity per player handle.

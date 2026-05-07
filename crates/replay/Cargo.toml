@@ -5,3 +5,13 @@ version.workspace = true
 license.workspace = true
 publish.workspace = true
 rust-version.workspace = true
+
+[dependencies]
+serde = { version = "1", default-features = false, features = ["derive", "alloc", "std"] }
+postcard = { version = "1", features = ["use-std"] }
+bevy = { version = "=0.18.1", default-features = false, features = ["std", "bevy_log"] }
+bevy_ggrs = "=0.21"
+sim = { path = "../sim" }
+
+[dev-dependencies]
+fixed_math = { path = "../fixed_math" }

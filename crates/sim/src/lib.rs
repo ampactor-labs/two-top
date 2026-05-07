@@ -119,18 +119,20 @@ pub fn record_last_tick_time(time: Res<Time<Real>>, mut last: ResMut<LastSimTick
 
 // ---- Plugin ----
 
-/// Adds the sim's rollback registrations, schedules, and systems.
+/// Adds the sim's rollback registrations, schedules, and gameplay systems.
+/// **Does NOT** install an input source — pair with one of:
+/// - [`DefaultInputsPlugin`] for synthesized inputs (sync_test, dev)
+/// - `replay::ReplayPlaybackPlugin` for replay-driven playback
 ///
 /// The `GgrsPlugin::<GgrsCfg>` itself must be added separately by the
-/// caller before this plugin runs (so that the `AdvanceWorld` schedule
-/// exists when we register systems into it).
+/// caller before this plugin runs (so the `AdvanceWorld` schedule exists
+/// when we register systems into it).
 pub struct SimPlugin;
 
 impl Plugin for SimPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<FrameCount>()
             .init_resource::<LastSimTickTime>()
-            .init_resource::<SynthesizedInputs>()
             .insert_resource(RollbackFrameRate(TICK_HZ));
 
         // Rollback registrations
@@ -144,9 +146,6 @@ impl Plugin for SimPlugin {
         app.checksum_component_with_hash::<PositionF>()
             .checksum_component_with_hash::<VelocityF>()
             .checksum_resource_with_hash::<FrameCount>();
-
-        // Local-input plumbing
-        app.add_systems(ReadInputs, read_local_inputs);
 
         // Sim systems — explicitly ordered per CONVENTIONS.md.
         app.add_systems(
@@ -168,5 +167,17 @@ impl Plugin for SimPlugin {
                 event.current_frame, event.mismatched_frames
             );
         });
+    }
+}
+
+/// Default input source: writes `LocalInputs<GgrsCfg>` from the
+/// `SynthesizedInputs` resource each tick. Caller mutates
+/// `SynthesizedInputs` between `app.update()` calls.
+pub struct DefaultInputsPlugin;
+
+impl Plugin for DefaultInputsPlugin {
+    fn build(&self, app: &mut App) {
+        app.init_resource::<SynthesizedInputs>()
+            .add_systems(ReadInputs, read_local_inputs);
     }
 }
