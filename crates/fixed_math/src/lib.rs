@@ -157,3 +157,63 @@ impl Vec2F {
         }
     }
 }
+
+/// Axis-aligned bounding box in fixed-point coords. Used for arena
+/// walls and player collision shapes.
+///
+/// Stored as min/max corners — translation is just two `Vec2F`
+/// additions, and the overlap predicate reads as four cheap integer
+/// comparisons. Centroid math goes through halving constants (no
+/// scalar division on `Vec2F` for now).
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub struct RectF {
+    pub min: Vec2F,
+    pub max: Vec2F,
+}
+
+impl RectF {
+    pub const fn from_min_max(min: Vec2F, max: Vec2F) -> Self {
+        Self { min, max }
+    }
+
+    /// Construct from a center and half-extents (half-width,
+    /// half-height). Often more natural than corners when describing
+    /// a player's collision shape ("32 cm half-extent square").
+    pub fn from_center_half_extents(center: Vec2F, half: Vec2F) -> Self {
+        Self {
+            min: center - half,
+            max: center + half,
+        }
+    }
+
+    pub fn width(self) -> Fix {
+        self.max.x - self.min.x
+    }
+
+    pub fn height(self) -> Fix {
+        self.max.y - self.min.y
+    }
+
+    pub fn contains(self, p: Vec2F) -> bool {
+        p.x >= self.min.x && p.x <= self.max.x && p.y >= self.min.y && p.y <= self.max.y
+    }
+
+    /// Strict overlap — touching edges (a.max == b.min) does not count.
+    /// Strictness matters for collision resolution: "exactly resting
+    /// against the wall" must be a non-overlap so the resolver doesn't
+    /// keep nudging the player.
+    pub fn overlaps(self, other: RectF) -> bool {
+        self.min.x < other.max.x
+            && self.max.x > other.min.x
+            && self.min.y < other.max.y
+            && self.max.y > other.min.y
+    }
+
+    /// Translate the rect by `delta`.
+    pub fn translated(self, delta: Vec2F) -> Self {
+        Self {
+            min: self.min + delta,
+            max: self.max + delta,
+        }
+    }
+}

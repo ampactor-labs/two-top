@@ -18,9 +18,11 @@ use bevy_ggrs::prelude::*;
 use fixed_math::Vec2F;
 use input_touch::{CursorPosition, TouchInputsPlugin, WindowSize, update_touch_state};
 use render::RenderSyncPlugin;
-use sim::{GgrsCfg, Player, PositionF, PreviousPositionF, SimPlugin, VelocityF};
+use sim::{GgrsCfg, Player, PositionF, PreviousPositionF, SimPlugin, VelocityF, arena_walls};
 
+mod camera;
 mod debug_overlay;
+use camera::CameraFollowPlugin;
 use debug_overlay::DebugInputOverlayPlugin;
 
 pub fn run() {
@@ -40,6 +42,7 @@ pub fn run() {
         .add_plugins(SimPlugin)
         .add_plugins(TouchInputsPlugin)
         .add_plugins(RenderSyncPlugin)
+        .add_plugins(CameraFollowPlugin)
         .add_plugins(DebugInputOverlayPlugin)
         .insert_resource(Session::SyncTest(session))
         .add_systems(Startup, setup)
@@ -80,6 +83,29 @@ fn setup(mut commands: Commands) {
         },
         Transform::default(),
     ));
+
+    // Arena boundary walls. Spawned in the fixed order returned by
+    // `arena_walls()` so entity ids are bit-identical across hosts
+    // (rollback determinism depends on this).
+    for wall in arena_walls() {
+        let size_cm = (
+            (wall.rect.max.x - wall.rect.min.x).to_num::<f32>(),
+            (wall.rect.max.y - wall.rect.min.y).to_num::<f32>(),
+        );
+        let center = (
+            (wall.rect.min.x + wall.rect.max.x).to_num::<f32>() * 0.5,
+            (wall.rect.min.y + wall.rect.max.y).to_num::<f32>() * 0.5,
+        );
+        commands.spawn((
+            wall,
+            Sprite {
+                color: Color::srgb(0.18, 0.18, 0.22),
+                custom_size: Some(Vec2::new(size_cm.0, size_cm.1)),
+                ..default()
+            },
+            Transform::from_xyz(center.0, center.1, -1.0),
+        ));
+    }
 }
 
 /// Mirrors the primary `Window`'s logical size and cursor position into

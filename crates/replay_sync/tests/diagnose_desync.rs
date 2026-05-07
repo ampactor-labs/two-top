@@ -17,10 +17,12 @@ fn script_path() -> PathBuf {
     workspace_root().join("scripts/diagnose_desync.sh")
 }
 
-fn write_tsv(path: &std::path::Path, rows: &[(&str, &str, &str, &str)]) {
-    let mut s = String::from("frame\ttotal_checksum\tpositionf_part\tvelocityf_part\n");
-    for (frame, total, pos, vel) in rows {
-        s.push_str(&format!("{frame}\t{total}\t{pos}\t{vel}\n"));
+fn write_tsv(path: &std::path::Path, rows: &[(&str, &str, &str, &str, &str, &str)]) {
+    let mut s = String::from(
+        "frame\ttotal_checksum\tpositionf_part\tvelocityf_part\tdashstate_part\tstunframes_part\n",
+    );
+    for (frame, total, pos, vel, dash, stun) in rows {
+        s.push_str(&format!("{frame}\t{total}\t{pos}\t{vel}\t{dash}\t{stun}\n"));
     }
     std::fs::write(path, s).expect("write tsv");
 }
@@ -31,9 +33,9 @@ fn identical_tsvs_succeed() {
     let a = dir.join("a.tsv");
     let b = dir.join("b.tsv");
     let rows = &[
-        ("0", "aa", "bb", "cc"),
-        ("1", "dd", "ee", "ff"),
-        ("2", "gg", "hh", "ii"),
+        ("0", "aa", "bb", "cc", "dd", "ee"),
+        ("1", "ff", "11", "22", "33", "44"),
+        ("2", "55", "66", "77", "88", "99"),
     ];
     write_tsv(&a, rows);
     write_tsv(&b, rows);
@@ -59,14 +61,14 @@ fn first_divergence_is_reported() {
     let a = dir.join("a.tsv");
     let b = dir.join("b.tsv");
     let rows_a = &[
-        ("0", "aa", "bb", "cc"),
-        ("1", "dd", "ee", "ff"),
-        ("2", "gg", "hh", "ii"),
+        ("0", "aa", "bb", "cc", "dd", "ee"),
+        ("1", "ff", "11", "22", "33", "44"),
+        ("2", "55", "66", "77", "88", "99"),
     ];
     let rows_b = &[
-        ("0", "aa", "bb", "cc"),
-        ("1", "dd", "XX", "ff"), // diverges at frame 1, positionf_part
-        ("2", "gg", "hh", "ii"),
+        ("0", "aa", "bb", "cc", "dd", "ee"),
+        ("1", "ff", "XX", "22", "33", "44"), // diverges at frame 1, positionf_part
+        ("2", "55", "66", "77", "88", "99"),
     ];
     write_tsv(&a, rows_a);
     write_tsv(&b, rows_b);

@@ -22,13 +22,17 @@ use replay::{
     DEV_SIM_VERSION, FORMAT_VERSION, FrameInputs, MAGIC, Replay, ReplayHeader, ReplayPlayback,
     ReplayPlaybackPlugin,
 };
-use sim::{GgrsCfg, Player, PlayerInput, PositionF, SimPlugin, VelocityF};
+use sim::{
+    DashState, GgrsCfg, Player, PlayerInput, PositionF, SimPlugin, StunFrames, VelocityF,
+    arena_walls,
+};
 use std::fmt::Write as _;
 use std::path::PathBuf;
 
 pub mod fuzz;
 
-pub const TSV_HEADER: &str = "frame\ttotal_checksum\tpositionf_part\tvelocityf_part";
+pub const TSV_HEADER: &str =
+    "frame\ttotal_checksum\tpositionf_part\tvelocityf_part\tdashstate_part\tstunframes_part";
 
 // ---- Canonical demo (Phase 5) ----
 
@@ -42,19 +46,43 @@ pub const CANONICAL_PERIOD: u32 = 30;
 /// unambiguous on the wire.
 pub const CANONICAL_STICK_AMP: i8 = 80;
 
+/// Period between DASH_DOWN edges in the canonical demo (2 s @ 60 Hz).
+/// Long enough that each dash fully completes (10 + 20 = 30 frame
+/// dash + cooldown) before the next edge fires.
+pub const CANONICAL_DASH_PERIOD: u32 = 120;
+/// Stick-y amplitude for the secondary axis. Smaller than stick-x so
+/// north/south runs don't reach the walls as fast as east/west.
+pub const CANONICAL_STICK_Y_AMP: i8 = 60;
+
 pub fn canonical_inputs() -> Vec<FrameInputs> {
     (0..CANONICAL_FRAMES)
         .map(|f| {
-            let dir = if (f / CANONICAL_PERIOD).is_multiple_of(2) {
+            let dir_x = if (f / CANONICAL_PERIOD).is_multiple_of(2) {
                 CANONICAL_STICK_AMP
             } else {
                 -CANONICAL_STICK_AMP
             };
+            // y-axis reverses on a phase offset of half the x-period
+            // so the players sweep through all four quadrants of the
+            // arena instead of just east/west.
+            let dir_y = if ((f + CANONICAL_PERIOD / 2) / CANONICAL_PERIOD).is_multiple_of(2) {
+                CANONICAL_STICK_Y_AMP
+            } else {
+                -CANONICAL_STICK_Y_AMP
+            };
+            // DASH_DOWN as a single-frame edge every CANONICAL_DASH_PERIOD
+            // frames. The off-frame returns to 0 so sim's edge-detection
+            // sees a clean rising edge.
+            let buttons = if f % CANONICAL_DASH_PERIOD == 0 {
+                PlayerInput::DASH_DOWN
+            } else {
+                0
+            };
             let p = PlayerInput {
-                stick_x: dir,
-                stick_y: 0,
+                stick_x: dir_x,
+                stick_y: dir_y,
                 aim_angle: 0,
-                buttons: 0,
+                buttons,
             };
             [p, p]
         })
@@ -120,6 +148,14 @@ fn build_app(replay: Replay) -> App {
         ));
     }
 
+    // Phase 9: spawn arena walls in their canonical fixed order so the
+    // `wall_collision` system has geometry to resolve against. Walls
+    // aren't rollback subjects (they don't change), so this is a one-
+    // shot spawn at app build time.
+    for wall in arena_walls() {
+        app.world_mut().spawn(wall);
+    }
+
     app.insert_resource(ReplayPlayback::new(replay));
     app
 }
@@ -164,10 +200,12 @@ pub fn compute_checksum_tsv(replay: &Replay) -> String {
         let world = app.world_mut();
         let pos_part = hash_component::<PositionF>(world);
         let vel_part = hash_component::<VelocityF>(world);
-        let total = pos_part ^ vel_part;
+        let dash_part = hash_component::<DashState>(world);
+        let stun_part = hash_component::<StunFrames>(world);
+        let total = pos_part ^ vel_part ^ dash_part ^ stun_part;
         writeln!(
             &mut out,
-            "{frame}\t{total:016x}\t{pos_part:016x}\t{vel_part:016x}"
+            "{frame}\t{total:016x}\t{pos_part:016x}\t{vel_part:016x}\t{dash_part:016x}\t{stun_part:016x}"
         )
         .expect("write tsv row");
     }

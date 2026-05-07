@@ -81,9 +81,14 @@ fn determinism_locked_600_frame_synctest() {
     // Locked baseline (linux-x64). Same bits expected on every supported
     // matrix target. Recapture and update only when the sim deliberately
     // changes determinism-affecting behavior.
+    //
+    // Baseline history:
+    //   * 0x0003efdf — original Phase 3, walk speed 5 cm/tick
+    //   * 0x000a3c77 — Phase 9 cycle 3, walk speed bumped to 13 cm/tick
+    //     (+ stick magnitude clamp, but this 1-axis test doesn't exercise it)
     assert_eq!(
         positions,
-        vec![(0, 0x0003efdf, 0x00000000), (1, 0x0003efdf, 0x00000000)],
+        vec![(0, 0x000a3c77, 0x00000000), (1, 0x000a3c77, 0x00000000)],
         "matrix target produced non-baseline bits"
     );
 }

@@ -1,4 +1,4 @@
-use fixed_math::{atan2, cos, sin, sin_cos, sqrt, Fix, FixWide, Vec2F, HALF_PI, PI, TWO_PI};
+use fixed_math::{atan2, cos, sin, sin_cos, sqrt, Fix, FixWide, RectF, Vec2F, HALF_PI, PI, TWO_PI};
 use proptest::prelude::*;
 
 fn bounded_fix() -> impl Strategy<Value = Fix> {
@@ -296,4 +296,96 @@ fn vec2f_from_cm_centimeter_units() {
     let v = Vec2F::from_cm(100, 200);
     assert_eq!(v.x, Fix::const_from_int(100));
     assert_eq!(v.y, Fix::const_from_int(200));
+}
+
+// ---- RectF (Phase 9) ----
+
+fn rect(min_x: i32, min_y: i32, max_x: i32, max_y: i32) -> RectF {
+    RectF::from_min_max(Vec2F::from_cm(min_x, min_y), Vec2F::from_cm(max_x, max_y))
+}
+
+#[test]
+fn rect_from_center_half_extents_round_trips_to_min_max() {
+    let r = RectF::from_center_half_extents(Vec2F::from_cm(0, 0), Vec2F::from_cm(50, 30));
+    assert_eq!(r.min, Vec2F::from_cm(-50, -30));
+    assert_eq!(r.max, Vec2F::from_cm(50, 30));
+}
+
+#[test]
+fn rect_width_height() {
+    let r = rect(-10, -5, 30, 15);
+    assert_eq!(r.width(), Fix::const_from_int(40));
+    assert_eq!(r.height(), Fix::const_from_int(20));
+}
+
+#[test]
+fn rect_contains_interior_and_edges() {
+    let r = rect(0, 0, 100, 100);
+    assert!(r.contains(Vec2F::from_cm(50, 50))); // interior
+    assert!(r.contains(Vec2F::from_cm(0, 0))); // min corner (edge inclusive)
+    assert!(r.contains(Vec2F::from_cm(100, 100))); // max corner (edge inclusive)
+}
+
+#[test]
+fn rect_does_not_contain_outside() {
+    let r = rect(0, 0, 100, 100);
+    assert!(!r.contains(Vec2F::from_cm(-1, 50)));
+    assert!(!r.contains(Vec2F::from_cm(101, 50)));
+    assert!(!r.contains(Vec2F::from_cm(50, -1)));
+    assert!(!r.contains(Vec2F::from_cm(50, 101)));
+}
+
+#[test]
+fn rect_overlaps_intersecting() {
+    let a = rect(0, 0, 100, 100);
+    let b = rect(50, 50, 150, 150);
+    assert!(a.overlaps(b));
+    assert!(b.overlaps(a));
+}
+
+#[test]
+fn rect_overlaps_is_strict_at_touching_edges() {
+    // Touching at exactly one edge does NOT count as overlap. This
+    // matters for collision resolution: "resting against the wall"
+    // must not register as a continuing collision or the resolver
+    // will keep nudging the player forever.
+    let a = rect(0, 0, 100, 100);
+    let b = rect(100, 0, 200, 100);
+    assert!(!a.overlaps(b));
+    assert!(!b.overlaps(a));
+}
+
+#[test]
+fn rect_overlaps_disjoint() {
+    let a = rect(0, 0, 50, 50);
+    let b = rect(100, 100, 150, 150);
+    assert!(!a.overlaps(b));
+}
+
+#[test]
+fn rect_translated_shifts_both_corners() {
+    let r = rect(0, 0, 50, 30);
+    let shifted = r.translated(Vec2F::from_cm(10, 5));
+    assert_eq!(shifted.min, Vec2F::from_cm(10, 5));
+    assert_eq!(shifted.max, Vec2F::from_cm(60, 35));
+}
+
+proptest! {
+    #[test]
+    fn rect_self_overlaps_when_nondegenerate(min_x in -100i32..0, min_y in -100i32..0, w in 1i32..200, h in 1i32..200) {
+        let r = rect(min_x, min_y, min_x + w, min_y + h);
+        prop_assert!(r.overlaps(r));
+    }
+
+    #[test]
+    fn rect_translation_preserves_overlap_relations(
+        ax in -50i32..50, ay in -50i32..50, dx in -10i32..10, dy in -10i32..10
+    ) {
+        let a = rect(ax, ay, ax + 20, ay + 20);
+        let b = rect(0, 0, 20, 20);
+        let ta = a.translated(Vec2F::from_cm(dx, dy));
+        let tb = b.translated(Vec2F::from_cm(dx, dy));
+        // Translating both rects by the same delta preserves overlap.
+        prop_assert_eq!(a.overlaps(b), ta.overlaps(tb));
+    }
 }
