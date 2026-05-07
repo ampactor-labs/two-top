@@ -1,0 +1,31 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/fixed_math",
+    "crates/sim",
+    "crates/net",
+    "crates/replay",
+    "crates/render",
+    "crates/input_touch",
+    "crates/app",
+    "crates/sync_test",
+    "crates/replay_sync",
+    "crates/replay_viewer",
+]
+
+[workspace.package]
+edition = "2024"
+version = "0.0.0"
+license = "MIT OR Apache-2.0"
+publish = false
+rust-version = "1.95"
+
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 3
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
