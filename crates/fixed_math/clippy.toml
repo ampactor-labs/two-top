@@ -1,0 +1,4 @@
+disallowed-types = [
+    { path = "f32", reason = "fixed_math is the determinism boundary; use `Fix` instead. The only allowed f32/f64 use is `Vec2F::to_f32`, which is annotated with `#[allow(clippy::disallowed_types)]`." },
+    { path = "f64", reason = "fixed_math is the determinism boundary; use `Fix` instead." },
+]

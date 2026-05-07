@@ -5,3 +5,10 @@ version.workspace = true
 license.workspace = true
 publish.workspace = true
 rust-version.workspace = true
+
+[dependencies]
+fixed = "1.31"
+cordic = "0.1.5"
+
+[dev-dependencies]
+proptest = "1.11"

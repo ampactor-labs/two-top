@@ -10,12 +10,17 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  check:
-    name: cargo check (workspace)
+  build:
+    name: check / test / clippy
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: workspace
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest
       - run: cargo check --workspace --locked
+      - run: cargo nextest run --workspace --locked
+      - run: cargo clippy --workspace --all-targets --locked -- -D warnings
