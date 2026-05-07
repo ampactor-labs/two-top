@@ -20,12 +20,15 @@ jobs:
           - target: x86_64-unknown-linux-gnu
             runs-on: ubuntu-latest
             pkg-args: --workspace
+            replay-sync: true
           - target: aarch64-unknown-linux-gnu
             runs-on: ubuntu-latest
             pkg-args: --workspace
+            replay-sync: true
           - target: aarch64-apple-darwin
             runs-on: macos-14
             pkg-args: --workspace
+            replay-sync: true
           # aarch64-linux-android: fixed_math only. bevy 0.18 force-pulls
           # bevy_android via cfg(target_os="android"), which depends on
           # android-activity requiring game-activity or native-activity
@@ -36,6 +39,7 @@ jobs:
           - target: aarch64-linux-android
             runs-on: ubuntu-latest
             pkg-args: -p fixed_math
+            replay-sync: false
     steps:
       - uses: actions/checkout@v5
       - uses: taiki-e/setup-cross-toolchain-action@v1
@@ -48,3 +52,61 @@ jobs:
         with:
           tool: cargo-nextest
       - run: cargo nextest run ${{ matrix.pkg-args }} --target ${{ matrix.target }} --locked
+
+      # Phase 5: per-frame, per-component checksum TSV from the canonical
+      # demo. The matrix runs identical input through identical sim code on
+      # each target; all surviving TSVs must be byte-identical to prove the
+      # sim is portable.
+      - name: Run replay_sync on canonical demo
+        if: matrix.replay-sync
+        run: |
+          cargo run -p replay_sync --bin replay_sync \
+            --target ${{ matrix.target }} --locked --release -- \
+            --demo tests/demos/canonical/match_v1.bmrg \
+            --output checksum-${{ matrix.target }}.tsv
+      - name: Upload checksum TSV
+        if: matrix.replay-sync
+        uses: actions/upload-artifact@v4
+        with:
+          name: checksum-${{ matrix.target }}
+          path: checksum-${{ matrix.target }}.tsv
+          if-no-files-found: error
+
+  tsv-diff:
+    name: cross-platform TSV diff
+    needs: determinism
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: tsvs
+      - name: Diff all TSVs against linux-x64 baseline
+        run: |
+          set -euo pipefail
+          BASE="tsvs/checksum-x86_64-unknown-linux-gnu/checksum-x86_64-unknown-linux-gnu.tsv"
+          if [[ ! -f "$BASE" ]]; then
+            echo "missing baseline TSV at $BASE" >&2
+            ls -laR tsvs >&2
+            exit 1
+          fi
+          fail=0
+          for d in tsvs/checksum-*; do
+            name="$(basename "$d")"
+            f="$d/${name}.tsv"
+            if [[ ! -f "$f" ]]; then
+              echo "missing TSV in $d" >&2
+              fail=1
+              continue
+            fi
+            if cmp -s "$BASE" "$f"; then
+              echo "$f matches baseline"
+            else
+              echo "DIVERGE: $f differs from baseline"
+              diff "$BASE" "$f" | head -40 || true
+              fail=1
+            fi
+          done
+          if [[ $fail -ne 0 ]]; then
+            echo "Cross-platform TSV diff failed — see scripts/diagnose_desync.sh"
+            exit 1
+          fi

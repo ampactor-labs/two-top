@@ -1,23 +1,24 @@
-//! Phase 4 skeleton. Loads a `.bmrg` replay, runs the sim under playback,
-//! and dumps final entity state. Phase 5 extends this with per-frame
-//! per-component checksum TSV output for the cross-platform diff harness.
+//! Phase 5 CLI. Loads a `.bmrg` replay and either:
+//!   * `--output <path.tsv>` — writes per-frame, per-component checksum TSV
+//!     for the cross-platform diff job to consume, or
+//!   * `--dump-state-at <frame>` — pretty-prints the full sim state at the
+//!     requested frame, used by `scripts/diagnose_desync.sh`.
+//!
+//! With no `--output` flag the TSV is streamed to stdout.
 
-use bevy::prelude::*;
-use bevy::time::TimeUpdateStrategy;
-use bevy_ggrs::prelude::*;
-use bevy_ggrs::GgrsPlugin;
-use core::time::Duration;
-use fixed_math::Vec2F;
-use replay::{decode, ReplayPlayback, ReplayPlaybackPlugin};
-use sim::{GgrsCfg, Player, PositionF, SimPlugin, VelocityF};
+use replay::decode;
+use replay_sync::{compute_checksum_tsv, dump_state_at};
 use std::fs;
+use std::io::Write as _;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().collect();
     let Some(demo_path) = arg_value::<String>(&args, "--demo") else {
-        eprintln!("usage: replay_sync --demo <path.bmrg> [--frames N]");
+        eprintln!(
+            "usage: replay_sync --demo <path.bmrg> [--output <path.tsv> | --dump-state-at <frame>]"
+        );
         return ExitCode::from(2);
     };
     let demo_path = PathBuf::from(demo_path);
@@ -38,60 +39,30 @@ fn main() -> ExitCode {
         }
     };
 
-    let frames: u32 = arg_value(&args, "--frames").unwrap_or(replay.header.frame_count);
-    println!(
-        "replay_sync: demo={} frames={frames} format_v{} sim_v{}",
-        demo_path.display(),
-        replay.header.format_version,
-        replay.header.sim_version,
-    );
-
-    // Build SyncTest session matching the replay's player count.
-    let mut sb = SessionBuilder::<GgrsCfg>::new()
-        .with_num_players(replay.header.num_players as usize)
-        .expect("with_num_players")
-        .with_check_distance(2)
-        .with_input_delay(2);
-    for i in 0..replay.header.num_players as usize {
-        sb = sb.add_player(PlayerType::Local, i).expect("add_player");
-    }
-    let session = sb.start_synctest_session().expect("synctest");
-
-    let mut app = App::new();
-    app.add_plugins(MinimalPlugins);
-    app.insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_secs_f64(
-        1.0 / sim::TICK_HZ as f64,
-    )));
-    app.add_plugins(GgrsPlugin::<GgrsCfg>::default());
-    app.add_plugins(SimPlugin);
-    app.add_plugins(ReplayPlaybackPlugin);
-    app.insert_resource(Session::SyncTest(session));
-    app.insert_resource(ReplayPlayback::new(replay));
-
-    for handle in 0..2usize {
-        app.world_mut().spawn((
-            Player { handle },
-            PositionF(Vec2F::ZERO),
-            VelocityF(Vec2F::ZERO),
-        ));
+    if let Some(frame) = arg_value::<u32>(&args, "--dump-state-at") {
+        let dump = dump_state_at(&replay, frame);
+        print!("{dump}");
+        return ExitCode::SUCCESS;
     }
 
-    for _ in 0..frames {
-        app.update();
-    }
+    let tsv = compute_checksum_tsv(&replay);
 
-    let world = app.world_mut();
-    let mut positions: Vec<(usize, i32, i32)> = world
-        .query::<(&Player, &PositionF)>()
-        .iter(world)
-        .map(|(p, pos)| (p.handle, pos.0.x.to_bits(), pos.0.y.to_bits()))
-        .collect();
-    positions.sort_by_key(|(h, _, _)| *h);
-    for (handle, xb, yb) in &positions {
-        println!("replay_sync: handle={handle} pos.x.bits={xb:#010x} pos.y.bits={yb:#010x}");
+    if let Some(out_path) = arg_value::<String>(&args, "--output") {
+        match fs::File::create(&out_path).and_then(|mut f| f.write_all(tsv.as_bytes())) {
+            Ok(()) => {
+                eprintln!(
+                    "replay_sync: wrote {} frames to {}",
+                    replay.header.frame_count, out_path
+                );
+            }
+            Err(e) => {
+                eprintln!("replay_sync: failed to write {out_path}: {e}");
+                return ExitCode::FAILURE;
+            }
+        }
+    } else {
+        print!("{tsv}");
     }
-
-    println!("replay_sync: finished {frames} frames");
     ExitCode::SUCCESS
 }
 
