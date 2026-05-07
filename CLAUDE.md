@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Planning-stage. No source code yet — only four canonical design docs. Phase 0 of `BUILD_PLAN.md` (workspace skeleton) has not been executed. Until it is, every implementation question routes through the docs below.
 
-The repo directory is `two-top` (hyphen). Rust crate names use `two_top` (underscore) since hyphens aren't valid in Rust identifiers.
+The displayed name is **2-Top**. Identifiers stay textual because Java package segments and Rust crate names can't start with a digit: the repo directory is `two-top` (hyphen), Rust crate names use `two_top` (underscore), and the Android bundle suffix is `twotop`. Treat "2-Top" as the user-facing name (READMEs, apk_label, marketing) and `two-top`/`two_top`/`twotop` as identifiers (paths, imports, manifests).
 
 ## Canonical docs — read order
 
@@ -19,7 +19,7 @@ These four files are the source of truth. Read all of them before proposing any 
 
 ## Project shape (one-paragraph summary)
 
-`two-top` is a 1v1 mobile rollback brawler (iOS/Android/web-PWA) in Rust on Bevy + `bevy_ggrs` + Matchbox WebRTC. Boomerang Fu mechanics: throw-and-recall, dash with i-frames, one-hit kills, 60s rounds, best-of-N. Fairness, determinism, and frame-stable visuals are non-negotiable. The whole architecture exists to make cross-platform bit-identical simulation provable, not just hopeful.
+**2-Top** is a 1v1 mobile rollback brawler (iOS/Android/web-PWA) in Rust on Bevy + `bevy_ggrs` + Matchbox WebRTC. Boomerang Fu mechanics: throw-and-recall, dash with i-frames, one-hit kills, 60s rounds, best-of-N. Fairness, determinism, and frame-stable visuals are non-negotiable. The whole architecture exists to make cross-platform bit-identical simulation provable, not just hopeful.
 
 ## Load-bearing invariants (the things easiest to get wrong)
 

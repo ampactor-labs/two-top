@@ -1,6 +1,8 @@
-# two-top
+# 2-Top
 
 A 1v1 mobile rollback brawler in Rust on Bevy + bevy_ggrs + Matchbox WebRTC. Portrait orientation, iOS / Android / web (PWA). Boomerang Fu mechanics with provable cross-platform deterministic simulation.
+
+> **Naming:** the displayed name is **2-Top**. The repo and codebase identifiers stay as `two-top` (directory) / `two_top` (Rust crate) / `twotop` (Android bundle suffix) because Java package segments and Rust crate names can't start with a digit.
 
 ## Design docs
 

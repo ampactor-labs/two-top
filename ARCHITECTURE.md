@@ -2,7 +2,7 @@
 
 ## Project Overview
 
-`two-top` is a 1v1 mobile rollback brawler in portrait orientation. Mechanics are derived from Boomerang Fu: each player has one thrown-and-recalled boomerang, dash with i-frames, one-hit kills, 60-second rounds, best-of-N format. The aesthetic is demonic-Duke pixel art executed with Hyper Light Drifter discipline.
+**2-Top** is a 1v1 mobile rollback brawler in portrait orientation. Mechanics are derived from Boomerang Fu: each player has one thrown-and-recalled boomerang, dash with i-frames, one-hit kills, 60-second rounds, best-of-N format. The aesthetic is demonic-Duke pixel art executed with Hyper Light Drifter discipline.
 
 Targets: iOS, Android, and web (PWA over WebRTC). Same Rust codebase across all three.
 
@@ -27,7 +27,7 @@ Networking is GGRS-style rollback peer-to-peer with WebRTC transport via Matchbo
 | Audio | `bevy_audio` (ships with default Bevy features) |
 
 ## Workspace Layout
-(Use two_top for Rust crate names since hyphens aren't valid there.)
+(Use `two_top` for Rust crate names since hyphens aren't valid there. Filesystem path stays `two-top`; the digit-form `2-Top` is the display name only.)
 
 ```
 two-top/
