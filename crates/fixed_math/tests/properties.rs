@@ -194,6 +194,26 @@ fn angle_of_unit_y_is_half_pi() {
     assert!(diff < Fix::from_bits(10), "angle={} expected π/2", v.angle());
 }
 
+/// Phase 2 cross-platform determinism gate.
+///
+/// 1000 rotations of (100cm, 0) by 0.01 radians, accumulating Q16.16 error.
+/// The resulting bit pattern must be identical on every supported target.
+/// If this assertion ever differs across linux-x64, linux-aarch64, macos
+/// aarch64, or android aarch64, the simulation is non-deterministic and
+/// rollback netcode will desync.
+#[test]
+fn determinism_locked_1000_rotations() {
+    let step = Fix::lit("0.01");
+    let mut v = Vec2F::from_cm(100, 0);
+    for _ in 0..1000 {
+        v = v.rotate(step);
+    }
+    // Locked bit values — captured from linux-x64 and frozen as the
+    // canonical post-1000-step state. Any platform deviation is a bug.
+    assert_eq!(v.x.to_bits(), 0xffad8d3c_u32 as i32, "x bits diverged: {:#x}", v.x.to_bits() as u32);
+    assert_eq!(v.y.to_bits(), 0xffc95ba0_u32 as i32, "y bits diverged: {:#x}", v.y.to_bits() as u32);
+}
+
 #[test]
 #[allow(clippy::disallowed_types)]
 fn to_f32_round_trips_integer_components() {
