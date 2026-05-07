@@ -63,6 +63,11 @@ NCOL="${#COL_NAMES[@]}"
 
 # Skip the header row (NR>1); for the first row whose A-side != B-side,
 # print frame and the first differing column index, then exit.
+# Honor $TMPDIR (mktemp does this automatically) so callers running under a
+# constrained tmpfs can redirect scratch to a roomier filesystem.
+SCRATCH="$(mktemp)"
+trap 'rm -f "$SCRATCH"' EXIT
+
 awk -v ncol="$NCOL" -v fa="$A" -v fb="$B" '
 BEGIN {
     OFS = "\t"
@@ -85,17 +90,15 @@ BEGIN {
         }
     }
 }
-' "$A" >/tmp/diagnose_desync_$$.out
+' "$A" >"$SCRATCH"
 
-if [[ ! -s /tmp/diagnose_desync_$$.out ]]; then
+if [[ ! -s "$SCRATCH" ]]; then
     echo "diagnose_desync: cmp says different, awk found no row diff — \
 TSVs may differ only in trailing whitespace" >&2
-    rm -f /tmp/diagnose_desync_$$.out
     exit 1
 fi
 
-LINE="$(cat /tmp/diagnose_desync_$$.out)"
-rm -f /tmp/diagnose_desync_$$.out
+LINE="$(cat "$SCRATCH")"
 KIND="$(printf '%s' "$LINE" | cut -f1)"
 
 case "$KIND" in
