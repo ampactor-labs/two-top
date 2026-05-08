@@ -96,10 +96,40 @@ pub enum DashState {
 
 /// Invulnerability frames countdown. > 0 means the player ignores
 /// incoming damage this tick. Set when a dash starts; decrements each
-/// tick. Phase 10+ (boomerangs) read this; Phase 9 just maintains it.
+/// tick. Phase 11 reads this in `hit_boomerang_player` to gate hits.
 #[derive(Component, Clone, Copy, PartialEq, Eq, Hash, Debug, Default)]
 #[require(Rollback)]
 pub struct StunFrames(pub u32);
+
+/// Phase 11 — player has been killed and is awaiting respawn at
+/// `respawn_at_frame`. While present, the existing player-input
+/// systems (`player_movement`, `start_dash`, `throw_boomerangs`) and
+/// hit detection (`hit_boomerang_player`) all filter the entity out
+/// via `Without<Dead>`, so the dead player can't move, dash, throw,
+/// or be re-killed. In-flight boomerangs owned by a dead player
+/// continue to fly, ricochet, recall, and catch normally — the
+/// corpse's position is still tracked as the recall target until
+/// cycle 2's respawn snap.
+#[derive(Component, Clone, Copy, PartialEq, Eq, Hash, Debug)]
+#[require(Rollback)]
+pub struct Dead {
+    pub respawn_at_frame: u32,
+}
+
+/// Frames a player stays Dead before respawn. 180 = 3 s @ 60 Hz —
+/// long enough that a kill feels punitive without dragging the round
+/// to a halt while still leaving room for the killer to reposition.
+pub const RESPAWN_FRAMES: u32 = 180;
+
+/// Phase 11 cycle 4: hit-stop. On a successful kill the killer's
+/// `StunFrames` is bumped to at least this many ticks (~100 ms @ 60 Hz)
+/// so the kill reads as a brief impact freeze (Phase 15 animation
+/// will pick up the freeze cue) and the killer can't be instantly
+/// countered by a buffered throw — the brief stun-window doubles as
+/// short i-frame insurance. We `.max()` against the existing
+/// `StunFrames` value so mid-dash killers keep their longer i-frames
+/// rather than being truncated to `HIT_STOP_FRAMES`.
+pub const HIT_STOP_FRAMES: u32 = 6;
 
 /// Boomerang state machine. Phase 10 cycle 1 only exercises Flying;
 /// Returning lands in cycle 3 (recall trigger). The state lives on a
@@ -301,6 +331,105 @@ pub struct NoInterpolate;
 #[derive(Resource, Clone, Copy, PartialEq, Eq, Hash, Debug, Default)]
 pub struct FrameCount(pub u32);
 
+/// Per-player round-win score. Increments on each kill via
+/// `hit_boomerang_player`. Rolled back so a kill that gets undone by
+/// rollback resimulation also undoes the score bump. Phase 11 cycle 6
+/// reads this to detect first-to-N round-win → MatchOver transition.
+#[derive(Resource, Clone, Copy, PartialEq, Eq, Hash, Debug, Default)]
+pub struct MatchScore {
+    pub p0: u8,
+    pub p1: u8,
+}
+
+/// Frames per countdown digit (3, 2, 1) — 60 = 1 s @ 60 Hz.
+pub const COUNTDOWN_DIGIT_FRAMES: u32 = 60;
+
+/// Active round duration. 1800 = 30 s @ 60 Hz; matches BUILD_PLAN
+/// § Phase 11 and is short enough that a stalemate doesn't drag.
+pub const ROUND_DURATION_FRAMES: u32 = 1800;
+
+/// Beat between rounds. 60 = 1 s @ 60 Hz; long enough for an animated
+/// "round won" flourish in Phase 15, short enough that the next round
+/// drops in cleanly.
+pub const ROUND_OVER_FRAMES: u32 = 60;
+
+/// Total kills required to end the match (`InRound`/`RoundOver` →
+/// `MatchOver`). Cycle 6's simplest scoring rule is "first to 5
+/// kills"; the round timer still rotates state for input-gating and
+/// future cleanup pulses, but doesn't independently end the match.
+/// BUILD_PLAN's older "first to 5 round wins" framing is satisfied
+/// in spirit: 5 kills is a reasonable proxy for round-level
+/// dominance and avoids a second per-round kill counter.
+pub const MATCH_WIN_THRESHOLD: u8 = 5;
+
+/// Round/match state machine. Rolled back as a plain `Resource` enum
+/// rather than via `bevy_roll_safe::init_ggrs_state` because
+/// `bevy_roll_safe` 0.7.0 caps `bevy_ggrs` at `^0.20` and we're on
+/// `=0.21`. See MORGAN_NOTES § "Why we cut bevy_roll_safe" for the
+/// rationale. The lost capability is `OnEnter`/`OnExit` lifecycle
+/// hooks — we don't use them; transitions are explicit pattern
+/// matches inside the gameplay systems that drive them.
+///
+/// Round flow: `Countdown` ticks down to zero (3-2-1, 60 frames per
+/// digit), then `InRound` until the round timer expires or a player
+/// reaches the win threshold; then `RoundOver` for a brief beat
+/// before the next `Countdown` (or `MatchOver` if the match is
+/// decided). Frame-numbered fields name the tick the next transition
+/// fires on so the system reading them is a single comparison
+/// against `FrameCount`.
+#[derive(Resource, Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub enum MatchState {
+    /// Pre-round countdown. `digit` is 3, 2, or 1; `expires_at_frame`
+    /// is the tick the digit changes (decrement, or transition to
+    /// `InRound` when digit hits 0).
+    Countdown { digit: u8, expires_at_frame: u32 },
+    /// Active round. `expires_at_frame` is the tick the round timer
+    /// runs out (transitions to `RoundOver`).
+    InRound { expires_at_frame: u32 },
+    /// Post-round beat before the next round starts.
+    /// `expires_at_frame` is the tick the next `Countdown` begins.
+    RoundOver { expires_at_frame: u32 },
+    /// Match decided. Terminal state — no further transitions.
+    MatchOver,
+}
+
+impl Default for MatchState {
+    fn default() -> Self {
+        // Match opens at the top of the countdown. `tick_match_state`
+        // reads `FrameCount.0 >= expires_at_frame` to fire transitions;
+        // FrameCount starts at 0. Setting the initial expiry to
+        // `COUNTDOWN_DIGIT_FRAMES - 1` makes the transition fire on
+        // the 60th tick (frame.0 == 59 at start of tick), so digit "3"
+        // visibly shows for ticks 0..=59 (60 ticks = 1 s) and the
+        // pattern composes cleanly with the post-init transitions
+        // which always set `expires = frame.0 + COUNTDOWN_DIGIT_FRAMES`.
+        MatchState::Countdown {
+            digit: 3,
+            expires_at_frame: COUNTDOWN_DIGIT_FRAMES - 1,
+        }
+    }
+}
+
+impl MatchState {
+    /// True iff the round is active and gameplay inputs should be
+    /// honored. `Countdown` / `RoundOver` / `MatchOver` lock the
+    /// players in place.
+    pub fn is_in_round(&self) -> bool {
+        matches!(self, MatchState::InRound { .. })
+    }
+
+    /// Headless-test helper: an `InRound` state with a far-future
+    /// expiry, suitable for sync_test / replay_sync / unit-test
+    /// ceremonies where the countdown and round-end transitions are
+    /// noise rather than the system under test. Pair with
+    /// [`InfiniteRoundPlugin`] for the one-line plugin form.
+    pub fn infinite_round() -> Self {
+        MatchState::InRound {
+            expires_at_frame: u32::MAX,
+        }
+    }
+}
+
 /// Wall-clock time of the most recent simulated tick. Render layer reads
 /// this to interpolate `Transform` between sim frames.
 ///
@@ -489,10 +618,14 @@ pub fn tick_dash_state(state: DashState) -> DashState {
 /// starts. Runs after `snapshot_previous` and before `player_movement`
 /// so this tick's movement system sees the new `DashState::Dashing`.
 pub fn start_dash(
+    match_state: Res<MatchState>,
     inputs: Res<PlayerInputs<GgrsCfg>>,
     history: Res<InputHistory>,
-    mut q: Query<(&Player, &mut DashState, &mut StunFrames)>,
+    mut q: Query<(&Player, &mut DashState, &mut StunFrames), Without<Dead>>,
 ) {
+    if !match_state.is_in_round() {
+        return;
+    }
     for (player, mut dash, mut stun) in &mut q {
         let (curr, _status) = inputs[player.handle];
         let prev = history
@@ -525,9 +658,13 @@ pub fn start_dash(
 /// overrides this — a dash committed before AIM_ACTIVE was set
 /// continues through the aim windup.
 pub fn player_movement(
+    match_state: Res<MatchState>,
     inputs: Res<PlayerInputs<GgrsCfg>>,
-    mut q: Query<(&Player, &mut PositionF, &mut VelocityF, &DashState)>,
+    mut q: Query<(&Player, &mut PositionF, &mut VelocityF, &DashState), Without<Dead>>,
 ) {
+    if !match_state.is_in_round() {
+        return;
+    }
     let walk_speed = Fix::const_from_int(WALK_SPEED_CM_PER_TICK);
     let dash_speed = Fix::const_from_int(DASH_SPEED_CM_PER_TICK);
     for (player, mut pos, mut vel, dash) in &mut q {
@@ -557,6 +694,78 @@ pub fn tick_player_timers(mut q: Query<(&mut DashState, &mut StunFrames)>) {
         *dash = tick_dash_state(*dash);
         if stun.0 > 0 {
             stun.0 -= 1;
+        }
+    }
+}
+
+/// `GgrsSchedule` system: a boomerang in `Flying` or `Returning` state
+/// whose AABB overlaps a non-owner, non-Dead, non-stunned player kills
+/// that player. Inserts the `Dead` component (with respawn frame
+/// computed from `FrameCount`) and despawns the boomerang. Runs after
+/// `boomerang_physics` + `boomerang_wall_collision` so the post-
+/// resolution rect is what's tested; runs before `catch_boomerangs`
+/// so a hit-and-catch on the same tick resolves as a kill (the
+/// boomerang despawns via the kill path, never reaches catch).
+///
+/// **Owner immunity**: a boomerang cannot kill the player who threw
+/// it. The owner_handle filter handles both the no-self-throw case
+/// (matters mainly for the spawn tick when the boomerang spawns
+/// inside the owner's rect) and the recalled-boomerang flying back
+/// past the owner case.
+///
+/// **Stun immunity**: `StunFrames > 0` blocks the hit. Currently the
+/// dash mechanic seeds `StunFrames` for `DASH_DURATION_FRAMES` ticks,
+/// so a well-timed dash dodges incoming projectiles. Phase 11 cycle 4
+/// will additionally use `StunFrames` for hit-stop on the killer.
+pub fn hit_boomerang_player(
+    mut commands: Commands,
+    frame: Res<FrameCount>,
+    mut score: ResMut<MatchScore>,
+    boomerangs: Query<(Entity, &Boomerang, &PositionF)>,
+    players: Query<(Entity, &Player, &PositionF, &StunFrames), Without<Dead>>,
+) {
+    for (boom_entity, boom, boom_pos) in &boomerangs {
+        let bb = boomerang_rect(boom_pos.0);
+        for (player_entity, player, player_pos, stun) in &players {
+            if player.handle == boom.owner_handle {
+                continue;
+            }
+            if stun.0 > 0 {
+                continue;
+            }
+            if !player_rect(player_pos.0).overlaps(bb) {
+                continue;
+            }
+            commands.entity(player_entity).insert(Dead {
+                respawn_at_frame: frame.0 + RESPAWN_FRAMES,
+            });
+            commands.entity(boom_entity).despawn();
+            // Award the kill to the boomerang's owner. saturating_add
+            // is bookkeeping-safe; in practice MatchOver fires at 5
+            // and resets, so the u8 ceiling is unreachable.
+            match boom.owner_handle {
+                0 => score.p0 = score.p0.saturating_add(1),
+                1 => score.p1 = score.p1.saturating_add(1),
+                _ => {}
+            }
+            // Hit-stop on the killer. Skipped if the killer is also
+            // Dead (the players query is `Without<Dead>`, so the
+            // .find() returns None). Otherwise insert a StunFrames
+            // value at least HIT_STOP_FRAMES, preserving any longer
+            // mid-dash i-frame window the killer already had.
+            if let Some((killer_entity, existing_stun)) = players
+                .iter()
+                .find(|(_, p, _, _)| p.handle == boom.owner_handle)
+                .map(|(e, _, _, s)| (e, s.0))
+            {
+                commands
+                    .entity(killer_entity)
+                    .insert(StunFrames(existing_stun.max(HIT_STOP_FRAMES)));
+            }
+            // One boomerang can only kill one player per tick — break
+            // out of the inner loop now that the boomerang is gone, so
+            // the next tick's iteration sees the despawned state.
+            break;
         }
     }
 }
@@ -599,12 +808,16 @@ pub fn catch_boomerangs(
 /// freshly-spawned boomerang doesn't take a phantom physics step on
 /// its spawn frame.
 pub fn throw_boomerangs(
+    match_state: Res<MatchState>,
     mut commands: Commands,
     inputs: Res<PlayerInputs<GgrsCfg>>,
     history: Res<InputHistory>,
-    players: Query<(&Player, &PositionF)>,
+    players: Query<(&Player, &PositionF), Without<Dead>>,
     boomerangs: Query<&Boomerang>,
 ) {
+    if !match_state.is_in_round() {
+        return;
+    }
     let throw_speed = Fix::const_from_int(THROW_SPEED_CM_PER_TICK);
     for (player, pos) in &players {
         let has_existing = boomerangs.iter().any(|b| b.owner_handle == player.handle);
@@ -681,11 +894,15 @@ pub fn recall_velocity(boom_pos: Vec2F, owner_pos: Vec2F, speed: Fix) -> Vec2F {
 /// to home toward the owner's current position — this is what lets
 /// the boomerang track a player who's still moving during recall.
 pub fn recall_boomerangs(
+    match_state: Res<MatchState>,
     inputs: Res<PlayerInputs<GgrsCfg>>,
     history: Res<InputHistory>,
     players: Query<(&Player, &PositionF)>,
     mut boomerangs: Query<(&mut Boomerang, &PositionF, &mut VelocityF)>,
 ) {
+    if !match_state.is_in_round() {
+        return;
+    }
     let recall_speed = Fix::const_from_int(RECALL_SPEED_CM_PER_TICK);
     for (mut boom, boom_pos, mut vel) in &mut boomerangs {
         let Some((_, owner_pos)) = players.iter().find(|(p, _)| p.handle == boom.owner_handle)
@@ -843,6 +1060,122 @@ pub fn snap_position(pos: &mut PositionF, prev: &mut PreviousPositionF, new: Vec
     prev.0 = new;
 }
 
+/// Per-handle respawn point. Symmetric on the x axis so both players
+/// re-enter the round on equal footing rather than spawning on top of
+/// where they last died. Phase 16 will swap this for arena-specific
+/// respawn slots.
+pub fn respawn_position(handle: usize) -> Vec2F {
+    match handle {
+        0 => Vec2F::from_cm(-100, 0),
+        _ => Vec2F::from_cm(100, 0),
+    }
+}
+
+/// `GgrsSchedule` system: revive any player whose `Dead.respawn_at_frame`
+/// has elapsed. Runs after `snapshot_previous` so we can use
+/// `snap_position` to collapse `PositionF`/`PreviousPositionF` to the
+/// new respawn point — the render-side interpolator then emits no
+/// motion for the teleport tick (no streak across the arena from
+/// corpse to spawn). Resets the player's `DashState`, `StunFrames`,
+/// and `VelocityF` so they revive in a clean Idle baseline rather
+/// than mid-dash or with stale velocity.
+type DeadPlayerQuery<'w, 's> = Query<
+    'w,
+    's,
+    (
+        Entity,
+        &'static Player,
+        &'static Dead,
+        &'static mut PositionF,
+        &'static mut PreviousPositionF,
+        &'static mut VelocityF,
+        &'static mut DashState,
+        &'static mut StunFrames,
+    ),
+>;
+
+pub fn tick_respawn(mut commands: Commands, frame: Res<FrameCount>, mut q: DeadPlayerQuery) {
+    for (entity, player, dead, mut pos, mut prev, mut vel, mut dash, mut stun) in &mut q {
+        if frame.0 < dead.respawn_at_frame {
+            continue;
+        }
+        snap_position(&mut pos, &mut prev, respawn_position(player.handle));
+        vel.0 = Vec2F::ZERO;
+        *dash = DashState::default();
+        *stun = StunFrames(0);
+        commands.entity(entity).remove::<Dead>();
+    }
+}
+
+/// `GgrsSchedule` system: drive the round/match state machine forward
+/// based on `FrameCount` and `MatchScore`. Runs early in the tick (after
+/// `tick_respawn`, before the input-gated gameplay systems) so a
+/// transition to `InRound` enables movement on the same tick the
+/// countdown finishes — "GO!" feel, no one-tick latch.
+///
+/// Transition rules:
+///   - `Countdown { digit, .. }` at expiry: decrement digit, or flip
+///     to `InRound` when digit was 1.
+///   - `InRound` at expiry **OR** when either player crosses
+///     `MATCH_WIN_THRESHOLD`: flip to `RoundOver` (timer-out) or
+///     `MatchOver` (threshold reached).
+///   - `RoundOver` at expiry: flip back to top of `Countdown` for the
+///     next round (unless threshold was reached during the beat,
+///     in which case `MatchOver`).
+///   - `MatchOver`: terminal.
+pub fn tick_match_state(
+    frame: Res<FrameCount>,
+    score: Res<MatchScore>,
+    mut state: ResMut<MatchState>,
+) {
+    let match_won = score.p0 >= MATCH_WIN_THRESHOLD || score.p1 >= MATCH_WIN_THRESHOLD;
+    *state = match *state {
+        MatchState::Countdown {
+            digit,
+            expires_at_frame,
+        } => {
+            if frame.0 >= expires_at_frame {
+                if digit > 1 {
+                    MatchState::Countdown {
+                        digit: digit - 1,
+                        expires_at_frame: frame.0 + COUNTDOWN_DIGIT_FRAMES,
+                    }
+                } else {
+                    MatchState::InRound {
+                        expires_at_frame: frame.0 + ROUND_DURATION_FRAMES,
+                    }
+                }
+            } else {
+                *state
+            }
+        }
+        MatchState::InRound { expires_at_frame } => {
+            if match_won {
+                MatchState::MatchOver
+            } else if frame.0 >= expires_at_frame {
+                MatchState::RoundOver {
+                    expires_at_frame: frame.0 + ROUND_OVER_FRAMES,
+                }
+            } else {
+                *state
+            }
+        }
+        MatchState::RoundOver { expires_at_frame } => {
+            if match_won {
+                MatchState::MatchOver
+            } else if frame.0 >= expires_at_frame {
+                MatchState::Countdown {
+                    digit: 3,
+                    expires_at_frame: frame.0 + COUNTDOWN_DIGIT_FRAMES,
+                }
+            } else {
+                *state
+            }
+        }
+        MatchState::MatchOver => MatchState::MatchOver,
+    };
+}
+
 pub fn record_last_tick_time(time: Res<Time<Real>>, mut last: ResMut<LastSimTickTime>) {
     last.0 = time.elapsed_secs_f64();
 }
@@ -884,6 +1217,8 @@ impl Plugin for SimPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<FrameCount>()
             .init_resource::<LastSimTickTime>()
+            .init_resource::<MatchScore>()
+            .init_resource::<MatchState>()
             .init_resource::<InputHistory>()
             .insert_resource(RollbackFrameRate(TICK_HZ));
 
@@ -895,9 +1230,12 @@ impl Plugin for SimPlugin {
             .rollback_component_with_copy::<NoInterpolate>()
             .rollback_component_with_copy::<DashState>()
             .rollback_component_with_copy::<StunFrames>()
+            .rollback_component_with_copy::<Dead>()
             .rollback_component_with_copy::<Boomerang>()
             .rollback_component_with_copy::<BoomerangState>()
             .rollback_resource_with_copy::<FrameCount>()
+            .rollback_resource_with_copy::<MatchScore>()
+            .rollback_resource_with_copy::<MatchState>()
             .rollback_resource_with_clone::<InputHistory>();
 
         // Checksums — required for SyncTest to detect divergence beyond
@@ -909,8 +1247,11 @@ impl Plugin for SimPlugin {
             .checksum_component_with_hash::<VelocityF>()
             .checksum_component_with_hash::<DashState>()
             .checksum_component_with_hash::<StunFrames>()
+            .checksum_component_with_hash::<Dead>()
             .checksum_component_with_hash::<Boomerang>()
             .checksum_resource_with_hash::<FrameCount>()
+            .checksum_resource_with_hash::<MatchScore>()
+            .checksum_resource_with_hash::<MatchState>()
             .checksum_resource_with_hash::<InputHistory>();
 
         // Sim systems — explicitly ordered per CONVENTIONS.md.
@@ -925,12 +1266,15 @@ impl Plugin for SimPlugin {
             GgrsSchedule,
             (
                 snapshot_previous,
+                tick_respawn,
+                tick_match_state,
                 start_dash,
                 player_movement,
                 wall_collision,
                 recall_boomerangs,
                 boomerang_physics,
                 boomerang_wall_collision,
+                hit_boomerang_player,
                 catch_boomerangs,
                 throw_boomerangs,
                 tick_player_timers,
@@ -966,5 +1310,19 @@ impl Plugin for DefaultInputsPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<SynthesizedInputs>()
             .add_systems(ReadInputs, read_local_inputs);
+    }
+}
+
+/// Replaces the default `MatchState::Countdown` with
+/// `MatchState::infinite_round()` so headless ceremonies (sync_test,
+/// replay_sync, unit tests) can exercise gameplay systems without
+/// burning 180 ticks waiting for the 3-2-1 countdown to finish. The
+/// real game binary (`crates/app`) must NOT add this plugin — its
+/// players need the countdown.
+pub struct InfiniteRoundPlugin;
+
+impl Plugin for InfiniteRoundPlugin {
+    fn build(&self, app: &mut App) {
+        app.insert_resource(MatchState::infinite_round());
     }
 }

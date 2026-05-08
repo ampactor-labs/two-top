@@ -23,8 +23,8 @@ use replay::{
     ReplayPlaybackPlugin,
 };
 use sim::{
-    Boomerang, DashState, GgrsCfg, Player, PlayerInput, PositionF, SimPlugin, StunFrames,
-    VelocityF, arena_walls,
+    Boomerang, DashState, GgrsCfg, MatchScore, MatchState, Player, PlayerInput, PositionF,
+    SimPlugin, StunFrames, VelocityF, arena_walls,
 };
 use std::fmt::Write as _;
 use std::path::PathBuf;
@@ -32,7 +32,7 @@ use std::path::PathBuf;
 pub mod fuzz;
 
 pub const TSV_HEADER: &str =
-    "frame\ttotal_checksum\tpositionf_part\tvelocityf_part\tdashstate_part\tstunframes_part\tboomerang_part";
+    "frame\ttotal_checksum\tpositionf_part\tvelocityf_part\tdashstate_part\tstunframes_part\tboomerang_part\tmatch_score_part\tmatch_state_part";
 
 // ---- Canonical demo (Phase 5) ----
 
@@ -204,6 +204,7 @@ fn build_app(replay: Replay) -> App {
     )));
     app.add_plugins(GgrsPlugin::<GgrsCfg>::default());
     app.add_plugins(SimPlugin);
+    app.add_plugins(sim::InfiniteRoundPlugin);
     app.add_plugins(ReplayPlaybackPlugin);
     app.insert_resource(Session::SyncTest(session));
 
@@ -248,6 +249,17 @@ fn hash_component<C: Component + Hash>(world: &mut World) -> u64 {
         handle.hash(&mut h);
         part.hash(&mut h);
     }
+    h.finish()
+}
+
+/// Per-frame checksum for a single rolled-back resource. Used for
+/// `MatchScore` + `MatchState` so a Phase 11 desync (an off-by-one
+/// score increment, an early/late state transition) surfaces in the
+/// cross-platform matrix rather than getting masked by the rest of
+/// the world checksum.
+fn hash_resource<R: Resource + Hash>(world: &World) -> u64 {
+    let mut h = checksum_hasher();
+    world.resource::<R>().hash(&mut h);
     h.finish()
 }
 
@@ -299,10 +311,13 @@ pub fn compute_checksum_tsv(replay: &Replay) -> String {
         let dash_part = hash_component::<DashState>(world);
         let stun_part = hash_component::<StunFrames>(world);
         let boom_part = hash_boomerangs(world);
-        let total = pos_part ^ vel_part ^ dash_part ^ stun_part ^ boom_part;
+        let score_part = hash_resource::<MatchScore>(world);
+        let state_part = hash_resource::<MatchState>(world);
+        let total =
+            pos_part ^ vel_part ^ dash_part ^ stun_part ^ boom_part ^ score_part ^ state_part;
         writeln!(
             &mut out,
-            "{frame}\t{total:016x}\t{pos_part:016x}\t{vel_part:016x}\t{dash_part:016x}\t{stun_part:016x}\t{boom_part:016x}"
+            "{frame}\t{total:016x}\t{pos_part:016x}\t{vel_part:016x}\t{dash_part:016x}\t{stun_part:016x}\t{boom_part:016x}\t{score_part:016x}\t{state_part:016x}"
         )
         .expect("write tsv row");
     }

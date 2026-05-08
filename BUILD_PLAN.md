@@ -251,7 +251,7 @@ This is not a numbered phase — it's the smallest viable cross-platform-build u
 - Death: hide player, set respawn timer (~3 seconds), increment opponent score
 - Respawn: `snap_position` to a respawn point, reset state
 - Hit-stop: brief `StunFrames` increase on the killer's animation for impact feel (4-6 frames)
-- `MatchState` via `bevy_roll_safe::init_ggrs_state`: `Countdown(3,2,1)`, `InRound`, `RoundOver`, `MatchOver`
+- `MatchState` as a plain rolled-back `Resource` enum: `Countdown(3,2,1)`, `InRound`, `RoundOver`, `MatchOver`. (See MORGAN_NOTES § "Why we cut bevy_roll_safe" — `bevy_roll_safe` 0.7 caps `bevy_ggrs` at `^0.20` and we're on `=0.21`.)
 - `MatchScore` resource, rolled back
 - Round timer: 30 seconds, transitions through states accordingly
 - First to 5 round wins ends the match

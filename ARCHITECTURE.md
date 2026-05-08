@@ -18,7 +18,7 @@ Networking is GGRS-style rollback peer-to-peer with WebRTC transport via Matchbo
 | Fixed-point math | `fixed` (Q16.16 via `FixedI32<U16>`) |
 | Trig / sqrt | `cordic` |
 | Deterministic RNG | `rand_xoshiro` (`Xoshiro256StarStar`) |
-| Rollback states | `bevy_roll_safe` (states only — not audio) |
+| Rollback states | Plain `Resource` enums (rolled back through bevy_ggrs directly — see MORGAN_NOTES § "Why we cut bevy_roll_safe") |
 | Serialization | `postcard` |
 | Logging | `tracing` + `tracing-subscriber` |
 | Property testing | `proptest` |
@@ -149,7 +149,7 @@ Rolled-back resources:
 - `FrameCount(u32)`
 - `PreviousInputs { per_player: [PlayerInput; 2] }`
 - `SimRng(Xoshiro256StarStar)`
-- `MatchState` (via `bevy_roll_safe::RollApp::init_roll_state`)
+- `MatchState` — plain `Resource` enum (`Countdown` / `InRound` / `RoundOver` / `MatchOver`), rolled back via `rollback_resource_with_copy::<MatchState>()`
 - `MatchScore { p0: u8, p1: u8 }`
 
 Registration in app setup:

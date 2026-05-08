@@ -26,6 +26,24 @@ Rollback netcode is *itself* a form of forward prediction at the input layer. Ad
 
 `bevy_transform_interpolation` is f32-throughout and assumes you write to `Transform` in `FixedUpdate`. We don't — our sim writes to `PositionF` (fixed-point) and the render layer derives `Transform`. Integrating their crate would mean fighting both their assumptions and ours. The 80 lines of interpolation we own are simpler than the wrapper we'd otherwise write. Build deeper not wider.
 
+## Why we cut `bevy_roll_safe`
+
+Phase 11 cycle 5 was supposed to land `MatchState` via `bevy_roll_safe::init_ggrs_state`. When we got there, `bevy_roll_safe` 0.7.0 (latest, also HEAD) constrained `bevy_ggrs ^0.20` and we'd already shipped Phases 8/9/10 on `bevy_ggrs = 0.21`. The crate doesn't accept us; we don't accept downgrading.
+
+The blast radius of each escape was uneven:
+- **Forking `bevy_roll_safe`** with a bumped `bevy_ggrs` would lock us to a fork forever — bevy_ggrs 0.20 → 0.21 had real breaking changes (session builder, synctest warmup tick, checksum_hasher) that the fork would need to absorb and re-absorb on every future `bevy_ggrs` bump. Permanent maintenance overhead for a feature we don't really need.
+- **Downgrading `bevy_ggrs` to 0.20** would re-validate Phase 8/9/10 against the older API, almost certainly drift the cross-platform determinism baseline checksum, and require re-recording the canonical `.bmrg`. Weeks of churn for hooks we don't use.
+- **Holding the phase** means waiting on someone else's release cadence with Phase 12 (networking) blocked behind it.
+
+Going DIY instead — `MatchState` as a plain rolled-back `Resource` enum — costs us the `OnEnter` / `OnExit` lifecycle hooks `bevy_roll_safe` provides, and gives us the rest:
+
+1. **Pattern consistency.** Every other rollback primitive in the sim (`FrameCount`, `MatchScore`, `InputHistory`) is a plain managed `Resource`. Making `MatchState` one too removes a concept boundary instead of inventing one.
+2. **Independence from upstream timing.** CONVENTIONS.md already warned us: *"Downstream rollback crates lag main bevy releases — chasing latest first guarantees broken determinism CI."* Cutting the lagging crate isn't deviating from spec — it's the spec applied recursively. We never have to coordinate three crates' upgrades again.
+3. **No lost capability.** Our state transitions live inside frame-counted gameplay systems that already see everything they need. The "init this when state becomes X" pattern is `if curr != prev { ... }`. Three lines beats a plugin abstraction.
+4. **Phase 14 (Replay Viewer) is happier.** Scrubbing through replay-time states becomes "read the resource at frame X" instead of reconstructing `State<>` machinery from rollback snapshots.
+
+We were already planning to build our own `RollbackSound` audio pattern (see "Why no `bevy_roll_safe` audio plugin" below). The states module was the only piece we kept — and it was the part most coupled to bevy version churn. Pulling that thread takes the whole crate out of our dep graph forever.
+
 ## Why no `bevy_roll_safe` audio plugin
 
 `bevy_roll_safe::RollbackAudioPlugin` wraps `bevy_audio` to prevent duplicate sounds during resimulation. It works, but it's a black box and tightly couples our audio to `bevy_audio` specifically. The `RollbackSound` entity pattern (sim spawns tagged entities, render reconciles and plays) is more code, but it's *our* code, gives us per-sound priority control, hit-cancel logic, and lets us swap audio backends later. Worth the extra ~100 lines.

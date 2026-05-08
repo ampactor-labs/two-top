@@ -66,3 +66,30 @@ fn canonical_demo_exercises_boomerang_state() {
         uniq.len(),
     );
 }
+
+/// Phase 11 cycle 7: the canonical demo's Phase 10 throw cycles also
+/// land kills (both players share inputs and start coincident, so each
+/// player's boomerang flies through the other's collision rect). The
+/// `match_score_part` column must therefore have multiple unique
+/// values — proves Phase 11 hit detection + score increment ran during
+/// the demo and protects against the matrix passing trivially on a
+/// stuck-at-zero `MatchScore`.
+#[test]
+fn canonical_demo_exercises_match_score() {
+    let bytes = std::fs::read(canonical_path()).expect("read canonical");
+    let replay = decode(&bytes).expect("decode canonical");
+    let tsv = compute_checksum_tsv(&replay);
+
+    // Column index 7 (zero-based): match_score_part.
+    let mut uniq: std::collections::BTreeSet<&str> = std::collections::BTreeSet::new();
+    for line in tsv.lines().skip(1) {
+        let cols: Vec<&str> = line.split('\t').collect();
+        uniq.insert(cols[7]);
+    }
+    assert!(
+        uniq.len() >= 2,
+        "canonical demo's match_score_part should change when kills land; \
+         saw only {} unique values: {uniq:?}",
+        uniq.len(),
+    );
+}

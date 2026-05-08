@@ -36,6 +36,7 @@ fn build_app() -> App {
     )));
     app.add_plugins(GgrsPlugin::<GgrsCfg>::default());
     app.add_plugins(SimPlugin);
+    app.add_plugins(sim::InfiniteRoundPlugin);
     app.insert_resource(Session::SyncTest(session));
 
     app.world_mut().spawn((

@@ -40,6 +40,7 @@ fn build_app(check_distance: usize) -> App {
     )));
     app.add_plugins(GgrsPlugin::<GgrsCfg>::default());
     app.add_plugins(SimPlugin);
+    app.add_plugins(sim::InfiniteRoundPlugin);
     app.add_plugins(DefaultInputsPlugin);
     app.insert_resource(Session::SyncTest(session));
 

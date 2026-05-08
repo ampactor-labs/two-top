@@ -55,7 +55,7 @@ Hard rules. Violations cause subtle bugs that are expensive to find. The CI and 
 - **`Cargo.lock` is committed.**
 - **`--locked` is used in CI.**
 - **`rust-toolchain.toml` pins exact stable version.** Toolchain drift is itself a determinism risk.
-- **Bevy is pinned with `=` to a single patch version** (e.g. `bevy = "=0.18.1"`). Do not bump until `bevy_ggrs`, `bevy_roll_safe`, and `bevy_matchbox` have all shipped releases compatible with the new Bevy. Downstream rollback crates lag main `bevy` releases — chasing latest first guarantees broken determinism CI.
+- **Bevy is pinned with `=` to a single patch version** (e.g. `bevy = "=0.18.1"`). Do not bump until `bevy_ggrs` and `bevy_matchbox` have shipped releases compatible with the new Bevy. Downstream rollback crates lag main `bevy` releases — chasing latest first guarantees broken determinism CI. (`bevy_roll_safe` was previously listed here; we cut the dep in Phase 11 — see MORGAN_NOTES § "Why we cut bevy_roll_safe".)
 - **`clippy -D warnings` is enforced** in the `ci` workflow.
 - **No `unsafe` in `sim` or `fixed_math` crates** without an `// SAFETY:` comment block explaining why.
 - **All public types in `sim` and `fixed_math` derive `Debug`.**
@@ -63,7 +63,7 @@ Hard rules. Violations cause subtle bugs that are expensive to find. The CI and 
 ## Module Boundaries
 
 - `fixed_math` depends on `fixed`, `cordic`, `serde`. Nothing else.
-- `sim` depends on `fixed_math`, `bevy` (no `bevy_render`), `bevy_ggrs`, `bytemuck`, `serde` (and once landed: `bevy_roll_safe`, `rand_xoshiro`, `tracing`).
+- `sim` depends on `fixed_math`, `bevy` (no `bevy_render`), `bevy_ggrs`, `bytemuck`, `serde` (and once landed: `rand_xoshiro`, `tracing`).
 - `render` depends on `sim`, `bevy` (full), `bevy_audio`. No reverse dependency.
 - `net` depends on `sim`, `matchbox_socket`, `bevy_ggrs`.
 - `replay` depends on `sim`, `bevy` (no `bevy_render`), `bevy_ggrs`, `postcard`, `serde`. The codec (`encode`/`decode`) is pure; the `RecordPlugin` / `ReplayPlaybackPlugin` are why `bevy` and `bevy_ggrs` are direct deps.

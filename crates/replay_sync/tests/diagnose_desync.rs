@@ -17,13 +17,25 @@ fn script_path() -> PathBuf {
     workspace_root().join("scripts/diagnose_desync.sh")
 }
 
-fn write_tsv(path: &std::path::Path, rows: &[(&str, &str, &str, &str, &str, &str, &str)]) {
+type TsvRow = (
+    &'static str,
+    &'static str,
+    &'static str,
+    &'static str,
+    &'static str,
+    &'static str,
+    &'static str,
+    &'static str,
+    &'static str,
+);
+
+fn write_tsv(path: &std::path::Path, rows: &[TsvRow]) {
     let mut s = String::from(
-        "frame\ttotal_checksum\tpositionf_part\tvelocityf_part\tdashstate_part\tstunframes_part\tboomerang_part\n",
+        "frame\ttotal_checksum\tpositionf_part\tvelocityf_part\tdashstate_part\tstunframes_part\tboomerang_part\tmatch_score_part\tmatch_state_part\n",
     );
-    for (frame, total, pos, vel, dash, stun, boom) in rows {
+    for (frame, total, pos, vel, dash, stun, boom, score, state) in rows {
         s.push_str(&format!(
-            "{frame}\t{total}\t{pos}\t{vel}\t{dash}\t{stun}\t{boom}\n"
+            "{frame}\t{total}\t{pos}\t{vel}\t{dash}\t{stun}\t{boom}\t{score}\t{state}\n"
         ));
     }
     std::fs::write(path, s).expect("write tsv");
@@ -34,10 +46,10 @@ fn identical_tsvs_succeed() {
     let dir = tempdir();
     let a = dir.join("a.tsv");
     let b = dir.join("b.tsv");
-    let rows = &[
-        ("0", "aa", "bb", "cc", "dd", "ee", "10"),
-        ("1", "ff", "11", "22", "33", "44", "20"),
-        ("2", "55", "66", "77", "88", "99", "30"),
+    let rows: &[TsvRow] = &[
+        ("0", "aa", "bb", "cc", "dd", "ee", "10", "01", "ab"),
+        ("1", "ff", "11", "22", "33", "44", "20", "02", "cd"),
+        ("2", "55", "66", "77", "88", "99", "30", "03", "ef"),
     ];
     write_tsv(&a, rows);
     write_tsv(&b, rows);
@@ -62,15 +74,15 @@ fn first_divergence_is_reported() {
     let dir = tempdir();
     let a = dir.join("a.tsv");
     let b = dir.join("b.tsv");
-    let rows_a = &[
-        ("0", "aa", "bb", "cc", "dd", "ee", "10"),
-        ("1", "ff", "11", "22", "33", "44", "20"),
-        ("2", "55", "66", "77", "88", "99", "30"),
+    let rows_a: &[TsvRow] = &[
+        ("0", "aa", "bb", "cc", "dd", "ee", "10", "01", "ab"),
+        ("1", "ff", "11", "22", "33", "44", "20", "02", "cd"),
+        ("2", "55", "66", "77", "88", "99", "30", "03", "ef"),
     ];
-    let rows_b = &[
-        ("0", "aa", "bb", "cc", "dd", "ee", "10"),
-        ("1", "ff", "XX", "22", "33", "44", "20"), // diverges at frame 1, positionf_part
-        ("2", "55", "66", "77", "88", "99", "30"),
+    let rows_b: &[TsvRow] = &[
+        ("0", "aa", "bb", "cc", "dd", "ee", "10", "01", "ab"),
+        ("1", "ff", "XX", "22", "33", "44", "20", "02", "cd"), // diverges at frame 1, positionf_part
+        ("2", "55", "66", "77", "88", "99", "30", "03", "ef"),
     ];
     write_tsv(&a, rows_a);
     write_tsv(&b, rows_b);
