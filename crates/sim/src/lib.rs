@@ -69,7 +69,7 @@ pub struct PreviousPositionF(pub Vec2F);
 pub struct VelocityF(pub Vec2F);
 
 #[derive(Component, Clone, Copy, PartialEq, Eq, Hash, Debug)]
-#[require(Rollback, DashState, StunFrames)]
+#[require(Rollback, DashState, StunFrames, Dead)]
 pub struct Player {
     pub handle: usize,
 }
@@ -101,19 +101,36 @@ pub enum DashState {
 #[require(Rollback)]
 pub struct StunFrames(pub u32);
 
-/// Phase 11 — player has been killed and is awaiting respawn at
-/// `respawn_at_frame`. While present, the existing player-input
-/// systems (`player_movement`, `start_dash`, `throw_boomerangs`) and
-/// hit detection (`hit_boomerang_player`) all filter the entity out
-/// via `Without<Dead>`, so the dead player can't move, dash, throw,
-/// or be re-killed. In-flight boomerangs owned by a dead player
-/// continue to fly, ricochet, recall, and catch normally — the
-/// corpse's position is still tracked as the recall target until
-/// cycle 2's respawn snap.
-#[derive(Component, Clone, Copy, PartialEq, Eq, Hash, Debug)]
+/// Phase 11 — player liveness state. `respawn_at_frame.is_some()`
+/// means the player is dying; `None` means alive. Stored as a
+/// VALUE component (always present on every Player) rather than
+/// add/remove on death so kills don't trigger Bevy archetype
+/// transitions on the player entity. Archetype transitions during
+/// rollback resimulation interact subtly with bevy_ggrs's snapshot
+/// restoration in ways that surface as fuzzed-input desyncs (the
+/// nightly Fuzz Soak caught this on Phase 11 seeds 29 and 61).
+/// Keeping `Dead` always-present collapses the kill into a value
+/// update on the existing component — no archetype mutation, no
+/// resimulation drift.
+///
+/// While `respawn_at_frame.is_some()`, the player-input systems
+/// (`player_movement`, `start_dash`, `throw_boomerangs`) and hit
+/// detection (`hit_boomerang_player`) skip the entity by reading
+/// `Dead` and checking the value. In-flight boomerangs owned by a
+/// dead player continue to fly, ricochet, recall, and catch
+/// normally — the corpse's position is still tracked as the recall
+/// target until `tick_respawn` snaps it to the spawn point.
+#[derive(Component, Clone, Copy, PartialEq, Eq, Hash, Debug, Default)]
 #[require(Rollback)]
 pub struct Dead {
-    pub respawn_at_frame: u32,
+    pub respawn_at_frame: Option<u32>,
+}
+
+impl Dead {
+    /// True iff the player is currently dying (respawn pending).
+    pub fn is_dying(&self) -> bool {
+        self.respawn_at_frame.is_some()
+    }
 }
 
 /// Frames a player stays Dead before respawn. 180 = 3 s @ 60 Hz —
@@ -621,12 +638,15 @@ pub fn start_dash(
     match_state: Res<MatchState>,
     inputs: Res<PlayerInputs<GgrsCfg>>,
     history: Res<InputHistory>,
-    mut q: Query<(&Player, &mut DashState, &mut StunFrames), Without<Dead>>,
+    mut q: Query<(&Player, &Dead, &mut DashState, &mut StunFrames)>,
 ) {
     if !match_state.is_in_round() {
         return;
     }
-    for (player, mut dash, mut stun) in &mut q {
+    for (player, dead, mut dash, mut stun) in &mut q {
+        if dead.is_dying() {
+            continue;
+        }
         let (curr, _status) = inputs[player.handle];
         let prev = history
             .0
@@ -660,14 +680,17 @@ pub fn start_dash(
 pub fn player_movement(
     match_state: Res<MatchState>,
     inputs: Res<PlayerInputs<GgrsCfg>>,
-    mut q: Query<(&Player, &mut PositionF, &mut VelocityF, &DashState), Without<Dead>>,
+    mut q: Query<(&Player, &Dead, &mut PositionF, &mut VelocityF, &DashState)>,
 ) {
     if !match_state.is_in_round() {
         return;
     }
     let walk_speed = Fix::const_from_int(WALK_SPEED_CM_PER_TICK);
     let dash_speed = Fix::const_from_int(DASH_SPEED_CM_PER_TICK);
-    for (player, mut pos, mut vel, dash) in &mut q {
+    for (player, dead, mut pos, mut vel, dash) in &mut q {
+        if dead.is_dying() {
+            continue;
+        }
         let velocity = match *dash {
             DashState::Dashing { dir, .. } => Vec2F::new(dir.x * dash_speed, dir.y * dash_speed),
             _ => {
@@ -722,11 +745,30 @@ pub fn hit_boomerang_player(
     frame: Res<FrameCount>,
     mut score: ResMut<MatchScore>,
     boomerangs: Query<(Entity, &Boomerang, &PositionF)>,
-    players: Query<(Entity, &Player, &PositionF, &StunFrames), Without<Dead>>,
+    mut players: Query<(Entity, &Player, &PositionF, &mut Dead, &StunFrames)>,
 ) {
     for (boom_entity, boom, boom_pos) in &boomerangs {
         let bb = boomerang_rect(boom_pos.0);
-        for (player_entity, player, player_pos, stun) in &players {
+        // First pass: locate the kill target via an immutable iter.
+        // Reading `&Dead` and `&StunFrames` lets us check liveness +
+        // i-frames without holding a mut borrow on the query.
+        //
+        // Critically: hit-stop below is dispatched via
+        // `Commands::insert` (deferred). If the bump wrote to
+        // `&mut StunFrames` directly, the next boomerang's
+        // inner-loop `stun.0 > 0` check would observe the bump and
+        // skip its (still-deserved) kill. That created an
+        // order-sensitive interaction where the boomerang iteration
+        // order at frame N decided which player survived a
+        // coincident two-way simultaneous hit — caught by the
+        // nightly fuzzer (Phase 11 seeds 29/61) and by the canonical
+        // demo gate. Deferred Commands keep mid-system reads
+        // unaffected, so coincident kills remain commutative.
+        let mut hit: Option<Entity> = None;
+        for (player_entity, player, player_pos, dead, stun) in &players {
+            if dead.is_dying() {
+                continue;
+            }
             if player.handle == boom.owner_handle {
                 continue;
             }
@@ -736,36 +778,44 @@ pub fn hit_boomerang_player(
             if !player_rect(player_pos.0).overlaps(bb) {
                 continue;
             }
-            commands.entity(player_entity).insert(Dead {
-                respawn_at_frame: frame.0 + RESPAWN_FRAMES,
-            });
-            commands.entity(boom_entity).despawn();
-            // Award the kill to the boomerang's owner. saturating_add
-            // is bookkeeping-safe; in practice MatchOver fires at 5
-            // and resets, so the u8 ceiling is unreachable.
-            match boom.owner_handle {
-                0 => score.p0 = score.p0.saturating_add(1),
-                1 => score.p1 = score.p1.saturating_add(1),
-                _ => {}
-            }
-            // Hit-stop on the killer. Skipped if the killer is also
-            // Dead (the players query is `Without<Dead>`, so the
-            // .find() returns None). Otherwise insert a StunFrames
-            // value at least HIT_STOP_FRAMES, preserving any longer
-            // mid-dash i-frame window the killer already had.
-            if let Some((killer_entity, existing_stun)) = players
-                .iter()
-                .find(|(_, p, _, _)| p.handle == boom.owner_handle)
-                .map(|(e, _, _, s)| (e, s.0))
-            {
-                commands
-                    .entity(killer_entity)
-                    .insert(StunFrames(existing_stun.max(HIT_STOP_FRAMES)));
-            }
-            // One boomerang can only kill one player per tick — break
-            // out of the inner loop now that the boomerang is gone, so
-            // the next tick's iteration sees the despawned state.
+            hit = Some(player_entity);
             break;
+        }
+        let Some(player_entity) = hit else {
+            continue;
+        };
+
+        // Mutate the victim: mark dying via a value update on the
+        // always-present `Dead` component (no archetype change, so
+        // bevy_ggrs's snapshot/restore stays bit-stable across
+        // rollback resimulation).
+        if let Ok((_, _, _, mut dead, _)) = players.get_mut(player_entity) {
+            dead.respawn_at_frame = Some(frame.0 + RESPAWN_FRAMES);
+        }
+        commands.entity(boom_entity).despawn();
+
+        // Award the kill to the boomerang's owner. saturating_add
+        // is bookkeeping-safe; in practice MatchOver fires at 5
+        // and resets, so the u8 ceiling is unreachable.
+        match boom.owner_handle {
+            0 => score.p0 = score.p0.saturating_add(1),
+            1 => score.p1 = score.p1.saturating_add(1),
+            _ => {}
+        }
+
+        // Hit-stop on the killer, deferred via Commands. Snapshot
+        // the existing `StunFrames` so a mid-dash killer keeps any
+        // longer i-frame window. Skipped if the killer is itself
+        // dying.
+        let killer_handle = boom.owner_handle;
+        let killer_data = players
+            .iter()
+            .find(|(_, p, _, d, _)| p.handle == killer_handle && !d.is_dying())
+            .map(|(e, _, _, _, s)| (e, s.0));
+        if let Some((killer_entity, existing_stun)) = killer_data {
+            commands
+                .entity(killer_entity)
+                .insert(StunFrames(existing_stun.max(HIT_STOP_FRAMES)));
         }
     }
 }
@@ -812,14 +862,17 @@ pub fn throw_boomerangs(
     mut commands: Commands,
     inputs: Res<PlayerInputs<GgrsCfg>>,
     history: Res<InputHistory>,
-    players: Query<(&Player, &PositionF), Without<Dead>>,
+    players: Query<(&Player, &Dead, &PositionF)>,
     boomerangs: Query<&Boomerang>,
 ) {
     if !match_state.is_in_round() {
         return;
     }
     let throw_speed = Fix::const_from_int(THROW_SPEED_CM_PER_TICK);
-    for (player, pos) in &players {
+    for (player, dead, pos) in &players {
+        if dead.is_dying() {
+            continue;
+        }
         let has_existing = boomerangs.iter().any(|b| b.owner_handle == player.handle);
         let Some(ring) = history.0.get(&player.handle) else {
             continue;
@@ -1079,13 +1132,12 @@ pub fn respawn_position(handle: usize) -> Vec2F {
 /// corpse to spawn). Resets the player's `DashState`, `StunFrames`,
 /// and `VelocityF` so they revive in a clean Idle baseline rather
 /// than mid-dash or with stale velocity.
-type DeadPlayerQuery<'w, 's> = Query<
+type PlayerStateQuery<'w, 's> = Query<
     'w,
     's,
     (
-        Entity,
         &'static Player,
-        &'static Dead,
+        &'static mut Dead,
         &'static mut PositionF,
         &'static mut PreviousPositionF,
         &'static mut VelocityF,
@@ -1094,16 +1146,19 @@ type DeadPlayerQuery<'w, 's> = Query<
     ),
 >;
 
-pub fn tick_respawn(mut commands: Commands, frame: Res<FrameCount>, mut q: DeadPlayerQuery) {
-    for (entity, player, dead, mut pos, mut prev, mut vel, mut dash, mut stun) in &mut q {
-        if frame.0 < dead.respawn_at_frame {
+pub fn tick_respawn(frame: Res<FrameCount>, mut q: PlayerStateQuery) {
+    for (player, mut dead, mut pos, mut prev, mut vel, mut dash, mut stun) in &mut q {
+        let Some(at) = dead.respawn_at_frame else {
+            continue;
+        };
+        if frame.0 < at {
             continue;
         }
         snap_position(&mut pos, &mut prev, respawn_position(player.handle));
         vel.0 = Vec2F::ZERO;
         *dash = DashState::default();
         *stun = StunFrames(0);
-        commands.entity(entity).remove::<Dead>();
+        dead.respawn_at_frame = None;
     }
 }
 

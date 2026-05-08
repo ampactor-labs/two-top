@@ -56,14 +56,18 @@ fn build_two_player_app() -> App {
 }
 
 fn dead_count(app: &mut App) -> usize {
-    app.world_mut().query::<&Dead>().iter(app.world()).count()
+    app.world_mut()
+        .query::<&Dead>()
+        .iter(app.world())
+        .filter(|d| d.is_dying())
+        .count()
 }
 
 fn p1_dead(app: &mut App) -> bool {
-    let mut q = app.world_mut().query::<(&Player, Option<&Dead>)>();
+    let mut q = app.world_mut().query::<(&Player, &Dead)>();
     q.iter(app.world())
         .find(|(p, _)| p.handle == 1)
-        .map(|(_, d)| d.is_some())
+        .map(|(_, d)| d.is_dying())
         .unwrap_or(false)
 }
 

@@ -24,7 +24,7 @@ use replay::{
 };
 use sim::{
     Boomerang, DashState, GgrsCfg, MatchScore, MatchState, Player, PlayerInput, PositionF,
-    SimPlugin, StunFrames, VelocityF, arena_walls,
+    PreviousPositionF, SimPlugin, StunFrames, VelocityF, arena_walls,
 };
 use std::fmt::Write as _;
 use std::path::PathBuf;
@@ -212,6 +212,7 @@ fn build_app(replay: Replay) -> App {
         app.world_mut().spawn((
             Player { handle },
             PositionF(Vec2F::ZERO),
+            PreviousPositionF(Vec2F::ZERO),
             VelocityF(Vec2F::ZERO),
         ));
     }

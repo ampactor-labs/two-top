@@ -65,7 +65,11 @@ fn count_boomerangs(app: &mut App) -> usize {
 
 fn dead_handles(app: &mut App) -> Vec<usize> {
     let mut q = app.world_mut().query::<(&Player, &Dead)>();
-    let mut h: Vec<usize> = q.iter(app.world()).map(|(p, _)| p.handle).collect();
+    let mut h: Vec<usize> = q
+        .iter(app.world())
+        .filter(|(_, d)| d.is_dying())
+        .map(|(p, _)| p.handle)
+        .collect();
     h.sort();
     h
 }
@@ -73,7 +77,7 @@ fn dead_handles(app: &mut App) -> Vec<usize> {
 fn dead_for(app: &mut App, handle: usize) -> Option<Dead> {
     let mut q = app.world_mut().query::<(&Player, &Dead)>();
     q.iter(app.world())
-        .find(|(p, _)| p.handle == handle)
+        .find(|(p, d)| p.handle == handle && d.is_dying())
         .map(|(_, d)| *d)
 }
 
@@ -228,7 +232,7 @@ fn already_dead_player_is_not_re_hit() {
             .expect("p1 entity")
     };
     app.world_mut().entity_mut(p1_entity).insert(Dead {
-        respawn_at_frame: 5000,
+        respawn_at_frame: Some(5000),
     });
 
     app.world_mut().spawn((
@@ -248,7 +252,7 @@ fn already_dead_player_is_not_re_hit() {
     assert_eq!(count_boomerangs(&mut app), 1);
     // p1 still has its original Dead with respawn_at_frame == 5000.
     let d = dead_for(&mut app, 1).expect("p1 still Dead");
-    assert_eq!(d.respawn_at_frame, 5000);
+    assert_eq!(d.respawn_at_frame, Some(5000));
 }
 
 // ---- respawn_at_frame computed from FrameCount ----
@@ -275,7 +279,7 @@ fn respawn_at_frame_is_current_frame_plus_respawn_window() {
     // hit_boomerang_player ran when FrameCount.0 was fc_after - 1 (the
     // very last system in the tick is advance_frame_count). So the
     // recorded respawn_at_frame is (fc_after - 1) + RESPAWN_FRAMES.
-    assert_eq!(d.respawn_at_frame, fc_after - 1 + RESPAWN_FRAMES);
+    assert_eq!(d.respawn_at_frame, Some(fc_after - 1 + RESPAWN_FRAMES));
 }
 
 // ---- MatchScore increment on kill (cycle 3) ----
@@ -462,7 +466,7 @@ fn dead_player_does_not_move_with_stick_input() {
             .expect("p1 entity")
     };
     app.world_mut().entity_mut(p1_entity).insert(Dead {
-        respawn_at_frame: 5000,
+        respawn_at_frame: Some(5000),
     });
 
     // Drive full-east stick. p1's position must not change tick over tick.
