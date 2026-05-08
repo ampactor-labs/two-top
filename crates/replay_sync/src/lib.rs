@@ -23,8 +23,8 @@ use replay::{
     ReplayPlaybackPlugin,
 };
 use sim::{
-    DashState, GgrsCfg, Player, PlayerInput, PositionF, SimPlugin, StunFrames, VelocityF,
-    arena_walls,
+    Boomerang, DashState, GgrsCfg, Player, PlayerInput, PositionF, SimPlugin, StunFrames,
+    VelocityF, arena_walls,
 };
 use std::fmt::Write as _;
 use std::path::PathBuf;
@@ -32,7 +32,7 @@ use std::path::PathBuf;
 pub mod fuzz;
 
 pub const TSV_HEADER: &str =
-    "frame\ttotal_checksum\tpositionf_part\tvelocityf_part\tdashstate_part\tstunframes_part";
+    "frame\ttotal_checksum\tpositionf_part\tvelocityf_part\tdashstate_part\tstunframes_part\tboomerang_part";
 
 // ---- Canonical demo (Phase 5) ----
 
@@ -54,9 +54,76 @@ pub const CANONICAL_DASH_PERIOD: u32 = 120;
 /// north/south runs don't reach the walls as fast as east/west.
 pub const CANONICAL_STICK_Y_AMP: i8 = 60;
 
+/// Frames where a throw/recall/catch cycle takes over from the base
+/// movement pattern. Three cycles spread across the 1800-frame demo
+/// give the cross-platform matrix three independent shots at catching
+/// a boomerang-system desync.
+pub const CANONICAL_THROW_CYCLE_STARTS: [u32; 3] = [240, 720, 1200];
+/// Length of one throw/recall/catch cycle (~1.3 s). See
+/// `throw_cycle_input` for the per-frame breakdown.
+pub const CANONICAL_THROW_CYCLE_LEN: u32 = 80;
+
+/// Returns an override input for offsets within a throw cycle, scripting
+/// throw → flight → ricochet → recall → catch:
+///   * `0..=7`: THROW_DOWN held + stick aimed +x (windup, no AIM_ACTIVE
+///     so player can still drift with stick — exercises the
+///     run-and-throw flow).
+///   * `8`: release THROW_DOWN with stick still aimed → throw fires
+///     (rising release edge consumed by `try_throw_direction`).
+///   * `9..=38`: idle. Boomerang flies east, hits east wall and
+///     ricochets within ~10 ticks at THROW_SPEED 50 cm/tick.
+///   * `39`: THROW_DOWN press (rising edge) → `recall_boomerangs`
+///     transitions Flying → Returning.
+///   * `40..=79`: hold THROW_DOWN. Returning boomerang homes at
+///     RECALL_SPEED until `catch_boomerangs` despawns it on overlap.
+fn throw_cycle_input(offset: u32) -> PlayerInput {
+    match offset {
+        0..=7 => PlayerInput {
+            stick_x: CANONICAL_STICK_AMP,
+            stick_y: 0,
+            aim_angle: 0,
+            buttons: PlayerInput::THROW_DOWN,
+        },
+        8 => PlayerInput {
+            stick_x: CANONICAL_STICK_AMP,
+            stick_y: 0,
+            aim_angle: 0,
+            buttons: 0,
+        },
+        9..=38 => PlayerInput::default(),
+        39..=79 => PlayerInput {
+            stick_x: 0,
+            stick_y: 0,
+            aim_angle: 0,
+            buttons: PlayerInput::THROW_DOWN,
+        },
+        _ => PlayerInput::default(),
+    }
+}
+
+/// Returns the cycle offset for `f` if it falls inside any of the
+/// throw-cycle windows, else `None`. Cycles do not overlap — see
+/// `CANONICAL_THROW_CYCLE_STARTS` placement.
+fn throw_cycle_offset(f: u32) -> Option<u32> {
+    CANONICAL_THROW_CYCLE_STARTS.iter().find_map(|&start| {
+        if f >= start && f < start + CANONICAL_THROW_CYCLE_LEN {
+            Some(f - start)
+        } else {
+            None
+        }
+    })
+}
+
 pub fn canonical_inputs() -> Vec<FrameInputs> {
     (0..CANONICAL_FRAMES)
         .map(|f| {
+            // Throw cycles override the base movement pattern entirely
+            // for their duration so the boomerang state machine has a
+            // clean, predictable input track to drive.
+            if let Some(offset) = throw_cycle_offset(f) {
+                let p = throw_cycle_input(offset);
+                return [p, p];
+            }
             let dir_x = if (f / CANONICAL_PERIOD).is_multiple_of(2) {
                 CANONICAL_STICK_AMP
             } else {
@@ -184,6 +251,35 @@ fn hash_component<C: Component + Hash>(world: &mut World) -> u64 {
     h.finish()
 }
 
+/// Per-frame checksum across all live `Boomerang` entities. Hashes
+/// (state, position, velocity) per boomerang and sorts by `owner_handle`
+/// so two coincident boomerangs from the same player can't collide
+/// (they can't — at most one per owner — but the sort makes the
+/// invariant explicit). When no boomerangs exist this returns the
+/// hasher's empty-state value, which is identical across platforms so
+/// the early-game frames stay byte-stable.
+fn hash_boomerangs(world: &mut World) -> u64 {
+    let mut rows: Vec<(usize, u64)> = world
+        .query::<(&Boomerang, &PositionF, &VelocityF)>()
+        .iter(world)
+        .map(|(b, pos, vel)| {
+            let mut h = checksum_hasher();
+            b.hash(&mut h);
+            pos.hash(&mut h);
+            vel.hash(&mut h);
+            (b.owner_handle, h.finish())
+        })
+        .collect();
+    rows.sort_by_key(|(h, _)| *h);
+
+    let mut h = checksum_hasher();
+    for (handle, part) in &rows {
+        handle.hash(&mut h);
+        part.hash(&mut h);
+    }
+    h.finish()
+}
+
 /// Run `replay` through the sim and return a TSV with one header row plus
 /// one row per simulated frame. The string is ASCII and ends with a final
 /// newline so byte-by-byte cross-platform diff is unambiguous.
@@ -202,10 +298,11 @@ pub fn compute_checksum_tsv(replay: &Replay) -> String {
         let vel_part = hash_component::<VelocityF>(world);
         let dash_part = hash_component::<DashState>(world);
         let stun_part = hash_component::<StunFrames>(world);
-        let total = pos_part ^ vel_part ^ dash_part ^ stun_part;
+        let boom_part = hash_boomerangs(world);
+        let total = pos_part ^ vel_part ^ dash_part ^ stun_part ^ boom_part;
         writeln!(
             &mut out,
-            "{frame}\t{total:016x}\t{pos_part:016x}\t{vel_part:016x}\t{dash_part:016x}\t{stun_part:016x}"
+            "{frame}\t{total:016x}\t{pos_part:016x}\t{vel_part:016x}\t{dash_part:016x}\t{stun_part:016x}\t{boom_part:016x}"
         )
         .expect("write tsv row");
     }
@@ -233,6 +330,13 @@ pub fn dump_state_at(replay: &Replay, frame: u32) -> String {
         .collect();
     rows.sort_by_key(|(h, _, _)| *h);
 
+    let mut boom_rows: Vec<(usize, Boomerang, PositionF, VelocityF)> = world
+        .query::<(&Boomerang, &PositionF, &VelocityF)>()
+        .iter(world)
+        .map(|(b, pos, vel)| (b.owner_handle, *b, *pos, *vel))
+        .collect();
+    boom_rows.sort_by_key(|(h, _, _, _)| *h);
+
     let mut out = String::new();
     writeln!(&mut out, "# replay_sync state dump @ frame {frame}").unwrap();
     for (h, pos, vel) in rows {
@@ -241,6 +345,20 @@ pub fn dump_state_at(replay: &Replay, frame: u32) -> String {
         writeln!(
             &mut out,
             "handle={h}\tpos=({:#010x},{:#010x})/({px:.6},{py:.6})\tvel=({:#010x},{:#010x})/({vx:.6},{vy:.6})",
+            pos.0.x.to_bits(),
+            pos.0.y.to_bits(),
+            vel.0.x.to_bits(),
+            vel.0.y.to_bits(),
+        )
+        .unwrap();
+    }
+    for (owner, boom, pos, vel) in boom_rows {
+        let (px, py) = pos.0.to_f32();
+        let (vx, vy) = vel.0.to_f32();
+        writeln!(
+            &mut out,
+            "boomerang owner={owner} state={:?}\tpos=({:#010x},{:#010x})/({px:.6},{py:.6})\tvel=({:#010x},{:#010x})/({vx:.6},{vy:.6})",
+            boom.state,
             pos.0.x.to_bits(),
             pos.0.y.to_bits(),
             vel.0.x.to_bits(),

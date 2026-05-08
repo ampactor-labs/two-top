@@ -40,3 +40,29 @@ fn canonical_replay_runs_through_checksum_pipeline() {
     let lines: Vec<&str> = tsv.lines().collect();
     assert_eq!(lines.len() as u32, CANONICAL_FRAMES + 1);
 }
+
+/// Phase 10 cycle 6: the canonical demo's throw-cycle windows must
+/// actually spawn boomerangs (otherwise the matrix gate would pass
+/// trivially when no boomerang code ever runs). We assert the
+/// `boomerang_part` column changes value across the demo — a sufficient
+/// signal that boomerangs entered + exited the world during the run.
+#[test]
+fn canonical_demo_exercises_boomerang_state() {
+    let bytes = std::fs::read(canonical_path()).expect("read canonical");
+    let replay = decode(&bytes).expect("decode canonical");
+    let tsv = compute_checksum_tsv(&replay);
+
+    // Column index 6 (zero-based): boomerang_part. Collect the unique
+    // values across every frame.
+    let mut uniq: std::collections::BTreeSet<&str> = std::collections::BTreeSet::new();
+    for line in tsv.lines().skip(1) {
+        let cols: Vec<&str> = line.split('\t').collect();
+        uniq.insert(cols[6]);
+    }
+    assert!(
+        uniq.len() >= 2,
+        "canonical demo's boomerang_part should change as boomerangs spawn/move/despawn; \
+         saw only {} unique values: {uniq:?}",
+        uniq.len(),
+    );
+}

@@ -101,6 +101,97 @@ pub enum DashState {
 #[require(Rollback)]
 pub struct StunFrames(pub u32);
 
+/// Boomerang state machine. Phase 10 cycle 1 only exercises Flying;
+/// Returning lands in cycle 3 (recall trigger). The state lives on a
+/// rollback entity alongside `PositionF`/`VelocityF`/`PreviousPositionF`.
+#[derive(Component, Clone, Copy, PartialEq, Eq, Hash, Debug, Default)]
+#[require(Rollback)]
+pub enum BoomerangState {
+    #[default]
+    Flying,
+    Returning,
+}
+
+#[derive(Component, Clone, Copy, PartialEq, Eq, Hash, Debug)]
+#[require(Rollback)]
+pub struct Boomerang {
+    pub owner_handle: usize,
+    pub state: BoomerangState,
+}
+
+/// Throw speed in cm/tick. ~3.8× walk speed: noticeably faster than
+/// the player can move, so the throw reads as an attack rather than a
+/// projectile drift. 50 × 60 = 3000 cm/sec.
+pub const THROW_SPEED_CM_PER_TICK: i32 = 50;
+
+/// Boomerang collision half-extent in cm. Smaller than the player's
+/// 16 cm: ~10 cm gives a 20 cm catch/hit footprint that reads as a
+/// chunky thrown weapon without making it cheese-easy to hit with.
+pub const BOOMERANG_HALF_EXTENT_CM: i32 = 10;
+
+/// Recall speed in cm/tick. A touch faster than `THROW_SPEED` so the
+/// boomerang catches up to a player who's moved forward since the
+/// throw — recall reads as "reeling in" rather than "drifting back".
+pub const RECALL_SPEED_CM_PER_TICK: i32 = 55;
+
+/// Distance from the world origin at which a boomerang is despawned.
+/// Generously outside the arena (1000 cm half-extent of the visible
+/// space; 4000 gives ~3 s of straight flight before despawn at
+/// THROW_SPEED). Cycle 2's wall ricochet should keep boomerangs
+/// bounded inside the arena under normal play; this radius is just a
+/// safety net so a stuck-velocity boomerang can't run out the
+/// `Fix` integer range (±32767) and panic on overflow.
+pub const BOOMERANG_DESPAWN_RADIUS_CM: i32 = 4000;
+
+pub fn boomerang_rect(pos: Vec2F) -> RectF {
+    let half = Vec2F::from_cm(BOOMERANG_HALF_EXTENT_CM, BOOMERANG_HALF_EXTENT_CM);
+    RectF::from_center_half_extents(pos, half)
+}
+
+/// Forgiveness window for THROW_DOWN edge detection. Same 6-frame
+/// window as Phase 8's standard forgiveness — 100 ms at 60 Hz.
+pub const THROW_FORGIVENESS_FRAMES: usize = 6;
+
+/// Pure helper: should this player throw a boomerang this tick?
+/// Returns the throw direction iff:
+///   - they don't already own a boomerang in flight,
+///   - THROW_DOWN was released this tick OR within the last
+///     `THROW_FORGIVENESS_FRAMES` ticks of history,
+///   - the stick has a usable direction.
+///
+/// The this-tick check (`just_released` against ring's last entry) is
+/// what makes the throw feel snappy — fires the same tick as the
+/// release, no 16 ms delay. The forgiveness window scan only catches
+/// the tail (e.g. if a player tapped release and *then* nudged the
+/// stick into a direction).
+pub fn try_throw_direction(
+    history_ring: &[PlayerInput; INPUT_HISTORY_LEN],
+    current_input: PlayerInput,
+    has_existing_boomerang: bool,
+) -> Option<Vec2F> {
+    if has_existing_boomerang {
+        return None;
+    }
+    let just_released_this_tick = just_released(
+        current_input,
+        previous_input(history_ring),
+        PlayerInput::THROW_DOWN,
+    );
+    let released_recently = released_within(
+        history_ring,
+        THROW_FORGIVENESS_FRAMES,
+        PlayerInput::THROW_DOWN,
+    );
+    if !just_released_this_tick && !released_recently {
+        return None;
+    }
+    let stick = decode_stick(current_input);
+    if stick.length() <= DASH_MIN_STICK_MAG {
+        return None;
+    }
+    Some(stick.normalize())
+}
+
 pub const DASH_DURATION_FRAMES: u32 = 10;
 pub const DASH_COOLDOWN_FRAMES: u32 = 20;
 /// Dash impulse speed in cm/tick. ~2.3× walk speed: makes dash feel
@@ -422,6 +513,17 @@ pub fn start_dash(
 /// Move players. Branches on `DashState`: while `Dashing`, velocity is
 /// the locked dash direction × `DASH_SPEED_CM_PER_TICK`; otherwise
 /// velocity comes from the (mag-clamped) stick × `WALK_SPEED_CM_PER_TICK`.
+///
+/// **Aim lock**: while `AIM_ACTIVE` is set, the stick is repurposed as
+/// aim direction/power (input_touch's throw state machine engages
+/// aim mode after a hold-and-drag threshold). The player is anchored
+/// during aim so committing to a precise throw means committing
+/// position — the risk dimension that makes aimed throws skill
+/// expression rather than free-cost optimal play. A quick tap-throw
+/// (THROW_DOWN held briefly without crossing the aim threshold) does
+/// NOT lock movement, so running-and-throwing flows unbroken. Dash
+/// overrides this — a dash committed before AIM_ACTIVE was set
+/// continues through the aim windup.
 pub fn player_movement(
     inputs: Res<PlayerInputs<GgrsCfg>>,
     mut q: Query<(&Player, &mut PositionF, &mut VelocityF, &DashState)>,
@@ -433,8 +535,12 @@ pub fn player_movement(
             DashState::Dashing { dir, .. } => Vec2F::new(dir.x * dash_speed, dir.y * dash_speed),
             _ => {
                 let (input, _status) = inputs[player.handle];
-                let stick = decode_stick(input);
-                Vec2F::new(stick.x * walk_speed, stick.y * walk_speed)
+                if input.buttons & PlayerInput::AIM_ACTIVE != 0 {
+                    Vec2F::ZERO
+                } else {
+                    let stick = decode_stick(input);
+                    Vec2F::new(stick.x * walk_speed, stick.y * walk_speed)
+                }
             }
         };
         vel.0 = velocity;
@@ -455,13 +561,193 @@ pub fn tick_player_timers(mut q: Query<(&mut DashState, &mut StunFrames)>) {
     }
 }
 
+/// `GgrsSchedule` system: catch a Returning boomerang the moment its
+/// AABB overlaps the owner's. Despawns the boomerang — no health/score
+/// effect yet (Phase 11 will read this). Runs after `boomerang_physics`
+/// and `boomerang_wall_collision` (so the catch fires on the tick the
+/// boomerang's post-physics rect overlaps the owner) and before
+/// `throw_boomerangs` (so a same-tick catch frees up the throw query
+/// and the player can re-throw without a one-tick latch). Bevy auto-
+/// applies commands between chained systems, so the despawn flushes
+/// before throw_boomerangs reads `Query<&Boomerang>`.
+///
+/// Flying boomerangs are not catchable — only Returning. Otherwise a
+/// throw whose initial spawn position overlaps the owner would catch
+/// itself on tick 1.
+pub fn catch_boomerangs(
+    mut commands: Commands,
+    players: Query<(&Player, &PositionF)>,
+    boomerangs: Query<(Entity, &Boomerang, &PositionF)>,
+) {
+    for (entity, boom, boom_pos) in &boomerangs {
+        if !matches!(boom.state, BoomerangState::Returning) {
+            continue;
+        }
+        let Some((_, owner_pos)) = players.iter().find(|(p, _)| p.handle == boom.owner_handle)
+        else {
+            continue;
+        };
+        if player_rect(owner_pos.0).overlaps(boomerang_rect(boom_pos.0)) {
+            commands.entity(entity).despawn();
+        }
+    }
+}
+
+/// `GgrsSchedule` system: spawn boomerangs on THROW_DOWN release edges.
+/// Runs after `wall_collision` so the spawn position is the post-
+/// resolution player position, and after `boomerang_physics` so the
+/// freshly-spawned boomerang doesn't take a phantom physics step on
+/// its spawn frame.
+pub fn throw_boomerangs(
+    mut commands: Commands,
+    inputs: Res<PlayerInputs<GgrsCfg>>,
+    history: Res<InputHistory>,
+    players: Query<(&Player, &PositionF)>,
+    boomerangs: Query<&Boomerang>,
+) {
+    let throw_speed = Fix::const_from_int(THROW_SPEED_CM_PER_TICK);
+    for (player, pos) in &players {
+        let has_existing = boomerangs.iter().any(|b| b.owner_handle == player.handle);
+        let Some(ring) = history.0.get(&player.handle) else {
+            continue;
+        };
+        let (curr, _) = inputs[player.handle];
+        let Some(unit_dir) = try_throw_direction(ring, curr, has_existing) else {
+            continue;
+        };
+        let velocity = unit_dir * throw_speed;
+        commands.spawn((
+            Boomerang {
+                owner_handle: player.handle,
+                state: BoomerangState::Flying,
+            },
+            PositionF(pos.0),
+            PreviousPositionF(pos.0),
+            VelocityF(velocity),
+        ));
+    }
+}
+
+/// `GgrsSchedule` system: bounce boomerangs off arena walls. Runs
+/// after `boomerang_physics` so the position update and OOB despawn
+/// happen first; surviving boomerangs that ended up overlapping a
+/// wall get pushed out and reflected. Iterates walls in Bevy's
+/// deterministic query order, applying push + reflect per wall, so a
+/// corner-hit resolves cleanly across two iterations.
+///
+/// Skips boomerangs in `Returning` state — recall is an uncanny pull
+/// that phases through walls. Otherwise the per-tick recall_velocity
+/// recompute would override any reflection on the next tick anyway.
+pub fn boomerang_wall_collision(
+    walls: Query<&Wall>,
+    mut boomerangs: Query<(&Boomerang, &mut PositionF, &mut VelocityF)>,
+) {
+    for (boom, mut pos, mut vel) in &mut boomerangs {
+        if matches!(boom.state, BoomerangState::Returning) {
+            continue;
+        }
+        for wall in &walls {
+            let bb = boomerang_rect(pos.0);
+            if let Some(push) = resolve_collision(bb, wall.rect) {
+                pos.0 = pos.0 + push;
+                vel.0 = reflect_velocity_for_push(vel.0, push);
+            }
+        }
+    }
+}
+
+/// Pure helper: velocity vector that homes a boomerang at `boom_pos`
+/// toward `owner_pos` at the requested speed. Returns the zero vector
+/// when the boomerang is already at the owner (caller is about to
+/// catch it next tick).
+pub fn recall_velocity(boom_pos: Vec2F, owner_pos: Vec2F, speed: Fix) -> Vec2F {
+    let delta = owner_pos - boom_pos;
+    if delta == Vec2F::ZERO {
+        return Vec2F::ZERO;
+    }
+    delta.normalize() * speed
+}
+
+/// `GgrsSchedule` system: handle the recall trigger and Returning-state
+/// homing. Runs before `boomerang_physics` so any state change or
+/// velocity update applies on this tick's physics step.
+///
+/// Trigger: while a boomerang is in `Flying`, if its owner pressed
+/// THROW_DOWN this tick (rising edge against `InputHistory`), the
+/// boomerang transitions to `Returning` and gets a velocity toward
+/// the owner.
+///
+/// Steering: in `Returning` state, velocity is recomputed every tick
+/// to home toward the owner's current position — this is what lets
+/// the boomerang track a player who's still moving during recall.
+pub fn recall_boomerangs(
+    inputs: Res<PlayerInputs<GgrsCfg>>,
+    history: Res<InputHistory>,
+    players: Query<(&Player, &PositionF)>,
+    mut boomerangs: Query<(&mut Boomerang, &PositionF, &mut VelocityF)>,
+) {
+    let recall_speed = Fix::const_from_int(RECALL_SPEED_CM_PER_TICK);
+    for (mut boom, boom_pos, mut vel) in &mut boomerangs {
+        let Some((_, owner_pos)) = players.iter().find(|(p, _)| p.handle == boom.owner_handle)
+        else {
+            continue;
+        };
+        match boom.state {
+            BoomerangState::Flying => {
+                let Some(ring) = history.0.get(&boom.owner_handle) else {
+                    continue;
+                };
+                let (curr, _) = inputs[boom.owner_handle];
+                let prev = previous_input(ring);
+                if just_pressed(curr, prev, PlayerInput::THROW_DOWN) {
+                    boom.state = BoomerangState::Returning;
+                    vel.0 = recall_velocity(boom_pos.0, owner_pos.0, recall_speed);
+                }
+            }
+            BoomerangState::Returning => {
+                vel.0 = recall_velocity(boom_pos.0, owner_pos.0, recall_speed);
+            }
+        }
+    }
+}
+
+/// `GgrsSchedule` system: advance flying/returning boomerangs by their
+/// velocity, despawning any that wander outside `BOOMERANG_DESPAWN_RADIUS_CM`.
+/// Cycle 1 has no ricochet — boomerangs fly forever in a straight line
+/// until they hit the despawn radius. Cycle 2 adds wall reflection
+/// (which keeps them in the arena under normal play); cycle 3+4 add
+/// the recall + catch loop.
+///
+/// Position update uses saturating add so a boomerang that overshoots
+/// `Fix::MAX` (~32767 cm) before the despawn check fires can't panic
+/// on integer overflow — saturate to MAX, then despawn next pass.
+pub fn boomerang_physics(
+    mut commands: Commands,
+    mut q: Query<(Entity, &mut PositionF, &VelocityF), With<Boomerang>>,
+) {
+    let max_r = Fix::const_from_int(BOOMERANG_DESPAWN_RADIUS_CM);
+    for (entity, mut pos, vel) in &mut q {
+        let new_x = pos.0.x.saturating_add(vel.0.x);
+        let new_y = pos.0.y.saturating_add(vel.0.y);
+        pos.0 = Vec2F::new(new_x, new_y);
+        if pos.0.x.abs() > max_r || pos.0.y.abs() > max_r {
+            commands.entity(entity).despawn();
+        }
+    }
+}
+
 /// Pure AABB collision resolution. If `player` overlaps `wall`, returns
 /// the minimum-translation vector to push the player out along the
 /// axis with the smaller overlap. `None` when there is no overlap.
 ///
 /// Axis selection uses 2×centers so we don't pay a fixed-point division.
-/// Tie-breaking (when both axes have equal overlap) picks the y axis
-/// since most arena walls are taller than they are wide.
+/// Tie-breaking (when both axes have equal overlap) picks the x axis.
+/// Rationale: a thin boomerang flying horizontally into a thick wall
+/// can produce equal overlaps on its first contact tick (overlap_x =
+/// penetration depth, overlap_y = full boomerang height); reflecting
+/// on x is the right answer there. For player vs walls, the smaller-
+/// overlap axis is unambiguous (players are square and walls are
+/// long), so the tie-break never bites.
 pub fn resolve_collision(player: RectF, wall: RectF) -> Option<Vec2F> {
     if !player.overlaps(wall) {
         return None;
@@ -478,7 +764,7 @@ pub fn resolve_collision(player: RectF, wall: RectF) -> Option<Vec2F> {
     let player_2cy = player.min.y + player.max.y;
     let wall_2cy = wall.min.y + wall.max.y;
 
-    if overlap_x < overlap_y {
+    if overlap_x <= overlap_y {
         let push = if player_2cx < wall_2cx {
             -overlap_x
         } else {
@@ -492,6 +778,26 @@ pub fn resolve_collision(player: RectF, wall: RectF) -> Option<Vec2F> {
             overlap_y
         };
         Some(Vec2F::new(Fix::ZERO, push))
+    }
+}
+
+/// Pure helper: reflect `vel` across the axis indicated by `push`.
+/// `push` comes out of `resolve_collision` and is purely along one
+/// axis (either x is zero or y is zero), so we just flip the
+/// matching component of velocity. Zero push (no collision) returns
+/// `vel` unchanged.
+///
+/// No damping by design — boomerangs ricochet at full energy. The
+/// "feel awesome" loop is sharp clean reflection, not a mushy
+/// energy-bleeding bounce. If players want the boomerang to slow
+/// down, they recall it.
+pub fn reflect_velocity_for_push(vel: Vec2F, push: Vec2F) -> Vec2F {
+    if push.x != Fix::ZERO {
+        Vec2F::new(-vel.x, vel.y)
+    } else if push.y != Fix::ZERO {
+        Vec2F::new(vel.x, -vel.y)
+    } else {
+        vel
     }
 }
 
@@ -589,6 +895,8 @@ impl Plugin for SimPlugin {
             .rollback_component_with_copy::<NoInterpolate>()
             .rollback_component_with_copy::<DashState>()
             .rollback_component_with_copy::<StunFrames>()
+            .rollback_component_with_copy::<Boomerang>()
+            .rollback_component_with_copy::<BoomerangState>()
             .rollback_resource_with_copy::<FrameCount>()
             .rollback_resource_with_clone::<InputHistory>();
 
@@ -601,6 +909,7 @@ impl Plugin for SimPlugin {
             .checksum_component_with_hash::<VelocityF>()
             .checksum_component_with_hash::<DashState>()
             .checksum_component_with_hash::<StunFrames>()
+            .checksum_component_with_hash::<Boomerang>()
             .checksum_resource_with_hash::<FrameCount>()
             .checksum_resource_with_hash::<InputHistory>();
 
@@ -619,6 +928,11 @@ impl Plugin for SimPlugin {
                 start_dash,
                 player_movement,
                 wall_collision,
+                recall_boomerangs,
+                boomerang_physics,
+                boomerang_wall_collision,
+                catch_boomerangs,
+                throw_boomerangs,
                 tick_player_timers,
                 advance_frame_count,
                 advance_input_history,

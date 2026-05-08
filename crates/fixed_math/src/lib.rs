@@ -1,6 +1,6 @@
 #![deny(clippy::disallowed_types)]
 
-use core::ops::{Add, Sub};
+use core::ops::{Add, Mul, Sub};
 
 pub type Fix = fixed::types::I16F16;
 pub type FixWide = fixed::types::I32F32;
@@ -22,6 +22,13 @@ impl Sub for Vec2F {
     type Output = Vec2F;
     fn sub(self, rhs: Vec2F) -> Vec2F {
         Vec2F { x: self.x - rhs.x, y: self.y - rhs.y }
+    }
+}
+
+impl Mul<Fix> for Vec2F {
+    type Output = Vec2F;
+    fn mul(self, rhs: Fix) -> Vec2F {
+        Vec2F { x: self.x * rhs, y: self.y * rhs }
     }
 }
 

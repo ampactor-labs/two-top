@@ -18,7 +18,10 @@ use bevy_ggrs::prelude::*;
 use fixed_math::Vec2F;
 use input_touch::{CursorPosition, TouchInputsPlugin, WindowSize, update_touch_state};
 use render::RenderSyncPlugin;
-use sim::{GgrsCfg, Player, PositionF, PreviousPositionF, SimPlugin, VelocityF, arena_walls};
+use sim::{
+    BOOMERANG_HALF_EXTENT_CM, Boomerang, GgrsCfg, Player, PositionF, PreviousPositionF, SimPlugin,
+    VelocityF, arena_walls,
+};
 
 mod camera;
 mod debug_overlay;
@@ -47,6 +50,7 @@ pub fn run() {
         .insert_resource(Session::SyncTest(session))
         .add_systems(Startup, setup)
         .add_systems(PreUpdate, update_window_metrics.before(update_touch_state))
+        .add_systems(Update, ensure_boomerang_visuals)
         .run();
 }
 
@@ -104,6 +108,39 @@ fn setup(mut commands: Commands) {
                 ..default()
             },
             Transform::from_xyz(center.0, center.1, -1.0),
+        ));
+    }
+}
+
+/// `Update`-schedule system: attaches a placeholder sprite + transform
+/// to any `Boomerang` entity that doesn't already have a `Sprite`. The
+/// initial `Transform` is seeded from the boomerang's `PositionF` so
+/// the first rendered frame appears at the spawn position rather than
+/// blinking through origin before `render::sync_transforms_from_sim`
+/// catches up. Subsequent frames are driven by the render-side
+/// interpolator.
+///
+/// Z-order: 0.5 — above the arena walls (z=-1.0) and above the players
+/// (z=0.0 by default), so a recalled boomerang reads cleanly when it
+/// passes over the player on its way home.
+///
+/// Lives in the `app` crate (not `render`) because `render` is built
+/// with a minimal Bevy feature set (no `bevy_sprite`); only `app`
+/// pulls in `DefaultPlugins`.
+type NewBoomerangs<'w, 's> =
+    Query<'w, 's, (Entity, &'static PositionF), (With<Boomerang>, Without<Sprite>)>;
+
+fn ensure_boomerang_visuals(mut commands: Commands, q: NewBoomerangs) {
+    let size_px = (BOOMERANG_HALF_EXTENT_CM * 2) as f32;
+    for (entity, pos) in &q {
+        let (x, y) = pos.0.to_f32();
+        commands.entity(entity).insert((
+            Sprite {
+                color: Color::srgb(0.92, 0.85, 0.40),
+                custom_size: Some(Vec2::new(size_px, size_px)),
+                ..default()
+            },
+            Transform::from_xyz(x, y, 0.5),
         ));
     }
 }
