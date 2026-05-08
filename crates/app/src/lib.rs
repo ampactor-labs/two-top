@@ -25,8 +25,10 @@ use sim::{
 
 mod camera;
 mod debug_overlay;
+mod lobby_overlay;
 use camera::CameraFollowPlugin;
 use debug_overlay::DebugInputOverlayPlugin;
+use lobby_overlay::LobbyOverlayPlugin;
 
 pub fn run() {
     let mut sb = SessionBuilder::<GgrsCfg>::new()
@@ -47,6 +49,8 @@ pub fn run() {
         .add_plugins(RenderSyncPlugin)
         .add_plugins(CameraFollowPlugin)
         .add_plugins(DebugInputOverlayPlugin)
+        .add_plugins(net::NetPlugin)
+        .add_plugins(LobbyOverlayPlugin)
         .insert_resource(Session::SyncTest(session))
         .add_systems(Startup, setup)
         .add_systems(PreUpdate, update_window_metrics.before(update_touch_state))

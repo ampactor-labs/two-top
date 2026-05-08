@@ -75,6 +75,17 @@ cargo run -p replay_sync -- --fuzz <seed>
 
 `Cargo.lock` is committed and `--locked` is enforced everywhere. `rust-toolchain.toml` pins the exact stable version — toolchain drift is itself a determinism risk, so don't loosen the pin without reason.
 
+## Operator runbooks
+
+CI cannot verify everything — some Phase exit criteria are inherently
+operator-tested (real device or real network required):
+
+- **`SIDELOAD.md`** — Phase 7.5 Android sideloading (`cargo apk run`).
+- **`SIGNALING.md`** — Phase 12 netplay signaling server setup, the
+  three test gates (full match across networks, brief blip
+  reconnection, long-disconnect forfeit), and the matchbox lobby
+  configuration recipe.
+
 ## Tooling conventions
 
 This repo is opted in to the AI-assisted dev protocol (`~/.claude/protocol/PROTOCOL.md`). Per-repo state lives in `.protocol/`, git hooks (commit-msg + pre-commit) are active. Disclosure conventions are in `CONTRIBUTING.md`; the PR self-review checklist is at `.github/PR_SELF_REVIEW.md`.

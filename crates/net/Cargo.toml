@@ -5,3 +5,35 @@ version.workspace = true
 license.workspace = true
 publish.workspace = true
 rust-version.workspace = true
+
+[dependencies]
+# matchbox_socket without its `ggrs` feature: that feature is pinned to
+# ggrs ^0.11, but bevy_ggrs 0.21 (our pinned version) uses ggrs ^0.12.
+# We supply our own bridge instead — see crates/net/src/lib.rs §
+# MatchboxBridge. (Phase 12 follows the same playbook as cutting
+# bevy_roll_safe in Phase 11: when the dep ecosystem lags our pinned
+# version, write the small adapter ourselves.)
+matchbox_socket = { version = "0.14", default-features = false }
+ggrs = { version = "0.12", default-features = false }
+bincode = { version = "2.0", default-features = false, features = [
+    "serde",
+    "alloc",
+] }
+log = { version = "0.4", default-features = false }
+# Bevy without render features — same posture as the sim crate.
+# We need `Resource` and the plugin/system traits, nothing else.
+bevy = { version = "=0.18.1", default-features = false, features = [
+    "std",
+    "bevy_log",
+] }
+# net depends on sim for `FrameCount` (the disconnection countdown
+# is frame-counted so peers agree on time-since-silence the same way
+# they agree on positions) and `MatchState` (forfeit transitions
+# `Forfeited` -> `MatchState::MatchOver` so the in-sim view of "match
+# ended" is the rolled-back source of truth).
+sim = { path = "../sim" }
+
+[dev-dependencies]
+# Used in tests for constructing dummy `PeerId(Uuid)` values when
+# round-tripping packets through the bridge encoders.
+uuid = "1"
