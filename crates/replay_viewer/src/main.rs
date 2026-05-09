@@ -70,7 +70,7 @@ const SCRUB_BAR_HANDLE_W: f32 = 16.0;
 const SCRUB_BAR_HANDLE_H: f32 = 64.0;
 /// Hot Bone color from the locked palette — used as the played-portion
 /// fill that grows leftward-to-rightward across the track.
-const PALETTE_HOT_BONE: Color = Color::srgb(1.0, 241.0 / 255.0, 194.0 / 255.0);
+const PALETTE_HOT_BONE: Color = render::palette::HOT_BONE;
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().collect();
@@ -368,7 +368,7 @@ fn setup(
             font_size: 14.0,
             ..default()
         },
-        TextColor(Color::srgb(0.95, 0.85, 0.40)),
+        TextColor(render::palette::SPARK),
         Transform::from_xyz(-440.0, 340.0, 100.0),
         FrameCounterText,
     ));
@@ -492,7 +492,7 @@ fn spawn_frame_step_and_speed(
 
 /// Bone color (palette idx 6) — used as the dim/inactive speed pip
 /// fill so the active pip's Hot-Bone tint reads as the selection.
-const PALETTE_BONE: Color = Color::srgb(203.0 / 255.0, 190.0 / 255.0, 148.0 / 255.0);
+const PALETTE_BONE: Color = render::palette::BONE;
 
 /// Same boomerang-visual attach as the app crate's `ensure_boomerang_visuals`.
 type NewBoomerangs<'w, 's> =
@@ -736,11 +736,11 @@ fn apply_play_pause(world: &mut World, paused: bool) {
 /// hitbox/vector annotations sit visibly on top of the Bone Cathedral
 /// rendering without competing with the gameplay sprites' brighter
 /// hues.
-const CHARCOAL_LINE: Color = Color::srgb(57.0 / 255.0, 52.0 / 255.0, 66.0 / 255.0);
+const CHARCOAL_LINE: Color = render::palette::CHARCOAL_LINE;
 
 /// Hot Bone (palette index 7) — used as the velocity-vector tip so
 /// motion direction reads at a glance even at low speeds.
-const HOT_BONE: Color = Color::srgb(1.0, 241.0 / 255.0, 194.0 / 255.0);
+const HOT_BONE: Color = render::palette::HOT_BONE;
 
 /// Velocity-vector visual scale: pixels of vector length per unit of
 /// `cm/tick` velocity. Picked so a typical walk-speed velocity

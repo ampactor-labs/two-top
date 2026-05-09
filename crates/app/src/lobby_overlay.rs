@@ -41,7 +41,7 @@ fn spawn_overlay(mut commands: Commands) {
         // Yellow tint distinguishes lobby state from the cyan-ish
         // input debug overlay so they're trivially separable on
         // screen even before reading the actual text.
-        TextColor(Color::srgb(0.95, 0.85, 0.40)),
+        TextColor(render::palette::SPARK),
         Transform::from_xyz(0.0, 0.0, 100.0),
         LobbyOverlayText,
     ));

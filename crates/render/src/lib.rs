@@ -17,6 +17,39 @@ use bevy::prelude::*;
 use fixed_math::Vec2F;
 use sim::{LastSimTickTime, NoInterpolate, PositionF, PreviousPositionF, TICK_HZ};
 
+// ===========================================================================
+// Phase 15 cycle 3c — locked 16-color palette.
+// Single source of truth for every render-side Color::srgb call across the
+// workspace. Mirrors `assets/palettes/two_top_16.gpl` exactly. Future code
+// references colors by name (`palette::HOT_BONE`) rather than reconstructing
+// raw RGB triples that drift from the canonical palette.
+// ===========================================================================
+
+pub mod palette {
+    use bevy::prelude::Color;
+
+    const fn p(r: u8, g: u8, b: u8) -> Color {
+        Color::srgb(r as f32 / 255.0, g as f32 / 255.0, b as f32 / 255.0)
+    }
+
+    pub const VOID: Color = p(11, 13, 18);
+    pub const DEEP_ASH: Color = p(23, 25, 34);
+    pub const BRUISE_SHADOW: Color = p(43, 37, 51);
+    pub const CHARCOAL_LINE: Color = p(57, 52, 66);
+    pub const COLD_STONE: Color = p(87, 90, 100);
+    pub const WARM_BONE_SHADE: Color = p(122, 101, 88);
+    pub const BONE: Color = p(203, 190, 148);
+    pub const HOT_BONE: Color = p(255, 241, 194);
+    pub const BLOOD_DARK: Color = p(110, 22, 50);
+    pub const P0_BLOOD: Color = p(210, 47, 69);
+    pub const EMBER: Color = p(240, 106, 58);
+    pub const SPARK: Color = p(255, 216, 102);
+    pub const DEEP_TEAL: Color = p(13, 101, 114);
+    pub const P1_CYAN: Color = p(39, 199, 216);
+    pub const RECALL_BLUE: Color = p(71, 108, 255);
+    pub const HIT_WHITE: Color = p(248, 247, 232);
+}
+
 /// Lerp between two sim positions, returning a `Vec2` ready to drop into
 /// `Transform.translation`. `alpha` is clamped to `[0.0, 1.0]`.
 pub fn lerp_position(prev: Vec2F, curr: Vec2F, alpha: f32) -> Vec2 {

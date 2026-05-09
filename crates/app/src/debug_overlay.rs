@@ -37,7 +37,7 @@ fn spawn_overlay(mut commands: Commands) {
             font_size: 13.0,
             ..default()
         },
-        TextColor(Color::srgb(0.95, 0.95, 0.95)),
+        TextColor(render::palette::HIT_WHITE),
         // Initial transform — re-positioned each frame from WindowSize.
         Transform::from_xyz(0.0, 0.0, 100.0),
         DebugOverlayText,
