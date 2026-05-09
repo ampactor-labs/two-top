@@ -23,6 +23,13 @@ bevy = { version = "=0.18.1", default-features = false, features = [
     "bevy_text",
     "default_font",
     "x11",
+    # Phase 14 cycle 2b: hitbox / velocity overlay uses Gizmos for
+    # cheap immediate-mode wireframe drawing. `bevy_gizmos` is the
+    # data-side, `bevy_gizmos_render` plugs them into the pipeline.
+    # Both ship with bevy itself — no third-party dep, just opt-in
+    # features on the existing pin.
+    "bevy_gizmos",
+    "bevy_gizmos_render",
 ] }
 bevy_ggrs = "=0.21"
 fixed_math = { path = "../fixed_math" }

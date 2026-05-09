@@ -37,8 +37,8 @@ use fixed_math::Vec2F;
 use render::RenderSyncPlugin;
 use replay::{ReplayPlayback, ReplayPlaybackPlugin, decode_for_sim_version};
 use sim::{
-    BOOMERANG_HALF_EXTENT_CM, Boomerang, GgrsCfg, Player, PositionF, PreviousPositionF, SimPlugin,
-    SimSnapshot, VelocityF, arena_walls,
+    BOOMERANG_HALF_EXTENT_CM, Boomerang, GgrsCfg, PLAYER_HALF_EXTENT_CM, Player, PositionF,
+    PreviousPositionF, SimPlugin, SimSnapshot, VelocityF, arena_walls,
 };
 
 /// Snapshot interval in sim ticks. Per BUILD_PLAN § Phase 14 Produces:
@@ -138,6 +138,14 @@ fn main() -> ExitCode {
             )
                 .chain(),
         )
+        // The diagnostic overlay reads `Transform` written by
+        // `render::sync_transforms_from_sim`, so it must run AFTER
+        // the render-side sync. Bevy default ordering would give us
+        // that, but `.after()` makes the dependency explicit.
+        .add_systems(
+            Update,
+            draw_diagnostic_overlay.after(render::sync_transforms_from_sim),
+        )
         .run();
 
     ExitCode::SUCCESS
@@ -192,6 +200,11 @@ struct ViewerControls {
     /// Frame the user has requested. `None` means "no seek pending —
     /// just normal play (or pause)".
     seek_target: Option<u32>,
+    /// Cycle 2b.1 hitbox / velocity overlay toggle. When `true` the
+    /// `draw_diagnostic_overlay` system renders Charcoal-Line
+    /// wireframes around every Player + Boomerang AABB plus a velocity
+    /// vector from each entity's center.
+    show_overlay: bool,
 }
 
 /// Spawns players + walls + camera. Spawn positions match
@@ -400,6 +413,9 @@ fn handle_keyboard_controls(
         controls.paused = true;
         controls.seek_target = Some(total.0.saturating_sub(1));
     }
+    if keys.just_pressed(KeyCode::KeyH) {
+        controls.show_overlay = !controls.show_overlay;
+    }
 }
 
 /// `Update` system: drives the seek state machine. Three phases:
@@ -482,4 +498,75 @@ fn apply_play_pause(world: &mut World, paused: bool) {
         vt.unpause();
         vt.set_relative_speed(1.0);
     }
+}
+
+/// Charcoal Line from `assets/palettes/two_top_16.gpl` — palette index
+/// 3, used as the wireframe stroke for the diagnostic overlay so the
+/// hitbox/vector annotations sit visibly on top of the Bone Cathedral
+/// rendering without competing with the gameplay sprites' brighter
+/// hues.
+const CHARCOAL_LINE: Color = Color::srgb(57.0 / 255.0, 52.0 / 255.0, 66.0 / 255.0);
+
+/// Hot Bone (palette index 7) — used as the velocity-vector tip so
+/// motion direction reads at a glance even at low speeds.
+const HOT_BONE: Color = Color::srgb(1.0, 241.0 / 255.0, 194.0 / 255.0);
+
+/// Velocity-vector visual scale: pixels of vector length per unit of
+/// `cm/tick` velocity. Picked so a typical walk-speed velocity
+/// (~13 cm/tick) renders as a ~52-pixel vector — visible at the
+/// 960x720 viewer resolution without occluding the player sprite.
+const VELOCITY_VECTOR_SCALE: f32 = 4.0;
+
+/// `Update` system: render diagnostic overlay (player + boomerang
+/// AABBs + velocity vectors) when the user has toggled it on. Uses
+/// the `Time<Real>`-driven render Transform (set by
+/// `render::sync_transforms_from_sim` earlier in Update) so the
+/// wireframes track the rendered position even between sim ticks
+/// during paused-but-still-rendering frames.
+fn draw_diagnostic_overlay(
+    controls: Res<ViewerControls>,
+    mut gizmos: Gizmos,
+    players: Query<(&Transform, &VelocityF), With<Player>>,
+    boomerangs: Query<(&Transform, &VelocityF), With<Boomerang>>,
+) {
+    if !controls.show_overlay {
+        return;
+    }
+    let player_size = Vec2::splat((PLAYER_HALF_EXTENT_CM * 2) as f32);
+    let boomerang_size = Vec2::splat((BOOMERANG_HALF_EXTENT_CM * 2) as f32);
+
+    for (xform, vel) in &players {
+        let center = xform.translation.truncate();
+        gizmos.rect_2d(
+            Isometry2d::from_translation(center),
+            player_size,
+            CHARCOAL_LINE,
+        );
+        draw_velocity_vector(&mut gizmos, center, vel.0);
+    }
+    for (xform, vel) in &boomerangs {
+        let center = xform.translation.truncate();
+        gizmos.rect_2d(
+            Isometry2d::from_translation(center),
+            boomerang_size,
+            CHARCOAL_LINE,
+        );
+        draw_velocity_vector(&mut gizmos, center, vel.0);
+    }
+}
+
+fn draw_velocity_vector(gizmos: &mut Gizmos, center: Vec2, vel: fixed_math::Vec2F) {
+    let (vx, vy) = vel.to_f32();
+    if vx == 0.0 && vy == 0.0 {
+        return;
+    }
+    let v = Vec2::new(vx, vy) * VELOCITY_VECTOR_SCALE;
+    let tip = center + v;
+    gizmos.line_2d(center, tip, CHARCOAL_LINE);
+    // A small Hot-Bone arrowhead at the tip so the direction reads
+    // even when the vector is short.
+    let perp = Vec2::new(-v.y, v.x).normalize_or_zero() * 4.0;
+    let back = tip - v.normalize_or_zero() * 6.0;
+    gizmos.line_2d(tip, back + perp, HOT_BONE);
+    gizmos.line_2d(tip, back - perp, HOT_BONE);
 }
