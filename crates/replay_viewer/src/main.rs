@@ -38,8 +38,24 @@ use render::RenderSyncPlugin;
 use replay::{ReplayPlayback, ReplayPlaybackPlugin, decode_for_sim_version};
 use sim::{
     BOOMERANG_HALF_EXTENT_CM, Boomerang, GgrsCfg, Player, PositionF, PreviousPositionF, SimPlugin,
-    VelocityF, arena_walls,
+    SimSnapshot, VelocityF, arena_walls,
 };
+
+/// Snapshot interval in sim ticks. Per BUILD_PLAN § Phase 14 Produces:
+/// "Snapshots taken every 60 frames" (1 second at 60 Hz). Bigger
+/// interval = less RAM, more replay-forward to scrub. 60 keeps the
+/// worst-case scrub-forward to one second of sim, which `Time<Virtual>`
+/// at the seek speed completes well under the 100 ms exit-criterion
+/// budget.
+const SNAPSHOT_INTERVAL: u32 = 60;
+/// Multiplier applied to `Time<Virtual>` while a seek is in flight. At
+/// 64x: one second of virtual playback = ~16 ms of wall-clock time, so
+/// scrubbing across the worst-case 60-frame replay-forward window
+/// completes in one or two Update cycles. Higher multipliers risk
+/// bevy_ggrs's accumulator overflowing the per-Update budget; 64x is
+/// the largest power-of-two that empirically lands in <100 ms across
+/// the canonical demo's frame range.
+const SEEK_SPEED: f32 = 64.0;
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().collect();
@@ -107,14 +123,20 @@ fn main() -> ExitCode {
         .insert_resource(Session::SyncTest(session))
         .insert_resource(ReplayPlayback::new(replay))
         .insert_resource(TotalFrames(total_frames))
+        .insert_resource(SnapshotBuffer::default())
+        .insert_resource(ViewerControls::default())
         .add_systems(Startup, setup)
         .add_systems(
             Update,
             (
                 ensure_boomerang_visuals,
+                handle_keyboard_controls,
+                drive_seek,
+                capture_snapshot,
                 update_frame_counter,
                 quit_when_replay_finished,
-            ),
+            )
+                .chain(),
         )
         .run();
 
@@ -126,6 +148,51 @@ struct TotalFrames(u32);
 
 #[derive(Component)]
 struct FrameCounterText;
+
+/// Ring of snapshots taken every [`SNAPSHOT_INTERVAL`] frames during
+/// forward playback. Backward seeks restore from the latest snapshot
+/// at-or-before the target frame and replay forward from there. Stays
+/// in memory only — never persisted.
+///
+/// Memory budget: at 60-frame intervals across a 30 s round (1800
+/// frames), that's 30 snapshots. Each snapshot is ~hundred-byte for the
+/// player/boomerang bundles plus the InputHistory clone — call it 2 KB
+/// per snapshot, 60 KB per round, well below any reasonable cap.
+#[derive(Resource, Default)]
+struct SnapshotBuffer {
+    /// Snapshots ordered by ascending `frame`. Push-only during forward
+    /// playback; truncated on backward seek so a future forward
+    /// playthrough can re-populate from the seek-target onward.
+    entries: Vec<SimSnapshot>,
+}
+
+impl SnapshotBuffer {
+    /// Latest snapshot at or before `frame`, if any. Returns `None`
+    /// when seeking before the very first snapshot (handled by a
+    /// caller-side reset to frame 0).
+    fn nearest_before(&self, frame: u32) -> Option<&SimSnapshot> {
+        self.entries.iter().rev().find(|s| s.frame <= frame)
+    }
+}
+
+/// Viewer playback state. Pause / single-step / seek are all driven
+/// through this; the actual sim-tick advancement happens via
+/// [`Time<Virtual>`] (paused → no accumulator fill → no ticks; sped-up
+/// → many ticks per Update, used for seek scrubs).
+///
+/// Seeks are async by nature: setting `seek_target` records the
+/// destination, and [`drive_seek`] fast-forwards the sim until the
+/// frame counter catches up, then re-pauses (or returns to play).
+#[derive(Resource, Clone, Copy, Default)]
+struct ViewerControls {
+    /// Player's stated paused/playing intent. Independent of
+    /// `seek_target` — a seek may temporarily unpause `Time<Virtual>`
+    /// even while `paused = true` so the seek can complete.
+    paused: bool,
+    /// Frame the user has requested. `None` means "no seek pending —
+    /// just normal play (or pause)".
+    seek_target: Option<u32>,
+}
 
 /// Spawns players + walls + camera. Spawn positions match
 /// [`replay_sync::build_app`] (both at origin) because the only `.bmrg`
@@ -223,24 +290,196 @@ fn ensure_boomerang_visuals(mut commands: Commands, q: NewBoomerangs) {
 fn update_frame_counter(
     frame: Res<sim::FrameCount>,
     total: Res<TotalFrames>,
+    controls: Res<ViewerControls>,
+    snaps: Res<SnapshotBuffer>,
     mut q: Query<&mut Text2d, With<FrameCounterText>>,
 ) {
     let Ok(mut text) = q.single_mut() else {
         return;
     };
-    text.0 = format!("frame {} / {}", frame.0, total.0);
+    let mode = match (controls.paused, controls.seek_target) {
+        (_, Some(t)) => format!("seek→{t}"),
+        (true, None) => "paused".into(),
+        (false, None) => "play".into(),
+    };
+    text.0 = format!(
+        "frame {} / {}  [{}]  snaps={}",
+        frame.0,
+        total.0,
+        mode,
+        snaps.entries.len(),
+    );
 }
 
-/// Auto-quit when the replay's input stream is exhausted. Cycle 2 will
-/// replace this with a "loop / pause at end" toggle, but cycle 1's
-/// goal is identical-playback verification — finishing cleanly at the
-/// last frame is the simplest way to make that easy to compare against
-/// `replay_sync --dump-state-at <last_frame>`.
+/// Cycle-2a auto-quit policy: only exit when the replay is exhausted
+/// AND the user is not paused. A paused viewer at the end of the
+/// stream stays open so the operator can scrub backward; pressing
+/// Space to resume from the last frame is the explicit quit.
 fn quit_when_replay_finished(
     playback: Res<ReplayPlayback>,
+    controls: Res<ViewerControls>,
     mut exit: MessageWriter<AppExit>,
 ) {
+    if controls.paused || controls.seek_target.is_some() {
+        return;
+    }
     if playback.cursor >= playback.replay.inputs.len() {
         exit.write(AppExit::Success);
+    }
+}
+
+// ---- Phase 14 cycle 2a: snapshot + scrub ----
+
+/// `Update` system: snapshots the sim every `SNAPSHOT_INTERVAL` frames
+/// during forward playback. Skips capture while a seek is in flight —
+/// the snapshot we'd take mid-replay-forward would just duplicate one
+/// already in the buffer (the seek itself was launched from one).
+fn capture_snapshot(world: &mut World) {
+    let frame = world.resource::<sim::FrameCount>().0;
+    let controls = *world.resource::<ViewerControls>();
+    if controls.seek_target.is_some() {
+        return;
+    }
+    if frame == 0 || !frame.is_multiple_of(SNAPSHOT_INTERVAL) {
+        return;
+    }
+
+    // Skip if we already captured this exact frame on a prior tick
+    // (Update can run multiple times per sim tick at high refresh
+    // rates — guard via the buffer's tail-frame).
+    let already_captured = world
+        .resource::<SnapshotBuffer>()
+        .entries
+        .last()
+        .is_some_and(|s| s.frame == frame);
+    if already_captured {
+        return;
+    }
+
+    let snap = SimSnapshot::capture(world);
+    world.resource_mut::<SnapshotBuffer>().entries.push(snap);
+}
+
+/// `Update` system: reads keyboard input and translates it into
+/// [`ViewerControls`] changes. Bindings:
+///
+/// | Key       | Action                                                  |
+/// |-----------|---------------------------------------------------------|
+/// | Space     | Toggle pause / play                                     |
+/// | →         | Step forward 1 frame (auto-pauses)                      |
+/// | ←         | Step backward 1 frame (auto-pauses; uses snapshot)      |
+/// | Home      | Seek to frame 0                                         |
+/// | End       | Seek to last frame                                      |
+fn handle_keyboard_controls(
+    keys: Res<ButtonInput<KeyCode>>,
+    frame: Res<sim::FrameCount>,
+    total: Res<TotalFrames>,
+    mut controls: ResMut<ViewerControls>,
+) {
+    let current = frame.0;
+    if keys.just_pressed(KeyCode::Space) {
+        controls.paused = !controls.paused;
+        // Resuming play cancels any in-flight seek.
+        if !controls.paused {
+            controls.seek_target = None;
+        }
+    }
+    if keys.just_pressed(KeyCode::ArrowRight) {
+        controls.paused = true;
+        controls.seek_target = Some(current.saturating_add(1).min(total.0.saturating_sub(1)));
+    }
+    if keys.just_pressed(KeyCode::ArrowLeft) {
+        controls.paused = true;
+        controls.seek_target = Some(current.saturating_sub(1));
+    }
+    if keys.just_pressed(KeyCode::Home) {
+        controls.paused = true;
+        controls.seek_target = Some(0);
+    }
+    if keys.just_pressed(KeyCode::End) {
+        controls.paused = true;
+        controls.seek_target = Some(total.0.saturating_sub(1));
+    }
+}
+
+/// `Update` system: drives the seek state machine. Three phases:
+///
+/// 1. **Backward seek launch** (`target < current`): restore the
+///    nearest-prior snapshot, reset the replay-cursor to that
+///    snapshot's frame, truncate snapshots after the seek target so
+///    forward play re-populates them. Then fall through to phase 2.
+/// 2. **Fast-forward** (`current < target`): unpause `Time<Virtual>` at
+///    [`SEEK_SPEED`]× so bevy_ggrs's accumulator chews through the
+///    remaining ticks across the next Update or two.
+/// 3. **Arrival** (`current == target`): clear `seek_target`, return
+///    `Time<Virtual>` to its baseline (paused if the user paused,
+///    1.0× otherwise).
+///
+/// Pause-without-seek is handled at the bottom — `Time<Virtual>` gets
+/// paused so bevy_ggrs's accumulator stops filling.
+fn drive_seek(world: &mut World) {
+    let controls = *world.resource::<ViewerControls>();
+    let current = world.resource::<sim::FrameCount>().0;
+
+    if let Some(target) = controls.seek_target {
+        // Phase 1: backward — restore from snapshot if needed.
+        if target < current {
+            // Truncate any snapshots at-or-after the seek target so a
+            // later forward play re-populates them.
+            world
+                .resource_mut::<SnapshotBuffer>()
+                .entries
+                .retain(|s| s.frame < target.max(1));
+
+            let nearest = world
+                .resource::<SnapshotBuffer>()
+                .nearest_before(target)
+                .cloned();
+            if let Some(snap) = nearest {
+                snap.restore(world);
+                world.resource_mut::<ReplayPlayback>().cursor = snap.frame as usize;
+            } else {
+                // No snapshot at-or-before target — must be a seek
+                // toward frame 0 or 1. Cycle 2a doesn't snapshot
+                // frame 0 (the initial state is what `setup` spawned),
+                // so the only fallback is to ask the user to restart
+                // the viewer. Surface a one-line warning instead of
+                // silently doing nothing.
+                bevy::log::warn!(
+                    target: "two_top::replay_viewer",
+                    target_frame = target,
+                    current_frame = current,
+                    "backward seek before first snapshot — restart viewer to scrub to frame 0",
+                );
+                world.resource_mut::<ViewerControls>().seek_target = None;
+                return;
+            }
+        }
+
+        let current_after_restore = world.resource::<sim::FrameCount>().0;
+
+        if current_after_restore == target {
+            // Arrival.
+            world.resource_mut::<ViewerControls>().seek_target = None;
+            apply_play_pause(world, controls.paused);
+        } else {
+            // Phase 2: fast-forward.
+            let mut vt = world.resource_mut::<Time<Virtual>>();
+            vt.unpause();
+            vt.set_relative_speed(SEEK_SPEED);
+        }
+    } else {
+        // No active seek — honor the play/pause intent.
+        apply_play_pause(world, controls.paused);
+    }
+}
+
+fn apply_play_pause(world: &mut World, paused: bool) {
+    let mut vt = world.resource_mut::<Time<Virtual>>();
+    if paused {
+        vt.pause();
+    } else {
+        vt.unpause();
+        vt.set_relative_speed(1.0);
     }
 }

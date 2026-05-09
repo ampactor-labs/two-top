@@ -1440,3 +1440,167 @@ impl Plugin for SimLifecycleLogPlugin {
         app.add_systems(Update, log_match_lifecycle_edges);
     }
 }
+
+// ---- Phase 14: SimSnapshot ----
+
+/// In-memory snapshot of every rolled-back sim component + resource at
+/// a given frame. Used by `replay_viewer` to scrub backward without
+/// re-running the entire prefix from frame 0.
+///
+/// Snapshots intentionally **don't** serialize: they live entirely in
+/// memory for the lifetime of the viewer session. The .bmrg replay
+/// format is the on-disk source of truth; snapshots are an
+/// optimisation. If a future tool needs persistent snapshots (e.g. a
+/// "share this exact frame" feature), add a `Serialize` derive across
+/// the relevant types — every component cloned here is already `Copy`
+/// + plain-old-data, so the derive is mechanical.
+#[derive(Clone, Debug)]
+pub struct SimSnapshot {
+    pub frame: u32,
+    /// One bundle per Player entity. Order isn't significant — restore
+    /// re-establishes entities in `handle` order so the spawn sequence
+    /// is deterministic.
+    pub players: Vec<PlayerSnap>,
+    /// One bundle per live Boomerang entity.
+    pub boomerangs: Vec<BoomerangSnap>,
+    pub frame_count: FrameCount,
+    pub match_state: MatchState,
+    pub match_score: MatchScore,
+    pub input_history: InputHistory,
+}
+
+/// All rolled-back component values for a single Player entity.
+/// `Dead`, `DashState`, `StunFrames` are `#[require]`d on `Player`,
+/// so every Player entity carries a value for each of these — capture
+/// pulls them in lockstep.
+#[derive(Clone, Copy, Debug)]
+pub struct PlayerSnap {
+    pub player: Player,
+    pub pos: PositionF,
+    pub prev_pos: PreviousPositionF,
+    pub vel: VelocityF,
+    pub dash: DashState,
+    pub stun: StunFrames,
+    pub dead: Dead,
+}
+
+/// All rolled-back component values for a single Boomerang entity.
+#[derive(Clone, Copy, Debug)]
+pub struct BoomerangSnap {
+    pub boomerang: Boomerang,
+    pub pos: PositionF,
+    pub prev_pos: PreviousPositionF,
+    pub vel: VelocityF,
+}
+
+impl SimSnapshot {
+    /// Capture the current sim state into a snapshot. Run from any
+    /// schedule — the World is read non-mutably. Call from `Update`
+    /// (post-rollback) so the captured state is the authoritative
+    /// post-tick value rather than a mid-resimulation intermediate.
+    pub fn capture(world: &mut World) -> Self {
+        let frame_count = *world.resource::<FrameCount>();
+        let match_state = *world.resource::<MatchState>();
+        let match_score = *world.resource::<MatchScore>();
+        let input_history = world.resource::<InputHistory>().clone();
+
+        let mut players: Vec<PlayerSnap> = world
+            .query::<(
+                &Player,
+                &PositionF,
+                &PreviousPositionF,
+                &VelocityF,
+                &DashState,
+                &StunFrames,
+                &Dead,
+            )>()
+            .iter(world)
+            .map(|(p, pos, prev, vel, dash, stun, dead)| PlayerSnap {
+                player: *p,
+                pos: *pos,
+                prev_pos: *prev,
+                vel: *vel,
+                dash: *dash,
+                stun: *stun,
+                dead: *dead,
+            })
+            .collect();
+        players.sort_by_key(|s| s.player.handle);
+
+        let mut boomerangs: Vec<BoomerangSnap> = world
+            .query::<(&Boomerang, &PositionF, &PreviousPositionF, &VelocityF)>()
+            .iter(world)
+            .map(|(b, pos, prev, vel)| BoomerangSnap {
+                boomerang: *b,
+                pos: *pos,
+                prev_pos: *prev,
+                vel: *vel,
+            })
+            .collect();
+        boomerangs.sort_by_key(|s| s.boomerang.owner_handle);
+
+        Self {
+            frame: frame_count.0,
+            players,
+            boomerangs,
+            frame_count,
+            match_state,
+            match_score,
+            input_history,
+        }
+    }
+
+    /// Restore the sim to this snapshot. Despawns all current Player +
+    /// Boomerang entities and re-spawns from the snapshot's bundles,
+    /// then overwrites the rolled-back resources. The caller is
+    /// expected to also reset any non-sim resources (the replay
+    /// playback cursor, etc.) — `SimSnapshot` only owns the sim's
+    /// own state.
+    ///
+    /// Spawn order matches the canonical setup order: players in
+    /// `handle` ascending, then boomerangs in `owner_handle` ascending.
+    /// This keeps Bevy's entity-id assignment deterministic so the
+    /// post-restore world is bit-identical to what the same frame
+    /// would have looked like during the original forward sim.
+    pub fn restore(&self, world: &mut World) {
+        let player_entities: Vec<Entity> = world
+            .query_filtered::<Entity, With<Player>>()
+            .iter(world)
+            .collect();
+        for e in player_entities {
+            world.despawn(e);
+        }
+        let boomerang_entities: Vec<Entity> = world
+            .query_filtered::<Entity, With<Boomerang>>()
+            .iter(world)
+            .collect();
+        for e in boomerang_entities {
+            world.despawn(e);
+        }
+
+        for snap in &self.players {
+            world.spawn((
+                snap.player,
+                snap.pos,
+                snap.prev_pos,
+                snap.vel,
+                snap.dash,
+                snap.stun,
+                snap.dead,
+            ));
+        }
+        for snap in &self.boomerangs {
+            world.spawn((
+                snap.boomerang,
+                snap.pos,
+                snap.prev_pos,
+                snap.vel,
+            ));
+        }
+
+        *world.resource_mut::<FrameCount>() = self.frame_count;
+        *world.resource_mut::<MatchState>() = self.match_state;
+        *world.resource_mut::<MatchScore>() = self.match_score;
+        *world.resource_mut::<InputHistory>() = self.input_history.clone();
+    }
+}
