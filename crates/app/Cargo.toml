@@ -45,6 +45,28 @@ net = { path = "../net" }
 render = { path = "../render" }
 sim = { path = "../sim" }
 
+# Phase 13 — diagnostic logging. The app crate owns the subscriber
+# setup; other crates emit through `tracing::*` (or bevy_log's re-export
+# of the same macros). `release_max_level_info` is a `tracing`-crate
+# cargo feature that compiles `debug!` / `trace!` calls down to no-ops
+# in release across the entire dep graph (cargo unifies features), so
+# release builds never pay the per-call dispatch cost or the message
+# formatting cost for verbose levels.
+tracing = { version = "0.1", default-features = false, features = [
+    "std",
+    "release_max_level_info",
+] }
+tracing-subscriber = { version = "0.3", default-features = false, features = [
+    "fmt",
+    "env-filter",
+    "registry",
+    "std",
+] }
+# tracing-appender's RollingFileAppender writes to a directory with
+# date-stamped filenames. Used for the release file-output path; dev
+# builds skip the appender entirely and write to stderr.
+tracing-appender = "0.2"
+
 # cargo-apk metadata for sideloading to Android dev devices.
 # See SIDELOAD.md for the full walkthrough. The repo identifier is
 # `two-top` and the crate is `two_top` because Java package segments

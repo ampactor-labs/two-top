@@ -12,6 +12,9 @@ serde = { version = "1", default-features = false, features = ["derive"] }
 bevy = { version = "=0.18.1", default-features = false, features = ["std", "bevy_log"] }
 bevy_ggrs = "=0.21"
 fixed_math = { path = "../fixed_math" }
+# Phase 13: emit lifecycle/round-flow events via tracing. The
+# subscriber lives in the app crate; sim only emits.
+tracing = { version = "0.1", default-features = false, features = ["std"] }
 
 # Android workaround. bevy_internal force-pulls bevy_android under
 # `cfg(target_os = "android")`, which depends on `android-activity = "0.6"`

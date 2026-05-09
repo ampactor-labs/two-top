@@ -19,7 +19,11 @@ bincode = { version = "2.0", default-features = false, features = [
     "serde",
     "alloc",
 ] }
-log = { version = "0.4", default-features = false }
+# Phase 13: tracing replaces the prior `log` crate dependency. bevy_log
+# (already enabled below) routes `tracing` events through whatever
+# subscriber the app crate installs; here we just emit. Default-features
+# off to keep the dep skinny — `std` is the only one we use.
+tracing = { version = "0.1", default-features = false, features = ["std"] }
 # Bevy without render features — same posture as the sim crate.
 # We need `Resource` and the plugin/system traits, nothing else.
 bevy = { version = "=0.18.1", default-features = false, features = [

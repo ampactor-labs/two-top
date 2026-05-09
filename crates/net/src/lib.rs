@@ -43,12 +43,13 @@ impl MatchboxBridge {
     /// frame-by-frame send/receive once the channel is open.
     pub fn new(channel: WebRtcChannel) -> Self {
         if channel.config().max_retransmits != Some(0) || channel.config().ordered {
-            log::warn!(
-                "MatchboxBridge: channel is reliable or ordered ({:?}); \
-                 ggrs has its own reliability layer and will perform \
-                 better on an unreliable+unordered channel. See \
-                 SIGNALING.md for the recommended channel config.",
-                channel.config(),
+            tracing::warn!(
+                target: "two_top::net",
+                config = ?channel.config(),
+                "matchbox channel is reliable or ordered; ggrs has its own \
+                 reliability layer and performs better on an unreliable+\
+                 unordered channel. See SIGNALING.md for the recommended \
+                 channel config.",
             );
         }
         Self { channel }
@@ -211,8 +212,21 @@ pub fn detect_peer_connection_edge(
     mut pending: ResMut<PendingP2PSwap>,
 ) {
     let previous = prev.clone().unwrap_or(LobbyState::Idle);
+    if previous != *state {
+        tracing::info!(
+            target: "two_top::net::lobby",
+            prev = ?previous,
+            next = ?*state,
+            "lobby-state transition",
+        );
+    }
     if let Some(peer_id) = should_swap_to_p2p(&previous, &state) {
         pending.0 = Some(peer_id);
+        tracing::info!(
+            target: "two_top::net::peer",
+            peer_id = %peer_id.0,
+            "rising-edge to Connected — pending P2P session swap",
+        );
     }
     *prev = Some(state.clone());
 }
@@ -294,8 +308,21 @@ pub fn tick_disconnection_grace(
 ) {
     if let Some(next) = next_lobby_state_for_silence(&lobby, frame.0, last_msg.0) {
         let became_forfeit = matches!(next, LobbyState::Forfeited { .. });
+        tracing::warn!(
+            target: "two_top::net::peer",
+            frame = frame.0,
+            silence_frames = frame.0.saturating_sub(last_msg.0),
+            prev = ?*lobby,
+            next = ?next,
+            "disconnection-grace transition",
+        );
         *lobby = next;
         if became_forfeit {
+            tracing::error!(
+                target: "two_top::net::peer",
+                frame = frame.0,
+                "peer silence exceeded forfeit threshold — match forfeited",
+            );
             *match_state = sim::MatchState::MatchOver;
         }
     }

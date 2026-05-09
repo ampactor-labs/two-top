@@ -1380,3 +1380,63 @@ impl Plugin for InfiniteRoundPlugin {
         app.insert_resource(MatchState::infinite_round());
     }
 }
+
+// ---- Phase 13: lifecycle logging ----
+
+/// Edge-detector that emits `tracing` events when [`MatchState`] or
+/// [`MatchScore`] transitions between observable values. Runs in
+/// `Update` (NOT `GgrsSchedule`) so it sees the post-rollback
+/// authoritative value — emitting from inside the rolled-back schedule
+/// would spam the log with one line per resimulation pass.
+///
+/// Targets:
+///   * `two_top::sim::lifecycle` for round/match transitions
+///   * `two_top::sim::score`     for kill-credited score bumps
+fn log_match_lifecycle_edges(
+    state: Res<MatchState>,
+    score: Res<MatchScore>,
+    frame: Res<FrameCount>,
+    mut prev_state: Local<Option<MatchState>>,
+    mut prev_score: Local<Option<MatchScore>>,
+) {
+    if let Some(prev) = *prev_state
+        && prev != *state
+    {
+        tracing::info!(
+            target: "two_top::sim::lifecycle",
+            frame = frame.0,
+            prev = ?prev,
+            next = ?*state,
+            "match-state transition",
+        );
+    }
+    *prev_state = Some(*state);
+
+    if let Some(prev) = *prev_score
+        && prev != *score
+    {
+        tracing::info!(
+            target: "two_top::sim::score",
+            frame = frame.0,
+            p0 = score.p0,
+            p1 = score.p1,
+            delta_p0 = (score.p0 as i16 - prev.p0 as i16),
+            delta_p1 = (score.p1 as i16 - prev.p1 as i16),
+            "score change",
+        );
+    }
+    *prev_score = Some(*score);
+}
+
+/// Opt-in plugin: install in the real game binary so round/match/score
+/// transitions land in the diagnostic log. Headless ceremonies
+/// (sync_test, replay_sync, unit tests) intentionally skip it — the
+/// scripted scenarios already know what transitions they trigger and
+/// don't benefit from the log noise.
+pub struct SimLifecycleLogPlugin;
+
+impl Plugin for SimLifecycleLogPlugin {
+    fn build(&self, app: &mut App) {
+        app.add_systems(Update, log_match_lifecycle_edges);
+    }
+}

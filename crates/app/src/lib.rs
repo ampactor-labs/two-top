@@ -19,18 +19,30 @@ use fixed_math::Vec2F;
 use input_touch::{CursorPosition, TouchInputsPlugin, WindowSize, update_touch_state};
 use render::RenderSyncPlugin;
 use sim::{
-    BOOMERANG_HALF_EXTENT_CM, Boomerang, GgrsCfg, Player, PositionF, PreviousPositionF, SimPlugin,
-    VelocityF, arena_walls,
+    BOOMERANG_HALF_EXTENT_CM, Boomerang, GgrsCfg, Player, PositionF, PreviousPositionF,
+    SimLifecycleLogPlugin, SimPlugin, VelocityF, arena_walls,
 };
 
 mod camera;
 mod debug_overlay;
 mod lobby_overlay;
+mod logging;
 use camera::CameraFollowPlugin;
 use debug_overlay::DebugInputOverlayPlugin;
 use lobby_overlay::LobbyOverlayPlugin;
 
 pub fn run() {
+    // Phase 13: install the tracing subscriber FIRST. The guard owns
+    // the non-blocking appender's worker thread in release; binding it
+    // to a `let` keeps it alive for the entire `App::run()` scope so
+    // pending log writes flush on graceful shutdown.
+    let _log_guard = logging::init_logging();
+    tracing::info!(
+        target: "two_top::app",
+        version = env!("CARGO_PKG_VERSION"),
+        "two-top starting",
+    );
+
     let mut sb = SessionBuilder::<GgrsCfg>::new()
         .with_num_players(2)
         .expect("with_num_players")
@@ -40,11 +52,30 @@ pub fn run() {
         sb = sb.add_player(PlayerType::Local, i).expect("add_player");
     }
     let session = sb.start_synctest_session().expect("synctest");
+    tracing::info!(
+        target: "two_top::app",
+        kind = "synctest",
+        num_players = 2,
+        check_distance = 2,
+        input_delay = 2,
+        "ggrs session started",
+    );
 
     App::new()
-        .add_plugins(DefaultPlugins)
+        // Disable bevy's LogPlugin: we own the subscriber installed
+        // above. LogPlugin would try to call `set_global_default` again
+        // and emit a noisy "global default subscriber set" complaint
+        // (and skip its own filter setup). Owning the subscriber lets
+        // the file appender + custom filter survive `App::run()`.
+        .add_plugins(DefaultPlugins.build().disable::<bevy::log::LogPlugin>())
         .add_plugins(GgrsPlugin::<GgrsCfg>::default())
         .add_plugins(SimPlugin)
+        // Phase 13: edge-detect MatchState/MatchScore transitions in
+        // Update so the diagnostic log captures round flow without
+        // duplicating events on each rollback resimulation. Headless
+        // ceremonies (sync_test, replay_sync) intentionally don't add
+        // this plugin.
+        .add_plugins(SimLifecycleLogPlugin)
         .add_plugins(TouchInputsPlugin)
         .add_plugins(RenderSyncPlugin)
         .add_plugins(CameraFollowPlugin)
@@ -54,8 +85,26 @@ pub fn run() {
         .insert_resource(Session::SyncTest(session))
         .add_systems(Startup, setup)
         .add_systems(PreUpdate, update_window_metrics.before(update_touch_state))
-        .add_systems(Update, ensure_boomerang_visuals)
+        .add_systems(Update, (ensure_boomerang_visuals, log_app_exit))
         .run();
+
+    tracing::info!(target: "two_top::app", "two-top exiting cleanly");
+}
+
+/// Phase 13: surface graceful-shutdown events into the diagnostic log.
+/// Bevy's `AppExit` event fires when the window closes or
+/// `app.send_event(AppExit::Success)` is invoked elsewhere. Reading it
+/// here gives the log a clear "shutdown initiated" line right before
+/// the `App::run()` loop unwinds — useful for distinguishing a clean
+/// exit from a panic-driven termination.
+fn log_app_exit(mut events: MessageReader<AppExit>) {
+    for ev in events.read() {
+        tracing::info!(
+            target: "two_top::app",
+            kind = ?ev,
+            "AppExit received — shutdown initiated",
+        );
+    }
 }
 
 #[bevy_main]
