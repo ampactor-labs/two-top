@@ -4585,6 +4585,14 @@ dependencies = [
 [[package]]
 name = "replay_viewer"
 version = "0.0.0"
+dependencies = [
+ "bevy",
+ "bevy_ggrs",
+ "fixed_math",
+ "render",
+ "replay",
+ "sim",
+]
 
 [[package]]
 name = "rfc6979"
