@@ -7,6 +7,26 @@ publish.workspace = true
 rust-version.workspace = true
 
 [dependencies]
-bevy = { version = "=0.18.1", default-features = false, features = ["std", "bevy_log"] }
+# Phase 15 cycle 2: render now owns the EffectSprite + ambient-ember
+# spawner systems, so it needs the sprite/asset/render features
+# beyond the minimal Phase-7 sim/render-boundary setup. This matches
+# CONVENTIONS § Module Boundaries which lists render's bevy as
+# "(full)". Still no `bevy_winit` / `bevy_window` here — the binary
+# crates own windowing.
+bevy = { version = "=0.18.1", default-features = false, features = [
+    "std",
+    "bevy_log",
+    "bevy_asset",
+    "bevy_render",
+    "bevy_core_pipeline",
+    "bevy_sprite",
+] }
 fixed_math = { path = "../fixed_math" }
 sim = { path = "../sim" }
+# Render-side RNG for cosmetic spawning (ambient embers, particle
+# scatter). Per CONVENTIONS § Render Layer Rules: "Visual RNG is
+# separate. Use a different RNG for cosmetic randomness; never read
+# from SimRng." `rand` + `rand_xoshiro` keep us deterministic on a
+# per-process basis (tests can seed it) without touching the sim's
+# rolled-back stream.
+rand = { version = "0.8", default-features = false, features = ["std", "std_rng", "small_rng"] }

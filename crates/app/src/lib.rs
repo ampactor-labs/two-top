@@ -17,7 +17,7 @@ use bevy_ggrs::GgrsPlugin;
 use bevy_ggrs::prelude::*;
 use fixed_math::Vec2F;
 use input_touch::{CursorPosition, TouchInputsPlugin, WindowSize, update_touch_state};
-use render::RenderSyncPlugin;
+use render::{EffectsPlugin, RenderSyncPlugin};
 use sim::{
     AnimState, BOOMERANG_HALF_EXTENT_CM, Boomerang, GgrsCfg, Player, PositionF, PreviousPositionF,
     SimLifecycleLogPlugin, SimPlugin, VelocityF, arena_walls,
@@ -78,6 +78,7 @@ pub fn run() {
         .add_plugins(SimLifecycleLogPlugin)
         .add_plugins(TouchInputsPlugin)
         .add_plugins(RenderSyncPlugin)
+        .add_plugins(EffectsPlugin)
         .add_plugins(CameraFollowPlugin)
         .add_plugins(DebugInputOverlayPlugin)
         .add_plugins(net::NetPlugin)

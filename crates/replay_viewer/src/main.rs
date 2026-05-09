@@ -34,7 +34,7 @@ use bevy::prelude::*;
 use bevy_ggrs::GgrsPlugin;
 use bevy_ggrs::prelude::*;
 use fixed_math::Vec2F;
-use render::RenderSyncPlugin;
+use render::{EffectsPlugin, RenderSyncPlugin};
 use replay::{ReplayPlayback, ReplayPlaybackPlugin, decode_for_sim_version};
 use sim::{
     AnimState, BOOMERANG_HALF_EXTENT_CM, Boomerang, GgrsCfg, PLAYER_HALF_EXTENT_CM, Player,
@@ -135,6 +135,7 @@ fn main() -> ExitCode {
         .add_plugins(SimPlugin)
         .add_plugins(ReplayPlaybackPlugin)
         .add_plugins(RenderSyncPlugin)
+        .add_plugins(EffectsPlugin)
         .insert_resource(Session::SyncTest(session))
         .insert_resource(ReplayPlayback::new(replay))
         .insert_resource(TotalFrames(total_frames))

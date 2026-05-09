@@ -74,3 +74,329 @@ impl Plugin for RenderSyncPlugin {
         app.add_systems(Update, sync_transforms_from_sim);
     }
 }
+
+// =========================================================================
+// Phase 15 cycle 2 — effect sprites + ambient embers.
+//
+// The render layer reads sim component transitions (Dead, BoomerangState)
+// in `Update` (post-rollback) and spawns short-lived effect sprites at the
+// position of the event. Effect sprites are NOT rolled back — they're
+// purely cosmetic and use Time<Real>. The cosmetic RNG (ambient ember
+// scatter) is also Real-time + per-process, never SimRng (CONVENTIONS).
+// =========================================================================
+
+use bevy::sprite::Anchor;
+use rand::Rng;
+use rand::SeedableRng as _;
+use rand::rngs::SmallRng;
+use sim::{Boomerang, BoomerangState, Dead, Player};
+
+/// One-shot animated sprite spawned by [`spawn_effect_sprite`]. Lives
+/// in render-time (not rolled back) — purely cosmetic, despawned by
+/// [`advance_effect_sprites`] when its frame counter reaches
+/// `frames`. Each frame is held for `seconds_per_frame` real seconds.
+#[derive(Component, Clone, Copy, Debug)]
+pub struct EffectSprite {
+    pub frames: u16,
+    pub seconds_per_frame: f32,
+    /// Real-time accumulator since the last frame swap. When this
+    /// crosses `seconds_per_frame`, the sprite advances and the
+    /// accumulator wraps.
+    pub elapsed: f32,
+    /// Current frame index. Despawn fires when this hits `frames`.
+    pub current: u16,
+}
+
+impl EffectSprite {
+    pub fn new(frames: u16, seconds_per_frame: f32) -> Self {
+        Self {
+            frames,
+            seconds_per_frame,
+            elapsed: 0.0,
+            current: 0,
+        }
+    }
+}
+
+/// Render-side advance for [`EffectSprite`]. Walks every effect sprite,
+/// advances its frame counter against `Time<Real>`, syncs the
+/// TextureAtlas index, and despawns when the animation finishes. Per
+/// CONVENTIONS § Animation: pixel-art frames snap (no fractional
+/// blending between source frames).
+pub fn advance_effect_sprites(
+    time: Res<Time<Real>>,
+    mut commands: Commands,
+    mut q: Query<(Entity, &mut EffectSprite, &mut Sprite)>,
+) {
+    let dt = time.delta_secs();
+    for (entity, mut effect, mut sprite) in &mut q {
+        effect.elapsed += dt;
+        while effect.elapsed >= effect.seconds_per_frame {
+            effect.elapsed -= effect.seconds_per_frame;
+            effect.current = effect.current.saturating_add(1);
+        }
+        if effect.current >= effect.frames {
+            commands.entity(entity).despawn();
+            continue;
+        }
+        if let Some(atlas) = sprite.texture_atlas.as_mut() {
+            atlas.index = effect.current as usize;
+        }
+    }
+}
+
+/// Spawn a one-shot effect sprite at `world_pos`. The sheet must
+/// already be loaded (typically via the [`EffectAssets`] resource
+/// prepared by [`EffectsPlugin`]).
+#[allow(clippy::too_many_arguments)]
+pub fn spawn_effect(
+    commands: &mut Commands,
+    image: Handle<Image>,
+    layout: Handle<TextureAtlasLayout>,
+    frames: u16,
+    seconds_per_frame: f32,
+    world_pos: Vec2,
+    pixel_size: f32,
+    z_layer: f32,
+) {
+    commands.spawn((
+        Sprite {
+            image,
+            texture_atlas: Some(TextureAtlas { layout, index: 0 }),
+            custom_size: Some(Vec2::splat(pixel_size)),
+            ..default()
+        },
+        Anchor::CENTER,
+        Transform::from_xyz(world_pos.x, world_pos.y, z_layer),
+        EffectSprite::new(frames, seconds_per_frame),
+    ));
+}
+
+/// Pre-loaded sprite-sheet handles + atlas layouts for the four
+/// Phase 15 effect sprites. Loaded once in `EffectsPlugin::startup`
+/// so the per-event spawners don't pay an asset-server hit each time.
+#[derive(Resource, Clone)]
+pub struct EffectAssets {
+    pub hit_burst: (Handle<Image>, Handle<TextureAtlasLayout>),
+    pub death_burst: (Handle<Image>, Handle<TextureAtlasLayout>),
+    pub recall_pulse: (Handle<Image>, Handle<TextureAtlasLayout>),
+    pub ambient_ember: (Handle<Image>, Handle<TextureAtlasLayout>),
+}
+
+fn load_effect_assets(
+    mut commands: Commands,
+    asset_server: Res<AssetServer>,
+    mut atlases: ResMut<Assets<TextureAtlasLayout>>,
+) {
+    // Sheet dimensions documented in assets/README.md:
+    //   hit_burst:     4 frames @ 24x24
+    //   death_burst:   6 frames @ 24x24
+    //   recall_pulse:  4 frames @ 16x16
+    //   ambient_ember: 4 frames @ 8x8
+    let hit_layout = atlases.add(TextureAtlasLayout::from_grid(
+        UVec2::splat(24),
+        4,
+        1,
+        None,
+        None,
+    ));
+    let death_layout = atlases.add(TextureAtlasLayout::from_grid(
+        UVec2::splat(24),
+        6,
+        1,
+        None,
+        None,
+    ));
+    let recall_layout = atlases.add(TextureAtlasLayout::from_grid(
+        UVec2::splat(16),
+        4,
+        1,
+        None,
+        None,
+    ));
+    let ember_layout = atlases.add(TextureAtlasLayout::from_grid(
+        UVec2::splat(8),
+        4,
+        1,
+        None,
+        None,
+    ));
+    commands.insert_resource(EffectAssets {
+        hit_burst: (
+            asset_server.load("sprites/particles/hit_burst_sheet.png"),
+            hit_layout,
+        ),
+        death_burst: (
+            asset_server.load("sprites/particles/death_burst_sheet.png"),
+            death_layout,
+        ),
+        recall_pulse: (
+            asset_server.load("sprites/particles/recall_pulse_sheet.png"),
+            recall_layout,
+        ),
+        ambient_ember: (
+            asset_server.load("sprites/particles/ambient_ember_sheet.png"),
+            ember_layout,
+        ),
+    });
+}
+
+/// Tracks each Player handle's last-observed `Dead.is_dying()` so
+/// [`spawn_hit_and_death_bursts`] can fire effect sprites only on the
+/// rising edge — the tick the player transitions from alive to dying.
+/// Local to that system to keep the visual-state cache out of the
+/// global resource graph.
+#[derive(Default)]
+pub struct PrevDying(pub bevy::platform::collections::HashMap<usize, bool>);
+
+/// Render-side detector: spawns hit_burst + death_burst at each
+/// player's position the moment they become `is_dying`. Two effects
+/// layered at slightly different Z so the hit flash reads on top of
+/// the longer death burst.
+pub fn spawn_hit_and_death_bursts(
+    mut commands: Commands,
+    assets: Res<EffectAssets>,
+    players: Query<(&Player, &Dead, &Transform)>,
+    mut prev: Local<PrevDying>,
+) {
+    for (player, dead, xform) in &players {
+        let now_dying = dead.is_dying();
+        let was_dying = prev.0.get(&player.handle).copied().unwrap_or(false);
+        if now_dying && !was_dying {
+            let pos = xform.translation.truncate();
+            // Hit burst — quick 4-frame flash, ~70 ms total. Above
+            // gameplay z so it pops over the player sprite that just
+            // got hit.
+            spawn_effect(
+                &mut commands,
+                assets.hit_burst.0.clone(),
+                assets.hit_burst.1.clone(),
+                4,
+                0.018,
+                pos,
+                64.0,
+                10.0,
+            );
+            // Death burst — 6 frames, ~150 ms total, slightly larger
+            // footprint. Ends with the corpse-mark commit per
+            // VISUAL_TARGET_PACK.md.
+            spawn_effect(
+                &mut commands,
+                assets.death_burst.0.clone(),
+                assets.death_burst.1.clone(),
+                6,
+                0.025,
+                pos,
+                80.0,
+                9.5,
+            );
+        }
+        prev.0.insert(player.handle, now_dying);
+    }
+}
+
+/// Tracks each Boomerang owner's last-observed `BoomerangState`.
+/// Same per-handle-edge pattern as [`PrevDying`].
+#[derive(Default)]
+pub struct PrevBoomerangState(pub bevy::platform::collections::HashMap<usize, BoomerangState>);
+
+/// Render-side detector: spawns recall_pulse at the boomerang's
+/// position the tick its state transitions from `Flying` to
+/// `Returning`. The pulse reads as the recall-energy emanation.
+pub fn spawn_recall_pulses(
+    mut commands: Commands,
+    assets: Res<EffectAssets>,
+    boomerangs: Query<(&Boomerang, &Transform)>,
+    mut prev: Local<PrevBoomerangState>,
+) {
+    for (boom, xform) in &boomerangs {
+        let curr = boom.state;
+        let was = prev
+            .0
+            .get(&boom.owner_handle)
+            .copied()
+            .unwrap_or(BoomerangState::Flying);
+        if matches!(was, BoomerangState::Flying) && matches!(curr, BoomerangState::Returning) {
+            spawn_effect(
+                &mut commands,
+                assets.recall_pulse.0.clone(),
+                assets.recall_pulse.1.clone(),
+                4,
+                0.040,
+                xform.translation.truncate(),
+                48.0,
+                8.0,
+            );
+        }
+        prev.0.insert(boom.owner_handle, curr);
+    }
+}
+
+/// Cosmetic RNG seeded once at startup. CONVENTIONS § Render Layer
+/// Rules forbids using `SimRng` here — visual jitter must never feed
+/// back into the rolled-back state.
+#[derive(Resource)]
+pub struct CosmeticRng(pub SmallRng);
+
+/// Drives the ambient-ember spawner: roughly every
+/// `1.0 / EMBER_RATE_HZ` real seconds, spawn an ember sprite at a
+/// random arena-interior position. The arena is 1500x1000 cm
+/// (per sim::ARENA_HALF_WIDTH/HEIGHT) so we sample a centered range
+/// with a 100 cm padding so embers don't clip into the wall sprites.
+#[derive(Resource)]
+pub struct EmberAccumulator {
+    pub elapsed: f32,
+}
+
+const EMBER_RATE_HZ: f32 = 4.0;
+const EMBER_ARENA_HALF_W: f32 = 650.0;
+const EMBER_ARENA_HALF_H: f32 = 400.0;
+
+pub fn spawn_ambient_embers(
+    time: Res<Time<Real>>,
+    mut commands: Commands,
+    assets: Res<EffectAssets>,
+    mut rng: ResMut<CosmeticRng>,
+    mut acc: ResMut<EmberAccumulator>,
+) {
+    acc.elapsed += time.delta_secs();
+    let interval = 1.0 / EMBER_RATE_HZ;
+    while acc.elapsed >= interval {
+        acc.elapsed -= interval;
+        let x = rng.0.gen_range(-EMBER_ARENA_HALF_W..=EMBER_ARENA_HALF_W);
+        let y = rng.0.gen_range(-EMBER_ARENA_HALF_H..=EMBER_ARENA_HALF_H);
+        spawn_effect(
+            &mut commands,
+            assets.ambient_ember.0.clone(),
+            assets.ambient_ember.1.clone(),
+            4,
+            0.080,
+            Vec2::new(x, y),
+            16.0,
+            -0.5,
+        );
+    }
+}
+
+/// Plugin: registers the effect-sprite infrastructure plus all four
+/// Phase 15 cycle 2 spawners. Add alongside [`RenderSyncPlugin`] in
+/// any binary that wants to render the polished effects (the live
+/// app + the replay viewer).
+pub struct EffectsPlugin;
+
+impl Plugin for EffectsPlugin {
+    fn build(&self, app: &mut App) {
+        app.insert_resource(CosmeticRng(SmallRng::seed_from_u64(0x00b0_07ed_2709)))
+            .insert_resource(EmberAccumulator { elapsed: 0.0 })
+            .add_systems(Startup, load_effect_assets)
+            .add_systems(
+                Update,
+                (
+                    advance_effect_sprites,
+                    spawn_hit_and_death_bursts,
+                    spawn_recall_pulses,
+                    spawn_ambient_embers,
+                ),
+            );
+    }
+}
