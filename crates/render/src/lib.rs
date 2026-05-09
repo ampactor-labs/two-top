@@ -89,7 +89,7 @@ use bevy::sprite::Anchor;
 use rand::Rng;
 use rand::SeedableRng as _;
 use rand::rngs::SmallRng;
-use sim::{Boomerang, BoomerangState, Dead, Player};
+use sim::{Boomerang, BoomerangState, Dead, MatchState, Player};
 
 /// One-shot animated sprite spawned by [`spawn_effect_sprite`]. Lives
 /// in render-time (not rolled back) — purely cosmetic, despawned by
@@ -173,14 +173,20 @@ pub fn spawn_effect(
 }
 
 /// Pre-loaded sprite-sheet handles + atlas layouts for the four
-/// Phase 15 effect sprites. Loaded once in `EffectsPlugin::startup`
-/// so the per-event spawners don't pay an asset-server hit each time.
+/// Phase 15 effect sprites + per-side floor-stain sheets. Loaded once
+/// in `EffectsPlugin::startup` so the per-event spawners don't pay an
+/// asset-server hit each time.
 #[derive(Resource, Clone)]
 pub struct EffectAssets {
     pub hit_burst: (Handle<Image>, Handle<TextureAtlasLayout>),
     pub death_burst: (Handle<Image>, Handle<TextureAtlasLayout>),
     pub recall_pulse: (Handle<Image>, Handle<TextureAtlasLayout>),
     pub ambient_ember: (Handle<Image>, Handle<TextureAtlasLayout>),
+    /// 4-cell stain sheets per side (small / medium / heavy / corpse-mark).
+    /// Cycle 3a uses cell 3 (corpse-mark) at the death position; later
+    /// cycles can vary the cell selection for visual variety.
+    pub p0_stain: (Handle<Image>, Handle<TextureAtlasLayout>),
+    pub p1_stain: (Handle<Image>, Handle<TextureAtlasLayout>),
 }
 
 fn load_effect_assets(
@@ -221,6 +227,14 @@ fn load_effect_assets(
         None,
         None,
     ));
+    // Stain sheets: 4 cells x 16x16 each. Same layout for both sides.
+    let stain_layout = atlases.add(TextureAtlasLayout::from_grid(
+        UVec2::splat(16),
+        4,
+        1,
+        None,
+        None,
+    ));
     commands.insert_resource(EffectAssets {
         hit_burst: (
             asset_server.load("sprites/particles/hit_burst_sheet.png"),
@@ -238,6 +252,14 @@ fn load_effect_assets(
             asset_server.load("sprites/particles/ambient_ember_sheet.png"),
             ember_layout,
         ),
+        p0_stain: (
+            asset_server.load("sprites/stains/p0_stain_sheet.png"),
+            stain_layout.clone(),
+        ),
+        p1_stain: (
+            asset_server.load("sprites/stains/p1_stain_sheet.png"),
+            stain_layout,
+        ),
     });
 }
 
@@ -249,10 +271,12 @@ fn load_effect_assets(
 #[derive(Default)]
 pub struct PrevDying(pub bevy::platform::collections::HashMap<usize, bool>);
 
-/// Render-side detector: spawns hit_burst + death_burst at each
-/// player's position the moment they become `is_dying`. Two effects
-/// layered at slightly different Z so the hit flash reads on top of
-/// the longer death burst.
+/// Render-side detector: spawns hit_burst + death_burst + persistent
+/// FloorStain at each player's position the moment they become
+/// `is_dying`. The two short bursts are layered at slightly different
+/// Z so the hit flash reads on top of the longer death burst; the
+/// stain commits as a permanent corpse-mark cell that persists till
+/// the round resets.
 pub fn spawn_hit_and_death_bursts(
     mut commands: Commands,
     assets: Res<EffectAssets>,
@@ -290,9 +314,73 @@ pub fn spawn_hit_and_death_bursts(
                 80.0,
                 9.5,
             );
+            // Persistent floor stain — the synthesis primitive from
+            // VISUAL_TARGET_PACK.md. Cell 3 is the corpse-mark, the
+            // continuation of the death burst's final frame. Sized
+            // 32 px so it reads as a real footprint without dominating
+            // the arena.
+            let (stain_image, stain_layout) = if player.handle == 0 {
+                assets.p0_stain.clone()
+            } else {
+                assets.p1_stain.clone()
+            };
+            commands.spawn((
+                Sprite {
+                    image: stain_image,
+                    texture_atlas: Some(TextureAtlas {
+                        layout: stain_layout,
+                        index: 3,
+                    }),
+                    custom_size: Some(Vec2::splat(32.0)),
+                    ..default()
+                },
+                Anchor::CENTER,
+                // Z below players (0.0) but above the floor (-1.0) so
+                // players step over the stains visually.
+                Transform::from_xyz(pos.x, pos.y, -0.5),
+                FloorStain {
+                    owner_handle: player.handle,
+                },
+            ));
         }
         prev.0.insert(player.handle, now_dying);
     }
+}
+
+/// Persistent floor stain — the Bone-Cathedral synthesis primitive
+/// (VISUAL_TARGET_PACK.md). Spawned at every kill position; cleared
+/// only when the next round starts (`MatchState` enters `Countdown`
+/// from a non-Countdown predecessor). The arena remembers each
+/// round's violence; this is the gore-revival pole's resting state
+/// in composition mode.
+#[derive(Component, Clone, Copy, Debug)]
+pub struct FloorStain {
+    /// Which player produced the stain. Used for cosmetic
+    /// distinguishability (P0 = blood-dark, P1 = deep-teal); the sim
+    /// itself never reads this — stains are render-only.
+    pub owner_handle: usize,
+}
+
+/// Render-side detector: clears every [`FloorStain`] when a new round
+/// starts. The "new round starts" signal is `MatchState` transitioning
+/// INTO `Countdown` from a non-`Countdown` predecessor (typically
+/// `RoundOver` for inter-round resets). Keeps the stain set
+/// round-scoped — players don't see the prior round's deaths bleed
+/// into the new one.
+pub fn clear_stains_on_round_reset(
+    state: Res<MatchState>,
+    mut prev: Local<Option<MatchState>>,
+    mut commands: Commands,
+    stains: Query<Entity, With<FloorStain>>,
+) {
+    let entered_countdown = matches!(*state, MatchState::Countdown { .. });
+    let was_countdown = matches!(*prev, Some(MatchState::Countdown { .. }));
+    if entered_countdown && !was_countdown && prev.is_some() {
+        for entity in &stains {
+            commands.entity(entity).despawn();
+        }
+    }
+    *prev = Some(*state);
 }
 
 /// Tracks each Boomerang owner's last-observed `BoomerangState`.
@@ -396,6 +484,7 @@ impl Plugin for EffectsPlugin {
                     spawn_hit_and_death_bursts,
                     spawn_recall_pulses,
                     spawn_ambient_embers,
+                    clear_stains_on_round_reset,
                 ),
             );
     }
