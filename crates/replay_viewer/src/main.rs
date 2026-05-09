@@ -345,25 +345,20 @@ fn setup(
         Transform::default(),
     ));
 
+    // Phase 15 cycle 3b: walls are sim-only entities; the
+    // training_floor backdrop below carries the visual wall pattern.
     for wall in arena_walls() {
-        let size_cm = (
-            (wall.rect.max.x - wall.rect.min.x).to_num::<f32>(),
-            (wall.rect.max.y - wall.rect.min.y).to_num::<f32>(),
-        );
-        let center = (
-            (wall.rect.min.x + wall.rect.max.x).to_num::<f32>() * 0.5,
-            (wall.rect.min.y + wall.rect.max.y).to_num::<f32>() * 0.5,
-        );
-        commands.spawn((
-            wall,
-            Sprite {
-                color: Color::srgb(0.18, 0.18, 0.22),
-                custom_size: Some(Vec2::new(size_cm.0, size_cm.1)),
-                ..default()
-            },
-            Transform::from_xyz(center.0, center.1, -1.0),
-        ));
+        commands.spawn(wall);
     }
+
+    commands.spawn((
+        Sprite {
+            image: asset_server.load("arenas/training_floor.png"),
+            custom_size: Some(Vec2::new(1100.0, 1600.0)),
+            ..default()
+        },
+        Transform::from_xyz(0.0, 0.0, -1.0),
+    ));
 
     // Frame counter HUD pinned to the upper-left, world-space (matches
     // the existing debug overlay convention in the app crate).
