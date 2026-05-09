@@ -549,9 +549,8 @@ pub fn read_local_inputs(
 }
 
 /// Walk speed in cm/tick. Sized so the arena's longest dimension
-/// (2 × ARENA_HALF_HEIGHT_CM = 1500 cm) crosses in ~2 seconds at 60 Hz:
-///
-///     1500 cm / (13 cm/tick × 60 tick/s) ≈ 1.92 s
+/// (2 * ARENA_HALF_HEIGHT_CM = 1500 cm) crosses in about 2 seconds at
+/// 60 Hz: 1500 cm / (13 cm/tick * 60 tick/s) ~= 1.92 s.
 ///
 /// Phase 9 exit criterion was "cross arena in ~2 seconds"; 13 cm/tick
 /// hits 1.92 s with integer-friendly arithmetic. Tuning this further is

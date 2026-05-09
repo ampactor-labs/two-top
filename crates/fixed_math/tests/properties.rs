@@ -20,8 +20,11 @@ proptest! {
     }
 
     #[test]
-    fn sqrt_of_square_roundtrip(bits in 0_i32..=(100 * 65_536)) {
+    fn sqrt_of_square_roundtrip(bits in 256_i32..=(100 * 65_536)) {
         let x = Fix::from_bits(bits);
+        // `x * x` is still an I16F16 value. Values below 256 raw bits
+        // have sub-LSB squares that round down to zero before `sqrt`
+        // sees them, so no sqrt implementation can recover `x`.
         let xx = x * x;
         let r = sqrt(xx);
         let tolerance = Fix::from_bits(100); // ~1.5e-3
