@@ -2481,6 +2481,74 @@ def touch_controls_sheet() -> Canvas:
 
 
 # ===========================================================================
+# Phase 14 cycle 2b.2 — replay viewer scrub bar.
+# Bone Cathedral aesthetic, HLD discipline (no gore-revival pole — this is
+# a composition-mode UI surface with no contact). Designed at native source
+# resolution; the viewer scales 4x onscreen for a 768x48 chunky-pixel band.
+# ===========================================================================
+
+# 192x12 source. Top + bottom 1px charcoal-line frame, deep-ash interior,
+# warm-bone-shade tick marks every 16 px (one per "second-equivalent" at
+# the canonical 1800-frame round), bone center pip every 64 px to anchor
+# longer-range scrubbing. Renders identically empty in the asset; the
+# viewer overlays the played-portion fill as a separate hot-bone Sprite.
+SCRUB_BAR_TRACK_W = 192
+SCRUB_BAR_TRACK_H = 12
+
+
+def scrub_bar_track() -> Canvas:
+    c = Canvas(SCRUB_BAR_TRACK_W, SCRUB_BAR_TRACK_H, PALETTE["clear"])
+    # Charcoal-line frame: 1 px top + bottom + 1 px caps on the sides.
+    c.rect(0, 0, SCRUB_BAR_TRACK_W, 1, PALETTE["charcoal_line"])
+    c.rect(0, SCRUB_BAR_TRACK_H - 1, SCRUB_BAR_TRACK_W, 1, PALETTE["charcoal_line"])
+    c.rect(0, 0, 1, SCRUB_BAR_TRACK_H, PALETTE["charcoal_line"])
+    c.rect(SCRUB_BAR_TRACK_W - 1, 0, 1, SCRUB_BAR_TRACK_H, PALETTE["charcoal_line"])
+    # Interior fill: deep ash so the empty-track reads as cold stone
+    # rather than void (void would clash with the surrounding window).
+    c.rect(1, 1, SCRUB_BAR_TRACK_W - 2, SCRUB_BAR_TRACK_H - 2, PALETTE["deep_ash"])
+    # Tick marks every 16 px (warm bone shade — visible but recessive).
+    # Skip the first/last 8 px so the ticks don't clash with the frame caps.
+    for x in range(16, SCRUB_BAR_TRACK_W - 8, 16):
+        c.set(x, 4, PALETTE["warm_bone_shade"])
+        c.set(x, 7, PALETTE["warm_bone_shade"])
+    # Major anchor pips every 64 px (bone — brighter, used as scrub
+    # landmarks for ~25%-of-round seeks).
+    for x in range(64, SCRUB_BAR_TRACK_W - 32, 64):
+        c.rect(x - 1, 5, 3, 2, PALETTE["bone"])
+    return c
+
+
+# Slider handle — 8x16, stacked-fang silhouette pointing both ways
+# (vertically symmetric so it reads as a "needle" indicator rather
+# than a directional fang). Hot-bone core for visibility, charcoal-line
+# stroke so it sits on top of the track without bleeding.
+SCRUB_BAR_HANDLE = """
+...BB...
+..BBBB..
+.BBhhBB.
+BBhhhhBB
+BBhBBhBB
+.lBBBBl.
+.lBBBBl.
+.lBBBBl.
+.lBBBBl.
+.lBBBBl.
+.lBBBBl.
+BBhBBhBB
+BBhhhhBB
+.BBhhBB.
+..BBBB..
+...BB...
+"""
+
+
+def scrub_bar_handle() -> Canvas:
+    c = Canvas(8, 16, PALETTE["clear"])
+    paint(c, 0, 0, SCRUB_BAR_HANDLE, side="p0")
+    return c
+
+
+# ===========================================================================
 # Contact sheet — review board showing every polished asset at scale.
 # ===========================================================================
 
@@ -2549,6 +2617,8 @@ def main() -> None:
         ("assets/hud/countdown_digits.png", countdown_digits()),
         ("assets/hud/match_over_badge.png", match_over_badge()),
         ("assets/hud/touch_controls.png", touch_controls_sheet()),
+        ("assets/hud/scrub_bar_track.png", scrub_bar_track()),
+        ("assets/hud/scrub_bar_handle.png", scrub_bar_handle()),
         ("assets/concepts/phase15_contact_sheet.png", contact_sheet()),
     ]
     for rel_path, canvas in outputs:

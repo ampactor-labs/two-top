@@ -94,6 +94,11 @@ pole's resting state in composition mode.
   letters, drop shadow, single spark flair per corner.
 - `hud/touch_controls.png` — 64 by 16 px; 4-cell strip with virtual
   stick idle/active and throw ring idle/active.
+- `hud/scrub_bar_track.png` — 192 by 12 px; replay-viewer scrub bar
+  background (deep-ash interior, charcoal-line frame, warm-bone-shade
+  ticks every 16 px, bone anchor pips every 64 px).
+- `hud/scrub_bar_handle.png` — 8 by 16 px; bone-fang vertical needle
+  used as the current-frame slider handle on the scrub bar.
 
 ## Contact Sheet
 

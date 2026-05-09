@@ -57,6 +57,21 @@ const SNAPSHOT_INTERVAL: u32 = 60;
 /// the canonical demo's frame range.
 const SEEK_SPEED: f32 = 64.0;
 
+/// Onscreen width of the scrub bar in window pixels. Source asset is
+/// 192 px wide, so 4x scale gives 768 px which fits the 960-wide
+/// viewer with comfortable margins.
+const SCRUB_BAR_WIDTH: f32 = 768.0;
+const SCRUB_BAR_HEIGHT: f32 = 48.0;
+/// Y-coordinate of the scrub bar relative to the camera. Negative
+/// because the camera centers at (0,0) and the bar lives at the bottom
+/// of the 720-tall window — `-720/2 + margin`.
+const SCRUB_BAR_Y: f32 = -320.0;
+const SCRUB_BAR_HANDLE_W: f32 = 16.0;
+const SCRUB_BAR_HANDLE_H: f32 = 64.0;
+/// Hot Bone color from the locked palette — used as the played-portion
+/// fill that grows leftward-to-rightward across the track.
+const PALETTE_HOT_BONE: Color = Color::srgb(1.0, 241.0 / 255.0, 194.0 / 255.0);
+
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().collect();
     let path = match args.get(1) {
@@ -125,15 +140,17 @@ fn main() -> ExitCode {
         .insert_resource(TotalFrames(total_frames))
         .insert_resource(SnapshotBuffer::default())
         .insert_resource(ViewerControls::default())
-        .add_systems(Startup, setup)
+        .add_systems(Startup, (setup, spawn_scrub_bar))
         .add_systems(
             Update,
             (
                 ensure_boomerang_visuals,
                 handle_keyboard_controls,
+                handle_scrub_bar_click,
                 drive_seek,
                 capture_snapshot,
                 update_frame_counter,
+                update_scrub_bar,
                 quit_when_replay_finished,
             )
                 .chain(),
@@ -156,6 +173,19 @@ struct TotalFrames(u32);
 
 #[derive(Component)]
 struct FrameCounterText;
+
+/// Marker components for the scrub-bar entities. The viewer stores
+/// the entity handles via these queries rather than a dedicated
+/// resource so a future cycle that swaps the visuals (different
+/// asset, different layout) only has to touch the system bodies.
+#[derive(Component)]
+struct ScrubBarTrack;
+
+#[derive(Component)]
+struct ScrubBarFill;
+
+#[derive(Component)]
+struct ScrubBarHandle;
 
 /// Ring of snapshots taken every [`SNAPSHOT_INTERVAL`] frames during
 /// forward playback. Backward seeks restore from the latest snapshot
@@ -267,8 +297,7 @@ fn setup(mut commands: Commands) {
     }
 
     // Frame counter HUD pinned to the upper-left, world-space (matches
-    // the existing debug overlay convention in the app crate). Cycle 2
-    // will replace this with a real scrub bar.
+    // the existing debug overlay convention in the app crate).
     commands.spawn((
         Text2d::new(String::new()),
         TextFont {
@@ -278,6 +307,64 @@ fn setup(mut commands: Commands) {
         TextColor(Color::srgb(0.95, 0.85, 0.40)),
         Transform::from_xyz(-440.0, 340.0, 100.0),
         FrameCounterText,
+    ));
+}
+
+/// Cycle 2b.2 — load the scrub-bar pixel art and spawn the
+/// track + fill + handle entities. Loaded in a separate Startup
+/// system so the AssetServer dependency stays out of the gameplay
+/// `setup` (which is meant to mirror the live app's setup signature).
+///
+/// Layout (centered horizontally on the camera, pinned at
+/// `SCRUB_BAR_Y` from camera center):
+///
+/// ```text
+///       [-384 .. +384] ← track (768 px wide)
+///       hot-bone fill grows from -384 rightward
+///       handle hovers above the current-frame x position
+/// ```
+fn spawn_scrub_bar(mut commands: Commands, asset_server: Res<AssetServer>) {
+    let track_image = asset_server.load("hud/scrub_bar_track.png");
+    let handle_image = asset_server.load("hud/scrub_bar_handle.png");
+
+    // Track: full-width, anchored at center.
+    commands.spawn((
+        Sprite {
+            image: track_image,
+            custom_size: Some(Vec2::new(SCRUB_BAR_WIDTH, SCRUB_BAR_HEIGHT)),
+            ..default()
+        },
+        Transform::from_xyz(0.0, SCRUB_BAR_Y, 90.0),
+        ScrubBarTrack,
+    ));
+
+    // Played-portion fill — Hot Bone color rectangle, anchored at the
+    // LEFT edge so its width can scale with progress without the
+    // sprite's center drifting. Z just above the track so the fill
+    // overlays the dark interior cleanly. In bevy 0.18 the anchor is
+    // a separate component required by Sprite (not a Sprite field).
+    let track_left = -SCRUB_BAR_WIDTH / 2.0;
+    commands.spawn((
+        Sprite {
+            color: PALETTE_HOT_BONE,
+            custom_size: Some(Vec2::new(0.0, SCRUB_BAR_HEIGHT - 8.0)),
+            ..default()
+        },
+        bevy::sprite::Anchor::CENTER_LEFT,
+        Transform::from_xyz(track_left + 4.0, SCRUB_BAR_Y, 91.0),
+        ScrubBarFill,
+    ));
+
+    // Handle: bone-fang vertical needle. Z above the fill so it always
+    // reads as the cursor.
+    commands.spawn((
+        Sprite {
+            image: handle_image,
+            custom_size: Some(Vec2::new(SCRUB_BAR_HANDLE_W, SCRUB_BAR_HANDLE_H)),
+            ..default()
+        },
+        Transform::from_xyz(track_left, SCRUB_BAR_Y, 92.0),
+        ScrubBarHandle,
     ));
 }
 
@@ -553,6 +640,82 @@ fn draw_diagnostic_overlay(
         );
         draw_velocity_vector(&mut gizmos, center, vel.0);
     }
+}
+
+/// Cycle 2b.2 — update the scrub-bar fill width + handle x-position
+/// each frame to reflect the current sim frame's progress through the
+/// replay. Runs in `Update` after the sim has potentially advanced so
+/// the visual is one tick fresh.
+fn update_scrub_bar(
+    frame: Res<sim::FrameCount>,
+    total: Res<TotalFrames>,
+    mut fills: Query<&mut Sprite, (With<ScrubBarFill>, Without<ScrubBarHandle>)>,
+    mut handles: Query<&mut Transform, With<ScrubBarHandle>>,
+) {
+    let progress = if total.0 == 0 {
+        0.0
+    } else {
+        (frame.0 as f32 / total.0 as f32).clamp(0.0, 1.0)
+    };
+    let inner_width = SCRUB_BAR_WIDTH - 8.0;
+    let track_left = -SCRUB_BAR_WIDTH / 2.0;
+
+    if let Ok(mut fill) = fills.single_mut() {
+        let target_w = inner_width * progress;
+        if let Some(size) = fill.custom_size.as_mut() {
+            size.x = target_w;
+        }
+    }
+
+    if let Ok(mut handle_xform) = handles.single_mut() {
+        handle_xform.translation.x = track_left + 4.0 + inner_width * progress;
+    }
+}
+
+/// Cycle 2b.2 — translate left-mouse clicks within the scrub bar's
+/// bounding box into a [`ViewerControls::seek_target`] update. The
+/// hit-test runs in window-space (cursor coordinates → world-space
+/// via the primary camera).
+///
+/// Click anywhere on the track jumps to that frame; release after a
+/// click also fires (no drag-tracking yet — cycle 2b.3 may add it
+/// alongside the frame-step buttons).
+fn handle_scrub_bar_click(
+    buttons: Res<ButtonInput<MouseButton>>,
+    windows: Query<&Window>,
+    cameras: Query<(&Camera, &GlobalTransform)>,
+    total: Res<TotalFrames>,
+    mut controls: ResMut<ViewerControls>,
+) {
+    if !buttons.just_pressed(MouseButton::Left) {
+        return;
+    }
+    let Ok(window) = windows.single() else {
+        return;
+    };
+    let Some(cursor) = window.cursor_position() else {
+        return;
+    };
+    let Ok((camera, cam_xform)) = cameras.single() else {
+        return;
+    };
+    let Ok(world_pos) = camera.viewport_to_world_2d(cam_xform, cursor) else {
+        return;
+    };
+
+    let in_bar_x = world_pos.x >= -SCRUB_BAR_WIDTH / 2.0
+        && world_pos.x <= SCRUB_BAR_WIDTH / 2.0;
+    let in_bar_y = (world_pos.y - SCRUB_BAR_Y).abs() <= SCRUB_BAR_HEIGHT / 2.0;
+    if !(in_bar_x && in_bar_y) {
+        return;
+    }
+
+    let inner_width = SCRUB_BAR_WIDTH - 8.0;
+    let track_left = -SCRUB_BAR_WIDTH / 2.0 + 4.0;
+    let progress = ((world_pos.x - track_left) / inner_width).clamp(0.0, 1.0);
+    let target = (progress * total.0 as f32).round() as u32;
+    controls.paused = true;
+    controls.seek_target = Some(target.min(total.0.saturating_sub(1)));
 }
 
 fn draw_velocity_vector(gizmos: &mut Gizmos, center: Vec2, vel: fixed_math::Vec2F) {
