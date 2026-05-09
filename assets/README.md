@@ -99,6 +99,9 @@ pole's resting state in composition mode.
   ticks every 16 px, bone anchor pips every 64 px).
 - `hud/scrub_bar_handle.png` — 8 by 16 px; bone-fang vertical needle
   used as the current-frame slider handle on the scrub bar.
+- `hud/frame_step_buttons.png` — 32 by 16 px; 2-cell strip with
+  bone-fang chevron buttons (cell 0 = back ◀, cell 1 = forward ▶) for
+  the replay viewer's frame-step controls.
 
 ## Contact Sheet
 

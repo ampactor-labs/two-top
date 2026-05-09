@@ -140,17 +140,20 @@ fn main() -> ExitCode {
         .insert_resource(TotalFrames(total_frames))
         .insert_resource(SnapshotBuffer::default())
         .insert_resource(ViewerControls::default())
-        .add_systems(Startup, (setup, spawn_scrub_bar))
+        .add_systems(Startup, (setup, spawn_scrub_bar, spawn_frame_step_and_speed))
         .add_systems(
             Update,
             (
                 ensure_boomerang_visuals,
                 handle_keyboard_controls,
                 handle_scrub_bar_click,
+                handle_frame_step_click,
+                handle_speed_pip_click,
                 drive_seek,
                 capture_snapshot,
                 update_frame_counter,
                 update_scrub_bar,
+                update_speed_pips,
                 quit_when_replay_finished,
             )
                 .chain(),
@@ -187,6 +190,22 @@ struct ScrubBarFill;
 #[derive(Component)]
 struct ScrubBarHandle;
 
+/// Frame-step button — the `+/- 1 frame` value indicates which
+/// direction the click should seek. Cycle 2b.3 spawns one of each
+/// flanking the scrub bar.
+#[derive(Component, Clone, Copy)]
+struct FrameStepButton {
+    delta: i32,
+}
+
+/// Speed-pip — its `idx` matches the index into [`SPEED_PRESETS`].
+/// Click-tested by [`handle_speed_pip_click`]; rendered with a Hot-Bone
+/// tint when `idx == ViewerControls.speed_idx`, Bone otherwise.
+#[derive(Component, Clone, Copy)]
+struct SpeedPip {
+    idx: usize,
+}
+
 /// Ring of snapshots taken every [`SNAPSHOT_INTERVAL`] frames during
 /// forward playback. Backward seeks restore from the latest snapshot
 /// at-or-before the target frame and replay forward from there. Stays
@@ -221,7 +240,7 @@ impl SnapshotBuffer {
 /// Seeks are async by nature: setting `seek_target` records the
 /// destination, and [`drive_seek`] fast-forwards the sim until the
 /// frame counter catches up, then re-pauses (or returns to play).
-#[derive(Resource, Clone, Copy, Default)]
+#[derive(Resource, Clone, Copy)]
 struct ViewerControls {
     /// Player's stated paused/playing intent. Independent of
     /// `seek_target` — a seek may temporarily unpause `Time<Virtual>`
@@ -235,7 +254,28 @@ struct ViewerControls {
     /// wireframes around every Player + Boomerang AABB plus a velocity
     /// vector from each entity's center.
     show_overlay: bool,
+    /// Index into [`SPEED_PRESETS`] selecting the active playback
+    /// speed (0.25x, 0.5x, 1x, 2x, 4x). Drives
+    /// [`Time<Virtual>::set_relative_speed`] when neither a seek nor
+    /// pause is in flight.
+    speed_idx: usize,
 }
+
+impl Default for ViewerControls {
+    fn default() -> Self {
+        Self {
+            paused: false,
+            seek_target: None,
+            show_overlay: false,
+            // Index 2 = 1.0x — natural realtime starting speed.
+            speed_idx: 2,
+        }
+    }
+}
+
+/// Playback speed presets per BUILD_PLAN § Phase 14 Produces:
+/// "Speed selector (0.25x, 0.5x, 1x, 2x, 4x)".
+const SPEED_PRESETS: [f32; 5] = [0.25, 0.5, 1.0, 2.0, 4.0];
 
 /// Spawns players + walls + camera. Spawn positions match
 /// [`replay_sync::build_app`] (both at origin) because the only `.bmrg`
@@ -367,6 +407,68 @@ fn spawn_scrub_bar(mut commands: Commands, asset_server: Res<AssetServer>) {
         ScrubBarHandle,
     ));
 }
+
+/// Cycle 2b.3 — frame-step buttons + speed pips. Frame-step buttons
+/// are sliced from a single 32x16 strip via the Sprite::rect crop:
+/// cell 0 (left half) = back, cell 1 (right half) = forward. Speed
+/// pips render as five colored squares in code (no asset).
+fn spawn_frame_step_and_speed(
+    mut commands: Commands,
+    asset_server: Res<AssetServer>,
+) {
+    let buttons_image = asset_server.load("hud/frame_step_buttons.png");
+
+    // Both buttons share the same source texture; rect crops select
+    // the two 16x16 cells from the 32x16 strip.
+    let button_y = SCRUB_BAR_Y;
+    let button_size = Vec2::splat(48.0);
+    let track_left = -SCRUB_BAR_WIDTH / 2.0;
+    let track_right = SCRUB_BAR_WIDTH / 2.0;
+
+    commands.spawn((
+        Sprite {
+            image: buttons_image.clone(),
+            custom_size: Some(button_size),
+            rect: Some(Rect::new(0.0, 0.0, 16.0, 16.0)),
+            ..default()
+        },
+        Transform::from_xyz(track_left - 36.0, button_y, 92.0),
+        FrameStepButton { delta: -1 },
+    ));
+    commands.spawn((
+        Sprite {
+            image: buttons_image,
+            custom_size: Some(button_size),
+            rect: Some(Rect::new(16.0, 0.0, 32.0, 16.0)),
+            ..default()
+        },
+        Transform::from_xyz(track_right + 36.0, button_y, 92.0),
+        FrameStepButton { delta: 1 },
+    ));
+
+    // Speed pips — clustered above the scrub bar, centered.
+    // Each pip is a 16x16 colored square. Spaced 24 px apart
+    // horizontally so the cluster spans 4*24 = 96 px.
+    let pip_y = SCRUB_BAR_Y + 36.0;
+    let pip_spacing = 24.0;
+    let cluster_left = -((SPEED_PRESETS.len() as f32 - 1.0) * pip_spacing) / 2.0;
+    for (i, _) in SPEED_PRESETS.iter().enumerate() {
+        let x = cluster_left + i as f32 * pip_spacing;
+        commands.spawn((
+            Sprite {
+                color: PALETTE_BONE,
+                custom_size: Some(Vec2::splat(14.0)),
+                ..default()
+            },
+            Transform::from_xyz(x, pip_y, 92.0),
+            SpeedPip { idx: i },
+        ));
+    }
+}
+
+/// Bone color (palette idx 6) — used as the dim/inactive speed pip
+/// fill so the active pip's Hot-Bone tint reads as the selection.
+const PALETTE_BONE: Color = Color::srgb(203.0 / 255.0, 190.0 / 255.0, 148.0 / 255.0);
 
 /// Same boomerang-visual attach as the app crate's `ensure_boomerang_visuals`.
 type NewBoomerangs<'w, 's> =
@@ -578,12 +680,13 @@ fn drive_seek(world: &mut World) {
 }
 
 fn apply_play_pause(world: &mut World, paused: bool) {
+    let speed = SPEED_PRESETS[world.resource::<ViewerControls>().speed_idx];
     let mut vt = world.resource_mut::<Time<Virtual>>();
     if paused {
         vt.pause();
     } else {
         vt.unpause();
-        vt.set_relative_speed(1.0);
+        vt.set_relative_speed(speed);
     }
 }
 
@@ -670,6 +773,109 @@ fn update_scrub_bar(
     if let Ok(mut handle_xform) = handles.single_mut() {
         handle_xform.translation.x = track_left + 4.0 + inner_width * progress;
     }
+}
+
+/// Cycle 2b.3 — drive each frame-step button's hit-test. Clicking
+/// the back/forward chevron sets the seek target one frame in that
+/// direction (auto-pauses).
+fn handle_frame_step_click(
+    buttons: Res<ButtonInput<MouseButton>>,
+    windows: Query<&Window>,
+    cameras: Query<(&Camera, &GlobalTransform)>,
+    step_buttons: Query<(&Transform, &FrameStepButton, &Sprite)>,
+    frame: Res<sim::FrameCount>,
+    total: Res<TotalFrames>,
+    mut controls: ResMut<ViewerControls>,
+) {
+    if !buttons.just_pressed(MouseButton::Left) {
+        return;
+    }
+    let Some(world_pos) = world_cursor(&windows, &cameras) else {
+        return;
+    };
+    for (xform, button, sprite) in &step_buttons {
+        let half = sprite
+            .custom_size
+            .unwrap_or(Vec2::splat(48.0))
+            / 2.0;
+        let center = xform.translation.truncate();
+        if (world_pos.x - center.x).abs() <= half.x
+            && (world_pos.y - center.y).abs() <= half.y
+        {
+            let next = (frame.0 as i64 + button.delta as i64)
+                .clamp(0, total.0.saturating_sub(1) as i64) as u32;
+            controls.paused = true;
+            controls.seek_target = Some(next);
+            return;
+        }
+    }
+}
+
+/// Cycle 2b.3 — drive each speed-pip's hit-test. Clicking sets the
+/// active speed index; the actual `Time<Virtual>::set_relative_speed`
+/// happens in [`drive_seek`]'s play branch on the next tick.
+fn handle_speed_pip_click(
+    buttons: Res<ButtonInput<MouseButton>>,
+    windows: Query<&Window>,
+    cameras: Query<(&Camera, &GlobalTransform)>,
+    pips: Query<(&Transform, &SpeedPip, &Sprite)>,
+    mut controls: ResMut<ViewerControls>,
+) {
+    if !buttons.just_pressed(MouseButton::Left) {
+        return;
+    }
+    let Some(world_pos) = world_cursor(&windows, &cameras) else {
+        return;
+    };
+    for (xform, pip, sprite) in &pips {
+        let half = sprite
+            .custom_size
+            .unwrap_or(Vec2::splat(14.0))
+            / 2.0;
+        let center = xform.translation.truncate();
+        if (world_pos.x - center.x).abs() <= half.x
+            && (world_pos.y - center.y).abs() <= half.y
+        {
+            controls.speed_idx = pip.idx;
+            return;
+        }
+    }
+}
+
+/// Cycle 2b.3 — update each speed pip's color tint each frame so the
+/// active pip reads as Hot Bone and the others stay dim Bone. Also
+/// applies the active speed to `Time<Virtual>` when the viewer is in
+/// normal play (not paused, no seek). Pause / seek already drive
+/// `Time<Virtual>` themselves and would conflict with a per-frame
+/// speed reset here.
+fn update_speed_pips(
+    controls: Res<ViewerControls>,
+    mut pips: Query<(&SpeedPip, &mut Sprite)>,
+    mut vt: ResMut<Time<Virtual>>,
+) {
+    for (pip, mut sprite) in &mut pips {
+        sprite.color = if pip.idx == controls.speed_idx {
+            PALETTE_HOT_BONE
+        } else {
+            PALETTE_BONE
+        };
+    }
+    if !controls.paused && controls.seek_target.is_none() {
+        vt.set_relative_speed(SPEED_PRESETS[controls.speed_idx]);
+    }
+}
+
+/// Shared cursor → world helper. Returns `None` when no window /
+/// cursor / camera is currently available (e.g. during the first
+/// frame before the window is fully initialized).
+fn world_cursor(
+    windows: &Query<&Window>,
+    cameras: &Query<(&Camera, &GlobalTransform)>,
+) -> Option<Vec2> {
+    let window = windows.single().ok()?;
+    let cursor = window.cursor_position()?;
+    let (camera, cam_xform) = cameras.single().ok()?;
+    camera.viewport_to_world_2d(cam_xform, cursor).ok()
 }
 
 /// Cycle 2b.2 — translate left-mouse clicks within the scrub bar's
