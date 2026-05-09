@@ -37,8 +37,8 @@ use fixed_math::Vec2F;
 use render::RenderSyncPlugin;
 use replay::{ReplayPlayback, ReplayPlaybackPlugin, decode_for_sim_version};
 use sim::{
-    BOOMERANG_HALF_EXTENT_CM, Boomerang, GgrsCfg, PLAYER_HALF_EXTENT_CM, Player, PositionF,
-    PreviousPositionF, SimPlugin, SimSnapshot, VelocityF, arena_walls,
+    AnimState, BOOMERANG_HALF_EXTENT_CM, Boomerang, GgrsCfg, PLAYER_HALF_EXTENT_CM, Player,
+    PositionF, PreviousPositionF, SimPlugin, SimSnapshot, VelocityF, arena_walls,
 };
 
 /// Snapshot interval in sim ticks. Per BUILD_PLAN § Phase 14 Produces:
@@ -145,6 +145,7 @@ fn main() -> ExitCode {
             Update,
             (
                 ensure_boomerang_visuals,
+                sync_sprite_atlas_from_anim,
                 handle_keyboard_controls,
                 handle_scrub_bar_click,
                 handle_frame_step_click,
@@ -287,8 +288,27 @@ const SPEED_PRESETS: [f32; 5] = [0.25, 0.5, 1.0, 2.0, 4.0];
 /// Phase 14 cycle 1 — it surfaces the moment Phase 13's deferred
 /// in-app match-recording lands and the format starts carrying real
 /// match recordings.
-fn setup(mut commands: Commands) {
+///
+/// Phase 15 cycle 1: players use the polished sprite sheets from
+/// `assets/sprites/players/` driven by `AnimState`. Same atlas + scale
+/// as the live `app` crate so the viewer renders matches exactly as
+/// they looked to the players.
+fn setup(
+    mut commands: Commands,
+    asset_server: Res<AssetServer>,
+    mut atlases: ResMut<Assets<TextureAtlasLayout>>,
+) {
     commands.spawn(Camera2d);
+
+    let layout = atlases.add(TextureAtlasLayout::from_grid(
+        UVec2::splat(24),
+        22,
+        1,
+        None,
+        None,
+    ));
+    let p0_image = asset_server.load("sprites/players/duelist_a_sheet.png");
+    let p1_image = asset_server.load("sprites/players/duelist_b_sheet.png");
 
     commands.spawn((
         Player { handle: 0 },
@@ -296,7 +316,11 @@ fn setup(mut commands: Commands) {
         PreviousPositionF(Vec2F::ZERO),
         VelocityF(Vec2F::ZERO),
         Sprite {
-            color: Color::srgb(0.95, 0.42, 0.65),
+            image: p0_image,
+            texture_atlas: Some(TextureAtlas {
+                layout: layout.clone(),
+                index: 0,
+            }),
             custom_size: Some(Vec2::new(48.0, 48.0)),
             ..default()
         },
@@ -309,7 +333,11 @@ fn setup(mut commands: Commands) {
         PreviousPositionF(Vec2F::ZERO),
         VelocityF(Vec2F::ZERO),
         Sprite {
-            color: Color::srgb(0.45, 0.78, 0.95),
+            image: p1_image,
+            texture_atlas: Some(TextureAtlas {
+                layout,
+                index: 0,
+            }),
             custom_size: Some(Vec2::new(48.0, 48.0)),
             ..default()
         },
@@ -474,18 +502,35 @@ const PALETTE_BONE: Color = Color::srgb(203.0 / 255.0, 190.0 / 255.0, 148.0 / 25
 type NewBoomerangs<'w, 's> =
     Query<'w, 's, (Entity, &'static PositionF), (With<Boomerang>, Without<Sprite>)>;
 
-fn ensure_boomerang_visuals(mut commands: Commands, q: NewBoomerangs) {
-    let size_px = (BOOMERANG_HALF_EXTENT_CM * 2) as f32;
+fn ensure_boomerang_visuals(
+    mut commands: Commands,
+    asset_server: Res<AssetServer>,
+    q: NewBoomerangs,
+) {
+    let size_px = ((BOOMERANG_HALF_EXTENT_CM * 2) as f32) * 2.0;
+    let image = asset_server.load("sprites/projectiles/bone_fang.png");
     for (entity, pos) in &q {
         let (x, y) = pos.0.to_f32();
         commands.entity(entity).insert((
             Sprite {
-                color: Color::srgb(0.92, 0.85, 0.40),
+                image: image.clone(),
                 custom_size: Some(Vec2::new(size_px, size_px)),
                 ..default()
             },
             Transform::from_xyz(x, y, 0.5),
         ));
+    }
+}
+
+/// Phase 15 cycle 1 — sync per-player atlas index from AnimState.
+/// Mirrors `app::sync_sprite_atlas_from_anim`. Lives here because
+/// the viewer is a separate binary that owns its own setup; a future
+/// refactor could lift this into a render-side helper crate.
+fn sync_sprite_atlas_from_anim(mut q: Query<(&AnimState, &mut Sprite), With<Player>>) {
+    for (anim, mut sprite) in &mut q {
+        if let Some(atlas) = sprite.texture_atlas.as_mut() {
+            atlas.index = anim.display_index() as usize;
+        }
     }
 }
 

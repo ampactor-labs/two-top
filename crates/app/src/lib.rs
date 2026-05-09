@@ -19,7 +19,7 @@ use fixed_math::Vec2F;
 use input_touch::{CursorPosition, TouchInputsPlugin, WindowSize, update_touch_state};
 use render::RenderSyncPlugin;
 use sim::{
-    BOOMERANG_HALF_EXTENT_CM, Boomerang, GgrsCfg, Player, PositionF, PreviousPositionF,
+    AnimState, BOOMERANG_HALF_EXTENT_CM, Boomerang, GgrsCfg, Player, PositionF, PreviousPositionF,
     SimLifecycleLogPlugin, SimPlugin, VelocityF, arena_walls,
 };
 
@@ -85,7 +85,14 @@ pub fn run() {
         .insert_resource(Session::SyncTest(session))
         .add_systems(Startup, setup)
         .add_systems(PreUpdate, update_window_metrics.before(update_touch_state))
-        .add_systems(Update, (ensure_boomerang_visuals, log_app_exit))
+        .add_systems(
+            Update,
+            (
+                ensure_boomerang_visuals,
+                sync_sprite_atlas_from_anim,
+                log_app_exit,
+            ),
+        )
         .run();
 
     tracing::info!(target: "two_top::app", "two-top exiting cleanly");
@@ -112,8 +119,27 @@ fn main() {
     run();
 }
 
-fn setup(mut commands: Commands) {
+fn setup(
+    mut commands: Commands,
+    asset_server: Res<AssetServer>,
+    mut atlases: ResMut<Assets<TextureAtlasLayout>>,
+) {
     commands.spawn(Camera2d);
+
+    // Phase 15: load the polished player sheets and slice them into
+    // 22-frame atlases (24x24 source per cell). Onscreen each player
+    // renders at 48x48 — same as the placeholder rectangle they
+    // replace, so the camera-follow + hitbox visualization land at
+    // the same scale.
+    let layout = atlases.add(TextureAtlasLayout::from_grid(
+        UVec2::splat(24),
+        22,
+        1,
+        None,
+        None,
+    ));
+    let p0_image = asset_server.load("sprites/players/duelist_a_sheet.png");
+    let p1_image = asset_server.load("sprites/players/duelist_b_sheet.png");
 
     commands.spawn((
         Player { handle: 0 },
@@ -121,7 +147,11 @@ fn setup(mut commands: Commands) {
         PreviousPositionF(Vec2F::from_cm(-100, 60)),
         VelocityF(Vec2F::ZERO),
         Sprite {
-            color: Color::srgb(0.95, 0.42, 0.65),
+            image: p0_image,
+            texture_atlas: Some(TextureAtlas {
+                layout: layout.clone(),
+                index: 0,
+            }),
             custom_size: Some(Vec2::new(48.0, 48.0)),
             ..default()
         },
@@ -134,7 +164,11 @@ fn setup(mut commands: Commands) {
         PreviousPositionF(Vec2F::from_cm(100, -60)),
         VelocityF(Vec2F::ZERO),
         Sprite {
-            color: Color::srgb(0.45, 0.78, 0.95),
+            image: p1_image,
+            texture_atlas: Some(TextureAtlas {
+                layout,
+                index: 0,
+            }),
             custom_size: Some(Vec2::new(48.0, 48.0)),
             ..default()
         },
@@ -183,18 +217,39 @@ fn setup(mut commands: Commands) {
 type NewBoomerangs<'w, 's> =
     Query<'w, 's, (Entity, &'static PositionF), (With<Boomerang>, Without<Sprite>)>;
 
-fn ensure_boomerang_visuals(mut commands: Commands, q: NewBoomerangs) {
-    let size_px = (BOOMERANG_HALF_EXTENT_CM * 2) as f32;
+fn ensure_boomerang_visuals(
+    mut commands: Commands,
+    asset_server: Res<AssetServer>,
+    q: NewBoomerangs,
+) {
+    // Phase 15: render the bone fang as the polished 12x12 sprite,
+    // upscaled 2x to match the placeholder's original 20-px footprint
+    // (BOOMERANG_HALF_EXTENT_CM * 2 = 20). Marked variants will land
+    // when per-round blood accumulation is wired in cycle 3.
+    let size_px = ((BOOMERANG_HALF_EXTENT_CM * 2) as f32) * 2.0;
+    let image = asset_server.load("sprites/projectiles/bone_fang.png");
     for (entity, pos) in &q {
         let (x, y) = pos.0.to_f32();
         commands.entity(entity).insert((
             Sprite {
-                color: Color::srgb(0.92, 0.85, 0.40),
+                image: image.clone(),
                 custom_size: Some(Vec2::new(size_px, size_px)),
                 ..default()
             },
             Transform::from_xyz(x, y, 0.5),
         ));
+    }
+}
+
+/// Phase 15 cycle 1: drive each player's TextureAtlas index from the
+/// rolled-back AnimState. Runs in `Update` after sim has advanced;
+/// `display_index()` snaps to a single atlas frame per tick (no
+/// interpolation per CONVENTIONS § Render Layer Rules).
+fn sync_sprite_atlas_from_anim(mut q: Query<(&AnimState, &mut Sprite), With<Player>>) {
+    for (anim, mut sprite) in &mut q {
+        if let Some(atlas) = sprite.texture_atlas.as_mut() {
+            atlas.index = anim.display_index() as usize;
+        }
     }
 }
 

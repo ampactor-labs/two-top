@@ -69,7 +69,7 @@ pub struct PreviousPositionF(pub Vec2F);
 pub struct VelocityF(pub Vec2F);
 
 #[derive(Component, Clone, Copy, PartialEq, Eq, Hash, Debug)]
-#[require(Rollback, DashState, StunFrames, Dead)]
+#[require(Rollback, DashState, StunFrames, Dead, AnimState)]
 pub struct Player {
     pub handle: usize,
 }
@@ -342,6 +342,121 @@ pub fn arena_walls() -> [Wall; 4] {
 #[derive(Component, Clone, Copy, PartialEq, Eq, Hash, Debug)]
 #[require(Rollback)]
 pub struct NoInterpolate;
+
+/// Phase 15: per-entity animation state. `anim_id` selects which
+/// animation is playing (Idle/Throw/Dash/Hit/Death); `ticks` counts
+/// sim ticks since the animation started. Render layer divides
+/// `ticks` by the per-animation frame-divider to get the display
+/// frame (animation runs slower than sim — 4-frame idle would be
+/// catastrophically fast at 60Hz).
+///
+/// Rolled back so animation state is consistent across resimulation
+/// (a respawn-during-rollback would otherwise drift the animation
+/// vs the post-rollback authoritative state). Per CONVENTIONS:
+/// "Animation does not interpolate. Pixel art frames snap." The
+/// render layer reads `display_frame()` and picks exactly one
+/// atlas index per render frame; no fractional blending.
+#[derive(Component, Clone, Copy, PartialEq, Eq, Hash, Debug, Default)]
+#[require(Rollback)]
+pub struct AnimState {
+    /// Selector into the per-character sprite sheet. See
+    /// [`AnimState::IDLE`]/[`THROW`]/etc. constants for the encoding.
+    pub anim_id: u8,
+    /// Sim ticks since this animation started. Reset to 0 on
+    /// transition. Range checked at u16::MAX would mean the player
+    /// idled for 18+ minutes, which is fine — even if it overflows,
+    /// `display_frame` modulo's it down for looping anims and caps
+    /// it for one-shots.
+    pub ticks: u16,
+}
+
+impl AnimState {
+    /// Looping idle bob.
+    pub const IDLE: u8 = 0;
+    /// One-shot throw: wind-up → cock → release → fly-out → recovery → settle.
+    pub const THROW: u8 = 1;
+    /// Looping dash blur (only while `DashState::Dashing`).
+    pub const DASH: u8 = 2;
+    /// One-shot hit reaction (white-flash silhouette → return).
+    pub const HIT: u8 = 3;
+    /// One-shot death: stagger → bow → buckle → disperse → corpse mark.
+    pub const DEATH: u8 = 4;
+
+    /// Per the player sprite sheet from VISUAL_TARGET_PACK.md and the
+    /// Phase 15 prep README: 0..3 idle, 4..9 throw, 10..11 dash,
+    /// 12..15 hit, 16..21 death. `frame_count` returns the source-frame
+    /// span; `atlas_offset` returns the strip index where this anim
+    /// starts (so render can compute final atlas index = offset +
+    /// display_frame).
+    pub const fn frame_count(anim_id: u8) -> u16 {
+        match anim_id {
+            Self::THROW => 6,
+            Self::DASH => 2,
+            Self::HIT => 4,
+            Self::DEATH => 6,
+            _ => 4,
+        }
+    }
+
+    pub const fn atlas_offset(anim_id: u8) -> u16 {
+        match anim_id {
+            Self::THROW => 4,
+            Self::DASH => 10,
+            Self::HIT => 12,
+            Self::DEATH => 16,
+            _ => 0,
+        }
+    }
+
+    /// Sim-ticks-per-displayed-frame. Tuned to read at the right
+    /// emotional cadence: idle is gentle (4 fps), throw + hit are
+    /// snappy (15 fps), dash flickers (12 fps), death has weight
+    /// (7.5 fps). All integers so the frame-stepping is deterministic.
+    pub const fn ticks_per_frame(anim_id: u8) -> u16 {
+        match anim_id {
+            Self::THROW => 4,
+            Self::DASH => 5,
+            Self::HIT => 4,
+            Self::DEATH => 8,
+            _ => 15,
+        }
+    }
+
+    /// One-shot anims (THROW/HIT/DEATH) cap at the last frame instead
+    /// of looping. The state-machine in [`advance_animation`] returns
+    /// to IDLE when a one-shot finishes, so the cap only matters for
+    /// edge cases where a state holds (e.g. dead player whose corpse
+    /// remains as the corpse-mark frame).
+    pub const fn is_oneshot(anim_id: u8) -> bool {
+        matches!(anim_id, Self::THROW | Self::HIT | Self::DEATH)
+    }
+
+    /// Atlas index into the 22-frame player sheet for the current
+    /// tick. Render layer reads this directly to pick a TextureAtlas
+    /// rect.
+    pub fn display_index(&self) -> u16 {
+        let divider = Self::ticks_per_frame(self.anim_id).max(1);
+        let count = Self::frame_count(self.anim_id);
+        let raw = self.ticks / divider;
+        let local = if Self::is_oneshot(self.anim_id) {
+            raw.min(count.saturating_sub(1))
+        } else {
+            raw % count
+        };
+        Self::atlas_offset(self.anim_id) + local
+    }
+
+    /// True iff this anim has played out — used by the state-machine
+    /// to decide when to return a one-shot to IDLE.
+    pub fn is_finished(&self) -> bool {
+        if !Self::is_oneshot(self.anim_id) {
+            return false;
+        }
+        let total_ticks =
+            Self::frame_count(self.anim_id) as u32 * Self::ticks_per_frame(self.anim_id) as u32;
+        self.ticks as u32 >= total_ticks
+    }
+}
 
 // ---- Resources ----
 
@@ -861,14 +976,14 @@ pub fn throw_boomerangs(
     mut commands: Commands,
     inputs: Res<PlayerInputs<GgrsCfg>>,
     history: Res<InputHistory>,
-    players: Query<(&Player, &Dead, &PositionF)>,
+    mut players: Query<(&Player, &Dead, &PositionF, &mut AnimState)>,
     boomerangs: Query<&Boomerang>,
 ) {
     if !match_state.is_in_round() {
         return;
     }
     let throw_speed = Fix::const_from_int(THROW_SPEED_CM_PER_TICK);
-    for (player, dead, pos) in &players {
+    for (player, dead, pos, mut anim) in &mut players {
         if dead.is_dying() {
             continue;
         }
@@ -890,6 +1005,12 @@ pub fn throw_boomerangs(
             PreviousPositionF(pos.0),
             VelocityF(velocity),
         ));
+        // Phase 15: kick the throw animation. Reset to frame 0 so the
+        // 6-frame wind-up plays from the start. `advance_animation`
+        // will keep it ticking until is_finished(), then the
+        // observable-state path in that system snaps back to Idle.
+        anim.anim_id = AnimState::THROW;
+        anim.ticks = 0;
     }
 }
 
@@ -1234,6 +1355,66 @@ pub fn record_last_tick_time(time: Res<Time<Real>>, mut last: ResMut<LastSimTick
     last.0 = time.elapsed_secs_f64();
 }
 
+/// `GgrsSchedule` system: tick the AnimState frame counter and run
+/// the animation state-machine. Priority order (highest wins):
+///   1. `Dead.is_dying()` -> DEATH
+///   2. `StunFrames > 0` -> HIT
+///   3. One-shot anim still in flight -> keep ticking
+///   4. `DashState::Dashing` -> DASH
+///   5. otherwise -> IDLE
+///
+/// THROW is set by `throw_boomerangs` (the system that spawns the
+/// boomerang) on the same tick the throw fires; the one-shot
+/// continuation rule keeps it ticking until the 6 frames complete.
+///
+/// Per CONVENTIONS: animation does not interpolate — `display_index`
+/// snaps to a single atlas frame per tick.
+pub fn advance_animation(mut q: Query<(&Dead, &DashState, &StunFrames, &mut AnimState)>) {
+    for (dead, dash, stun, mut anim) in &mut q {
+        // Death always wins. Lock to DEATH and tick — the one-shot
+        // caps at the corpse-mark frame via display_index().
+        if dead.is_dying() {
+            if anim.anim_id != AnimState::DEATH {
+                anim.anim_id = AnimState::DEATH;
+                anim.ticks = 0;
+            } else {
+                anim.ticks = anim.ticks.saturating_add(1);
+            }
+            continue;
+        }
+        // Hit wins over Dash/Idle/Throw. Re-trigger if anim isn't
+        // already HIT (StunFrames == 1 vs == 12 should both hold HIT
+        // for the full one-shot duration).
+        if stun.0 > 0 {
+            if anim.anim_id != AnimState::HIT {
+                anim.anim_id = AnimState::HIT;
+                anim.ticks = 0;
+            } else {
+                anim.ticks = anim.ticks.saturating_add(1);
+            }
+            continue;
+        }
+        // No priority override — let any in-flight one-shot finish
+        // (currently only THROW; HIT/DEATH already handled above).
+        if AnimState::is_oneshot(anim.anim_id) && !anim.is_finished() {
+            anim.ticks = anim.ticks.saturating_add(1);
+            continue;
+        }
+        // Pick from observable state.
+        let target = if matches!(dash, DashState::Dashing { .. }) {
+            AnimState::DASH
+        } else {
+            AnimState::IDLE
+        };
+        if target != anim.anim_id {
+            anim.anim_id = target;
+            anim.ticks = 0;
+        } else {
+            anim.ticks = anim.ticks.saturating_add(1);
+        }
+    }
+}
+
 /// Last system in `GgrsSchedule`: pushes the current tick's inputs
 /// onto each player's history ring. Must run AFTER all edge consumers
 /// so they see history's last entry as "previous tick". Iterates
@@ -1287,6 +1468,7 @@ impl Plugin for SimPlugin {
             .rollback_component_with_copy::<Dead>()
             .rollback_component_with_copy::<Boomerang>()
             .rollback_component_with_copy::<BoomerangState>()
+            .rollback_component_with_copy::<AnimState>()
             .rollback_resource_with_copy::<FrameCount>()
             .rollback_resource_with_copy::<MatchScore>()
             .rollback_resource_with_copy::<MatchState>()
@@ -1303,6 +1485,7 @@ impl Plugin for SimPlugin {
             .checksum_component_with_hash::<StunFrames>()
             .checksum_component_with_hash::<Dead>()
             .checksum_component_with_hash::<Boomerang>()
+            .checksum_component_with_hash::<AnimState>()
             .checksum_resource_with_hash::<FrameCount>()
             .checksum_resource_with_hash::<MatchScore>()
             .checksum_resource_with_hash::<MatchState>()
@@ -1332,6 +1515,7 @@ impl Plugin for SimPlugin {
                 catch_boomerangs,
                 throw_boomerangs,
                 tick_player_timers,
+                advance_animation,
                 advance_frame_count,
                 advance_input_history,
             )
@@ -1470,9 +1654,9 @@ pub struct SimSnapshot {
 }
 
 /// All rolled-back component values for a single Player entity.
-/// `Dead`, `DashState`, `StunFrames` are `#[require]`d on `Player`,
-/// so every Player entity carries a value for each of these — capture
-/// pulls them in lockstep.
+/// `Dead`, `DashState`, `StunFrames`, `AnimState` are `#[require]`d on
+/// `Player`, so every Player entity carries a value for each of these —
+/// capture pulls them in lockstep.
 #[derive(Clone, Copy, Debug)]
 pub struct PlayerSnap {
     pub player: Player,
@@ -1482,6 +1666,7 @@ pub struct PlayerSnap {
     pub dash: DashState,
     pub stun: StunFrames,
     pub dead: Dead,
+    pub anim: AnimState,
 }
 
 /// All rolled-back component values for a single Boomerang entity.
@@ -1513,9 +1698,10 @@ impl SimSnapshot {
                 &DashState,
                 &StunFrames,
                 &Dead,
+                &AnimState,
             )>()
             .iter(world)
-            .map(|(p, pos, prev, vel, dash, stun, dead)| PlayerSnap {
+            .map(|(p, pos, prev, vel, dash, stun, dead, anim)| PlayerSnap {
                 player: *p,
                 pos: *pos,
                 prev_pos: *prev,
@@ -1523,6 +1709,7 @@ impl SimSnapshot {
                 dash: *dash,
                 stun: *stun,
                 dead: *dead,
+                anim: *anim,
             })
             .collect();
         players.sort_by_key(|s| s.player.handle);
@@ -1587,6 +1774,7 @@ impl SimSnapshot {
                 snap.dash,
                 snap.stun,
                 snap.dead,
+                snap.anim,
             ));
         }
         for snap in &self.boomerangs {
