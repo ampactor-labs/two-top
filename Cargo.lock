@@ -5084,6 +5084,7 @@ dependencies = [
  "bevy_ggrs",
  "bytemuck",
  "fixed_math",
+ "proptest",
  "serde",
  "tracing",
 ]

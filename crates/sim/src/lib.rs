@@ -1355,63 +1355,65 @@ pub fn record_last_tick_time(time: Res<Time<Real>>, mut last: ResMut<LastSimTick
     last.0 = time.elapsed_secs_f64();
 }
 
-/// `GgrsSchedule` system: tick the AnimState frame counter and run
-/// the animation state-machine. Priority order (highest wins):
+/// Pure helper for [`advance_animation`]'s state machine. Given the
+/// observable state of one entity at the START of the tick, returns
+/// the AnimState the entity should hold at END of tick.
+///
+/// Priority order (highest wins):
 ///   1. `Dead.is_dying()` -> DEATH
 ///   2. `StunFrames > 0` -> HIT
-///   3. One-shot anim still in flight -> keep ticking
+///   3. One-shot anim still in flight -> keep ticking the same anim
 ///   4. `DashState::Dashing` -> DASH
 ///   5. otherwise -> IDLE
 ///
-/// THROW is set by `throw_boomerangs` (the system that spawns the
-/// boomerang) on the same tick the throw fires; the one-shot
-/// continuation rule keeps it ticking until the 6 frames complete.
+/// THROW transitions are set externally by `throw_boomerangs` on the
+/// tick the throw fires; this helper preserves the THROW one-shot via
+/// rule 3 until its frames elapse.
+///
+/// Pure for property-test purposes — no `&mut World`, no resources,
+/// no side effects. The system below is a thin wrapper.
+pub fn next_anim_state(
+    dead: Dead,
+    dash: DashState,
+    stun: StunFrames,
+    current: AnimState,
+) -> AnimState {
+    let target_id = if dead.is_dying() {
+        Some(AnimState::DEATH)
+    } else if stun.0 > 0 {
+        Some(AnimState::HIT)
+    } else if AnimState::is_oneshot(current.anim_id) && !current.is_finished() {
+        // Let the in-flight one-shot finish.
+        return AnimState {
+            anim_id: current.anim_id,
+            ticks: current.ticks.saturating_add(1),
+        };
+    } else if matches!(dash, DashState::Dashing { .. }) {
+        Some(AnimState::DASH)
+    } else {
+        Some(AnimState::IDLE)
+    };
+    let id = target_id.expect("priority above always assigns an anim_id");
+    if id != current.anim_id {
+        AnimState { anim_id: id, ticks: 0 }
+    } else {
+        AnimState {
+            anim_id: id,
+            ticks: current.ticks.saturating_add(1),
+        }
+    }
+}
+
+/// `GgrsSchedule` system: tick the AnimState frame counter and run
+/// the animation state-machine. Delegates per-entity logic to
+/// [`next_anim_state`] (which is pure and property-tested in
+/// `tests/anim_state.rs`).
 ///
 /// Per CONVENTIONS: animation does not interpolate — `display_index`
 /// snaps to a single atlas frame per tick.
 pub fn advance_animation(mut q: Query<(&Dead, &DashState, &StunFrames, &mut AnimState)>) {
     for (dead, dash, stun, mut anim) in &mut q {
-        // Death always wins. Lock to DEATH and tick — the one-shot
-        // caps at the corpse-mark frame via display_index().
-        if dead.is_dying() {
-            if anim.anim_id != AnimState::DEATH {
-                anim.anim_id = AnimState::DEATH;
-                anim.ticks = 0;
-            } else {
-                anim.ticks = anim.ticks.saturating_add(1);
-            }
-            continue;
-        }
-        // Hit wins over Dash/Idle/Throw. Re-trigger if anim isn't
-        // already HIT (StunFrames == 1 vs == 12 should both hold HIT
-        // for the full one-shot duration).
-        if stun.0 > 0 {
-            if anim.anim_id != AnimState::HIT {
-                anim.anim_id = AnimState::HIT;
-                anim.ticks = 0;
-            } else {
-                anim.ticks = anim.ticks.saturating_add(1);
-            }
-            continue;
-        }
-        // No priority override — let any in-flight one-shot finish
-        // (currently only THROW; HIT/DEATH already handled above).
-        if AnimState::is_oneshot(anim.anim_id) && !anim.is_finished() {
-            anim.ticks = anim.ticks.saturating_add(1);
-            continue;
-        }
-        // Pick from observable state.
-        let target = if matches!(dash, DashState::Dashing { .. }) {
-            AnimState::DASH
-        } else {
-            AnimState::IDLE
-        };
-        if target != anim.anim_id {
-            anim.anim_id = target;
-            anim.ticks = 0;
-        } else {
-            anim.ticks = anim.ticks.saturating_add(1);
-        }
+        *anim = next_anim_state(*dead, *dash, *stun, *anim);
     }
 }
 

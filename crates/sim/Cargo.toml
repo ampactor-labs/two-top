@@ -34,3 +34,8 @@ tracing = { version = "0.1", default-features = false, features = ["std"] }
 # one-feature-flip plus a packager swap.
 [target.'cfg(target_os = "android")'.dependencies]
 android-activity = { version = "0.6", features = ["native-activity"] }
+
+[dev-dependencies]
+# Phase 15 cycle 1 polish: property-test the AnimState state machine.
+# Same pin as crates/fixed_math.
+proptest = "1.11"
