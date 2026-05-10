@@ -8,7 +8,7 @@ use bytemuck::{Pod, Zeroable};
 use core::net::SocketAddr;
 use fixed_math::{Fix, RectF, Vec2F};
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 // ---- Wire input ----
 
@@ -1739,55 +1739,140 @@ impl SimSnapshot {
         }
     }
 
-    /// Restore the sim to this snapshot. Despawns all current Player +
-    /// Boomerang entities and re-spawns from the snapshot's bundles,
-    /// then overwrites the rolled-back resources. The caller is
-    /// expected to also reset any non-sim resources (the replay
-    /// playback cursor, etc.) — `SimSnapshot` only owns the sim's
-    /// own state.
+    /// Restore the sim to this snapshot. Mutates rolled-back component
+    /// VALUES in place on existing entities rather than the
+    /// despawn-and-respawn pattern that earlier revisions used —
+    /// per CONVENTIONS § Component Rules: "No mid-tick
+    /// `Commands::insert / remove::<T>()` on existing rollback
+    /// entities." Despawn-and-respawn churns each entity's bevy_ggrs
+    /// `Rollback` component ID, which desyncs bevy_ggrs's internal
+    /// SyncTest verification snapshot machinery (verification rolls
+    /// back N ticks and compares checksums; mismatched Rollback IDs
+    /// cause silent state divergence on the verification re-runs).
     ///
-    /// Spawn order matches the canonical setup order: players in
-    /// `handle` ascending, then boomerangs in `owner_handle` ascending.
-    /// This keeps Bevy's entity-id assignment deterministic so the
-    /// post-restore world is bit-identical to what the same frame
-    /// would have looked like during the original forward sim.
+    /// Players match by handle (always count = 2 in the live game).
+    /// Boomerangs match by `owner_handle`; missing ones spawn,
+    /// extras despawn. The spawn/despawn for boomerangs is still
+    /// necessary because count varies (0..N), but it's restricted
+    /// to entities the snapshot legitimately added or removed —
+    /// no churn on entities whose VALUE changed.
+    ///
+    /// The caller is expected to also reset any non-sim resources
+    /// (the replay playback cursor, etc.) — `SimSnapshot` only owns
+    /// the sim's own state.
     pub fn restore(&self, world: &mut World) {
-        let player_entities: Vec<Entity> = world
-            .query_filtered::<Entity, With<Player>>()
+        // ---- Players: mutate in place by handle ----
+        // Players are #[require]'d into existence at app startup and
+        // never despawned during normal play, so a snap of 2 players
+        // and a world of 2 players is the universal case. Match by
+        // `Player.handle` which is the canonical identifier.
+        //
+        // Defensive: despawn any Player whose handle isn't in the
+        // snapshot. Live game has count=2 so this is a no-op, but
+        // tests that seed extra Player handles need them removed.
+        let snap_handles: BTreeSet<usize> = self.players.iter().map(|s| s.player.handle).collect();
+        let extra_players: Vec<Entity> = world
+            .query::<(Entity, &Player)>()
             .iter(world)
+            .filter(|(_, p)| !snap_handles.contains(&p.handle))
+            .map(|(e, _)| e)
             .collect();
-        for e in player_entities {
+        for e in extra_players {
             world.despawn(e);
         }
-        let boomerang_entities: Vec<Entity> = world
-            .query_filtered::<Entity, With<Boomerang>>()
-            .iter(world)
-            .collect();
-        for e in boomerang_entities {
-            world.despawn(e);
+        for snap in &self.players {
+            let target_entity = world
+                .query::<(Entity, &Player)>()
+                .iter(world)
+                .find(|(_, p)| p.handle == snap.player.handle)
+                .map(|(e, _)| e);
+            if let Some(e) = target_entity {
+                let mut entity_mut = world.entity_mut(e);
+                if let Some(mut c) = entity_mut.get_mut::<PositionF>() {
+                    *c = snap.pos;
+                }
+                if let Some(mut c) = entity_mut.get_mut::<PreviousPositionF>() {
+                    *c = snap.prev_pos;
+                }
+                if let Some(mut c) = entity_mut.get_mut::<VelocityF>() {
+                    *c = snap.vel;
+                }
+                if let Some(mut c) = entity_mut.get_mut::<DashState>() {
+                    *c = snap.dash;
+                }
+                if let Some(mut c) = entity_mut.get_mut::<StunFrames>() {
+                    *c = snap.stun;
+                }
+                if let Some(mut c) = entity_mut.get_mut::<Dead>() {
+                    *c = snap.dead;
+                }
+                if let Some(mut c) = entity_mut.get_mut::<AnimState>() {
+                    *c = snap.anim;
+                }
+            } else {
+                // Snapshot has a player handle the live world doesn't.
+                // Spawn it. Should not happen during normal scrub; the
+                // app's startup already placed both Players.
+                world.spawn((
+                    snap.player,
+                    snap.pos,
+                    snap.prev_pos,
+                    snap.vel,
+                    snap.dash,
+                    snap.stun,
+                    snap.dead,
+                    snap.anim,
+                ));
+            }
         }
 
-        for snap in &self.players {
-            world.spawn((
-                snap.player,
-                snap.pos,
-                snap.prev_pos,
-                snap.vel,
-                snap.dash,
-                snap.stun,
-                snap.dead,
-                snap.anim,
-            ));
+        // ---- Boomerangs: match by owner_handle, spawn missing,
+        //                  despawn extras ----
+        // Determinism note: boomerang count varies (0..N), so we
+        // can't avoid spawn/despawn entirely. The match-by-owner
+        // pattern minimizes churn — a boomerang with the same owner
+        // in both snap and world stays as the SAME entity (mutated
+        // in place); only count-mismatched entities churn.
+        let snap_owners: BTreeSet<usize> = self
+            .boomerangs
+            .iter()
+            .map(|s| s.boomerang.owner_handle)
+            .collect();
+        let extras: Vec<Entity> = world
+            .query::<(Entity, &Boomerang)>()
+            .iter(world)
+            .filter(|(_, b)| !snap_owners.contains(&b.owner_handle))
+            .map(|(e, _)| e)
+            .collect();
+        for e in extras {
+            world.despawn(e);
         }
         for snap in &self.boomerangs {
-            world.spawn((
-                snap.boomerang,
-                snap.pos,
-                snap.prev_pos,
-                snap.vel,
-            ));
+            let target_entity = world
+                .query::<(Entity, &Boomerang)>()
+                .iter(world)
+                .find(|(_, b)| b.owner_handle == snap.boomerang.owner_handle)
+                .map(|(e, _)| e);
+            if let Some(e) = target_entity {
+                let mut entity_mut = world.entity_mut(e);
+                if let Some(mut c) = entity_mut.get_mut::<Boomerang>() {
+                    *c = snap.boomerang;
+                }
+                if let Some(mut c) = entity_mut.get_mut::<PositionF>() {
+                    *c = snap.pos;
+                }
+                if let Some(mut c) = entity_mut.get_mut::<PreviousPositionF>() {
+                    *c = snap.prev_pos;
+                }
+                if let Some(mut c) = entity_mut.get_mut::<VelocityF>() {
+                    *c = snap.vel;
+                }
+            } else {
+                world.spawn((snap.boomerang, snap.pos, snap.prev_pos, snap.vel));
+            }
         }
 
+        // ---- Resources ----
         *world.resource_mut::<FrameCount>() = self.frame_count;
         *world.resource_mut::<MatchState>() = self.match_state;
         *world.resource_mut::<MatchScore>() = self.match_score;

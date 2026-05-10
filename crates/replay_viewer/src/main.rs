@@ -106,17 +106,30 @@ fn main() -> ExitCode {
         replay.header.num_players,
     );
 
-    // Same SyncTest configuration replay_sync uses — a single-player
-    // session that runs each frame deterministically without rollback
-    // verification overhead. The check_distance value is irrelevant for
-    // playback (no input divergence is possible), but keeping it at 2
-    // matches the live app's session shape so the schedule executes
-    // identically.
+    // Replay-playback session config: check_distance=0 + input_delay=0.
+    //
+    // Both are critical for the snapshot-scrub flow (cycle 2a) to
+    // produce deterministic state across backward seeks:
+    //
+    // - check_distance=0 disables bevy_ggrs's per-tick verification
+    //   rollback. The verification snapshot ring is independent of
+    //   our SimSnapshot and would desync after restore.
+    //
+    // - input_delay=0 disables bevy_ggrs's internal input-delay
+    //   buffer. With input_delay > 0, N frames of inputs sit in
+    //   bevy_ggrs's buffer (not in SimSnapshot) — restoring sets the
+    //   World back, but the buffer's contents are "wrong" for the
+    //   restored frame, producing divergent forward replay.
+    //
+    // The live game uses input_delay=2 to mask network latency;
+    // replays have no network so 0 is both correct and faster.
+    // See `replay_sync::build_app_configurable` rationale +
+    // `tests/snapshot_round_trip.rs` for the catching test.
     let mut sb = SessionBuilder::<GgrsCfg>::new()
         .with_num_players(replay.header.num_players as usize)
         .expect("with_num_players")
-        .with_check_distance(2)
-        .with_input_delay(2);
+        .with_check_distance(0)
+        .with_input_delay(0);
     for i in 0..replay.header.num_players as usize {
         sb = sb.add_player(PlayerType::Local, i).expect("add_player");
     }

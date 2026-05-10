@@ -186,12 +186,43 @@ pub fn canonical_path() -> PathBuf {
 /// Build a fresh app configured for replay-driven sim with two players at
 /// the origin. Mirrors the integration-test setup so that local and CI runs
 /// produce comparable state.
-fn build_app(replay: Replay) -> App {
+///
+/// `pub` so integration tests (e.g. `tests/snapshot_round_trip.rs`) can
+/// drive the same exact app shape `compute_checksum_tsv` uses internally.
+pub fn build_app(replay: Replay) -> App {
+    build_app_with_check_distance(replay, 2)
+}
+
+/// Variant of [`build_app`] that lets the caller pick the SyncTest
+/// `check_distance`. Used by snapshot-restore round-trip tests that
+/// want `check_distance: 0` (no per-tick verification rollback —
+/// bevy_ggrs's internal verification snapshot ring is incompatible
+/// with `SimSnapshot::restore` overrides). The replay viewer's
+/// playback flow should also use `check_distance: 0` for the same
+/// reason — there's no input divergence in pure playback so
+/// verification is wasted work that also breaks scrub.
+pub fn build_app_with_check_distance(replay: Replay, check_distance: usize) -> App {
+    build_app_configurable(replay, check_distance, 2)
+}
+
+/// Full-control variant of [`build_app`]. Used by snapshot-restore
+/// round-trip tests that need `input_delay: 0` (bevy_ggrs's input
+/// delay buffer holds N frames of inputs INTERNALLY — not visible to
+/// `SimSnapshot::capture`, not restorable by `SimSnapshot::restore`.
+/// With `input_delay > 0` the buffer state diverges between forward
+/// play and restore-then-replay paths). Replay viewer's playback
+/// loop should also use `input_delay: 0` since playback has no
+/// network latency to mask.
+pub fn build_app_configurable(
+    replay: Replay,
+    check_distance: usize,
+    input_delay: u32,
+) -> App {
     let mut sb = SessionBuilder::<GgrsCfg>::new()
         .with_num_players(replay.header.num_players as usize)
         .expect("with_num_players")
-        .with_check_distance(2)
-        .with_input_delay(2);
+        .with_check_distance(check_distance)
+        .with_input_delay(input_delay as usize);
     for i in 0..replay.header.num_players as usize {
         sb = sb.add_player(PlayerType::Local, i).expect("add_player");
     }
@@ -291,6 +322,25 @@ fn hash_boomerangs(world: &mut World) -> u64 {
         part.hash(&mut h);
     }
     h.finish()
+}
+
+/// Combined per-frame state checksum xoring every component + resource
+/// hash that `compute_checksum_tsv` records as separate columns. This is
+/// the same `total_checksum` value the TSV's first hex column carries —
+/// surfaced as a function so tests can compute it without parsing TSV
+/// strings.
+///
+/// `pub` so integration tests can compare two app worlds at the same
+/// frame and assert byte-identity.
+pub fn world_state_checksum(world: &mut World) -> u64 {
+    let pos_part = hash_component::<PositionF>(world);
+    let vel_part = hash_component::<VelocityF>(world);
+    let dash_part = hash_component::<DashState>(world);
+    let stun_part = hash_component::<StunFrames>(world);
+    let boom_part = hash_boomerangs(world);
+    let score_part = hash_resource::<MatchScore>(world);
+    let state_part = hash_resource::<MatchState>(world);
+    pos_part ^ vel_part ^ dash_part ^ stun_part ^ boom_part ^ score_part ^ state_part
 }
 
 /// Run `replay` through the sim and return a TSV with one header row plus
