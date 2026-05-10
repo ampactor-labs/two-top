@@ -1455,7 +1455,6 @@ impl Plugin for SimPlugin {
             .init_resource::<MatchScore>()
             .init_resource::<MatchState>()
             .init_resource::<InputHistory>()
-            .init_resource::<SelectedArena>()
             .insert_resource(RollbackFrameRate(TICK_HZ));
 
         // Rollback registrations
@@ -1470,7 +1469,6 @@ impl Plugin for SimPlugin {
             .rollback_component_with_copy::<Boomerang>()
             .rollback_component_with_copy::<BoomerangState>()
             .rollback_component_with_copy::<AnimState>()
-            .rollback_component_with_copy::<BonePyre>()
             .rollback_resource_with_copy::<FrameCount>()
             .rollback_resource_with_copy::<MatchScore>()
             .rollback_resource_with_copy::<MatchState>()
@@ -1488,7 +1486,6 @@ impl Plugin for SimPlugin {
             .checksum_component_with_hash::<Dead>()
             .checksum_component_with_hash::<Boomerang>()
             .checksum_component_with_hash::<AnimState>()
-            .checksum_component_with_hash::<BonePyre>()
             .checksum_resource_with_hash::<FrameCount>()
             .checksum_resource_with_hash::<MatchScore>()
             .checksum_resource_with_hash::<MatchState>()
@@ -1514,7 +1511,6 @@ impl Plugin for SimPlugin {
                 recall_boomerangs,
                 boomerang_physics,
                 boomerang_wall_collision,
-                boomerang_pyre_collision,
                 hit_boomerang_player,
                 catch_boomerangs,
                 throw_boomerangs,
@@ -1629,119 +1625,6 @@ impl Plugin for SimLifecycleLogPlugin {
     }
 }
 
-// ---- Phase 16: arenas ----
-
-/// Identifies the active arena for a match. Selected once at match
-/// start (loser-bans flow lands later); persists for the whole match.
-/// Stored as a non-rolled-back `Resource` because the selection is
-/// fixed for every tick of the match — rolling it back would be
-/// pointless overhead. The arena's per-entity state (BonePyre
-/// shatter, etc.) IS rolled back.
-#[derive(Resource, Clone, Copy, PartialEq, Eq, Hash, Debug, Default)]
-pub enum ArenaId {
-    /// The neutral arena: open box + one central bone pyre.
-    /// Tournament-default, the testing ground for raw boomerang
-    /// mechanics. Even the "neutral" arena has one piece of
-    /// interactive cover so every throw cycle has tactical texture.
-    #[default]
-    Anchor,
-    /// Phase 16 cycle 3: horizontal blood chasm bisecting the arena
-    /// plus an Altar Sigil per side that triggers a temporary
-    /// bone-bridge. Currently empty (just the bare arena box) until
-    /// cycle 3 lands the chasm + sigil mechanics.
-    Crossing,
-    /// Phase 16 cycle 4: paired Sigil Doors (player teleporters)
-    /// plus two chain-linked bone pyres. Currently empty until
-    /// cycle 4.
-    Reliquary,
-}
-
-#[derive(Resource, Clone, Copy, PartialEq, Eq, Hash, Debug, Default)]
-pub struct SelectedArena(pub ArenaId);
-
-/// Cover entity that blocks boomerang line-of-sight until shattered.
-/// Boomerangs ricochet off intact pyres exactly the way they ricochet
-/// off arena walls. On impact the pyre's `shattered` flag flips true
-/// and from that tick on the pyre stops blocking — the boomerang
-/// passes through as if the pyre weren't there.
-///
-/// Match-scoped persistence: shattered pyres stay shattered for the
-/// rest of the match. Combined with floor stains (also match-scope
-/// per the post-Phase-15 refactor) this makes the arena read as a
-/// visual scoreboard — by round 5 of a BO5 the cover map tells the
-/// match's history.
-///
-/// Stored with the rect embedded (rather than a separate PositionF +
-/// half-extent constants) because every pyre is a fixed-position
-/// arena prop — there's no per-tick movement, just the discrete
-/// shatter event. Rolled back via `rollback_component_with_copy` so
-/// the shatter is deterministic across resimulation.
-#[derive(Component, Clone, Copy, PartialEq, Eq, Hash, Debug)]
-#[require(Rollback)]
-pub struct BonePyre {
-    pub rect: RectF,
-    pub shattered: bool,
-}
-
-/// Per-arena pyre placements. Returned in fixed deterministic order
-/// so entity-id assignment is byte-identical across hosts. All pyres
-/// are mirror-symmetric about the arena's center axis (competitive
-/// 1v1 fairness — players never get an asymmetric advantage).
-pub fn arena_pyres_for(arena: ArenaId) -> Vec<BonePyre> {
-    let pyre_half = Fix::const_from_int(BONE_PYRE_HALF_EXTENT_CM);
-    match arena {
-        ArenaId::Anchor => {
-            // One central pyre — the simplest possible interactive
-            // arena prop. Sits exactly on the y-axis so it's
-            // mirror-symmetric horizontally.
-            vec![BonePyre {
-                rect: RectF::from_center_half_extents(Vec2F::ZERO, Vec2F::new(pyre_half, pyre_half)),
-                shattered: false,
-            }]
-        }
-        ArenaId::Crossing | ArenaId::Reliquary => {
-            // Cycle 3 + 4 will populate these. Empty for now.
-            Vec::new()
-        }
-    }
-}
-
-/// Half-extent of every bone pyre. 24 cm = 48 cm full extent — sized
-/// between the player (32 cm) and an arena wall (200+ cm) so it
-/// reads as cover at the camera's framing distance without dwarfing
-/// the players.
-pub const BONE_PYRE_HALF_EXTENT_CM: i32 = 24;
-
-/// `GgrsSchedule` system: bounce boomerangs off intact bone pyres
-/// (same ricochet semantics as `boomerang_wall_collision`) and
-/// shatter the pyre on impact. Runs after `boomerang_wall_collision`
-/// so a boomerang that ricochets off the arena edge into a pyre
-/// resolves the wall first, then the pyre.
-///
-/// `Returning` boomerangs phase through pyres just as they phase
-/// through walls — the recall pull is uncanny by design.
-pub fn boomerang_pyre_collision(
-    mut pyres: Query<&mut BonePyre>,
-    mut boomerangs: Query<(&Boomerang, &mut PositionF, &mut VelocityF)>,
-) {
-    for (boom, mut pos, mut vel) in &mut boomerangs {
-        if matches!(boom.state, BoomerangState::Returning) {
-            continue;
-        }
-        for mut pyre in &mut pyres {
-            if pyre.shattered {
-                continue;
-            }
-            let bb = boomerang_rect(pos.0);
-            if let Some(push) = resolve_collision(bb, pyre.rect) {
-                pos.0 = pos.0 + push;
-                vel.0 = reflect_velocity_for_push(vel.0, push);
-                pyre.shattered = true;
-            }
-        }
-    }
-}
-
 // ---- Phase 14: SimSnapshot ----
 
 /// In-memory snapshot of every rolled-back sim component + resource at
@@ -1764,9 +1647,6 @@ pub struct SimSnapshot {
     pub players: Vec<PlayerSnap>,
     /// One bundle per live Boomerang entity.
     pub boomerangs: Vec<BoomerangSnap>,
-    /// One per BonePyre entity, keyed deterministically by rect-min
-    /// for restore ordering. Captures the shatter state.
-    pub pyres: Vec<BonePyreSnap>,
     pub frame_count: FrameCount,
     pub match_state: MatchState,
     pub match_score: MatchScore,
@@ -1796,15 +1676,6 @@ pub struct BoomerangSnap {
     pub pos: PositionF,
     pub prev_pos: PreviousPositionF,
     pub vel: VelocityF,
-}
-
-/// Captured state for a single BonePyre entity. Position is fixed
-/// (`rect`) so the snapshot just preserves the shatter state for
-/// restore — backward-scrub past a shatter event must un-shatter
-/// the pyre.
-#[derive(Clone, Copy, Debug)]
-pub struct BonePyreSnap {
-    pub pyre: BonePyre,
 }
 
 impl SimSnapshot {
@@ -1855,21 +1726,10 @@ impl SimSnapshot {
             .collect();
         boomerangs.sort_by_key(|s| s.boomerang.owner_handle);
 
-        let mut pyres: Vec<BonePyreSnap> = world
-            .query::<&BonePyre>()
-            .iter(world)
-            .map(|p| BonePyreSnap { pyre: *p })
-            .collect();
-        // Deterministic order keyed by rect-min raw bits — pyre
-        // positions are unique per arena, so this gives a stable
-        // total ordering for restore.
-        pyres.sort_by_key(|s| (s.pyre.rect.min.x.to_bits(), s.pyre.rect.min.y.to_bits()));
-
         Self {
             frame: frame_count.0,
             players,
             boomerangs,
-            pyres,
             frame_count,
             match_state,
             match_score,
@@ -1904,13 +1764,6 @@ impl SimSnapshot {
         for e in boomerang_entities {
             world.despawn(e);
         }
-        let pyre_entities: Vec<Entity> = world
-            .query_filtered::<Entity, With<BonePyre>>()
-            .iter(world)
-            .collect();
-        for e in pyre_entities {
-            world.despawn(e);
-        }
 
         for snap in &self.players {
             world.spawn((
@@ -1931,9 +1784,6 @@ impl SimSnapshot {
                 snap.prev_pos,
                 snap.vel,
             ));
-        }
-        for snap in &self.pyres {
-            world.spawn(snap.pyre);
         }
 
         *world.resource_mut::<FrameCount>() = self.frame_count;

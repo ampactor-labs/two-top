@@ -37,9 +37,8 @@ use fixed_math::Vec2F;
 use render::{EffectsPlugin, RenderSyncPlugin};
 use replay::{ReplayPlayback, ReplayPlaybackPlugin, decode_for_sim_version};
 use sim::{
-    AnimState, BOOMERANG_HALF_EXTENT_CM, BonePyre, Boomerang, GgrsCfg, PLAYER_HALF_EXTENT_CM,
-    Player, PositionF, PreviousPositionF, SelectedArena, SimPlugin, SimSnapshot, VelocityF,
-    arena_pyres_for, arena_walls,
+    AnimState, BOOMERANG_HALF_EXTENT_CM, Boomerang, GgrsCfg, PLAYER_HALF_EXTENT_CM, Player,
+    PositionF, PreviousPositionF, SimPlugin, SimSnapshot, VelocityF, arena_walls,
 };
 
 /// Snapshot interval in sim ticks. Per BUILD_PLAN § Phase 14 Produces:
@@ -148,7 +147,6 @@ fn main() -> ExitCode {
             (
                 ensure_boomerang_visuals,
                 sync_sprite_atlas_from_anim,
-                sync_pyre_visuals,
                 handle_keyboard_controls,
                 handle_scrub_bar_click,
                 handle_frame_step_click,
@@ -300,7 +298,6 @@ fn setup(
     mut commands: Commands,
     asset_server: Res<AssetServer>,
     mut atlases: ResMut<Assets<TextureAtlasLayout>>,
-    selected_arena: Res<SelectedArena>,
 ) {
     commands.spawn(Camera2d);
 
@@ -362,29 +359,6 @@ fn setup(
         },
         Transform::from_xyz(0.0, 0.0, -1.0),
     ));
-
-    // Phase 16 cycle 1: arena pyres. Same spawn pattern as the live
-    // app — the viewer's job is to render exactly what the players
-    // saw, so per-arena props must match.
-    for pyre in arena_pyres_for(selected_arena.0) {
-        let size_cm = (
-            (pyre.rect.max.x - pyre.rect.min.x).to_num::<f32>(),
-            (pyre.rect.max.y - pyre.rect.min.y).to_num::<f32>(),
-        );
-        let center = (
-            (pyre.rect.min.x + pyre.rect.max.x).to_num::<f32>() * 0.5,
-            (pyre.rect.min.y + pyre.rect.max.y).to_num::<f32>() * 0.5,
-        );
-        commands.spawn((
-            pyre,
-            Sprite {
-                color: render::palette::BONE,
-                custom_size: Some(Vec2::new(size_cm.0, size_cm.1)),
-                ..default()
-            },
-            Transform::from_xyz(center.0, center.1, 0.4),
-        ));
-    }
 
     // Frame counter HUD pinned to the upper-left, world-space (matches
     // the existing debug overlay convention in the app crate).
@@ -553,20 +527,6 @@ fn sync_sprite_atlas_from_anim(mut q: Query<(&AnimState, &mut Sprite), With<Play
         if let Some(atlas) = sprite.texture_atlas.as_mut() {
             atlas.index = anim.display_index() as usize;
         }
-    }
-}
-
-/// Phase 16 cycle 1 — pyre visual sync. Mirror of app::sync_pyre_visuals.
-/// Re-tints when the pyre's rolled-back `shattered` flag changes;
-/// scrubbing backward in the viewer past a shatter event will revert
-/// the tint correctly because the snapshot restores the flag too.
-fn sync_pyre_visuals(mut q: Query<(&BonePyre, &mut Sprite), Changed<BonePyre>>) {
-    for (pyre, mut sprite) in &mut q {
-        sprite.color = if pyre.shattered {
-            render::palette::CHARCOAL_LINE
-        } else {
-            render::palette::BONE
-        };
     }
 }
 

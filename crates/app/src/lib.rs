@@ -19,9 +19,8 @@ use fixed_math::Vec2F;
 use input_touch::{CursorPosition, TouchInputsPlugin, WindowSize, update_touch_state};
 use render::{EffectsPlugin, RenderSyncPlugin};
 use sim::{
-    AnimState, BOOMERANG_HALF_EXTENT_CM, BonePyre, Boomerang, GgrsCfg, Player, PositionF,
-    PreviousPositionF, SelectedArena, SimLifecycleLogPlugin, SimPlugin, VelocityF, arena_pyres_for,
-    arena_walls,
+    AnimState, BOOMERANG_HALF_EXTENT_CM, Boomerang, GgrsCfg, Player, PositionF, PreviousPositionF,
+    SimLifecycleLogPlugin, SimPlugin, VelocityF, arena_walls,
 };
 
 mod camera;
@@ -92,7 +91,6 @@ pub fn run() {
             (
                 ensure_boomerang_visuals,
                 sync_sprite_atlas_from_anim,
-                sync_pyre_visuals,
                 log_app_exit,
             ),
         )
@@ -126,7 +124,6 @@ fn setup(
     mut commands: Commands,
     asset_server: Res<AssetServer>,
     mut atlases: ResMut<Assets<TextureAtlasLayout>>,
-    selected_arena: Res<SelectedArena>,
 ) {
     commands.spawn(Camera2d);
 
@@ -203,47 +200,6 @@ fn setup(
         },
         Transform::from_xyz(0.0, 0.0, -1.0),
     ));
-
-    // Phase 16 cycle 1: spawn arena-specific bone pyres. Spawn order
-    // matches arena_pyres_for() for deterministic entity ids across
-    // hosts. Visual is a placeholder Bone-colored rectangle for now;
-    // proper pixel art comes in a polish pass.
-    for pyre in arena_pyres_for(selected_arena.0) {
-        let size_cm = (
-            (pyre.rect.max.x - pyre.rect.min.x).to_num::<f32>(),
-            (pyre.rect.max.y - pyre.rect.min.y).to_num::<f32>(),
-        );
-        let center = (
-            (pyre.rect.min.x + pyre.rect.max.x).to_num::<f32>() * 0.5,
-            (pyre.rect.min.y + pyre.rect.max.y).to_num::<f32>() * 0.5,
-        );
-        commands.spawn((
-            pyre,
-            Sprite {
-                color: render::palette::BONE,
-                custom_size: Some(Vec2::new(size_cm.0, size_cm.1)),
-                ..default()
-            },
-            Transform::from_xyz(center.0, center.1, 0.4),
-        ));
-    }
-}
-
-/// Phase 16 cycle 1 — pyre visual sync. Watches every `BonePyre` and
-/// tints its sprite based on the rolled-back `shattered` flag:
-/// intact = Bone, shattered = Charcoal Line (the dark "shattered
-/// remnant" reading). Match-scoped persistence is automatic — the
-/// flag stays true through round transitions because the pyre
-/// component itself stays in the world; the only reset is at app
-/// restart (or eventually MatchOver -> next match).
-fn sync_pyre_visuals(mut q: Query<(&BonePyre, &mut Sprite), Changed<BonePyre>>) {
-    for (pyre, mut sprite) in &mut q {
-        sprite.color = if pyre.shattered {
-            render::palette::CHARCOAL_LINE
-        } else {
-            render::palette::BONE
-        };
-    }
 }
 
 /// `Update`-schedule system: attaches a placeholder sprite + transform
