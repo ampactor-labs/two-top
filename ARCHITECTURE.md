@@ -316,17 +316,16 @@ Diagnostic events written to `.bmrg.log` companion file (JSON Lines).
 
 Three-layer determinism defense:
 
-**Layer 1: SyncTestSession.** Single-machine. Runs every CI job. `check_distance: 7`, `input_delay: 0`. Catches intra-machine non-determinism.
+**Layer 1: SyncTestSession.** Single-machine. Runs every CI job via `cargo nextest run --workspace --locked` in `ci.yml`, which executes `crates/sim/tests/determinism.rs::determinism_locked_600_frame_synctest` — a 600-frame SyncTest with `check_distance: 7`, `input_delay: 2`. Catches intra-machine non-determinism. (The live app + `replay_sync` use `check_distance: 2` to keep the per-frame resimulation cost down; the test bumps it to 7 for stricter coverage.)
 
 **Layer 2: Cross-platform replay matrix.** `replay_sync` binary runs `tests/demos/canonical/match_v1.bmrg` headlessly on each platform, dumps per-frame per-component checksum log. Diff job compares all logs against linux-x64 baseline. Platforms: linux-x64, linux-aarch64 (qemu), macos-14 (native ARM), aarch64-linux-android (currently scoped to `fixed_math` only — see `.github/workflows/determinism.yml`).
 
 **Layer 3: Per-component checksum dump for diagnostics.** When the diff job finds a divergence, the log already says which component column differs at which frame. `scripts/diagnose_desync.sh` re-runs `replay_sync --dump-state-at <frame>` on both platforms and prints a side-by-side comparison.
 
-Soak schedule:
-- **PR**: 30s canonical demo (1,800 frames)
-- **Main**: 5min canonical + stress demos (18,000 frames)
-- **Nightly**: 1hr fuzzed inputs, 100 seeds
-- **Weekly**: 10hr fuzzed soak
+Soak schedule (current; the four-tier ladder below is the eventual target):
+- **Per-PR + per-main**: `ci.yml` runs `cargo nextest run --workspace --locked` (covers Layer 1's 600-frame SyncTest) + `clippy --workspace --all-targets --locked -- -D warnings`. `determinism.yml` runs Layer 2's cross-platform replay matrix on the canonical demo.
+- **Nightly**: `fuzz_soak.yml` runs N seeds × 1800 frames (default 100 seeds via cron `0 4 * * *`).
+- **Aspirational**: per-main 18000-frame stress demos + weekly 10hr fuzzed soak. Not currently scheduled — wire when the project has hardened enough that the existing tiers stop catching novel bugs.
 
 Fuzzer auto-commits divergent seeds as `tests/demos/regressions/<seed>.bmrg`.
 
