@@ -394,21 +394,30 @@ pub struct FloorStain {
     pub owner_handle: usize,
 }
 
-/// Render-side detector: clears every [`FloorStain`] when a new round
-/// starts. The "new round starts" signal is `MatchState` transitioning
-/// INTO `Countdown` from a non-`Countdown` predecessor (typically
-/// `RoundOver` for inter-round resets). Keeps the stain set
-/// round-scoped — players don't see the prior round's deaths bleed
-/// into the new one.
-pub fn clear_stains_on_round_reset(
+/// Render-side detector: clears every [`FloorStain`] when a NEW
+/// MATCH starts (transition out of `MatchOver`). Stains accumulate
+/// across every round of a match — by round 5 of a BO5 the arena
+/// is a wreckage of the entire match's violence, readable as a
+/// visual scoreboard. Round transitions DO NOT clear stains.
+///
+/// This is the synthesis primitive (VISUAL_TARGET_PACK.md, "the
+/// arena remembers each round's violence") cranked to match-scope —
+/// the most aesthetically aligned scope for the gore-revival pole.
+///
+/// Currently `MatchOver` is terminal in sim, so this trigger never
+/// fires within a single app session — stains effectively persist
+/// for the lifetime of the process. The system is wired up in
+/// advance for the eventual Phase 18 "play again" flow, where the
+/// MatchOver → Countdown transition becomes a real signal.
+pub fn clear_stains_on_match_reset(
     state: Res<MatchState>,
     mut prev: Local<Option<MatchState>>,
     mut commands: Commands,
     stains: Query<Entity, With<FloorStain>>,
 ) {
-    let entered_countdown = matches!(*state, MatchState::Countdown { .. });
-    let was_countdown = matches!(*prev, Some(MatchState::Countdown { .. }));
-    if entered_countdown && !was_countdown && prev.is_some() {
+    let was_match_over = matches!(*prev, Some(MatchState::MatchOver));
+    let now_post_match_over = !matches!(*state, MatchState::MatchOver);
+    if was_match_over && now_post_match_over {
         for entity in &stains {
             commands.entity(entity).despawn();
         }
@@ -517,7 +526,7 @@ impl Plugin for EffectsPlugin {
                     spawn_hit_and_death_bursts,
                     spawn_recall_pulses,
                     spawn_ambient_embers,
-                    clear_stains_on_round_reset,
+                    clear_stains_on_match_reset,
                 ),
             );
     }
