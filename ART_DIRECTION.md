@@ -1,8 +1,9 @@
-# Art Direction
+# Art Direction v2
 
-Phase 15 prep. This document does not supersede `ARCHITECTURE.md`,
-`BUILD_PLAN.md`, or `CONVENTIONS.md`; it turns their visual intent into
-an asset contract.
+Art overhaul spec. Supersedes the Phase 15 prep version. This document
+does not supersede `ARCHITECTURE.md`, `BUILD_PLAN.md`, or `CONVENTIONS.md`;
+it turns their visual intent into an asset contract at a dramatically
+higher craft bar.
 
 ## North Star
 
@@ -25,8 +26,9 @@ during them. The arena remembers each kill until the round resets.
 Neither lineage alone is enough. "Demonic HLD" without the gore pole
 goes too distant-pretty for boomerang-fu energy. "Doom on a phone"
 without the HLD pole loses the readability that rollback-deliberate
-1v1 needs. Both poles, applied per-mode (see `VISUAL_TARGET_PACK.md` §
-Two Modes).
+1v1 needs. Both poles, applied per-mode (see Two-Mode Rule below).
+
+## Readability Hierarchy
 
 The priority order is:
 
@@ -39,37 +41,11 @@ The priority order is:
 
 If an effect competes with a higher-priority item, cut the effect.
 
-## Research Anchors
-
-- Apple HIG game controls: frequent controls belong near the thumbs,
-  controls must avoid device safe areas, and primary touch controls
-  should be at least 44 by 44 pt with clear press states.
-- Android accessibility guidance: touch targets should be at least
-  48 by 48 dp, with about 8 dp spacing between adjacent targets.
-- Riot's gameplay-clarity writing is the right model for a competitive
-  game: characters and VFX must keep gameplay information visible, while
-  environments stay cheaper, quieter, and less detailed.
-- Xbox accessibility contrast guidance applies directly to the HUD and
-  gameplay cues: important text and non-text elements need enough
-  contrast against the current background.
-- Pixel art references consistently point to the same constraints:
-  limited palettes, strong value separation, readable silhouettes, and
-  outlines that support shape before detail.
-
-Useful references:
-
-- https://developer.apple.com/design/human-interface-guidelines/game-controls
-- https://support.google.com/accessibility/android/answer/7101858
-- https://www.riotgames.com/en/news/valorant-shaders-and-gameplay-clarity
-- https://www.riotgames.com/en/artedu/visual-effects
-- https://learn.microsoft.com/en-us/gaming/accessibility/xbox-accessibility-guidelines/102
-- https://lospec.com/palettes/
-
 ## Palette
 
-Phase 15 asks for 16-color palette enforcement. Start with this working
-palette and adjust only after testing screenshots on desktop and phone.
-The importable palette file lives at `assets/palettes/two_top_16.gpl`.
+The 16-color palette is the single source of truth. The importable
+palette file lives at `assets/palettes/two_top_16.gpl`; the Rust
+module is `render::palette`.
 
 | Role | Hex |
 | --- | --- |
@@ -94,87 +70,130 @@ Do not make player identity color-only. P0 and P1 need different
 silhouettes, horns, weapon hold poses, or outline treatments so they
 survive color-vision differences and video compression.
 
-## Asset Sizes
+## Two-Mode Rule
 
-- Player source frames: 24 by 24 px, rendered at 48 by 48 world units.
+The renderer operates in two modes: **composition** (HLD-quiet) for
+idle/movement/in-flight throw, and **contact** (gore-revival proud)
+for hit/kill/death/recall-snap. Mode switches are hard, not blended.
+Composition is most of the round; contact is brief frames.
+
+## Asset Sizes (v2)
+
+- Player source frames: **32×32 px**, rendered at **64×64 world units**.
   The collision body is smaller than the sprite, so the sprite can carry
   an outline, horns, and animation smear without changing gameplay.
-- Boomerang source frames: 12 by 12 px, with a separate 3-frame trail
-  strip. The boomerang must remain brighter than floor detail in every
-  arena.
-- Arena tiles: 16 by 16 px. Floor motifs should stay low contrast and
+- Boomerang source frames: **20×20 px**, rendered at **40×40 world units**.
+  The boomerang must remain brighter than floor detail in every arena.
+- Arena tiles: **32×32 px**. Floor motifs should stay low contrast and
   never use the same high-value accents as players, boomerangs, or hits.
-- Particles: 2 by 2, 3 by 3, and 4 by 4 px chunky sprites. Prefer hard
-  opaque pixels over translucent haze.
-- HUD icons: 16 by 16 px source, scaled through nearest filtering.
+- Particles: source cells vary per effect (see asset table below).
+  Prefer hard opaque pixels over translucent haze.
+- HUD icons: **2× the v1 cell sizes**, scaled through nearest filtering.
   Touch affordances can be code-drawn rings unless a raster treatment is
   needed later.
 
 Use nearest-neighbor filtering for all sprite assets. Avoid fractional
 pixel scaling where possible.
 
-## Phase 15 Minimum Set
+Rationale (recorded so nobody "fixes" it back): 32×32 @ 2× world scale
+keeps the chunky gore-revival texel on a phone held at arm's length;
+HLD-ness comes from animation acting + composition, not resolution.
+Boomerang stays 40×40 world so gameplay feel is untouched.
 
-1. One full playable character sheet:
-   - idle: 4 frames
-   - throw: 6 frames
-   - dash: 2 frames
-   - hit: 2 to 4 frames
-   - death: 6 frames
-2. A second player treatment:
-   - minimum: same animation timing, altered silhouette, different
-     palette slots
-   - better: separate head/shoulder silhouette and dash smear shape
-3. Boomerang:
-   - bone-fang projectile, 12 by 12 px
-   - 3 trail frames
-   - flying and returning must differ by shape or trail, not only color
-4. Particles:
-   - hit burst
-   - boomerang trail
-   - death burst
-   - ambient ember
-5. Training arena:
-   - floor tile
-   - wall edge/corner tiles
-   - spawn marks
-   - subtle center-line or duel-ring motif
-6. HUD:
-   - score pips
-   - round timer treatment
-   - countdown digits
-   - match-over badge
+## Animation Table (v2)
+
+| Anim | ID | Frames | Atlas Offset | Ticks/Frame | Oneshot |
+|------|----|--------|--------------|-------------|---------|
+| IDLE | 0 | 6 | 0 | 9 | no |
+| RUN | 1 | 6 | 6 | 5 | no |
+| THROW | 2 | 8 | 12 | 3 | yes |
+| DASH | 3 | 4 | 20 | 3 | no |
+| HIT | 4 | 4 | 24 | 3 | yes |
+| CATCH | 5 | 3 | 28 | 3 | yes |
+| DEATH | 6 | 13 | 31 | 8 | yes |
+
+Total atlas strip: **44 frames** per player sheet (44×1 @ 32×32 = 1408×32 px).
+
+## Duelist Design
+
+- **P0 "the Cur"**: compact, forward-hunched, two short bull horns,
+  ragged half-cloak. Body P0_BLOOD, shadow BLOOD_DARK, horn/claw
+  accents BONE, eyes SPARK (2 px, always hottest pixel on the body).
+  IDLE = weight-shifting bob, asymmetric. RUN = hunched lope, horn-leading,
+  directional smear with afterimage pixels in body color at 40% (use the
+  darker body shade, not alpha). THROW = wind-up, cock, release, fly-out,
+  recovery, settle. DASH = full horizontal blur. HIT = full HIT_WHITE
+  silhouette flash 1 frame, then recoil. CATCH = arm snap up, 1-frame
+  SPARK flash at the hand. DEATH = stagger, knee buckle, gore burst
+  (P0_BLOOD/BLOOD_DARK chunks), collapse to a corpse pile that matches
+  the stain corpse-mark.
+
+- **P1 "the Revenant"**: tall, narrow shoulders, single swept-back horn,
+  hanging sash/tail. Body P1_CYAN, shadow DEEP_TEAL. Same animation
+  timing, distinctly different silhouette.
+
+## Pixel Craft Standards
+
+Acceptance checklist for every sprite — the generator loop iterates
+until every item passes.
+
+1. **Silhouette first**: flood the sprite to one color; it must still
+   read (pose, direction, which player) at 50% zoom.
+2. **Clusters, not noise**: shading in connected 2+ px clusters; no
+   checkerboard dithering at this scale; no orphan single pixels except
+   deliberate sparks/eyes.
+3. **No pillow shading**: one light direction (top-left), shadow side
+   committed.
+4. **Outline**: 1 px, CHARCOAL_LINE or darker body shade — broken
+   (skipped) on the lit edge for pop.
+5. **No banding**: no parallel 1-px bands hugging the outline.
+6. **Anim physics**: every action gets anticipation and follow-through;
+   fast motion gets smear frames, not more in-betweens; loops hit the
+   same pixel positions at wrap.
+7. **Palette discipline**: the 16 colors only; player-identity colors
+   never appear on the other player or neutral props (Recall Blue is the
+   boomerang-return channel, Ember/Spark are heat accents, Hit White is
+   reserved for impact).
+8. **Two-mode check**: composition-mode assets (idle, tiles, floors) are
+   quiet — ≤4 colors, low contrast; contact-mode assets (bursts, death,
+   gore) spike contrast and pixel energy.
+
+## Asset Table
+
+| Asset | Path | Source Cell | Layout | Sheet px | Render Size |
+|-------|------|------------|--------|----------|-------------|
+| P0 duelist | sprites/players/duelist_a_sheet.png | 32×32 | 44×1 | 1408×32 | 64×64 |
+| P1 duelist | sprites/players/duelist_b_sheet.png | 32×32 | 44×1 | 1408×32 | 64×64 |
+| Bone fang | sprites/projectiles/bone_fang.png | 20×20 | 1×1 | 20×20 | 40×40 |
+| Fang spin | sprites/projectiles/bone_fang_spin_sheet.png | 20×20 | 4×1 | 80×20 | 40×40 |
+| Fang trail | sprites/projectiles/bone_fang_trail_sheet.png | 20×20 | 6×1 | 120×20 | 40×40 |
+| Fang marked | sprites/projectiles/bone_fang_marked_sheet.png | 20×20 | 4×1 | 80×20 | 40×40 |
+| Hit burst | sprites/particles/hit_burst_sheet.png | 32×32 | 6×1 | 192×32 | 80×80 |
+| Death burst | sprites/particles/death_burst_sheet.png | 48×48 | 10×1 | 480×48 | 112×112 |
+| Recall pulse | sprites/particles/recall_pulse_sheet.png | 24×24 | 6×1 | 144×24 | 48×48 |
+| Shatter burst | sprites/particles/shatter_burst_sheet.png | 32×32 | 6×1 | 192×32 | 80×80 |
+| Stains P0 | sprites/stains/p0_stain_sheet.png | 24×24 | 4×1 | 96×24 | 48×48 |
+| Stains P1 | sprites/stains/p1_stain_sheet.png | 24×24 | 4×1 | 96×24 | 48×48 |
+| Bone pyre | sprites/arena/bone_pyre_sheet.png | 32×32 | 3×1 | 96×32 | 64×64 |
+| Altar sigil | sprites/arena/altar_sigil_sheet.png | 32×32 | 2×1 | 64×32 | 64×64 |
+| Sigil door | sprites/arena/sigil_door_sheet.png | 32×32 | 2×1 | 64×32 | 64×64 |
+| Pickups | sprites/pickups/pickup_sheet.png | 24×24 | 6×1 | 144×24 | 48×48 |
+| Tiles | arenas/tile_sheet.png | 32×32 | 6×1 | 192×32 | 64×64 |
+| Arena floors | arenas/{anchor,crossing,reliquary}_floor.png | — | composed | 320×480 | covers 1000×1500 cm |
+| Embers | sprites/particles/ember_sheet.png | 8×8 | 4×1 | 32×8 | 8×8 |
+| HUD set | hud/*.png | 2× v1 | same layouts | 2× v1 | unchanged world |
 
 ## Visual Rules
 
-- The renderer operates in two modes: **composition** (HLD-quiet) for
-  idle/movement/in-flight throw, and **contact** (gore-revival
-  proud) for hit/kill/death/recall-snap. Mode switches are hard, not
-  blended. Composition is most of the round; contact is brief frames.
 - The boomerang should be the brightest moving object unless a hit
   flash is active.
 - Player silhouettes should read at thumbnail size. Details inside the
-  silhouette are optional; the outline is not. Posture has weight —
-  idle is centered; throw leans forward into the throw; taunt opens
-  the shoulders.
-- Hit effects are short, geometric, and source-readable. A player
-  should know who caused a hit from the burst direction and color
-  pairing. The kill-frame sequence (flash → spray → shards → stain)
-  caps at ~12 frames total; everything else is composition mode.
-- Each death paints a persistent floor stain at the kill location, in
-  the victim's dark palette slot (`Blood dark` for P0, `Deep teal`
-  for P1). The stain is hand-crafted (chunky core, mid ring, edge
-  flecks), render-only state, and resets on round end. The arena
-  remembers the round's violence; that is where the gore-revival pole
-  lives between kills.
-- The boomerang accumulates a small blood mark per kill it lands —
-  cosmetic only, never feeds sim. Carved sigil along the spine
-  signals "marked weapon", not decoration.
+  silhouette are optional; the outline is not.
+- Hit effects are short, geometric, and source-readable.
+- Each death paints a persistent floor stain at the kill location.
 - Ambient particles must never cross the same value range as gameplay
   particles.
-- Arena floors should use texture density sparingly. Mobile thumbs
-  will already occlude the lower corners; the center play lane must
-  stay clean. Stain density must stay readable late in a round.
+- Arena floors should use texture density sparingly.
 - Do not use bloom, blur, large translucent clouds, or fullscreen
   color washes for gameplay-critical information.
 - Color grading, screen shake, particles, persistent stains, and
@@ -183,38 +202,7 @@ pixel scaling where possible.
 
 ## Generation Strategy
 
-Do not batch-generate every final sprite sheet at once. Generate in this
-order:
-
-1. Four concept sheets: character pair, boomerang/VFX, training arena,
-   HUD/touch treatment.
-2. Lock the palette and silhouettes from those sheets.
-3. Generate or hand-pixel one character's complete animation sheet.
-4. Implement the atlas path and nearest filtering.
-5. Test gameplay readability on desktop and a real phone.
-6. Generate the remaining final assets only after the first sheet works
-   in-game.
-
-AI-generated pixel art should be treated as concept or rough source
-unless the output passes manual pixel cleanup. Frame-to-frame consistency
-matters more than one beautiful still frame.
-
-## Current Seed Pack
-
-The first placeholder pack is generated by
-`scripts/generate_placeholder_art.py`. Review the contact sheet at
-`assets/concepts/phase15_contact_sheet.png`, then replace or refine the
-individual files listed in `assets/README.md`.
-
-The visual target comparison pack is generated by
-`scripts/generate_visual_targets.py`. The chosen direction is
-`Bone Cathedral, blood-marked`, documented in `VISUAL_TARGET_PACK.md`,
-with boards in `assets/concepts/target_pack/`. The pack ships two
-target boards — `bone_cathedral.png` (composition mode, at rest) and
-`synthesis_showcase.png` (contact mode, with stains, kill frame,
-attitude poses, and the boomerang's per-round blood-mark accumulation).
-
-When image generation is available, start from the prompts in
-`assets/concepts/phase15_image_prompts.md`. Do not treat those generated
-images as implementation-ready until they have been reduced to the
-working palette, checked for frame consistency, and tested in-game.
+All art is deterministically generated from ASCII pixel grids by
+`scripts/generate_polished_assets.py`. The generator writes a contact
+sheet to `assets/concepts/contact_sheet_v2.png` showing every sheet at
+2× with labels for visual review.
