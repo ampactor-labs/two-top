@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Repository status
 
-Planning-stage. No source code yet — only four canonical design docs. Phase 0 of `BUILD_PLAN.md` (workspace skeleton) has not been executed. Until it is, every implementation question routes through the docs below.
+Phases 0–15 complete. The workspace has 10 crates (`fixed_math`, `sim`, `render`, `input_touch`, `net`, `replay`, `replay_sync`, `sync_test`, `replay_viewer`, `app`) with 275 passing tests, clippy-clean, and cross-platform determinism matrix green. Full gameplay is implemented: movement, dash + i-frames, boomerang throw/ricochet/recall/catch, hits/death/respawn, round flow (first-to-5), replay codec + viewer with scrub, touch input, net crate with lobby FSM, sprite animation + particles + 16-color palette. Remaining work is tracked in `docs/plans/COMPLETION_PLAN.md`: art overhaul, arenas (Phase 16), pickups (Phase 17), real netplay wiring (Phase 12 completion), polish (Phase 18), and release tag.
 
 The displayed name is **2-Top**. Identifiers stay textual because Java package segments and Rust crate names can't start with a digit: the repo directory is `two-top` (hyphen), Rust crate names use `two_top` (underscore), and the Android bundle suffix is `twotop`. Treat "2-Top" as the user-facing name (READMEs, apk_label, marketing) and `two-top`/`two_top`/`twotop` as identifiers (paths, imports, manifests).
 

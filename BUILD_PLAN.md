@@ -352,6 +352,8 @@ This is not a numbered phase — it's the smallest viable cross-platform-build u
 - All three arenas playable end-to-end
 - Each feels mechanically distinct
 
+**History:** Cycle 1 landed as commit `58fd4ab` (arena infrastructure + Anchor's central bone pyre), then was reverted in `5bf8c81` with no documented reason. Audit of the diff found the code determinism-clean (correct `rollback_component_with_copy` + `checksum_component_with_hash` registration, deterministic ordering, SyncTest-verified). Re-implemented in the Completion Plan's M2 using `58fd4ab` as the spec (not blind cherry-picked — commit `1204aa9` changed `SimSnapshot` afterward and would conflict).
+
 ---
 
 ## Phase 17 — Pickups
