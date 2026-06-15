@@ -14,6 +14,7 @@
 
 # Local TMPDIR scratch (used when /tmp tmpfs hits its quota cap on this dev box).
 .probe/
+.tmpdir/
 
 # >>> claude-protocol >>>
 # AI-tool artifacts (never tracked)

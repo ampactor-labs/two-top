@@ -110,9 +110,9 @@ Boomerang stays 40×40 world so gameplay feel is untouched.
 | DASH | 3 | 4 | 20 | 3 | no |
 | HIT | 4 | 4 | 24 | 3 | yes |
 | CATCH | 5 | 3 | 28 | 3 | yes |
-| DEATH | 6 | 13 | 31 | 8 | yes |
+| DEATH | 6 | 10 | 31 | 8 | yes |
 
-Total atlas strip: **44 frames** per player sheet (44×1 @ 32×32 = 1408×32 px).
+Total atlas strip: **41 frames** per player sheet (41×1 @ 32×32 = 1312×32 px).
 
 ## Duelist Design
 
@@ -162,8 +162,8 @@ until every item passes.
 
 | Asset | Path | Source Cell | Layout | Sheet px | Render Size |
 |-------|------|------------|--------|----------|-------------|
-| P0 duelist | sprites/players/duelist_a_sheet.png | 32×32 | 44×1 | 1408×32 | 64×64 |
-| P1 duelist | sprites/players/duelist_b_sheet.png | 32×32 | 44×1 | 1408×32 | 64×64 |
+| P0 duelist | sprites/players/duelist_a_sheet.png | 32×32 | 41×1 | 1312×32 | 64×64 |
+| P1 duelist | sprites/players/duelist_b_sheet.png | 32×32 | 41×1 | 1312×32 | 64×64 |
 | Bone fang | sprites/projectiles/bone_fang.png | 20×20 | 1×1 | 20×20 | 40×40 |
 | Fang spin | sprites/projectiles/bone_fang_spin_sheet.png | 20×20 | 4×1 | 80×20 | 40×40 |
 | Fang trail | sprites/projectiles/bone_fang_trail_sheet.png | 20×20 | 6×1 | 120×20 | 40×40 |

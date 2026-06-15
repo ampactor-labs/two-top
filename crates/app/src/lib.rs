@@ -17,7 +17,7 @@ use bevy_ggrs::GgrsPlugin;
 use bevy_ggrs::prelude::*;
 use fixed_math::Vec2F;
 use input_touch::{CursorPosition, TouchInputsPlugin, WindowSize, update_touch_state};
-use render::{EffectsPlugin, RenderSyncPlugin};
+use render::{EffectsPlugin, RenderSyncPlugin, player_atlas_layout, PLAYER_RENDER_SIZE};
 use sim::{
     AnimState, BOOMERANG_HALF_EXTENT_CM, Boomerang, GgrsCfg, Player, PositionF, PreviousPositionF,
     SimLifecycleLogPlugin, SimPlugin, VelocityF, arena_walls,
@@ -127,18 +127,9 @@ fn setup(
 ) {
     commands.spawn(Camera2d);
 
-    // Phase 15: load the polished player sheets and slice them into
-    // 22-frame atlases (24x24 source per cell). Onscreen each player
-    // renders at 48x48 — same as the placeholder rectangle they
-    // replace, so the camera-follow + hitbox visualization land at
-    // the same scale.
-    let layout = atlases.add(TextureAtlasLayout::from_grid(
-        UVec2::splat(24),
-        22,
-        1,
-        None,
-        None,
-    ));
+    // ART_DIRECTION.md v2: 41-frame atlases (32x32 source per cell).
+    // Render at PLAYER_RENDER_SIZE (64x64 world units).
+    let layout = player_atlas_layout(&mut atlases);
     let p0_image = asset_server.load("sprites/players/duelist_a_sheet.png");
     let p1_image = asset_server.load("sprites/players/duelist_b_sheet.png");
 
@@ -153,7 +144,7 @@ fn setup(
                 layout: layout.clone(),
                 index: 0,
             }),
-            custom_size: Some(Vec2::new(48.0, 48.0)),
+            custom_size: Some(Vec2::splat(PLAYER_RENDER_SIZE)),
             ..default()
         },
         Transform::default(),
@@ -170,7 +161,7 @@ fn setup(
                 layout,
                 index: 0,
             }),
-            custom_size: Some(Vec2::new(48.0, 48.0)),
+            custom_size: Some(Vec2::splat(PLAYER_RENDER_SIZE)),
             ..default()
         },
         Transform::default(),

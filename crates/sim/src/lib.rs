@@ -343,18 +343,17 @@ pub fn arena_walls() -> [Wall; 4] {
 #[require(Rollback)]
 pub struct NoInterpolate;
 
-/// Phase 15: per-entity animation state. `anim_id` selects which
-/// animation is playing (Idle/Throw/Dash/Hit/Death); `ticks` counts
-/// sim ticks since the animation started. Render layer divides
-/// `ticks` by the per-animation frame-divider to get the display
-/// frame (animation runs slower than sim — 4-frame idle would be
-/// catastrophically fast at 60Hz).
+/// Per-entity animation state (v2). `anim_id` selects which
+/// animation is playing (Idle/Run/Throw/Dash/Hit/Catch/Death);
+/// `ticks` counts sim ticks since the animation started. Render
+/// layer divides `ticks` by the per-animation frame-divider to get
+/// the display frame (animation runs slower than sim).
 ///
 /// Rolled back so animation state is consistent across resimulation
 /// (a respawn-during-rollback would otherwise drift the animation
 /// vs the post-rollback authoritative state). Per CONVENTIONS:
 /// "Animation does not interpolate. Pixel art frames snap." The
-/// render layer reads `display_frame()` and picks exactly one
+/// render layer reads `display_index()` and picks exactly one
 /// atlas index per render frame; no fractional blending.
 #[derive(Component, Clone, Copy, PartialEq, Eq, Hash, Debug, Default)]
 #[require(Rollback)]
@@ -365,7 +364,7 @@ pub struct AnimState {
     /// Sim ticks since this animation started. Reset to 0 on
     /// transition. Range checked at u16::MAX would mean the player
     /// idled for 18+ minutes, which is fine — even if it overflows,
-    /// `display_frame` modulo's it down for looping anims and caps
+    /// `display_index` modulo's it down for looping anims and caps
     /// it for one-shots.
     pub ticks: u16,
 }
@@ -373,65 +372,79 @@ pub struct AnimState {
 impl AnimState {
     /// Looping idle bob.
     pub const IDLE: u8 = 0;
+    /// Looping run cycle (stick magnitude > DASH_MIN_STICK_MAG).
+    pub const RUN: u8 = 1;
     /// One-shot throw: wind-up → cock → release → fly-out → recovery → settle.
-    pub const THROW: u8 = 1;
+    pub const THROW: u8 = 2;
     /// Looping dash blur (only while `DashState::Dashing`).
-    pub const DASH: u8 = 2;
+    pub const DASH: u8 = 3;
     /// One-shot hit reaction (white-flash silhouette → return).
-    pub const HIT: u8 = 3;
+    pub const HIT: u8 = 4;
+    /// One-shot catch: arm snap up, spark flash at the hand.
+    pub const CATCH: u8 = 5;
     /// One-shot death: stagger → bow → buckle → disperse → corpse mark.
-    pub const DEATH: u8 = 4;
+    pub const DEATH: u8 = 6;
 
-    /// Per the player sprite sheet from VISUAL_TARGET_PACK.md and the
-    /// Phase 15 prep README: 0..3 idle, 4..9 throw, 10..11 dash,
-    /// 12..15 hit, 16..21 death. `frame_count` returns the source-frame
+    /// Per ART_DIRECTION.md v2 animation table. 41-frame atlas strip
+    /// (32×32 source cells). `frame_count` returns the source-frame
     /// span; `atlas_offset` returns the strip index where this anim
     /// starts (so render can compute final atlas index = offset +
     /// display_frame).
     pub const fn frame_count(anim_id: u8) -> u16 {
         match anim_id {
-            Self::THROW => 6,
-            Self::DASH => 2,
+            Self::IDLE => 6,
+            Self::RUN => 6,
+            Self::THROW => 8,
+            Self::DASH => 4,
             Self::HIT => 4,
-            Self::DEATH => 6,
-            _ => 4,
+            Self::CATCH => 3,
+            Self::DEATH => 10,
+            _ => 6,
         }
     }
 
     pub const fn atlas_offset(anim_id: u8) -> u16 {
         match anim_id {
-            Self::THROW => 4,
-            Self::DASH => 10,
-            Self::HIT => 12,
-            Self::DEATH => 16,
+            Self::IDLE => 0,
+            Self::RUN => 6,
+            Self::THROW => 12,
+            Self::DASH => 20,
+            Self::HIT => 24,
+            Self::CATCH => 28,
+            Self::DEATH => 31,
             _ => 0,
         }
     }
 
     /// Sim-ticks-per-displayed-frame. Tuned to read at the right
-    /// emotional cadence: idle is gentle (4 fps), throw + hit are
-    /// snappy (15 fps), dash flickers (12 fps), death has weight
-    /// (7.5 fps). All integers so the frame-stepping is deterministic.
+    /// emotional cadence: idle is gentle (~6.7 fps), run is brisk
+    /// (12 fps), throw/hit/catch are snappy (20 fps), dash flickers
+    /// (20 fps), death has weight (7.5 fps). All integers so the
+    /// frame-stepping is deterministic.
     pub const fn ticks_per_frame(anim_id: u8) -> u16 {
         match anim_id {
-            Self::THROW => 4,
-            Self::DASH => 5,
-            Self::HIT => 4,
+            Self::IDLE => 9,
+            Self::RUN => 5,
+            Self::THROW => 3,
+            Self::DASH => 3,
+            Self::HIT => 3,
+            Self::CATCH => 3,
             Self::DEATH => 8,
-            _ => 15,
+            _ => 9,
         }
     }
 
-    /// One-shot anims (THROW/HIT/DEATH) cap at the last frame instead
-    /// of looping. The state-machine in [`advance_animation`] returns
-    /// to IDLE when a one-shot finishes, so the cap only matters for
-    /// edge cases where a state holds (e.g. dead player whose corpse
-    /// remains as the corpse-mark frame).
+    /// One-shot anims cap at the last frame instead of looping. The
+    /// state-machine in [`advance_animation`] returns to IDLE/RUN
+    /// when a one-shot finishes.
     pub const fn is_oneshot(anim_id: u8) -> bool {
-        matches!(anim_id, Self::THROW | Self::HIT | Self::DEATH)
+        matches!(anim_id, Self::THROW | Self::HIT | Self::CATCH | Self::DEATH)
     }
 
-    /// Atlas index into the 22-frame player sheet for the current
+    /// Total frames in the 41-frame player atlas strip.
+    pub const TOTAL_ATLAS_FRAMES: u16 = 41;
+
+    /// Atlas index into the 41-frame player sheet for the current
     /// tick. Render layer reads this directly to pick a TextureAtlas
     /// rect.
     pub fn display_index(&self) -> u16 {
@@ -949,19 +962,23 @@ pub fn hit_boomerang_player(
 /// itself on tick 1.
 pub fn catch_boomerangs(
     mut commands: Commands,
-    players: Query<(&Player, &PositionF)>,
+    mut players: Query<(&Player, &PositionF, &mut AnimState)>,
     boomerangs: Query<(Entity, &Boomerang, &PositionF)>,
 ) {
     for (entity, boom, boom_pos) in &boomerangs {
         if !matches!(boom.state, BoomerangState::Returning) {
             continue;
         }
-        let Some((_, owner_pos)) = players.iter().find(|(p, _)| p.handle == boom.owner_handle)
+        let Some((_, owner_pos, mut anim)) = players.iter_mut().find(|(p, _, _)| p.handle == boom.owner_handle)
         else {
             continue;
         };
         if player_rect(owner_pos.0).overlaps(boomerang_rect(boom_pos.0)) {
             commands.entity(entity).despawn();
+            // Kick the CATCH animation — same pattern as throw_boomerangs
+            // setting THROW at line 1012.
+            anim.anim_id = AnimState::CATCH;
+            anim.ticks = 0;
         }
     }
 }
@@ -1364,11 +1381,13 @@ pub fn record_last_tick_time(time: Res<Time<Real>>, mut last: ResMut<LastSimTick
 ///   2. `StunFrames > 0` -> HIT
 ///   3. One-shot anim still in flight -> keep ticking the same anim
 ///   4. `DashState::Dashing` -> DASH
-///   5. otherwise -> IDLE
+///   5. `is_moving` (stick magnitude > threshold) -> RUN
+///   6. otherwise -> IDLE
 ///
-/// THROW transitions are set externally by `throw_boomerangs` on the
-/// tick the throw fires; this helper preserves the THROW one-shot via
-/// rule 3 until its frames elapse.
+/// THROW and CATCH transitions are set externally by
+/// `throw_boomerangs` and `catch_boomerangs` on the tick the event
+/// fires; this helper preserves them as one-shot via rule 3 until
+/// their frames elapse.
 ///
 /// Pure for property-test purposes — no `&mut World`, no resources,
 /// no side effects. The system below is a thin wrapper.
@@ -1377,6 +1396,7 @@ pub fn next_anim_state(
     dash: DashState,
     stun: StunFrames,
     current: AnimState,
+    is_moving: bool,
 ) -> AnimState {
     let target_id = if dead.is_dying() {
         Some(AnimState::DEATH)
@@ -1390,6 +1410,8 @@ pub fn next_anim_state(
         };
     } else if matches!(dash, DashState::Dashing { .. }) {
         Some(AnimState::DASH)
+    } else if is_moving {
+        Some(AnimState::RUN)
     } else {
         Some(AnimState::IDLE)
     };
@@ -1411,9 +1433,15 @@ pub fn next_anim_state(
 ///
 /// Per CONVENTIONS: animation does not interpolate — `display_index`
 /// snaps to a single atlas frame per tick.
-pub fn advance_animation(mut q: Query<(&Dead, &DashState, &StunFrames, &mut AnimState)>) {
-    for (dead, dash, stun, mut anim) in &mut q {
-        *anim = next_anim_state(*dead, *dash, *stun, *anim);
+pub fn advance_animation(
+    inputs: Res<PlayerInputs<GgrsCfg>>,
+    mut q: Query<(&Player, &Dead, &DashState, &StunFrames, &mut AnimState)>,
+) {
+    for (player, dead, dash, stun, mut anim) in &mut q {
+        let (curr, _) = inputs[player.handle];
+        let stick = decode_stick(curr);
+        let is_moving = stick.length() > DASH_MIN_STICK_MAG;
+        *anim = next_anim_state(*dead, *dash, *stun, *anim, is_moving);
     }
 }
 

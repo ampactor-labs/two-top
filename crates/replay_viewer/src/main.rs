@@ -34,7 +34,7 @@ use bevy::prelude::*;
 use bevy_ggrs::GgrsPlugin;
 use bevy_ggrs::prelude::*;
 use fixed_math::Vec2F;
-use render::{EffectsPlugin, RenderSyncPlugin};
+use render::{EffectsPlugin, RenderSyncPlugin, player_atlas_layout, PLAYER_RENDER_SIZE};
 use replay::{ReplayPlayback, ReplayPlaybackPlugin, decode_for_sim_version};
 use sim::{
     AnimState, BOOMERANG_HALF_EXTENT_CM, Boomerang, GgrsCfg, PLAYER_HALF_EXTENT_CM, Player,
@@ -314,13 +314,11 @@ fn setup(
 ) {
     commands.spawn(Camera2d);
 
-    let layout = atlases.add(TextureAtlasLayout::from_grid(
-        UVec2::splat(24),
-        22,
-        1,
-        None,
-        None,
-    ));
+    // ART_DIRECTION.md v2: 41-frame atlases (32x32 source per cell),
+    // rendered at PLAYER_RENDER_SIZE. Shared with the live `app` crate
+    // via render::player_atlas_layout so the viewer renders matches
+    // exactly as players saw them.
+    let layout = player_atlas_layout(&mut atlases);
     let p0_image = asset_server.load("sprites/players/duelist_a_sheet.png");
     let p1_image = asset_server.load("sprites/players/duelist_b_sheet.png");
 
@@ -335,7 +333,7 @@ fn setup(
                 layout: layout.clone(),
                 index: 0,
             }),
-            custom_size: Some(Vec2::new(48.0, 48.0)),
+            custom_size: Some(Vec2::splat(PLAYER_RENDER_SIZE)),
             ..default()
         },
         Transform::default(),
@@ -352,7 +350,7 @@ fn setup(
                 layout,
                 index: 0,
             }),
-            custom_size: Some(Vec2::new(48.0, 48.0)),
+            custom_size: Some(Vec2::splat(PLAYER_RENDER_SIZE)),
             ..default()
         },
         Transform::default(),

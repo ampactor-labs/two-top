@@ -15,7 +15,28 @@
 
 use bevy::prelude::*;
 use fixed_math::Vec2F;
-use sim::{LastSimTickTime, NoInterpolate, PositionF, PreviousPositionF, TICK_HZ};
+use sim::{AnimState, LastSimTickTime, NoInterpolate, PositionF, PreviousPositionF, TICK_HZ};
+
+/// Shared player atlas layout matching ART_DIRECTION.md v2:
+/// 41 frames × 32×32 px cells in a single-row strip (1312×32 px sheet).
+/// Called from both `app` and `replay_viewer` setup to avoid duplicating
+/// the atlas contract.
+pub fn player_atlas_layout(
+    atlases: &mut Assets<TextureAtlasLayout>,
+) -> Handle<TextureAtlasLayout> {
+    atlases.add(TextureAtlasLayout::from_grid(
+        UVec2::splat(32),
+        AnimState::TOTAL_ATLAS_FRAMES as u32,
+        1,
+        None,
+        None,
+    ))
+}
+
+/// Onscreen render size for player sprites. 32 px source × 2 = 64 world
+/// units — keeps the chunky gore-revival texel at arm's-length phone
+/// distance per ART_DIRECTION.md v2 rationale.
+pub const PLAYER_RENDER_SIZE: f32 = 64.0;
 
 // ===========================================================================
 // Phase 15 cycle 3c — locked 16-color palette.
