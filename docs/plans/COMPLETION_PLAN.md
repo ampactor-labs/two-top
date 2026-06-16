@@ -14,7 +14,7 @@
 | M1 | Art 2.0 | New art spec + generator rewrite + AnimState v2 | Yes (AnimState) | ✅ done |
 | M2 | Phase 16: arenas | BonePyre re-land, Crossing, Reliquary, arena select | Yes | ✅ done |
 | M3 | Phase 17: pickups + perfect catch | 6 pickups, spawn system, perfect-catch | Yes | 🔶 3.1–3.3 done; 3.4 (art) left |
-| **MP** | **PC + Web platform track** | **Desktop input, local couch versus, desktop/web builds, cross-play** | **No (input/app/build)** | 🔶 P.1+P.2 landed (couch versus playable; operator playtest + gamepad/windowing/web left) |
+| **MP** | **PC + Web platform track** | **Desktop input, local couch versus, desktop/web builds, cross-play** | **No (input/app/build)** | 🔶 P.1–P.3 landed (couch versus playable, keyboard+gamepad, whole-arena window); P.4 online / P.5–P.6 web left |
 | M4 | Phase 12 completion | Real matchbox wiring, P2P swap, loopback verified | No (net/app) | ⬜ planned |
 | M5 | Phase 18: polish | Shake, kill-cam, audio, haptics, UI, perf pass | Mostly render | ⬜ planned |
 | M6 | Release readiness | SIM_VERSION=1, tag, operator checklist | Yes (version) | ⬜ planned |
@@ -50,14 +50,15 @@
 - [x] Task 3.1: Perfect catch mechanic
 - [x] Task 3.2: Pickup plumbing
 - [x] Task 3.3: Six modifier behaviors (Fire/Heavy/Bouncy/Curve/Multishot/Phantom) — fuzz-clean across all arenas
-- [ ] Task 3.4: Pickup presentation (icons, HUD chip, per-kind boomerang tint)
+- [x] Task 3.4: Pickup presentation — floor icons + per-kind boomerang tint (held-modifier HUD chip deferred)
 
 ## Milestone P — PC + Web Platform Track
 
 Why this is cheap: the sim is deterministic in fixed-point, so it already runs bit-identically off-phone; the only per-platform work is *input*, *windowing*, and *build pipeline*. Each task: test-first where sim-adjacent, full gate, commit.
 
-- [x] Task P.1: **Desktop input source** — `input_desktop` crate mirroring `input_touch`'s `ReadInputs` shape. Maps the **keyboard** to per-handle `LocalInputs<GgrsCfg>` in the 4-byte wire format, level signals only. Pure `input_from_dpad` mapping unit-tested (6 cases). *Gamepad is a follow-up (needs the `bevy_gilrs` feature, not yet in the app build).*
-- [x] Task P.2: **Local couch versus (one PC, no network)** — desktop `ReadInputs` source emits **distinct** inputs per handle (P0 = WASD/Space/LShift, P1 = arrows/RShift/RCtrl) into the 2-local-player SyncTest session (which self-verifies determinism every frame), input delay 0. Boots clean. **Fastest "play with a friend" path; zero dependency on M4.** 🛑 *Operator playtest pending: confirm two players move independently + scoring/round flow on a real keyboard.* A non-SyncTest local session is a later optimization, not a blocker.
+- [x] Task P.1: **Desktop input source** — `input_desktop` crate mirroring `input_touch`'s `ReadInputs` shape. Maps **keyboard + gamepad** to per-handle `LocalInputs<GgrsCfg>` in the 4-byte wire format, level signals only. Pure mapping unit-tested (8 cases). Gamepad is opt-in (`--features gamepad`; gilrs needs libudev on Linux) so the default build needs no system libs.
+- [x] Task P.2: **Local couch versus (one PC, no network)** — desktop `ReadInputs` source emits **distinct** inputs per handle (P0 = WASD/Space/LShift / pad 0, P1 = arrows/RShift/RCtrl / pad 1) into the 2-local-player SyncTest session (which self-verifies determinism every frame), input delay 0. Boots clean. **Fastest "play with a friend" path; zero dependency on M4.** 🛑 *Operator playtest pending: confirm two players move independently + scoring/round flow on real hardware.* A non-SyncTest local session is a later optimization, not a blocker.
+- [x] Task P.3: **Desktop window + whole-arena camera** — portrait 600×900 window titled "2-Top"; desktop camera frames the whole arena via `ScalingMode::AutoMin` (no follow; mobile keeps the zoomed `FollowCam`); world-space control legend; F11 borderless fullscreen toggle. Boots clean.
 - [ ] Task P.3: **Desktop windowing + packaging** — resizable/fullscreen window; landscape/desktop camera + HUD scale (the layout is portrait-phone today); on-screen control-scheme hint; release artifacts for Linux/macOS/Windows. Add `x86_64-pc-windows-msvc` to the determinism matrix.
 - [ ] Task P.4: **Desktop online netplay** — after M4 lands, the same Matchbox driver gives remote PC-vs-PC. Verify two desktop windows + local signaling server complete a match desync-free (extends M4's loopback gate).
 - [ ] Task P.5: **Web / WASM (PWA)** — `wasm32-unknown-unknown` target, trunk/wasm-bindgen build, asset loading, web-audio path, mouse+touch+keyboard input, PWA manifest + service worker. Matchbox is browser-native, so netplay carries over unchanged. Add a wasm build (and, if feasible headless, a wasm sim-checksum check) to CI.
