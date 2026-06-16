@@ -2056,6 +2056,99 @@ kkkkkkk.
 """
 
 
+def pickup_sheet() -> Canvas:
+    """6-cell strip, 24x24 each — one floor pickup per PickupKind in the
+    sim's `as_u8` order: Fire / Heavy / Bouncy / Curve / Multishot / Phantom.
+    Each is a kind-colored glyph resting on a dark stone plinth so it reads
+    as an item on the arena floor. Palette-true per ART_DIRECTION v2:
+    Fire=Ember, Heavy=Cold Stone, Bouncy=Spark, Curve=Recall Blue,
+    Multishot=Hot Bone, Phantom=Bruise Shadow."""
+    cell = 24
+    c = Canvas(cell * 6, cell)
+    char = PALETTE["charcoal_line"]
+    stone = PALETTE["cold_stone"]
+    dark = PALETTE["bruise_shadow"]
+
+    def disc(ox: int, cx: int, cy: int, r: int, color) -> None:
+        for yy in range(-r, r + 1):
+            for xx in range(-r, r + 1):
+                if xx * xx + yy * yy <= r * r:
+                    c.set(ox + cx + xx, cy + yy, color)
+
+    # Dark stone plinth at the bottom of every cell grounds the item.
+    for i in range(6):
+        ox = i * cell
+        c.rect(ox + 5, 21, 14, 1, char)
+        c.rect(ox + 6, 20, 12, 1, stone)
+        c.rect(ox + 8, 19, 8, 1, dark)
+
+    # 0 — Fire: ember flame with a spark core.
+    ox = 0
+    ember, spark, bd = PALETTE["ember"], PALETTE["spark"], PALETTE["blood_dark"]
+    disc(ox, 12, 12, 5, ember)
+    c.rect(ox + 11, 4, 3, 8, ember)
+    c.line(ox + 12, 4, ox + 9, 10, ember)
+    c.line(ox + 12, 4, ox + 15, 10, ember)
+    disc(ox, 12, 13, 2, spark)
+    c.set(ox + 12, 15, bd)
+
+    # 1 — Heavy: a cold-stone weight block, bone top, dark base.
+    ox = cell
+    bone = PALETTE["bone"]
+    c.rect(ox + 5, 8, 14, 9, stone)
+    c.rect(ox + 5, 8, 14, 2, bone)
+    c.rect(ox + 5, 15, 14, 2, char)
+    for x in range(4, 20):
+        c.set(ox + x, 7, char)
+        c.set(ox + x, 17, char)
+    for y in range(8, 17):
+        c.set(ox + 4, y, char)
+        c.set(ox + 19, y, char)
+    c.line(ox + 9, 12, ox + 14, 12, char)
+
+    # 2 — Bouncy: a spark ball with motion arcs.
+    ox = 2 * cell
+    hb = PALETTE["hot_bone"]
+    disc(ox, 11, 11, 5, PALETTE["spark"])
+    disc(ox, 10, 9, 2, hb)
+    for ax, ay in [(18, 6), (19, 9), (18, 12)]:
+        c.set(ox + ax, ay, char)
+
+    # 3 — Curve: a recall-blue banana arc with an arrowhead.
+    ox = 3 * cell
+    rb, cyn = PALETTE["recall_blue"], PALETTE["p1_cyan"]
+    for a in range(205, 345, 7):
+        x = 11 + round(8 * math.cos(math.radians(a)))
+        y = 13 + round(8 * math.sin(math.radians(a)))
+        c.set(ox + x, y, rb)
+        c.set(ox + x, y - 1, cyn)
+    c.line(ox + 17, 5, ox + 14, 6, rb)
+    c.line(ox + 17, 5, ox + 17, 9, rb)
+
+    # 4 — Multishot: three hot-bone fangs fanning up from a base.
+    ox = 4 * cell
+    bx, by = 12, 17
+    for tx, ty in [(6, 5), (12, 3), (18, 5)]:
+        c.line(ox + bx, by, ox + tx, ty, PALETTE["hot_bone"])
+        c.set(ox + tx, ty, PALETTE["bone"])
+        c.set(ox + tx, ty + 1, PALETTE["bone"])
+
+    # 5 — Phantom: a faded spectre with hollow eyes.
+    ox = 5 * cell
+    br, hw = PALETTE["bruise_shadow"], PALETTE["hit_white"]
+    disc(ox, 12, 10, 5, br)
+    c.rect(ox + 7, 10, 11, 7, br)
+    for x in range(7, 18, 2):
+        c.set(ox + x, 17, br)
+    for y in range(5, 17):
+        c.set(ox + 6, y, stone)
+        c.set(ox + 17, y, stone)
+    c.set(ox + 10, 11, hw)
+    c.set(ox + 14, 11, hw)
+
+    return c
+
+
 def score_pips() -> Canvas:
     """Two rows: P0 (top) + P1 (bottom). 5 pips per row, 8x8 each.
     Renders as filled-or-empty per round score; this sheet shows the
@@ -2537,6 +2630,7 @@ def main() -> None:
         ("assets/sprites/arena/altar_sigil_sheet.png", altar_sigil_sheet()),
         ("assets/sprites/arena/bone_bridge_tile.png", bone_bridge_tile()),
         ("assets/sprites/arena/sigil_door_sheet.png", sigil_door_sheet()),
+        ("assets/sprites/pickups/pickup_sheet.png", pickup_sheet()),
         ("assets/hud/score_pips.png", score_pips()),
         ("assets/hud/timer_digits.png", timer_digits()),
         ("assets/hud/countdown_digits.png", countdown_digits()),

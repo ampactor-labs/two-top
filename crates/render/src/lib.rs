@@ -132,8 +132,78 @@ impl Plugin for RenderSyncPlugin {
                 sync_pyre_visuals,
                 sync_crossing_visuals,
                 sync_reliquary_visuals,
+                ensure_pickup_visuals,
+                tint_boomerangs_by_modifier,
             ),
         );
+    }
+}
+
+/// Per-kind tint for a boomerang sprite so a modified throw reads at a
+/// glance (matches the pickup-icon colors). `None` → no tint (white
+/// multiplier keeps the bone fang's own color).
+fn boomerang_tint(modifier: Option<sim::PickupKind>) -> Color {
+    use sim::PickupKind::*;
+    match modifier {
+        None => Color::WHITE,
+        Some(Fire) => palette::EMBER,
+        Some(Heavy) => palette::COLD_STONE,
+        Some(Bouncy) => palette::SPARK,
+        Some(Curve) => palette::RECALL_BLUE,
+        Some(Multishot) => palette::HOT_BONE,
+        Some(Phantom) => palette::BRUISE_SHADOW,
+    }
+}
+
+/// `Update` system: tint every boomerang sprite by its active modifier.
+/// Runs each frame over the handful of live boomerangs (cheap) so the tint
+/// is correct regardless of when the sprite was attached.
+pub fn tint_boomerangs_by_modifier(
+    mut q: Query<(&sim::BoomerangMods, &mut Sprite), With<sim::Boomerang>>,
+) {
+    for (mods, mut sprite) in &mut q {
+        sprite.color = boomerang_tint(mods.modifier);
+    }
+}
+
+/// `Update` system: give each freshly-spawned floor `Pickup` (sim) entity a
+/// sprite from the 6-cell pickup atlas, indexed by kind. Pickups don't
+/// move, so the transform is set once here; when sim despawns the pickup
+/// (collected / expired) the sprite goes with the entity. A `Local` caches
+/// the atlas layout so we don't leak a layout asset per spawn.
+pub fn ensure_pickup_visuals(
+    mut commands: Commands,
+    asset_server: Res<AssetServer>,
+    mut atlases: ResMut<Assets<TextureAtlasLayout>>,
+    mut layout: Local<Option<Handle<TextureAtlasLayout>>>,
+    q: Query<(Entity, &sim::Pickup, &sim::PositionF), Without<Sprite>>,
+) {
+    if q.is_empty() {
+        return;
+    }
+    let layout = layout
+        .get_or_insert_with(|| {
+            atlases.add(TextureAtlasLayout::from_grid(UVec2::splat(24), 6, 1, None, None))
+        })
+        .clone();
+    let image = asset_server.load("sprites/pickups/pickup_sheet.png");
+    // Render a touch larger than the 32 cm hitbox so it pops on the floor.
+    let size = (sim::PICKUP_HALF_EXTENT_CM * 2) as f32 * 1.4;
+    for (entity, pickup, pos) in &q {
+        let (x, y) = pos.0.to_f32();
+        commands.entity(entity).insert((
+            Sprite {
+                image: image.clone(),
+                texture_atlas: Some(TextureAtlas {
+                    layout: layout.clone(),
+                    index: pickup.kind.as_u8() as usize,
+                }),
+                custom_size: Some(Vec2::splat(size)),
+                ..default()
+            },
+            // Above the floor + arena props, below players/boomerangs.
+            Transform::from_xyz(x, y, 0.2),
+        ));
     }
 }
 
