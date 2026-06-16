@@ -59,6 +59,10 @@ input_desktop = { path = "../input_desktop" }
 net = { path = "../net" }
 render = { path = "../render" }
 sim = { path = "../sim" }
+# Cosmetic-only RNG for the screen-shake direction (Phase 18). Reads the
+# render crate's `CosmeticRng` (never `SimRng` — shake must never feed back
+# into rolled-back state). Mirrors render's feature set; cargo unifies it.
+rand = { version = "0.8", default-features = false, features = ["std", "std_rng", "small_rng"] }
 
 # Phase 13 — diagnostic logging. The app crate owns the subscriber
 # setup; other crates emit through `tracing::*` (or bevy_log's re-export

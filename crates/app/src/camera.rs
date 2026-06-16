@@ -8,6 +8,8 @@
 //! desktop.
 
 use bevy::prelude::*;
+use rand::Rng as _;
+use render::{CosmeticRng, SHAKE_DECAY_PER_SEC, SHAKE_MAX_OFFSET, ScreenShake, shake_offset};
 use sim::{Player, PositionF};
 
 /// Marker for the camera that should track the players. The mobile build
@@ -29,12 +31,61 @@ pub fn damped_step(current: f32, target: f32, rate: f32, dt: f32) -> f32 {
     current + (target - current) * alpha
 }
 
+/// Linear trauma decay (pure, for testing). Trauma bleeds off at
+/// [`SHAKE_DECAY_PER_SEC`] per second, floored at zero.
+pub fn decay_trauma(trauma: f32, dt: f32) -> f32 {
+    (trauma - SHAKE_DECAY_PER_SEC * dt).max(0.0)
+}
+
 pub struct CameraFollowPlugin;
 
 impl Plugin for CameraFollowPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(Update, camera_follow);
+        // Screen shake straddles the base-positioning systems: `shake_settle`
+        // removes last frame's offset (restoring the camera to its true base)
+        // *before* `camera_follow` recomputes the base, then `shake_apply`
+        // decays trauma, samples a fresh offset, and re-applies it *after*.
+        // This keeps the kick from drifting the follow/kill-cam base. The
+        // ScreenShake resource is provided by render's EffectsPlugin.
+        app.add_systems(
+            Update,
+            (
+                shake_settle.before(camera_follow),
+                camera_follow,
+                shake_apply.after(camera_follow),
+            ),
+        );
     }
+}
+
+/// Remove the previously-applied shake offset so the base-positioning
+/// systems (camera_follow / the kill-cam) see the camera at its true base.
+fn shake_settle(shake: Res<ScreenShake>, mut camera: Query<&mut Transform, With<Camera2d>>) {
+    let Ok(mut xform) = camera.single_mut() else {
+        return;
+    };
+    xform.translation.x -= shake.offset.x;
+    xform.translation.y -= shake.offset.y;
+}
+
+/// Decay trauma, sample a fresh offset from the cosmetic RNG, and add it to
+/// the camera's (freshly-positioned) base. The offset is stashed in the
+/// resource so [`shake_settle`] can undo it next frame.
+fn shake_apply(
+    time: Res<Time<Real>>,
+    mut shake: ResMut<ScreenShake>,
+    mut rng: ResMut<CosmeticRng>,
+    mut camera: Query<&mut Transform, With<Camera2d>>,
+) {
+    shake.trauma = decay_trauma(shake.trauma, time.delta_secs());
+    let angle = rng.0.gen_range(0.0..std::f32::consts::TAU);
+    let offset = shake_offset(shake.trauma, SHAKE_MAX_OFFSET, angle);
+    shake.offset = offset;
+    let Ok(mut xform) = camera.single_mut() else {
+        return;
+    };
+    xform.translation.x += offset.x;
+    xform.translation.y += offset.y;
 }
 
 fn camera_follow(
@@ -102,5 +153,23 @@ mod tests {
     fn damped_step_at_target_stays_at_target() {
         let v = damped_step(50.0, 50.0, 4.0, 0.1);
         assert!((v - 50.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn decay_trauma_bleeds_off_over_time() {
+        // A 0.1 s frame removes 0.1 × SHAKE_DECAY_PER_SEC of trauma.
+        let t = decay_trauma(1.0, 0.1);
+        assert!((t - (1.0 - 0.1 * SHAKE_DECAY_PER_SEC)).abs() < 1e-6);
+    }
+
+    #[test]
+    fn decay_trauma_floors_at_zero() {
+        // A long frame can't drive trauma negative.
+        assert_eq!(decay_trauma(0.1, 10.0), 0.0);
+    }
+
+    #[test]
+    fn decay_trauma_zero_dt_is_identity() {
+        assert!((decay_trauma(0.42, 0.0) - 0.42).abs() < 1e-6);
     }
 }

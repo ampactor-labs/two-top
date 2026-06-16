@@ -159,6 +159,7 @@ dependencies = [
  "input_desktop",
  "input_touch",
  "net",
+ "rand 0.8.6",
  "render",
  "sim",
  "tracing",

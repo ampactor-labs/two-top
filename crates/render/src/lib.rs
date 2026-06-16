@@ -606,6 +606,7 @@ pub struct PrevDying(pub bevy::platform::collections::HashMap<usize, bool>);
 pub fn spawn_hit_and_death_bursts(
     mut commands: Commands,
     assets: Res<EffectAssets>,
+    mut shake: ResMut<ScreenShake>,
     players: Query<(&Player, &Dead, &Transform)>,
     mut prev: Local<PrevDying>,
 ) {
@@ -614,6 +615,9 @@ pub fn spawn_hit_and_death_bursts(
         let was_dying = prev.0.get(&player.handle).copied().unwrap_or(false);
         if now_dying && !was_dying {
             let pos = xform.translation.truncate();
+            // Kill feedback: camera kick + a hard 2-frame white flash.
+            shake.add_trauma(TRAUMA_KILL);
+            spawn_kill_flash(&mut commands);
             // Hit burst — quick 4-frame flash, ~70 ms total. Above
             // gameplay z so it pops over the player sprite that just
             // got hit.
@@ -801,6 +805,155 @@ pub fn spawn_ambient_embers(
     }
 }
 
+// =========================================================================
+// Phase 18 Task 5.1 — screen shake + kill flash.
+//
+// Cosmetic camera kick + a brief fullscreen white flash on impactful
+// events. Both read the SAME sim edges the effect sprites already detect
+// (a player turning `is_dying`, a `BonePyre` shattering, an `Empowered`
+// flag rising), so they compose for the replay viewer too. All render-
+// only: `ScreenShake` is never rolled back, the offset is sampled from
+// the cosmetic RNG (never `SimRng`), and the flash is a plain sprite
+// (CONVENTIONS § Render Layer Rules).
+// =========================================================================
+
+/// Cosmetic screen-shake state. `trauma` is 0..1 energy that decays over
+/// real time; the applied pixel offset scales with `trauma²` (the Vlambeer
+/// trauma curve) so a graze barely nudges and a kill kicks hard. `offset`
+/// is the pixel offset the camera last applied, retained so the camera
+/// systems can subtract it before recomputing — that keeps shake from
+/// drifting the camera's base (follow / kill-cam) position. The camera
+/// systems live in the `app` crate (they own the `Transform`); this
+/// resource is the producer/consumer handoff.
+#[derive(Resource, Default, Debug)]
+pub struct ScreenShake {
+    pub trauma: f32,
+    pub offset: Vec2,
+}
+
+impl ScreenShake {
+    /// Add `amount` of trauma, saturating at 1.0. Trauma is additive so a
+    /// kill landed mid-shatter shakes harder, but the cap bounds the kick.
+    pub fn add_trauma(&mut self, amount: f32) {
+        self.trauma = (self.trauma + amount).clamp(0.0, 1.0);
+    }
+}
+
+/// Trauma lost per real-time second (linear decay).
+pub const SHAKE_DECAY_PER_SEC: f32 = 1.8;
+/// Camera offset in world units at `trauma == 1.0` (the source sprites are
+/// 32 px at 2× world scale, so 6 world units ≈ 3 source texels of kick).
+pub const SHAKE_MAX_OFFSET: f32 = 6.0;
+/// Kill shake. This is a one-hit-kill game — every landed contact is a
+/// death (`award_kill`), so the plan's separate "hit" and "death" events
+/// coincide; the kill edge gets the stronger death-magnitude kick.
+pub const TRAUMA_KILL: f32 = 0.7;
+/// Pyre-shatter shake (arena geometry breaking).
+pub const TRAUMA_SHATTER: f32 = 0.3;
+/// Perfect-catch shake (the signature skill beat).
+pub const TRAUMA_PERFECT_CATCH: f32 = 0.25;
+
+/// Pure offset sampler: magnitude `trauma² × max`, direction `angle`
+/// radians. Split out so the curve is unit-testable; the camera system
+/// supplies a random angle from the cosmetic RNG each frame.
+pub fn shake_offset(trauma: f32, max: f32, angle: f32) -> Vec2 {
+    let mag = trauma * trauma * max;
+    Vec2::new(angle.cos() * mag, angle.sin() * mag)
+}
+
+/// A brief fullscreen white flash quad (kill feedback). Lives `frames`
+/// render frames at a constant alpha, then despawns. Spawned on the kill
+/// edge by [`spawn_hit_and_death_bursts`].
+#[derive(Component)]
+pub struct KillFlash {
+    pub frames_left: u8,
+}
+
+/// How many render frames the kill flash holds before despawning.
+pub const KILL_FLASH_FRAMES: u8 = 2;
+/// Flash alpha (contact-mode accent — feedback, not information).
+pub const KILL_FLASH_ALPHA: f32 = 0.6;
+/// Spawn a kill flash covering the whole view. A single large quad at the
+/// arena origin (z above gameplay + effects, below the HUD legend) covers
+/// both the static desktop camera and the zoomed mobile follow cam, which
+/// always centres well inside the arena — no per-frame reposition needed.
+fn spawn_kill_flash(commands: &mut Commands) {
+    let mut color = palette::HIT_WHITE;
+    color.set_alpha(KILL_FLASH_ALPHA);
+    commands.spawn((
+        Sprite {
+            color,
+            custom_size: Some(Vec2::splat(8000.0)),
+            ..default()
+        },
+        Transform::from_xyz(0.0, 0.0, 50.0),
+        KillFlash {
+            frames_left: KILL_FLASH_FRAMES,
+        },
+    ));
+}
+
+/// Render-side: tick every [`KillFlash`] down one render frame and despawn
+/// when spent. Constant alpha (no fade) per the plan — a hard 2-frame
+/// strobe reads as impact, not a dissolve.
+pub fn advance_kill_flash(
+    mut commands: Commands,
+    mut q: Query<(Entity, &mut KillFlash)>,
+) {
+    for (entity, mut flash) in &mut q {
+        if flash.frames_left <= 1 {
+            commands.entity(entity).despawn();
+        } else {
+            flash.frames_left -= 1;
+        }
+    }
+}
+
+/// Tracks each player's last-seen `Empowered` flag so the shake fires once
+/// on the rising edge of a perfect catch (same per-handle edge pattern as
+/// [`PrevDying`]).
+#[derive(Default)]
+pub struct PrevEmpowered(pub bevy::platform::collections::HashMap<usize, bool>);
+
+/// Render-side: add perfect-catch trauma the tick a player's `Empowered`
+/// flag rises (a catch inside the perfect window). Falling edges (the
+/// empowered throw consuming the flag) don't shake.
+pub fn shake_on_perfect_catch(
+    mut shake: ResMut<ScreenShake>,
+    players: Query<(&Player, &sim::Empowered)>,
+    mut prev: Local<PrevEmpowered>,
+) {
+    for (player, emp) in &players {
+        let now = emp.0;
+        let was = prev.0.get(&player.handle).copied().unwrap_or(false);
+        if now && !was {
+            shake.add_trauma(TRAUMA_PERFECT_CATCH);
+        }
+        prev.0.insert(player.handle, now);
+    }
+}
+
+/// Tracks each pyre entity's last-seen `shattered` flag so the shake fires
+/// once on the shatter edge — `Changed<BonePyre>` also fires on spawn, so
+/// an explicit false→true edge is required to avoid a startup kick.
+#[derive(Default)]
+pub struct PrevShattered(pub bevy::platform::collections::HashMap<Entity, bool>);
+
+/// Render-side: add shatter trauma the tick a `BonePyre` breaks.
+pub fn shake_on_pyre_shatter(
+    mut shake: ResMut<ScreenShake>,
+    pyres: Query<(Entity, &sim::BonePyre)>,
+    mut prev: Local<PrevShattered>,
+) {
+    for (entity, pyre) in &pyres {
+        let was = prev.0.get(&entity).copied().unwrap_or(false);
+        if pyre.shattered && !was {
+            shake.add_trauma(TRAUMA_SHATTER);
+        }
+        prev.0.insert(entity, pyre.shattered);
+    }
+}
+
 /// Plugin: registers the effect-sprite infrastructure plus all four
 /// Phase 15 cycle 2 spawners. Add alongside [`RenderSyncPlugin`] in
 /// any binary that wants to render the polished effects (the live
@@ -811,6 +964,7 @@ impl Plugin for EffectsPlugin {
     fn build(&self, app: &mut App) {
         app.insert_resource(CosmeticRng(SmallRng::seed_from_u64(0x00b0_07ed_2709)))
             .insert_resource(EmberAccumulator { elapsed: 0.0 })
+            .init_resource::<ScreenShake>()
             .add_systems(Startup, load_effect_assets)
             .add_systems(
                 Update,
@@ -820,7 +974,48 @@ impl Plugin for EffectsPlugin {
                     spawn_recall_pulses,
                     spawn_ambient_embers,
                     clear_stains_on_match_reset,
+                    advance_kill_flash,
+                    shake_on_perfect_catch,
+                    shake_on_pyre_shatter,
                 ),
             );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn shake_offset_zero_trauma_is_zero() {
+        let v = shake_offset(0.0, SHAKE_MAX_OFFSET, 1.234);
+        assert!(v.length() < 1e-6);
+    }
+
+    #[test]
+    fn shake_offset_full_trauma_hits_max_magnitude() {
+        // trauma == 1.0 → magnitude == max, regardless of angle.
+        for &angle in &[0.0, 0.7, 1.6, 3.1, 5.5] {
+            let v = shake_offset(1.0, SHAKE_MAX_OFFSET, angle);
+            assert!((v.length() - SHAKE_MAX_OFFSET).abs() < 1e-4);
+        }
+    }
+
+    #[test]
+    fn shake_offset_scales_quadratically() {
+        // Half trauma → quarter magnitude (the trauma² curve).
+        let half = shake_offset(0.5, SHAKE_MAX_OFFSET, 0.0).length();
+        let full = shake_offset(1.0, SHAKE_MAX_OFFSET, 0.0).length();
+        assert!((half - full * 0.25).abs() < 1e-4);
+    }
+
+    #[test]
+    fn add_trauma_accumulates_and_clamps() {
+        let mut s = ScreenShake::default();
+        s.add_trauma(TRAUMA_PERFECT_CATCH);
+        assert!((s.trauma - TRAUMA_PERFECT_CATCH).abs() < 1e-6);
+        // Stacking past 1.0 saturates rather than overflowing the curve.
+        s.add_trauma(1.0);
+        assert!((s.trauma - 1.0).abs() < 1e-6);
     }
 }
