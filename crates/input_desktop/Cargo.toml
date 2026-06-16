@@ -11,6 +11,10 @@ rust-version.workspace = true
 # emits wire-format `PlayerInput` for the GGRS `ReadInputs` schedule. Per
 # CONVENTIONS the wire carries level signals only — never rolled back,
 # never serialized.
-bevy = { version = "=0.18.1", default-features = false, features = ["std", "keyboard"] }
+bevy = { version = "=0.18.1", default-features = false, features = [
+    "std",
+    "keyboard",
+    "gamepad",
+] }
 bevy_ggrs = "=0.21"
 sim = { path = "../sim" }

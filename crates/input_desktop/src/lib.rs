@@ -12,15 +12,18 @@
 //!   * **P0**: `WASD` move · `Space` throw · `LeftShift` dash
 //!   * **P1**: arrow keys move · `RightShift` throw · `RightCtrl` dash
 //!
+//! Or grab controllers: the first connected gamepad drives P0, the second
+//! drives P1 (left stick moves; South/RightTrigger throw; East/LeftTrigger
+//! dash). A gamepad only takes over its handle while it's active, so the
+//! keyboard stays a live fallback.
+//!
 //! In online play (a single local handle) that handle always uses the P0
 //! (primary) scheme regardless of which network slot it occupies.
-//!
-//! Gamepad support is a planned follow-up (plan task P.1) — it needs the
-//! `bevy_gilrs` feature, which isn't in the app's bevy build yet.
 
 use core::f32::consts::PI;
 
 use bevy::input::ButtonInput;
+use bevy::input::gamepad::{Gamepad, GamepadButton};
 use bevy::input::keyboard::KeyCode;
 use bevy::prelude::*;
 use bevy_ggrs::prelude::ReadInputs;
@@ -83,6 +86,14 @@ pub fn input_from_dpad(
     } else {
         (x, y)
     };
+    wire_input(sx, sy, throw, dash)
+}
+
+/// Pure core shared by the keyboard (d-pad) and gamepad (analog) paths:
+/// quantize a game-space stick `(sx, sy)` in `[-1, 1]` plus the two held
+/// buttons into the 4-byte wire format, setting `AIM_ACTIVE` + `aim_angle`
+/// when throwing over a live direction.
+fn wire_input(sx: f32, sy: f32, throw: bool, dash: bool) -> PlayerInput {
     let stick_x = (sx * 127.0).round().clamp(-127.0, 127.0) as i8;
     let stick_y = (sy * 127.0).round().clamp(-127.0, 127.0) as i8;
 
@@ -109,6 +120,21 @@ pub fn input_from_dpad(
     }
 }
 
+/// Left-stick deadzone — a resting/drifting stick reads as neutral.
+const GAMEPAD_DEADZONE: f32 = 0.18;
+
+/// Pure: collapse a raw analog stick to a deadzoned game-space vector,
+/// rescaling past the deadzone edge so motion ramps from zero (not from a
+/// jump to 0.18). Inside the deadzone → exactly zero.
+pub fn apply_deadzone(raw: Vec2, deadzone: f32) -> Vec2 {
+    let mag = raw.length();
+    if mag <= deadzone {
+        return Vec2::ZERO;
+    }
+    let scaled = ((mag - deadzone) / (1.0 - deadzone)).min(1.0);
+    (raw / mag) * scaled
+}
+
 /// Quantize a heading in radians `[-π, π]` to the wire's u8 angle, matching
 /// `input_touch`'s convention so render interprets it identically.
 fn quantize_angle(rad: f32) -> u8 {
@@ -128,20 +154,45 @@ fn read_bindings(keys: &ButtonInput<KeyCode>, b: KeyBindings) -> PlayerInput {
     )
 }
 
-/// `ReadInputs` system: map the keyboard to a per-handle `PlayerInput`.
-/// Two local handles (couch versus) → handle 0 uses P0 keys, handle 1 uses
-/// P1 keys. One local handle (online) → that handle uses the P0 scheme.
+/// Read a connected gamepad into a `PlayerInput`, or `None` when it's idle
+/// so the keyboard fallback for that handle keeps control. Left stick
+/// moves; South or RightTrigger throws; East or LeftTrigger dashes.
+fn read_gamepad(gp: &Gamepad) -> Option<PlayerInput> {
+    let stick = apply_deadzone(gp.left_stick(), GAMEPAD_DEADZONE);
+    let throw =
+        gp.pressed(GamepadButton::South) || gp.pressed(GamepadButton::RightTrigger);
+    let dash = gp.pressed(GamepadButton::East) || gp.pressed(GamepadButton::LeftTrigger);
+    let active = stick != Vec2::ZERO || throw || dash;
+    active.then(|| wire_input(stick.x, stick.y, throw, dash))
+}
+
+/// `ReadInputs` system: map keyboard + gamepads to a per-handle
+/// `PlayerInput`. Two local handles (couch versus) → scheme 0 (WASD / pad
+/// 0) drives handle 0, scheme 1 (arrows / pad 1) drives handle 1. One
+/// local handle (online) → that handle uses scheme 0. A gamepad assigned
+/// to a scheme overrides the keyboard for it while the pad is active.
 pub fn read_local_desktop_inputs(
     mut commands: Commands,
     keys: Res<ButtonInput<KeyCode>>,
+    gamepads: Query<(Entity, &Gamepad)>,
     local_players: Res<LocalPlayers>,
 ) {
-    let p0 = read_bindings(&keys, KeyBindings::P0);
-    let p1 = read_bindings(&keys, KeyBindings::P1);
+    let kb = [
+        read_bindings(&keys, KeyBindings::P0),
+        read_bindings(&keys, KeyBindings::P1),
+    ];
+    // Stable scheme→gamepad assignment by entity order: first pad → P0.
+    let mut pads: Vec<(Entity, &Gamepad)> = gamepads.iter().collect();
+    pads.sort_by_key(|(e, _)| *e);
+
     let solo = local_players.0.len() == 1;
     let mut map = bevy::platform::collections::HashMap::default();
     for &handle in &local_players.0 {
-        let input = if solo || handle == 0 { p0 } else { p1 };
+        let scheme = if solo { 0 } else { handle.min(1) };
+        let input = pads
+            .get(scheme)
+            .and_then(|(_, gp)| read_gamepad(gp))
+            .unwrap_or(kb[scheme]);
         map.insert(handle, input);
     }
     commands.insert_resource(LocalInputs::<GgrsCfg>(map));
@@ -198,6 +249,31 @@ mod tests {
         let p = input_from_dpad(false, false, false, false, true, true);
         assert_ne!(p.buttons & PlayerInput::THROW_DOWN, 0);
         assert_ne!(p.buttons & PlayerInput::DASH_DOWN, 0);
+    }
+
+    #[test]
+    fn deadzone_zeroes_small_input_and_passes_full_tilt() {
+        // Inside the deadzone collapses to exactly zero.
+        assert_eq!(apply_deadzone(Vec2::new(0.1, 0.0), 0.18), Vec2::ZERO);
+        assert_eq!(apply_deadzone(Vec2::new(0.0, -0.15), 0.18), Vec2::ZERO);
+        // Full tilt survives at ~unit length (rescaled from the edge).
+        let full = apply_deadzone(Vec2::new(1.0, 0.0), 0.18);
+        assert!((full.x - 1.0).abs() < 1e-6 && full.y.abs() < 1e-6);
+        // Just past the deadzone ramps up from ~0, not a jump to 0.18.
+        let near = apply_deadzone(Vec2::new(0.2, 0.0), 0.18);
+        assert!(near.x > 0.0 && near.x < 0.1, "ramps from zero: {}", near.x);
+    }
+
+    #[test]
+    fn analog_stick_quantizes_through_wire_input() {
+        // Half-tilt right → ~half of 127.
+        let p = wire_input(0.5, 0.0, false, false);
+        assert!((p.stick_x as i32 - 64).abs() <= 1, "stick_x={}", p.stick_x);
+        assert_eq!(p.stick_y, 0);
+        // Analog throw aimed up sets AIM_ACTIVE.
+        let up = wire_input(0.0, 0.9, true, false);
+        assert_ne!(up.buttons & PlayerInput::AIM_ACTIVE, 0);
+        assert!(up.stick_y > 100);
     }
 
     #[test]

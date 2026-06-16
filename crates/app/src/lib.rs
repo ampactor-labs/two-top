@@ -234,7 +234,7 @@ fn setup(
             Text2d::new(
                 "P0: WASD  ·  Space throw  ·  LShift dash\n\
                  P1: Arrows  ·  RShift throw  ·  RCtrl dash\n\
-                 F11 fullscreen",
+                 or controllers (build --features gamepad)  ·  F11 fullscreen",
             ),
             TextFont {
                 font_size: 26.0,

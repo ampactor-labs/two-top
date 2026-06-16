@@ -18,6 +18,17 @@ crate-type = ["cdylib", "rlib"]
 name = "app"
 path = "src/main.rs"
 
+[features]
+default = []
+# Controller support. Off by default so the standard keyboard build needs
+# no system libraries; the gilrs backend pulls `libudev-sys`, which on
+# Linux needs `libudev` dev headers (Fedora: `libudev-devel`, Debian:
+# `libudev-dev`). Build with `--features gamepad` to play with controllers.
+# input_desktop's gamepad *code* always compiles (Bevy's `gamepad` type
+# feature has no system dep); without this backend the gamepad query is
+# just empty and the keyboard drives play.
+gamepad = ["bevy/bevy_gilrs"]
+
 [dependencies]
 # `app` is the only crate in the workspace that needs windowing,
 # rendering, and font/text infra. CONVENTIONS keeps these features out
