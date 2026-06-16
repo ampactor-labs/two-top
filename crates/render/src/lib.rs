@@ -607,6 +607,7 @@ pub fn spawn_hit_and_death_bursts(
     mut commands: Commands,
     assets: Res<EffectAssets>,
     mut shake: ResMut<ScreenShake>,
+    mut last_kill: ResMut<LastKillPos>,
     players: Query<(&Player, &Dead, &Transform)>,
     mut prev: Local<PrevDying>,
 ) {
@@ -615,8 +616,11 @@ pub fn spawn_hit_and_death_bursts(
         let was_dying = prev.0.get(&player.handle).copied().unwrap_or(false);
         if now_dying && !was_dying {
             let pos = xform.translation.truncate();
-            // Kill feedback: camera kick + a hard 2-frame white flash.
+            // Kill feedback: camera kick + a hard 2-frame white flash, and
+            // record where it happened so the kill-cam can punch in on the
+            // round/match-ending blow.
             shake.add_trauma(TRAUMA_KILL);
+            last_kill.0 = pos;
             spawn_kill_flash(&mut commands);
             // Hit burst — quick 4-frame flash, ~70 ms total. Above
             // gameplay z so it pops over the player sprite that just
@@ -819,17 +823,21 @@ pub fn spawn_ambient_embers(
 
 /// Cosmetic screen-shake state. `trauma` is 0..1 energy that decays over
 /// real time; the applied pixel offset scales with `trauma²` (the Vlambeer
-/// trauma curve) so a graze barely nudges and a kill kicks hard. `offset`
-/// is the pixel offset the camera last applied, retained so the camera
-/// systems can subtract it before recomputing — that keeps shake from
-/// drifting the camera's base (follow / kill-cam) position. The camera
-/// systems live in the `app` crate (they own the `Transform`); this
-/// resource is the producer/consumer handoff.
+/// trauma curve) so a graze barely nudges and a kill kicks hard. The camera
+/// rig (app crate, which owns the `Transform`) decays this and samples a
+/// fresh offset each frame; render's only job is to *add* trauma on impact
+/// events. The rig recomputes the camera position from its base every
+/// frame, so no applied-offset bookkeeping is needed here.
 #[derive(Resource, Default, Debug)]
 pub struct ScreenShake {
     pub trauma: f32,
-    pub offset: Vec2,
 }
+
+/// Last kill position in world space, updated on every kill edge by
+/// [`spawn_hit_and_death_bursts`]. The kill-cam (app crate) reads this when
+/// a round/match ends to know where to punch in. Render-only.
+#[derive(Resource, Default, Debug)]
+pub struct LastKillPos(pub Vec2);
 
 impl ScreenShake {
     /// Add `amount` of trauma, saturating at 1.0. Trauma is additive so a
@@ -965,6 +973,7 @@ impl Plugin for EffectsPlugin {
         app.insert_resource(CosmeticRng(SmallRng::seed_from_u64(0x00b0_07ed_2709)))
             .insert_resource(EmberAccumulator { elapsed: 0.0 })
             .init_resource::<ScreenShake>()
+            .init_resource::<LastKillPos>()
             .add_systems(Startup, load_effect_assets)
             .add_systems(
                 Update,
