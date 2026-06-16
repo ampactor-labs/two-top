@@ -38,7 +38,7 @@ use render::{EffectsPlugin, RenderSyncPlugin, player_atlas_layout, PLAYER_RENDER
 use replay::{ReplayPlayback, ReplayPlaybackPlugin, decode_for_sim_version};
 use sim::{
     AnimState, BOOMERANG_HALF_EXTENT_CM, Boomerang, GgrsCfg, PLAYER_HALF_EXTENT_CM, Player,
-    PositionF, PreviousPositionF, SimPlugin, SimSnapshot, VelocityF, arena_walls,
+    PositionF, PreviousPositionF, SelectedArena, SimPlugin, SimSnapshot, VelocityF, arena_walls,
 };
 
 /// Snapshot interval in sim ticks. Per BUILD_PLAN § Phase 14 Produces:
@@ -311,6 +311,7 @@ fn setup(
     mut commands: Commands,
     asset_server: Res<AssetServer>,
     mut atlases: ResMut<Assets<TextureAtlasLayout>>,
+    selected: Res<SelectedArena>,
 ) {
     commands.spawn(Camera2d);
 
@@ -370,6 +371,10 @@ fn setup(
         },
         Transform::from_xyz(0.0, 0.0, -1.0),
     ));
+
+    // Phase 16: spawn the selected arena's bone-pyre cover (same shared
+    // helper as the app crate, so the viewer renders arenas identically).
+    render::spawn_arena_props(&mut commands, &selected);
 
     // Frame counter HUD pinned to the upper-left, world-space (matches
     // the existing debug overlay convention in the app crate).

@@ -20,7 +20,7 @@ use input_touch::{CursorPosition, TouchInputsPlugin, WindowSize, update_touch_st
 use render::{EffectsPlugin, RenderSyncPlugin, player_atlas_layout, PLAYER_RENDER_SIZE};
 use sim::{
     AnimState, BOOMERANG_HALF_EXTENT_CM, Boomerang, GgrsCfg, Player, PositionF, PreviousPositionF,
-    SimLifecycleLogPlugin, SimPlugin, VelocityF, arena_walls,
+    SelectedArena, SimLifecycleLogPlugin, SimPlugin, VelocityF, arena_walls,
 };
 
 mod camera;
@@ -124,6 +124,7 @@ fn setup(
     mut commands: Commands,
     asset_server: Res<AssetServer>,
     mut atlases: ResMut<Assets<TextureAtlasLayout>>,
+    selected: Res<SelectedArena>,
 ) {
     commands.spawn(Camera2d);
 
@@ -178,8 +179,8 @@ fn setup(
         commands.spawn(wall);
     }
 
-    // Phase 15 cycle 3b: arena backdrop. training_floor.png is the
-    // composed Bone-Cathedral arena (160x240 px source) — scaled to
+    // Phase 15 cycle 3b / A2: arena backdrop. training_floor.png is the
+    // composed moody Bone-Cathedral floor (320x480 px source) — scaled to
     // cover roughly the arena's playable area + walls (1100x1600 cm).
     // Z below players, stains, and effect sprites so the camera
     // composition reads as "everything sits ON the cathedral floor".
@@ -191,6 +192,10 @@ fn setup(
         },
         Transform::from_xyz(0.0, 0.0, -1.0),
     ));
+
+    // Phase 16: spawn the selected arena's bone-pyre cover (shared helper
+    // so app + replay_viewer render arenas identically).
+    render::spawn_arena_props(&mut commands, &selected);
 }
 
 /// `Update`-schedule system: attaches a placeholder sprite + transform

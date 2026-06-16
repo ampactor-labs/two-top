@@ -125,7 +125,48 @@ pub struct RenderSyncPlugin;
 
 impl Plugin for RenderSyncPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(Update, sync_transforms_from_sim);
+        app.add_systems(Update, (sync_transforms_from_sim, sync_pyre_visuals));
+    }
+}
+
+// ---- Phase 16: arena prop visuals ----
+
+/// Spawn the selected arena's bone-pyre cover as rollback entities, each
+/// with a placeholder bone-colored quad sized to its collision rect (the
+/// real pyre sprite lands in cycle 2). Called from both `app` and
+/// `replay_viewer` setup so the two binaries render arenas identically —
+/// the shared helper replaces what was copy-pasted in the reverted diff.
+pub fn spawn_arena_props(commands: &mut Commands, selected: &sim::SelectedArena) {
+    for pyre in sim::arena_pyres_for(selected.0) {
+        let (min_x, min_y) = pyre.rect.min.to_f32();
+        let (max_x, max_y) = pyre.rect.max.to_f32();
+        let center = Vec2::new((min_x + max_x) * 0.5, (min_y + max_y) * 0.5);
+        let size = Vec2::new(max_x - min_x, max_y - min_y);
+        commands.spawn((
+            pyre,
+            Sprite {
+                color: palette::BONE,
+                custom_size: Some(size),
+                ..default()
+            },
+            // Just above the floor (z=-1), below players/boomerangs (z=0).
+            Transform::from_xyz(center.x, center.y, -0.5),
+        ));
+    }
+}
+
+/// Re-tint a pyre quad when its shatter state changes: bone while intact,
+/// charcoal once shattered. Runs on `Changed<BonePyre>` so it's free on
+/// the ticks nothing shatters.
+pub fn sync_pyre_visuals(
+    mut q: Query<(&sim::BonePyre, &mut Sprite), Changed<sim::BonePyre>>,
+) {
+    for (pyre, mut sprite) in &mut q {
+        sprite.color = if pyre.shattered {
+            palette::CHARCOAL_LINE
+        } else {
+            palette::BONE
+        };
     }
 }
 
