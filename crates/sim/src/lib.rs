@@ -1229,6 +1229,32 @@ pub const MULTISHOT_FAN_RAD: Fix = Fix::lit("0.2617994");
 /// contact, or after this many frames if they somehow miss every wall.
 pub const MULTISHOT_SECONDARY_LIFETIME_FRAMES: u32 = 120;
 
+/// A Fire boomerang drops a burning cell every this many ticks while flying.
+pub const FIRE_TRAIL_INTERVAL_TICKS: u32 = 6;
+/// How long a dropped fire cell stays lethal before burning out.
+pub const FIRE_TRAIL_LIFETIME_FRAMES: u32 = 90;
+/// Fire cell collision half-extent in cm — a 24 cm hot square, smaller than
+/// the player so it reads as a hazard you can thread between, not a wall.
+pub const FIRE_TRAIL_HALF_EXTENT_CM: i32 = 12;
+
+/// A lingering patch of fire dropped by a Fire-modified boomerang. Rolled
+/// back like every gameplay entity. Position lives in a paired `PositionF`
+/// (the cell never moves), mirroring how floor `Pickup`s are placed.
+#[derive(Component, Clone, Copy, PartialEq, Eq, Hash, Debug)]
+#[require(Rollback)]
+pub struct FireTrailCell {
+    /// The thrower — immune to their own fire; the opponent is not.
+    pub owner_handle: usize,
+    /// Frame at which the cell burns out and despawns.
+    pub expires_at_frame: u32,
+}
+
+/// Collision AABB for a fire cell centered on `pos`.
+pub fn fire_trail_rect(pos: Vec2F) -> RectF {
+    let half = Vec2F::from_cm(FIRE_TRAIL_HALF_EXTENT_CM, FIRE_TRAIL_HALF_EXTENT_CM);
+    RectF::from_center_half_extents(pos, half)
+}
+
 /// `GgrsSchedule` system: bend Curve boomerangs each flying tick (banana
 /// throw). Runs before `boomerang_physics` so the rotated heading is what
 /// moves this tick.
@@ -1254,6 +1280,74 @@ pub fn expire_secondary_boomerangs(
         if let Some(at) = mods.despawn_at_frame
             && frame.0 >= at
         {
+            commands.entity(e).despawn();
+        }
+    }
+}
+
+/// `GgrsSchedule` system: a Fire boomerang lays down a burning cell at its
+/// current position every `FIRE_TRAIL_INTERVAL_TICKS`. Gated on the global
+/// frame counter (deterministic and rollback-stable) so every Fire fang in
+/// flight drops on the same cadence. Runs after `boomerang_physics` so the
+/// cell lands on the boomerang's post-move position.
+pub fn drop_fire_trail(
+    frame: Res<FrameCount>,
+    mut commands: Commands,
+    boomerangs: Query<(&Boomerang, &BoomerangMods, &PositionF)>,
+) {
+    if !frame.0.is_multiple_of(FIRE_TRAIL_INTERVAL_TICKS) {
+        return;
+    }
+    for (boom, mods, pos) in &boomerangs {
+        if matches!(boom.state, BoomerangState::Flying)
+            && matches!(mods.modifier, Some(PickupKind::Fire))
+        {
+            commands.spawn((
+                FireTrailCell {
+                    owner_handle: boom.owner_handle,
+                    expires_at_frame: frame.0 + FIRE_TRAIL_LIFETIME_FRAMES,
+                },
+                PositionF(pos.0),
+            ));
+        }
+    }
+}
+
+/// `GgrsSchedule` system: a fire cell kills any non-owner player standing in
+/// it, crediting the cell's owner through the shared `award_kill` path (same
+/// dying-flag + scoring as a boomerang hit). Dash i-frames (`StunFrames`)
+/// and already-dying players are immune. Direct `&mut Dead` is safe here
+/// (unlike `hit_boomerang_player`'s deferred hit-stop): a victim flagged
+/// dying by one cell is skipped by every other cell the same tick, so a
+/// kill counts once and coincident two-way kills stay commutative — each
+/// cell kills a *different* victim.
+pub fn fire_trail_kills(
+    frame: Res<FrameCount>,
+    mut score: ResMut<MatchScore>,
+    cells: Query<(&FireTrailCell, &PositionF)>,
+    mut players: Query<(&Player, &PositionF, &mut Dead, &StunFrames)>,
+) {
+    for (cell, cell_pos) in &cells {
+        let cr = fire_trail_rect(cell_pos.0);
+        for (player, player_pos, mut dead, stun) in &mut players {
+            if dead.is_dying() || player.handle == cell.owner_handle || stun.0 > 0 {
+                continue;
+            }
+            if player_rect(player_pos.0).overlaps(cr) {
+                award_kill(&mut dead, cell.owner_handle, frame.0, &mut score);
+            }
+        }
+    }
+}
+
+/// `GgrsSchedule` system: despawn fire cells that have burned out.
+pub fn expire_fire_trail(
+    frame: Res<FrameCount>,
+    mut commands: Commands,
+    cells: Query<(Entity, &FireTrailCell)>,
+) {
+    for (e, cell) in &cells {
+        if frame.0 >= cell.expires_at_frame {
             commands.entity(e).despawn();
         }
     }
@@ -1713,6 +1807,7 @@ impl Plugin for SimPlugin {
             .rollback_component_with_copy::<HeldModifier>()
             .rollback_component_with_copy::<BoomerangMods>()
             .rollback_component_with_copy::<Pickup>()
+            .rollback_component_with_copy::<FireTrailCell>()
             .rollback_component_with_copy::<BonePyre>()
             .rollback_resource_with_copy::<FrameCount>()
             .rollback_resource_with_copy::<MatchScore>()
@@ -1739,6 +1834,7 @@ impl Plugin for SimPlugin {
             .checksum_component_with_hash::<HeldModifier>()
             .checksum_component_with_hash::<BoomerangMods>()
             .checksum_component_with_hash::<Pickup>()
+            .checksum_component_with_hash::<FireTrailCell>()
             .checksum_component_with_hash::<BonePyre>()
             .checksum_resource_with_hash::<FrameCount>()
             .checksum_resource_with_hash::<MatchScore>()
@@ -1776,10 +1872,12 @@ impl Plugin for SimPlugin {
                     boomerang_physics,
                     boomerang_wall_collision,
                     expire_secondary_boomerangs,
+                    drop_fire_trail,
                     boomerang_pyre_collision,
                     chain_ignition.run_if(arena_is(ArenaId::Reliquary)),
                     boomerang_sigil_collision.run_if(arena_is(ArenaId::Crossing)),
                     hit_boomerang_player,
+                    fire_trail_kills,
                     chasm_kills.run_if(arena_is(ArenaId::Crossing)),
                     sigil_door_teleport.run_if(arena_is(ArenaId::Reliquary)),
                     catch_boomerangs,
@@ -1789,6 +1887,7 @@ impl Plugin for SimPlugin {
                 pickup_spawner,
                 collect_pickups,
                 expire_pickups,
+                expire_fire_trail,
                 tick_player_timers,
                 advance_animation,
                 advance_frame_count,
@@ -2488,6 +2587,9 @@ pub struct SimSnapshot {
     /// One per live floor Pickup, sorted by slot for a deterministic
     /// restore order.
     pub pickups: Vec<PickupSnap>,
+    /// One per live fire cell, sorted by (owner, position, expiry) for a
+    /// deterministic restore order.
+    pub fire_trail: Vec<FireTrailSnap>,
     pub rng: SimRng,
     pub pickup_timer: PickupSpawnTimer,
     pub input_history: InputHistory,
@@ -2525,6 +2627,13 @@ pub struct BoomerangSnap {
 #[derive(Clone, Copy, Debug)]
 pub struct PickupSnap {
     pub pickup: Pickup,
+    pub pos: PositionF,
+}
+
+/// Captured state for a single fire-trail cell.
+#[derive(Clone, Copy, Debug)]
+pub struct FireTrailSnap {
+    pub cell: FireTrailCell,
     pub pos: PositionF,
 }
 
@@ -2620,6 +2729,25 @@ impl SimSnapshot {
             .collect();
         pickups.sort_by_key(|s| s.pickup.slot);
 
+        let mut fire_trail: Vec<FireTrailSnap> = world
+            .query::<(&FireTrailCell, &PositionF)>()
+            .iter(world)
+            .map(|(c, pos)| FireTrailSnap {
+                cell: *c,
+                pos: *pos,
+            })
+            .collect();
+        // Cells have no stable identity; sort by (owner, position, expiry)
+        // for a deterministic total order, then reconcile by count on restore.
+        fire_trail.sort_by_key(|s| {
+            (
+                s.cell.owner_handle,
+                s.pos.0.x.to_bits(),
+                s.pos.0.y.to_bits(),
+                s.cell.expires_at_frame,
+            )
+        });
+
         let mut pyres: Vec<BonePyreSnap> = world
             .query::<&BonePyre>()
             .iter(world)
@@ -2640,6 +2768,7 @@ impl SimSnapshot {
             bridge,
             door_cooldown,
             pickups,
+            fire_trail,
             rng,
             pickup_timer,
             input_history,
@@ -2848,6 +2977,33 @@ impl SimSnapshot {
             } else {
                 world.spawn((snap.pickup, snap.pos));
             }
+        }
+
+        // ---- Fire-trail cells: reconcile by COUNT, mutate in place ----
+        // Cells have no rollback-stable identity (a single owner can have
+        // many, and restore overwrites every value), so — exactly like
+        // boomerangs — pair snapshot entries to existing entities
+        // positionally and spawn/despawn only the count difference, keeping
+        // bevy_ggrs Rollback IDs stable for the overlap.
+        let world_cells: Vec<Entity> = world
+            .query::<(Entity, &FireTrailCell)>()
+            .iter(world)
+            .map(|(e, _)| e)
+            .collect();
+        for (snap, &e) in self.fire_trail.iter().zip(world_cells.iter()) {
+            let mut em = world.entity_mut(e);
+            if let Some(mut c) = em.get_mut::<FireTrailCell>() {
+                *c = snap.cell;
+            }
+            if let Some(mut c) = em.get_mut::<PositionF>() {
+                *c = snap.pos;
+            }
+        }
+        for snap in self.fire_trail.iter().skip(world_cells.len()) {
+            world.spawn((snap.cell, snap.pos));
+        }
+        for &e in world_cells.iter().skip(self.fire_trail.len()) {
+            world.despawn(e);
         }
 
         // ---- Resources ----

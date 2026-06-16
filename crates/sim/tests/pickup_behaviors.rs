@@ -13,11 +13,12 @@ use bevy_ggrs::prelude::*;
 use fixed_math::{Fix, RectF, Vec2F};
 use sim::{
     BONE_PYRE_HALF_EXTENT_CM, BOUNCY_MAX_SPEED_CM_PER_TICK, BonePyre, Boomerang, BoomerangMods,
-    BoomerangState, DefaultInputsPlugin, FrameCount, GgrsCfg, HeldModifier, InfiniteRoundPlugin,
-    MULTISHOT_SECONDARY_LIFETIME_FRAMES, PickupKind, Player, PlayerInput, PositionF,
-    PreviousPositionF, SimPlugin, SimSnapshot, SynthesizedInputs, THROW_SPEED_CM_PER_TICK,
-    VelocityF, Wall, WallKind, boomerang_pyre_collision, boomerang_wall_collision,
-    curve_boomerangs, expire_secondary_boomerangs, modified_throw_speed,
+    BoomerangState, Dead, DefaultInputsPlugin, FIRE_TRAIL_LIFETIME_FRAMES, FireTrailCell,
+    FrameCount, GgrsCfg, HeldModifier, InfiniteRoundPlugin, MULTISHOT_SECONDARY_LIFETIME_FRAMES,
+    MatchScore, PickupKind, Player, PlayerInput, PositionF, PreviousPositionF, SimPlugin,
+    SimSnapshot, StunFrames, SynthesizedInputs, THROW_SPEED_CM_PER_TICK, VelocityF, Wall, WallKind,
+    boomerang_pyre_collision, boomerang_wall_collision, curve_boomerangs, drop_fire_trail,
+    expire_fire_trail, expire_secondary_boomerangs, fire_trail_kills, modified_throw_speed,
 };
 
 fn bare_app() -> App {
@@ -478,4 +479,203 @@ fn restore_shrinks_an_overpopulated_boomerang_set() {
         !q.iter(app.world()).next().unwrap().is_secondary,
         "the lone survivor is the snapshot's primary",
     );
+}
+
+// ---- Fire trail: drop cadence, kills, expiry, snapshot ----
+
+fn cell_count(app: &mut App) -> usize {
+    let mut q = app.world_mut().query::<&FireTrailCell>();
+    q.iter(app.world()).count()
+}
+
+#[test]
+fn fire_boomerang_drops_cells_on_the_interval_only() {
+    let mut app = bare_app();
+    // A flying Fire boomerang...
+    app.world_mut().spawn((
+        Boomerang {
+            owner_handle: 0,
+            state: BoomerangState::Flying,
+        },
+        BoomerangMods {
+            modifier: Some(PickupKind::Fire),
+            is_secondary: false,
+            despawn_at_frame: None,
+        },
+        PositionF(Vec2F::from_cm(100, 50)),
+        PreviousPositionF(Vec2F::from_cm(100, 50)),
+        VelocityF(Vec2F::from_cm(50, 0)),
+    ));
+    // ...and a plain boomerang that must never leave fire.
+    app.world_mut().spawn((
+        Boomerang {
+            owner_handle: 1,
+            state: BoomerangState::Flying,
+        },
+        BoomerangMods::default(),
+        PositionF(Vec2F::from_cm(-100, 0)),
+        PreviousPositionF(Vec2F::from_cm(-100, 0)),
+        VelocityF(Vec2F::from_cm(-50, 0)),
+    ));
+
+    // On a 6-tick boundary → exactly one cell, at the Fire boomerang.
+    *app.world_mut().resource_mut::<FrameCount>() = FrameCount(12);
+    app.world_mut().run_system_once(drop_fire_trail).unwrap();
+    let cells: Vec<(FireTrailCell, Vec2F)> = {
+        let mut q = app.world_mut().query::<(&FireTrailCell, &PositionF)>();
+        q.iter(app.world()).map(|(c, p)| (*c, p.0)).collect()
+    };
+    assert_eq!(cells.len(), 1, "one Fire boomerang drops one cell on cadence");
+    assert_eq!(cells[0].0.owner_handle, 0, "cell inherits the thrower");
+    assert_eq!(
+        cells[0].0.expires_at_frame,
+        12 + FIRE_TRAIL_LIFETIME_FRAMES,
+        "cell burns out a lifetime later",
+    );
+    assert_eq!(
+        cells[0].1,
+        Vec2F::from_cm(100, 50),
+        "cell drops at the boomerang's position",
+    );
+
+    // Off-cadence → nothing new.
+    *app.world_mut().resource_mut::<FrameCount>() = FrameCount(13);
+    app.world_mut().run_system_once(drop_fire_trail).unwrap();
+    assert_eq!(cell_count(&mut app), 1, "no drop between intervals");
+
+    // Next boundary → another cell.
+    *app.world_mut().resource_mut::<FrameCount>() = FrameCount(18);
+    app.world_mut().run_system_once(drop_fire_trail).unwrap();
+    assert_eq!(cell_count(&mut app), 2, "drops again on the next interval");
+}
+
+#[test]
+fn fire_cell_kills_opponent_credits_owner_spares_owner() {
+    let mut app = bare_app();
+    app.world_mut().spawn((
+        FireTrailCell {
+            owner_handle: 0,
+            expires_at_frame: 9999,
+        },
+        PositionF(Vec2F::ZERO),
+    ));
+    // Owner standing in their own fire — immune.
+    let p0 = app
+        .world_mut()
+        .spawn((Player { handle: 0 }, PositionF(Vec2F::ZERO)))
+        .id();
+    // Opponent standing in it — burns.
+    let p1 = app
+        .world_mut()
+        .spawn((Player { handle: 1 }, PositionF(Vec2F::ZERO)))
+        .id();
+
+    app.world_mut().run_system_once(fire_trail_kills).unwrap();
+
+    assert!(
+        !app.world().entity(p0).get::<Dead>().unwrap().is_dying(),
+        "the owner is immune to their own fire",
+    );
+    assert!(
+        app.world().entity(p1).get::<Dead>().unwrap().is_dying(),
+        "the opponent burns",
+    );
+    assert_eq!(
+        app.world().resource::<MatchScore>().p0,
+        1,
+        "the kill is credited to the fire's owner",
+    );
+}
+
+#[test]
+fn fire_cell_does_not_burn_through_iframes() {
+    let mut app = bare_app();
+    app.world_mut().spawn((
+        FireTrailCell {
+            owner_handle: 0,
+            expires_at_frame: 9999,
+        },
+        PositionF(Vec2F::ZERO),
+    ));
+    let p1 = app
+        .world_mut()
+        .spawn((Player { handle: 1 }, PositionF(Vec2F::ZERO)))
+        .id();
+    *app.world_mut().entity_mut(p1).get_mut::<StunFrames>().unwrap() = StunFrames(5);
+
+    app.world_mut().run_system_once(fire_trail_kills).unwrap();
+    assert!(
+        !app.world().entity(p1).get::<Dead>().unwrap().is_dying(),
+        "dash i-frames carry a player through the fire unharmed",
+    );
+}
+
+#[test]
+fn fire_cell_expires_at_its_lifetime() {
+    let mut app = bare_app();
+    app.world_mut().spawn((
+        FireTrailCell {
+            owner_handle: 0,
+            expires_at_frame: 300,
+        },
+        PositionF(Vec2F::ZERO),
+    ));
+    *app.world_mut().resource_mut::<FrameCount>() = FrameCount(299);
+    app.world_mut().run_system_once(expire_fire_trail).unwrap();
+    assert_eq!(cell_count(&mut app), 1, "alive one frame before burnout");
+    *app.world_mut().resource_mut::<FrameCount>() = FrameCount(300);
+    app.world_mut().run_system_once(expire_fire_trail).unwrap();
+    assert_eq!(cell_count(&mut app), 0, "despawned at the burnout frame");
+}
+
+#[test]
+fn fire_cells_survive_snapshot_round_trip() {
+    let mut app = bare_app();
+    app.world_mut().spawn((
+        FireTrailCell {
+            owner_handle: 0,
+            expires_at_frame: 100,
+        },
+        PositionF(Vec2F::from_cm(10, 0)),
+    ));
+    app.world_mut().spawn((
+        FireTrailCell {
+            owner_handle: 0,
+            expires_at_frame: 200,
+        },
+        PositionF(Vec2F::from_cm(20, 0)),
+    ));
+    app.world_mut().spawn((
+        FireTrailCell {
+            owner_handle: 1,
+            expires_at_frame: 150,
+        },
+        PositionF(Vec2F::from_cm(-10, 0)),
+    ));
+
+    let snap = SimSnapshot::capture(app.world_mut());
+    let es: Vec<Entity> = {
+        let mut q = app.world_mut().query::<(Entity, &FireTrailCell)>();
+        q.iter(app.world()).map(|(e, _)| e).collect()
+    };
+    for e in es {
+        app.world_mut().despawn(e);
+    }
+    assert_eq!(cell_count(&mut app), 0);
+    snap.restore(app.world_mut());
+
+    let mut got: Vec<(usize, u32, i32)> = {
+        let mut q = app.world_mut().query::<(&FireTrailCell, &PositionF)>();
+        q.iter(app.world())
+            .map(|(c, p)| (c.owner_handle, c.expires_at_frame, p.0.x.to_bits()))
+            .collect()
+    };
+    got.sort();
+    let mut want = vec![
+        (0usize, 100u32, Vec2F::from_cm(10, 0).x.to_bits()),
+        (0, 200, Vec2F::from_cm(20, 0).x.to_bits()),
+        (1, 150, Vec2F::from_cm(-10, 0).x.to_bits()),
+    ];
+    want.sort();
+    assert_eq!(got, want, "every fire cell restored with owner/expiry/position");
 }
