@@ -69,7 +69,7 @@ pub struct PreviousPositionF(pub Vec2F);
 pub struct VelocityF(pub Vec2F);
 
 #[derive(Component, Clone, Copy, PartialEq, Eq, Hash, Debug)]
-#[require(Rollback, DashState, StunFrames, Dead, AnimState, Empowered)]
+#[require(Rollback, DashState, StunFrames, Dead, AnimState, Empowered, HeldModifier)]
 pub struct Player {
     pub handle: usize,
 }
@@ -193,10 +193,25 @@ pub enum BoomerangState {
 }
 
 #[derive(Component, Clone, Copy, PartialEq, Eq, Hash, Debug)]
-#[require(Rollback)]
+#[require(Rollback, BoomerangMods)]
 pub struct Boomerang {
     pub owner_handle: usize,
     pub state: BoomerangState,
+}
+
+/// Per-boomerang pickup modifier + multishot role. Carried as a separate
+/// `#[require]`d component (default = primary, unmodified) so every boomerang
+/// — including the dozens spawned bare in tests — auto-gets a sane value
+/// without touching every `Boomerang { .. }` literal. `throw_boomerangs`
+/// overrides it when the thrower holds a pickup.
+#[derive(Component, Clone, Copy, PartialEq, Eq, Hash, Debug, Default)]
+#[require(Rollback)]
+pub struct BoomerangMods {
+    /// Active pickup modifier, if any (Phase 17 cycle 3 gives each behavior).
+    pub modifier: Option<PickupKind>,
+    /// Multishot side-fang: despawns on first wall contact and is ignored by
+    /// recall/catch. Default false = the primary fang.
+    pub is_secondary: bool,
 }
 
 /// Throw speed in cm/tick. ~3.8× walk speed: noticeably faster than
@@ -1042,13 +1057,20 @@ pub fn throw_boomerangs(
     mut commands: Commands,
     inputs: Res<PlayerInputs<GgrsCfg>>,
     history: Res<InputHistory>,
-    mut players: Query<(&Player, &Dead, &PositionF, &mut AnimState, &mut Empowered)>,
+    mut players: Query<(
+        &Player,
+        &Dead,
+        &PositionF,
+        &mut AnimState,
+        &mut Empowered,
+        &mut HeldModifier,
+    )>,
     boomerangs: Query<&Boomerang>,
 ) {
     if !match_state.is_in_round() {
         return;
     }
-    for (player, dead, pos, mut anim, mut empowered) in &mut players {
+    for (player, dead, pos, mut anim, mut empowered, mut held) in &mut players {
         if dead.is_dying() {
             continue;
         }
@@ -1063,10 +1085,17 @@ pub fn throw_boomerangs(
         // A perfect-catch empowerment is consumed by this throw.
         let velocity = unit_dir * throw_speed_for(empowered.0);
         empowered.0 = false;
+        // A held pickup rides this throw (cycle 3 gives each modifier its
+        // behavior). Consumed on throw.
+        let modifier = held.0.take();
         commands.spawn((
             Boomerang {
                 owner_handle: player.handle,
                 state: BoomerangState::Flying,
+            },
+            BoomerangMods {
+                modifier,
+                is_secondary: false,
             },
             PositionF(pos.0),
             PreviousPositionF(pos.0),
@@ -1539,6 +1568,8 @@ impl Plugin for SimPlugin {
             .init_resource::<SelectedArena>()
             .init_resource::<BridgeState>()
             .init_resource::<DoorCooldown>()
+            .init_resource::<SimRng>()
+            .init_resource::<PickupSpawnTimer>()
             .insert_resource(RollbackFrameRate(TICK_HZ));
 
         // Rollback registrations
@@ -1554,12 +1585,17 @@ impl Plugin for SimPlugin {
             .rollback_component_with_copy::<BoomerangState>()
             .rollback_component_with_copy::<AnimState>()
             .rollback_component_with_copy::<Empowered>()
+            .rollback_component_with_copy::<HeldModifier>()
+            .rollback_component_with_copy::<BoomerangMods>()
+            .rollback_component_with_copy::<Pickup>()
             .rollback_component_with_copy::<BonePyre>()
             .rollback_resource_with_copy::<FrameCount>()
             .rollback_resource_with_copy::<MatchScore>()
             .rollback_resource_with_copy::<MatchState>()
             .rollback_resource_with_copy::<BridgeState>()
             .rollback_resource_with_copy::<DoorCooldown>()
+            .rollback_resource_with_copy::<SimRng>()
+            .rollback_resource_with_copy::<PickupSpawnTimer>()
             .rollback_resource_with_clone::<InputHistory>();
 
         // Checksums — required for SyncTest to detect divergence beyond
@@ -1575,12 +1611,17 @@ impl Plugin for SimPlugin {
             .checksum_component_with_hash::<Boomerang>()
             .checksum_component_with_hash::<AnimState>()
             .checksum_component_with_hash::<Empowered>()
+            .checksum_component_with_hash::<HeldModifier>()
+            .checksum_component_with_hash::<BoomerangMods>()
+            .checksum_component_with_hash::<Pickup>()
             .checksum_component_with_hash::<BonePyre>()
             .checksum_resource_with_hash::<FrameCount>()
             .checksum_resource_with_hash::<MatchScore>()
             .checksum_resource_with_hash::<MatchState>()
             .checksum_resource_with_hash::<BridgeState>()
             .checksum_resource_with_hash::<DoorCooldown>()
+            .checksum_resource_with_hash::<SimRng>()
+            .checksum_resource_with_hash::<PickupSpawnTimer>()
             .checksum_resource_with_hash::<InputHistory>();
 
         // Sim systems — explicitly ordered per CONVENTIONS.md.
@@ -1618,6 +1659,9 @@ impl Plugin for SimPlugin {
                     throw_boomerangs,
                 )
                     .chain(),
+                pickup_spawner,
+                collect_pickups,
+                expire_pickups,
                 tick_player_timers,
                 advance_animation,
                 advance_frame_count,
@@ -2078,6 +2122,203 @@ pub fn arena_is(id: ArenaId) -> impl Fn(Res<SelectedArena>) -> bool + Clone {
     move |selected: Res<SelectedArena>| selected.0 == id
 }
 
+// ---- Phase 17: pickups ----
+
+/// Rolled-back deterministic RNG for gameplay randomness (pickup spawns).
+/// xorshift64* — portable, no platform-dependent behavior, no float. Per
+/// CONVENTIONS this is the ONLY randomness allowed in sim; cosmetics use a
+/// separate non-rolled-back RNG on the render side.
+#[derive(Resource, Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub struct SimRng {
+    state: u64,
+}
+
+impl Default for SimRng {
+    fn default() -> Self {
+        // Fixed non-zero golden-ratio seed. (Wiring it from ReplayHeader.seed
+        // is a follow-up; a constant seed already makes every replay of the
+        // same input stream reproduce the same pickup sequence.)
+        Self {
+            state: 0x9E37_79B9_7F4A_7C15,
+        }
+    }
+}
+
+impl SimRng {
+    pub fn next_u32(&mut self) -> u32 {
+        let mut x = self.state;
+        x ^= x >> 12;
+        x ^= x << 25;
+        x ^= x >> 27;
+        self.state = x;
+        (x.wrapping_mul(0x2545_F491_4F6C_DD1D) >> 32) as u32
+    }
+
+    /// Uniform integer in `[lo, hi)`. `hi` must be > `lo`.
+    pub fn range(&mut self, lo: u32, hi: u32) -> u32 {
+        lo + self.next_u32() % (hi - lo)
+    }
+}
+
+/// The six pickup modifiers. Each changes the one thing you do — the throw —
+/// so they deepen the core loop instead of bolting on new verbs.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub enum PickupKind {
+    /// Faster fang that drops a lethal fire trail.
+    Fire,
+    /// Slower fang that plows through cover without ricocheting.
+    Heavy,
+    /// Gains speed with every wall ricochet.
+    Bouncy,
+    /// Curves in flight (banana throw).
+    Curve,
+    /// Throws a 3-fang fan.
+    Multishot,
+    /// Phases through walls + cover (through-wall snipe).
+    Phantom,
+}
+
+impl PickupKind {
+    pub const ALL: [PickupKind; 6] = [
+        PickupKind::Fire,
+        PickupKind::Heavy,
+        PickupKind::Bouncy,
+        PickupKind::Curve,
+        PickupKind::Multishot,
+        PickupKind::Phantom,
+    ];
+
+    pub fn as_u8(self) -> u8 {
+        match self {
+            PickupKind::Fire => 0,
+            PickupKind::Heavy => 1,
+            PickupKind::Bouncy => 2,
+            PickupKind::Curve => 3,
+            PickupKind::Multishot => 4,
+            PickupKind::Phantom => 5,
+        }
+    }
+}
+
+/// A pickup waiting on the floor. Rolled back so spawn/collect is rollback-
+/// safe; lives on an entity with a fixed `PositionF` at one of the slots.
+#[derive(Component, Clone, Copy, PartialEq, Eq, Hash, Debug)]
+#[require(Rollback)]
+pub struct Pickup {
+    pub kind: PickupKind,
+    /// Which of the four fixed slots this occupies (stable restore key).
+    pub slot: u8,
+    pub despawn_at_frame: u32,
+}
+
+/// The pickup a player is carrying (one at a time; a new pickup replaces it).
+/// Moved onto the next thrown boomerang and cleared. `#[require]`d on Player.
+#[derive(Component, Clone, Copy, PartialEq, Eq, Hash, Debug, Default)]
+#[require(Rollback)]
+pub struct HeldModifier(pub Option<PickupKind>);
+
+/// Rolled-back timer: the earliest frame the next pickup may appear.
+#[derive(Resource, Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub struct PickupSpawnTimer {
+    pub next_at_frame: u32,
+}
+
+impl Default for PickupSpawnTimer {
+    fn default() -> Self {
+        // Don't drop a pickup the instant the round opens — let the first
+        // exchange breathe. First pickup lands ~8 s in.
+        Self {
+            next_at_frame: PICKUP_MIN_INTERVAL_FRAMES,
+        }
+    }
+}
+
+pub const PICKUP_MIN_INTERVAL_FRAMES: u32 = 480;
+pub const PICKUP_MAX_INTERVAL_FRAMES: u32 = 720;
+pub const PICKUP_LIFETIME_FRAMES: u32 = 360;
+pub const PICKUP_HALF_EXTENT_CM: i32 = 16;
+
+/// Four fixed, mirror-symmetric pickup slots (competitive fairness — neither
+/// side is closer to a spawn point).
+pub fn pickup_slots() -> [Vec2F; 4] {
+    [
+        Vec2F::from_cm(-250, -400),
+        Vec2F::from_cm(250, -400),
+        Vec2F::from_cm(-250, 400),
+        Vec2F::from_cm(250, 400),
+    ]
+}
+
+pub fn pickup_rect(pos: Vec2F) -> RectF {
+    let h = Fix::const_from_int(PICKUP_HALF_EXTENT_CM);
+    RectF::from_center_half_extents(pos, Vec2F::new(h, h))
+}
+
+/// `GgrsSchedule` system: spawn at most one pickup at a time on a randomized
+/// interval. Deterministic — the spawn frame/slot/kind come from the rolled-
+/// back `SimRng`, so two hosts (and a replay) agree exactly.
+pub fn pickup_spawner(
+    frame: Res<FrameCount>,
+    match_state: Res<MatchState>,
+    mut rng: ResMut<SimRng>,
+    mut timer: ResMut<PickupSpawnTimer>,
+    mut commands: Commands,
+    existing: Query<&Pickup>,
+) {
+    if !match_state.is_in_round() || !existing.is_empty() || frame.0 < timer.next_at_frame {
+        return;
+    }
+    let slot = rng.range(0, 4) as usize;
+    let kind = PickupKind::ALL[rng.range(0, PickupKind::ALL.len() as u32) as usize];
+    commands.spawn((
+        Pickup {
+            kind,
+            slot: slot as u8,
+            despawn_at_frame: frame.0 + PICKUP_LIFETIME_FRAMES,
+        },
+        PositionF(pickup_slots()[slot]),
+    ));
+    // Earliest frame the *next* pickup may appear. Interval > lifetime, so
+    // there's always a gap between one pickup vanishing and the next.
+    timer.next_at_frame =
+        frame.0 + rng.range(PICKUP_MIN_INTERVAL_FRAMES, PICKUP_MAX_INTERVAL_FRAMES);
+}
+
+/// `GgrsSchedule` system: a living player walking over a pickup collects it
+/// (filling/replacing its `HeldModifier`) and despawns the pickup.
+pub fn collect_pickups(
+    mut commands: Commands,
+    mut players: Query<(&Dead, &PositionF, &mut HeldModifier), With<Player>>,
+    pickups: Query<(Entity, &Pickup, &PositionF)>,
+) {
+    for (entity, pickup, ppos) in &pickups {
+        for (dead, player_pos, mut held) in &mut players {
+            if dead.is_dying() {
+                continue;
+            }
+            if player_rect(player_pos.0).overlaps(pickup_rect(ppos.0)) {
+                held.0 = Some(pickup.kind);
+                commands.entity(entity).despawn();
+                break;
+            }
+        }
+    }
+}
+
+/// `GgrsSchedule` system: despawn pickups that have sat uncollected past
+/// their lifetime.
+pub fn expire_pickups(
+    frame: Res<FrameCount>,
+    mut commands: Commands,
+    pickups: Query<(Entity, &Pickup)>,
+) {
+    for (entity, pickup) in &pickups {
+        if frame.0 >= pickup.despawn_at_frame {
+            commands.entity(entity).despawn();
+        }
+    }
+}
+
 // ---- Phase 14: SimSnapshot ----
 
 /// In-memory snapshot of every rolled-back sim component + resource at
@@ -2109,6 +2350,11 @@ pub struct SimSnapshot {
     pub match_score: MatchScore,
     pub bridge: BridgeState,
     pub door_cooldown: DoorCooldown,
+    /// One per live floor Pickup, sorted by slot for a deterministic
+    /// restore order.
+    pub pickups: Vec<PickupSnap>,
+    pub rng: SimRng,
+    pub pickup_timer: PickupSpawnTimer,
     pub input_history: InputHistory,
 }
 
@@ -2127,15 +2373,24 @@ pub struct PlayerSnap {
     pub dead: Dead,
     pub anim: AnimState,
     pub empowered: Empowered,
+    pub held: HeldModifier,
 }
 
 /// All rolled-back component values for a single Boomerang entity.
 #[derive(Clone, Copy, Debug)]
 pub struct BoomerangSnap {
     pub boomerang: Boomerang,
+    pub mods: BoomerangMods,
     pub pos: PositionF,
     pub prev_pos: PreviousPositionF,
     pub vel: VelocityF,
+}
+
+/// Captured state for a single floor Pickup entity.
+#[derive(Clone, Copy, Debug)]
+pub struct PickupSnap {
+    pub pickup: Pickup,
+    pub pos: PositionF,
 }
 
 /// Captured state for a single BonePyre entity. The position (`rect`) is
@@ -2157,6 +2412,8 @@ impl SimSnapshot {
         let match_score = *world.resource::<MatchScore>();
         let bridge = *world.resource::<BridgeState>();
         let door_cooldown = *world.resource::<DoorCooldown>();
+        let rng = *world.resource::<SimRng>();
+        let pickup_timer = *world.resource::<PickupSpawnTimer>();
         let input_history = world.resource::<InputHistory>().clone();
 
         let mut players: Vec<PlayerSnap> = world
@@ -2170,33 +2427,63 @@ impl SimSnapshot {
                 &Dead,
                 &AnimState,
                 &Empowered,
+                &HeldModifier,
             )>()
             .iter(world)
-            .map(|(p, pos, prev, vel, dash, stun, dead, anim, empowered)| PlayerSnap {
-                player: *p,
-                pos: *pos,
-                prev_pos: *prev,
-                vel: *vel,
-                dash: *dash,
-                stun: *stun,
-                dead: *dead,
-                anim: *anim,
-                empowered: *empowered,
-            })
+            .map(
+                |(p, pos, prev, vel, dash, stun, dead, anim, empowered, held)| PlayerSnap {
+                    player: *p,
+                    pos: *pos,
+                    prev_pos: *prev,
+                    vel: *vel,
+                    dash: *dash,
+                    stun: *stun,
+                    dead: *dead,
+                    anim: *anim,
+                    empowered: *empowered,
+                    held: *held,
+                },
+            )
             .collect();
         players.sort_by_key(|s| s.player.handle);
 
         let mut boomerangs: Vec<BoomerangSnap> = world
-            .query::<(&Boomerang, &PositionF, &PreviousPositionF, &VelocityF)>()
+            .query::<(
+                &Boomerang,
+                &BoomerangMods,
+                &PositionF,
+                &PreviousPositionF,
+                &VelocityF,
+            )>()
             .iter(world)
-            .map(|(b, pos, prev, vel)| BoomerangSnap {
+            .map(|(b, mods, pos, prev, vel)| BoomerangSnap {
                 boomerang: *b,
+                mods: *mods,
                 pos: *pos,
                 prev_pos: *prev,
                 vel: *vel,
             })
             .collect();
-        boomerangs.sort_by_key(|s| s.boomerang.owner_handle);
+        // Owner handle alone isn't unique once Multishot spawns several
+        // boomerangs per owner — break ties by position bits for a stable
+        // total order.
+        boomerangs.sort_by_key(|s| {
+            (
+                s.boomerang.owner_handle,
+                s.pos.0.x.to_bits(),
+                s.pos.0.y.to_bits(),
+            )
+        });
+
+        let mut pickups: Vec<PickupSnap> = world
+            .query::<(&Pickup, &PositionF)>()
+            .iter(world)
+            .map(|(p, pos)| PickupSnap {
+                pickup: *p,
+                pos: *pos,
+            })
+            .collect();
+        pickups.sort_by_key(|s| s.pickup.slot);
 
         let mut pyres: Vec<BonePyreSnap> = world
             .query::<&BonePyre>()
@@ -2217,6 +2504,9 @@ impl SimSnapshot {
             match_score,
             bridge,
             door_cooldown,
+            pickups,
+            rng,
+            pickup_timer,
             input_history,
         }
     }
@@ -2294,6 +2584,9 @@ impl SimSnapshot {
                 if let Some(mut c) = entity_mut.get_mut::<Empowered>() {
                     *c = snap.empowered;
                 }
+                if let Some(mut c) = entity_mut.get_mut::<HeldModifier>() {
+                    *c = snap.held;
+                }
             } else {
                 // Snapshot has a player handle the live world doesn't.
                 // Spawn it. Should not happen during normal scrub; the
@@ -2308,6 +2601,7 @@ impl SimSnapshot {
                     snap.dead,
                     snap.anim,
                     snap.empowered,
+                    snap.held,
                 ));
             }
         }
@@ -2344,6 +2638,9 @@ impl SimSnapshot {
                 if let Some(mut c) = entity_mut.get_mut::<Boomerang>() {
                     *c = snap.boomerang;
                 }
+                if let Some(mut c) = entity_mut.get_mut::<BoomerangMods>() {
+                    *c = snap.mods;
+                }
                 if let Some(mut c) = entity_mut.get_mut::<PositionF>() {
                     *c = snap.pos;
                 }
@@ -2354,7 +2651,7 @@ impl SimSnapshot {
                     *c = snap.vel;
                 }
             } else {
-                world.spawn((snap.boomerang, snap.pos, snap.prev_pos, snap.vel));
+                world.spawn((snap.boomerang, snap.mods, snap.pos, snap.prev_pos, snap.vel));
             }
         }
 
@@ -2394,7 +2691,40 @@ impl SimSnapshot {
             }
         }
 
+        // ---- Pickups: match by slot, spawn missing, despawn extras ----
+        // Slot (0..3) uniquely identifies a pickup; count varies 0..1.
+        let snap_slots: BTreeSet<u8> = self.pickups.iter().map(|s| s.pickup.slot).collect();
+        let extra_pickups: Vec<Entity> = world
+            .query::<(Entity, &Pickup)>()
+            .iter(world)
+            .filter(|(_, p)| !snap_slots.contains(&p.slot))
+            .map(|(e, _)| e)
+            .collect();
+        for e in extra_pickups {
+            world.despawn(e);
+        }
+        for snap in &self.pickups {
+            let target = world
+                .query::<(Entity, &Pickup)>()
+                .iter(world)
+                .find(|(_, p)| p.slot == snap.pickup.slot)
+                .map(|(e, _)| e);
+            if let Some(e) = target {
+                let mut em = world.entity_mut(e);
+                if let Some(mut c) = em.get_mut::<Pickup>() {
+                    *c = snap.pickup;
+                }
+                if let Some(mut c) = em.get_mut::<PositionF>() {
+                    *c = snap.pos;
+                }
+            } else {
+                world.spawn((snap.pickup, snap.pos));
+            }
+        }
+
         // ---- Resources ----
+        *world.resource_mut::<SimRng>() = self.rng;
+        *world.resource_mut::<PickupSpawnTimer>() = self.pickup_timer;
         *world.resource_mut::<FrameCount>() = self.frame_count;
         *world.resource_mut::<MatchState>() = self.match_state;
         *world.resource_mut::<MatchScore>() = self.match_score;
