@@ -229,6 +229,10 @@ pub struct BoomerangMods {
     /// Multishot side-fang: despawns on first wall contact and is ignored by
     /// recall/catch. Default false = the primary fang.
     pub is_secondary: bool,
+    /// Frame at which a Multishot side-fang self-despawns if it hasn't already
+    /// hit a wall (a backstop for fangs that fly through a gap). `None` for
+    /// primaries and non-multishot fangs — they live until recalled/caught.
+    pub despawn_at_frame: Option<u32>,
 }
 
 /// Throw speed in cm/tick. ~3.8× walk speed: noticeably faster than
@@ -1070,6 +1074,7 @@ pub fn catch_boomerangs(
 /// freshly-spawned boomerang doesn't take a phantom physics step on
 /// its spawn frame.
 pub fn throw_boomerangs(
+    frame: Res<FrameCount>,
     match_state: Res<MatchState>,
     mut commands: Commands,
     inputs: Res<PlayerInputs<GgrsCfg>>,
@@ -1104,6 +1109,7 @@ pub fn throw_boomerangs(
         let modifier = held.0.take();
         let velocity = unit_dir * modified_throw_speed(empowered.0, modifier);
         empowered.0 = false;
+        // The primary (recallable, catchable) fang flies straight.
         commands.spawn((
             Boomerang {
                 owner_handle: player.handle,
@@ -1112,11 +1118,35 @@ pub fn throw_boomerangs(
             BoomerangMods {
                 modifier,
                 is_secondary: false,
+                despawn_at_frame: None,
             },
             PositionF(pos.0),
             PreviousPositionF(pos.0),
             VelocityF(velocity),
         ));
+        // Multishot adds two fire-and-forget side-fangs at ±15°. They share
+        // the modifier so they read as the same throw, but are flagged
+        // `is_secondary` so recall/catch ignore them and a wall hit (or the
+        // lifetime backstop) despawns them.
+        if matches!(modifier, Some(PickupKind::Multishot)) {
+            let expire = frame.0 + MULTISHOT_SECONDARY_LIFETIME_FRAMES;
+            for theta in [MULTISHOT_FAN_RAD, -MULTISHOT_FAN_RAD] {
+                commands.spawn((
+                    Boomerang {
+                        owner_handle: player.handle,
+                        state: BoomerangState::Flying,
+                    },
+                    BoomerangMods {
+                        modifier,
+                        is_secondary: true,
+                        despawn_at_frame: Some(expire),
+                    },
+                    PositionF(pos.0),
+                    PreviousPositionF(pos.0),
+                    VelocityF(velocity.rotate(theta)),
+                ));
+            }
+        }
         // Phase 15: kick the throw animation. Reset to frame 0 so the
         // 6-frame wind-up plays from the start. `advance_animation`
         // will keep it ticking until is_finished(), then the
@@ -1137,10 +1167,17 @@ pub fn throw_boomerangs(
 /// that phases through walls. Otherwise the per-tick recall_velocity
 /// recompute would override any reflection on the next tick anyway.
 pub fn boomerang_wall_collision(
+    mut commands: Commands,
     walls: Query<&Wall>,
-    mut boomerangs: Query<(&Boomerang, &BoomerangMods, &mut PositionF, &mut VelocityF)>,
+    mut boomerangs: Query<(
+        Entity,
+        &Boomerang,
+        &BoomerangMods,
+        &mut PositionF,
+        &mut VelocityF,
+    )>,
 ) {
-    for (boom, mods, mut pos, mut vel) in &mut boomerangs {
+    for (entity, boom, mods, mut pos, mut vel) in &mut boomerangs {
         if matches!(boom.state, BoomerangState::Returning { .. }) {
             continue;
         }
@@ -1152,6 +1189,12 @@ pub fn boomerang_wall_collision(
         for wall in &walls {
             let bb = boomerang_rect(pos.0);
             if let Some(push) = resolve_collision(bb, wall.rect) {
+                // Multishot side-fangs die on the first wall they touch
+                // rather than ricocheting — the fan is a one-way burst.
+                if mods.is_secondary {
+                    commands.entity(entity).despawn();
+                    break;
+                }
                 pos.0 = pos.0 + push;
                 vel.0 = reflect_velocity_for_push(vel.0, push);
                 // Bouncy gains speed with every ricochet, capped.
@@ -1178,6 +1221,14 @@ pub const BOUNCY_MAX_SPEED_CM_PER_TICK: i32 = 80;
 /// Curve's turn rate while flying: 1.5° per tick (≈90°/sec) in radians.
 pub const CURVE_RAD_PER_TICK: Fix = Fix::lit("0.0261799");
 
+/// Multishot fan half-angle: the two side-fangs launch at ±15° off the aim,
+/// in radians. The center fang flies straight (the recallable primary).
+pub const MULTISHOT_FAN_RAD: Fix = Fix::lit("0.2617994");
+
+/// Multishot side-fangs are fire-and-forget: they despawn on first wall
+/// contact, or after this many frames if they somehow miss every wall.
+pub const MULTISHOT_SECONDARY_LIFETIME_FRAMES: u32 = 120;
+
 /// `GgrsSchedule` system: bend Curve boomerangs each flying tick (banana
 /// throw). Runs before `boomerang_physics` so the rotated heading is what
 /// moves this tick.
@@ -1187,6 +1238,23 @@ pub fn curve_boomerangs(mut q: Query<(&Boomerang, &BoomerangMods, &mut VelocityF
             && matches!(mods.modifier, Some(PickupKind::Curve))
         {
             vel.0 = vel.0.rotate(CURVE_RAD_PER_TICK);
+        }
+    }
+}
+
+/// `GgrsSchedule` system: despawn Multishot side-fangs that have outlived
+/// their `despawn_at_frame` backstop without hitting a wall first. Primaries
+/// and non-multishot fangs carry `None` and are never touched here.
+pub fn expire_secondary_boomerangs(
+    frame: Res<FrameCount>,
+    mut commands: Commands,
+    q: Query<(Entity, &BoomerangMods)>,
+) {
+    for (e, mods) in &q {
+        if let Some(at) = mods.despawn_at_frame
+            && frame.0 >= at
+        {
+            commands.entity(e).despawn();
         }
     }
 }
@@ -1221,13 +1289,17 @@ pub fn recall_boomerangs(
     inputs: Res<PlayerInputs<GgrsCfg>>,
     history: Res<InputHistory>,
     players: Query<(&Player, &PositionF)>,
-    mut boomerangs: Query<(&mut Boomerang, &PositionF, &mut VelocityF)>,
+    mut boomerangs: Query<(&mut Boomerang, &BoomerangMods, &PositionF, &mut VelocityF)>,
 ) {
     if !match_state.is_in_round() {
         return;
     }
     let recall_speed = Fix::const_from_int(RECALL_SPEED_CM_PER_TICK);
-    for (mut boom, boom_pos, mut vel) in &mut boomerangs {
+    for (mut boom, mods, boom_pos, mut vel) in &mut boomerangs {
+        // Multishot side-fangs never return — they're throw-and-forget.
+        if mods.is_secondary {
+            continue;
+        }
         let Some((_, owner_pos)) = players.iter().find(|(p, _)| p.handle == boom.owner_handle)
         else {
             continue;
@@ -1703,6 +1775,7 @@ impl Plugin for SimPlugin {
                     curve_boomerangs,
                     boomerang_physics,
                     boomerang_wall_collision,
+                    expire_secondary_boomerangs,
                     boomerang_pyre_collision,
                     chain_ignition.run_if(arena_is(ArenaId::Reliquary)),
                     boomerang_sigil_collision.run_if(arena_is(ArenaId::Crossing)),
@@ -2668,53 +2741,46 @@ impl SimSnapshot {
             }
         }
 
-        // ---- Boomerangs: match by owner_handle, spawn missing,
-        //                  despawn extras ----
-        // Determinism note: boomerang count varies (0..N), so we
-        // can't avoid spawn/despawn entirely. The match-by-owner
-        // pattern minimizes churn — a boomerang with the same owner
-        // in both snap and world stays as the SAME entity (mutated
-        // in place); only count-mismatched entities churn.
-        let snap_owners: BTreeSet<usize> = self
-            .boomerangs
-            .iter()
-            .map(|s| s.boomerang.owner_handle)
-            .collect();
-        let extras: Vec<Entity> = world
+        // ---- Boomerangs: reconcile by COUNT, mutate in place ----
+        // `owner_handle` is no longer unique (Multishot spawns up to three
+        // fangs per owner), and a boomerang has no rollback-stable identity
+        // anyway — restore overwrites every component value. So we pair the
+        // snapshot entries to existing entities positionally: mutate the
+        // overlap in place (keeping bevy_ggrs Rollback IDs stable, the churn
+        // 1204aa9 fixed), then spawn or despawn only the count difference.
+        // Which specific entity receives which value is irrelevant — all
+        // values are overwritten — and restore is a single-machine scrub
+        // path (replay_viewer), never part of the cross-platform checksum.
+        let world_booms: Vec<Entity> = world
             .query::<(Entity, &Boomerang)>()
             .iter(world)
-            .filter(|(_, b)| !snap_owners.contains(&b.owner_handle))
             .map(|(e, _)| e)
             .collect();
-        for e in extras {
-            world.despawn(e);
-        }
-        for snap in &self.boomerangs {
-            let target_entity = world
-                .query::<(Entity, &Boomerang)>()
-                .iter(world)
-                .find(|(_, b)| b.owner_handle == snap.boomerang.owner_handle)
-                .map(|(e, _)| e);
-            if let Some(e) = target_entity {
-                let mut entity_mut = world.entity_mut(e);
-                if let Some(mut c) = entity_mut.get_mut::<Boomerang>() {
-                    *c = snap.boomerang;
-                }
-                if let Some(mut c) = entity_mut.get_mut::<BoomerangMods>() {
-                    *c = snap.mods;
-                }
-                if let Some(mut c) = entity_mut.get_mut::<PositionF>() {
-                    *c = snap.pos;
-                }
-                if let Some(mut c) = entity_mut.get_mut::<PreviousPositionF>() {
-                    *c = snap.prev_pos;
-                }
-                if let Some(mut c) = entity_mut.get_mut::<VelocityF>() {
-                    *c = snap.vel;
-                }
-            } else {
-                world.spawn((snap.boomerang, snap.mods, snap.pos, snap.prev_pos, snap.vel));
+        for (snap, &e) in self.boomerangs.iter().zip(world_booms.iter()) {
+            let mut entity_mut = world.entity_mut(e);
+            if let Some(mut c) = entity_mut.get_mut::<Boomerang>() {
+                *c = snap.boomerang;
             }
+            if let Some(mut c) = entity_mut.get_mut::<BoomerangMods>() {
+                *c = snap.mods;
+            }
+            if let Some(mut c) = entity_mut.get_mut::<PositionF>() {
+                *c = snap.pos;
+            }
+            if let Some(mut c) = entity_mut.get_mut::<PreviousPositionF>() {
+                *c = snap.prev_pos;
+            }
+            if let Some(mut c) = entity_mut.get_mut::<VelocityF>() {
+                *c = snap.vel;
+            }
+        }
+        // Snapshot had more boomerangs than the world: spawn the remainder.
+        for snap in self.boomerangs.iter().skip(world_booms.len()) {
+            world.spawn((snap.boomerang, snap.mods, snap.pos, snap.prev_pos, snap.vel));
+        }
+        // World had more boomerangs than the snapshot: despawn the remainder.
+        for &e in world_booms.iter().skip(self.boomerangs.len()) {
+            world.despawn(e);
         }
 
         // ---- Bone pyres: mutate in place by rect key ----

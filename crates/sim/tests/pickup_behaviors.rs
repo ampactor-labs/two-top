@@ -13,9 +13,11 @@ use bevy_ggrs::prelude::*;
 use fixed_math::{Fix, RectF, Vec2F};
 use sim::{
     BONE_PYRE_HALF_EXTENT_CM, BOUNCY_MAX_SPEED_CM_PER_TICK, BonePyre, Boomerang, BoomerangMods,
-    BoomerangState, GgrsCfg, PickupKind, PositionF, PreviousPositionF, SimPlugin,
-    THROW_SPEED_CM_PER_TICK, VelocityF, Wall, WallKind, boomerang_pyre_collision,
-    boomerang_wall_collision, curve_boomerangs, modified_throw_speed,
+    BoomerangState, DefaultInputsPlugin, FrameCount, GgrsCfg, HeldModifier, InfiniteRoundPlugin,
+    MULTISHOT_SECONDARY_LIFETIME_FRAMES, PickupKind, Player, PlayerInput, PositionF,
+    PreviousPositionF, SimPlugin, SimSnapshot, SynthesizedInputs, THROW_SPEED_CM_PER_TICK,
+    VelocityF, Wall, WallKind, boomerang_pyre_collision, boomerang_wall_collision,
+    curve_boomerangs, expire_secondary_boomerangs, modified_throw_speed,
 };
 
 fn bare_app() -> App {
@@ -48,6 +50,7 @@ fn spawn_mod(app: &mut App, modifier: PickupKind, pos: Vec2F, vel: Vec2F) -> Ent
             BoomerangMods {
                 modifier: Some(modifier),
                 is_secondary: false,
+                despawn_at_frame: None,
             },
             PositionF(pos),
             PreviousPositionF(pos),
@@ -178,4 +181,301 @@ fn curve_bends_velocity_preserving_speed() {
     );
     let (sb, sa) = (before.length(), after.length());
     assert!((sa - sb).abs() <= Fix::from_bits(0x400), "speed is preserved");
+}
+
+// ---- Multishot: 3-fan throw, secondary lifecycle, recall/snapshot ----
+
+/// A full SimPlugin app driven by synthesized inputs (1 player), so a
+/// tap-release actually runs `throw_boomerangs`. Returns the player entity
+/// so a held modifier can be planted before the throw.
+fn full_app() -> (App, Entity) {
+    let mut sb = SessionBuilder::<GgrsCfg>::new()
+        .with_num_players(1)
+        .unwrap()
+        .with_check_distance(2)
+        .with_input_delay(0);
+    sb = sb.add_player(PlayerType::Local, 0).unwrap();
+    let session = sb.start_synctest_session().unwrap();
+
+    let mut app = App::new();
+    app.add_plugins(MinimalPlugins);
+    app.insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_secs_f64(
+        1.0 / sim::TICK_HZ as f64,
+    )));
+    app.add_plugins(GgrsPlugin::<GgrsCfg>::default());
+    app.add_plugins(SimPlugin);
+    app.add_plugins(InfiniteRoundPlugin);
+    app.add_plugins(DefaultInputsPlugin);
+    app.insert_resource(Session::SyncTest(session));
+
+    let p = app
+        .world_mut()
+        .spawn((
+            Player { handle: 0 },
+            PositionF(Vec2F::ZERO),
+            PreviousPositionF(Vec2F::ZERO),
+            VelocityF(Vec2F::ZERO),
+        ))
+        .id();
+    (app, p)
+}
+
+fn set_input(app: &mut App, stick_x: i8, buttons: u8) {
+    app.world_mut().resource_mut::<SynthesizedInputs>().0 = PlayerInput {
+        stick_x,
+        stick_y: 0,
+        aim_angle: 0,
+        buttons,
+    };
+}
+
+fn boom_count(app: &mut App) -> usize {
+    let mut q = app.world_mut().query::<&Boomerang>();
+    q.iter(app.world()).count()
+}
+
+/// Spawn one Multishot fang directly (no throw). Secondaries carry a
+/// lifetime backstop the way `throw_boomerangs` sets it.
+fn spawn_fang(app: &mut App, is_secondary: bool, pos: Vec2F) -> Entity {
+    app.world_mut()
+        .spawn((
+            Boomerang {
+                owner_handle: 0,
+                state: BoomerangState::Flying,
+            },
+            BoomerangMods {
+                modifier: Some(PickupKind::Multishot),
+                is_secondary,
+                despawn_at_frame: if is_secondary { Some(120) } else { None },
+            },
+            PositionF(pos),
+            PreviousPositionF(pos),
+            VelocityF(Vec2F::from_cm(50, 0)),
+        ))
+        .id()
+}
+
+fn despawn_all_booms(app: &mut App) {
+    let es: Vec<Entity> = {
+        let mut q = app.world_mut().query::<(Entity, &Boomerang)>();
+        q.iter(app.world()).map(|(e, _)| e).collect()
+    };
+    for e in es {
+        app.world_mut().despawn(e);
+    }
+}
+
+#[test]
+fn multishot_throw_spawns_three_fanned_fangs() {
+    let (mut app, p) = full_app();
+    app.update(); // SyncTestSession warmup
+    *app.world_mut().entity_mut(p).get_mut::<HeldModifier>().unwrap() =
+        HeldModifier(Some(PickupKind::Multishot));
+    // Hold (centered stick), then release aimed +x.
+    set_input(&mut app, 0, PlayerInput::THROW_DOWN);
+    app.update();
+    set_input(&mut app, 127, 0);
+    app.update();
+
+    let mut q = app
+        .world_mut()
+        .query::<(&BoomerangMods, &VelocityF)>();
+    let fangs: Vec<(BoomerangMods, Vec2F)> =
+        q.iter(app.world()).map(|(m, v)| (*m, v.0)).collect();
+    assert_eq!(fangs.len(), 3, "multishot throws three fangs");
+
+    let primaries: Vec<&(BoomerangMods, Vec2F)> =
+        fangs.iter().filter(|(m, _)| !m.is_secondary).collect();
+    let secondaries: Vec<&(BoomerangMods, Vec2F)> =
+        fangs.iter().filter(|(m, _)| m.is_secondary).collect();
+    assert_eq!(primaries.len(), 1, "exactly one recallable primary");
+    assert_eq!(secondaries.len(), 2, "two fire-and-forget side-fangs");
+
+    let primary_v = primaries[0].1;
+    let pspeed = primary_v.length();
+    assert!(primaries[0].0.despawn_at_frame.is_none(), "primary has no timeout");
+    for (m, v) in &fangs {
+        assert!(
+            (v.length() - pspeed).abs() <= Fix::from_bits(0x2000),
+            "all three fangs share the throw speed",
+        );
+        if m.is_secondary {
+            assert!(m.despawn_at_frame.is_some(), "side-fang has a lifetime backstop");
+        }
+    }
+    // The two side-fangs fan to OPPOSITE sides of the primary heading:
+    // the cross product (primary × fang) flips sign between them.
+    let cross = |a: Vec2F, b: Vec2F| a.x * b.y - a.y * b.x;
+    let c0 = cross(primary_v, secondaries[0].1);
+    let c1 = cross(primary_v, secondaries[1].1);
+    assert!(c0 != Fix::ZERO && c1 != Fix::ZERO, "side-fangs are rotated off the primary");
+    assert!(
+        (c0 > Fix::ZERO) != (c1 > Fix::ZERO),
+        "side-fangs fan symmetrically to opposite sides",
+    );
+}
+
+#[test]
+fn multishot_recall_returns_only_the_primary() {
+    let (mut app, p) = full_app();
+    app.update();
+    *app.world_mut().entity_mut(p).get_mut::<HeldModifier>().unwrap() =
+        HeldModifier(Some(PickupKind::Multishot));
+    set_input(&mut app, 0, PlayerInput::THROW_DOWN);
+    app.update();
+    set_input(&mut app, 127, 0);
+    app.update();
+    assert_eq!(boom_count(&mut app), 3, "three fangs in flight");
+
+    // Let the fangs fly out a few ticks so the recalled primary's first
+    // home-step doesn't overlap the owner (catch would despawn it before
+    // we observe Returning). Stick centered so the player holds at origin.
+    set_input(&mut app, 0, 0);
+    for _ in 0..6 {
+        app.update();
+    }
+    // Press THROW_DOWN again — a rising edge triggers recall.
+    set_input(&mut app, 0, PlayerInput::THROW_DOWN);
+    app.update();
+
+    let mut q = app.world_mut().query::<(&Boomerang, &BoomerangMods)>();
+    let states: Vec<(BoomerangState, bool)> =
+        q.iter(app.world()).map(|(b, m)| (b.state, m.is_secondary)).collect();
+    assert!(
+        states
+            .iter()
+            .any(|(s, sec)| !sec && matches!(s, BoomerangState::Returning { .. })),
+        "recall flips the primary to Returning",
+    );
+    assert!(
+        states
+            .iter()
+            .filter(|(_, sec)| *sec)
+            .all(|(s, _)| matches!(s, BoomerangState::Flying)),
+        "side-fangs ignore recall and keep flying",
+    );
+}
+
+#[test]
+fn multishot_secondary_dies_on_first_wall_primary_ricochets() {
+    let mut app = bare_app();
+    app.world_mut().spawn(Wall {
+        kind: WallKind::Solid,
+        rect: RectF::from_center_half_extents(
+            Vec2F::from_cm(30, 0),
+            Vec2F::new(Fix::const_from_int(10), Fix::const_from_int(100)),
+        ),
+    });
+    spawn_fang(&mut app, true, Vec2F::from_cm(25, 0));
+    spawn_fang(&mut app, false, Vec2F::from_cm(25, 0));
+    app.world_mut()
+        .run_system_once(boomerang_wall_collision)
+        .unwrap();
+
+    let mut q = app.world_mut().query::<(&BoomerangMods, &VelocityF)>();
+    let survivors: Vec<(bool, Vec2F)> =
+        q.iter(app.world()).map(|(m, v)| (m.is_secondary, v.0)).collect();
+    assert_eq!(survivors.len(), 1, "only the primary survives the wall");
+    assert!(!survivors[0].0, "the survivor is the primary, not a side-fang");
+    assert!(
+        survivors[0].1.x < Fix::ZERO,
+        "the primary ricocheted (vx flipped negative)",
+    );
+}
+
+#[test]
+fn multishot_secondary_expires_at_backstop_but_primary_persists() {
+    let mut app = bare_app();
+    app.world_mut().spawn((
+        Boomerang {
+            owner_handle: 0,
+            state: BoomerangState::Flying,
+        },
+        BoomerangMods {
+            modifier: Some(PickupKind::Multishot),
+            is_secondary: true,
+            despawn_at_frame: Some(200),
+        },
+        PositionF(Vec2F::ZERO),
+        PreviousPositionF(Vec2F::ZERO),
+        VelocityF(Vec2F::from_cm(50, 0)),
+    ));
+    spawn_fang(&mut app, false, Vec2F::from_cm(40, 0));
+
+    *app.world_mut().resource_mut::<FrameCount>() = FrameCount(199);
+    app.world_mut()
+        .run_system_once(expire_secondary_boomerangs)
+        .unwrap();
+    assert_eq!(boom_count(&mut app), 2, "alive one frame before the backstop");
+
+    *app.world_mut().resource_mut::<FrameCount>() = FrameCount(200);
+    app.world_mut()
+        .run_system_once(expire_secondary_boomerangs)
+        .unwrap();
+    let mut q = app.world_mut().query::<&BoomerangMods>();
+    let left: Vec<bool> = q.iter(app.world()).map(|m| m.is_secondary).collect();
+    assert_eq!(left.len(), 1, "secondary despawned at its backstop frame");
+    assert!(!left[0], "the no-timeout primary persists past frame 200");
+    // sanity: the constant the throw uses is the one we're modeling.
+    assert_eq!(MULTISHOT_SECONDARY_LIFETIME_FRAMES, 120);
+}
+
+#[test]
+fn three_same_owner_fangs_survive_snapshot_round_trip() {
+    let mut app = bare_app();
+    spawn_fang(&mut app, false, Vec2F::from_cm(0, 0));
+    spawn_fang(&mut app, true, Vec2F::from_cm(10, 0));
+    spawn_fang(&mut app, true, Vec2F::from_cm(20, 0));
+
+    let snap = SimSnapshot::capture(app.world_mut());
+    despawn_all_booms(&mut app);
+    assert_eq!(boom_count(&mut app), 0);
+    snap.restore(app.world_mut());
+
+    let mut q = app.world_mut().query::<(&BoomerangMods, &PositionF)>();
+    let mut primaries = 0;
+    let mut secondaries = 0;
+    let mut xs: Vec<i32> = Vec::new();
+    for (m, pos) in q.iter(app.world()) {
+        if m.is_secondary {
+            secondaries += 1;
+        } else {
+            primaries += 1;
+        }
+        xs.push(pos.0.x.to_bits());
+    }
+    assert_eq!(primaries, 1, "one primary restored");
+    assert_eq!(
+        secondaries, 2,
+        "two side-fangs restored — NOT collapsed onto one entity by owner_handle",
+    );
+    xs.sort();
+    assert_eq!(
+        xs,
+        vec![
+            Vec2F::from_cm(0, 0).x.to_bits(),
+            Vec2F::from_cm(10, 0).x.to_bits(),
+            Vec2F::from_cm(20, 0).x.to_bits(),
+        ],
+        "every fang's position survives the round trip",
+    );
+}
+
+#[test]
+fn restore_shrinks_an_overpopulated_boomerang_set() {
+    let mut app = bare_app();
+    spawn_fang(&mut app, false, Vec2F::from_cm(0, 0));
+    let snap = SimSnapshot::capture(app.world_mut()); // captures exactly one
+    // Over-populate the world the way a Multishot throw would.
+    spawn_fang(&mut app, true, Vec2F::from_cm(10, 0));
+    spawn_fang(&mut app, true, Vec2F::from_cm(20, 0));
+    assert_eq!(boom_count(&mut app), 3);
+
+    snap.restore(app.world_mut());
+    assert_eq!(boom_count(&mut app), 1, "restore despawns the surplus fangs");
+    let mut q = app.world_mut().query::<&BoomerangMods>();
+    assert!(
+        !q.iter(app.world()).next().unwrap().is_secondary,
+        "the lone survivor is the snapshot's primary",
+    );
 }
