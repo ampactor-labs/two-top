@@ -139,11 +139,6 @@ impl Plugin for RenderSyncPlugin {
 
 // ---- Phase 16: arena prop visuals ----
 
-/// Spawn the selected arena's bone-pyre cover as rollback entities, each
-/// with a placeholder bone-colored quad sized to its collision rect (the
-/// real pyre sprite lands in cycle 2). Called from both `app` and
-/// `replay_viewer` setup so the two binaries render arenas identically —
-/// the shared helper replaces what was copy-pasted in the reverted diff.
 /// Marker: the bone-bridge overlay (Crossing) — visible only while raised.
 #[derive(Component)]
 pub struct BridgeVisual;
@@ -674,7 +669,7 @@ pub fn spawn_recall_pulses(
             .get(&boom.owner_handle)
             .copied()
             .unwrap_or(BoomerangState::Flying);
-        if matches!(was, BoomerangState::Flying) && matches!(curr, BoomerangState::Returning) {
+        if matches!(was, BoomerangState::Flying) && matches!(curr, BoomerangState::Returning { .. }) {
             spawn_effect(
                 &mut commands,
                 assets.recall_pulse.0.clone(),

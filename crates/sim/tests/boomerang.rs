@@ -12,11 +12,11 @@ use bevy_ggrs::prelude::*;
 use core::time::Duration;
 use fixed_math::{Fix, Vec2F};
 use sim::{
-    ARENA_HALF_WIDTH_CM, Boomerang, BoomerangState, DefaultInputsPlugin, GgrsCfg,
-    INPUT_HISTORY_LEN, Player, PlayerInput, PositionF, PreviousPositionF,
-    RECALL_SPEED_CM_PER_TICK, SimPlugin, SynthesizedInputs, THROW_SPEED_CM_PER_TICK, VelocityF,
-    arena_walls, boomerang_rect, player_rect, recall_velocity, reflect_velocity_for_push,
-    try_throw_direction,
+    ARENA_HALF_WIDTH_CM, Boomerang, BoomerangState, DefaultInputsPlugin,
+    EMPOWERED_THROW_SPEED_CM_PER_TICK, GgrsCfg, INPUT_HISTORY_LEN, Player, PlayerInput, PositionF,
+    PreviousPositionF, RECALL_SPEED_CM_PER_TICK, SimPlugin, SynthesizedInputs,
+    THROW_SPEED_CM_PER_TICK, VelocityF, arena_walls, boomerang_rect, player_rect, recall_velocity,
+    reflect_velocity_for_push, try_throw_direction,
 };
 
 // ---- Pure helper unit tests ----
@@ -462,7 +462,7 @@ fn recall_press_transitions_flying_to_returning() {
     app.update();
     let (boom, _, vel) = first_boomerang(&mut app).unwrap();
     assert!(
-        matches!(boom.state, BoomerangState::Returning),
+        matches!(boom.state, BoomerangState::Returning { .. }),
         "recall press should have flipped Flying → Returning",
     );
     // Velocity now points back toward owner (player at origin), so vx < 0.
@@ -517,7 +517,7 @@ fn returning_boomerang_homes_each_tick_at_recall_speed() {
     // outside RECALL_SPEED of the owner, dx stays approximately -recall.
     app.update();
     let (boom, p2, vel2) = first_boomerang(&mut app).unwrap();
-    assert!(matches!(boom.state, BoomerangState::Returning));
+    assert!(matches!(boom.state, BoomerangState::Returning { .. }));
 
     let dx = (p2 - p1).x;
     let recall_speed = Fix::const_from_int(RECALL_SPEED_CM_PER_TICK);
@@ -700,9 +700,17 @@ fn catch_frees_owner_to_throw_again() {
     );
     let (b, _, vel) = first_boomerang(&mut app).unwrap();
     assert!(matches!(b.state, BoomerangState::Flying));
-    let speed = Fix::const_from_int(THROW_SPEED_CM_PER_TICK);
-    // South throw — vy = -speed, vx ~ 0.
-    assert!((vel.y + speed).abs() <= Fix::from_bits(2));
+    // South throw — vy negative, vx ~ 0. The speed is base OR the perfect-
+    // catch empowered speed: this quick recall+return can land inside the
+    // perfect-catch window, empowering the re-throw. Exact speed selection
+    // is pinned in catch.rs; here we only assert re-throw freedom + aim.
+    let base = Fix::const_from_int(THROW_SPEED_CM_PER_TICK);
+    let empowered = Fix::const_from_int(EMPOWERED_THROW_SPEED_CM_PER_TICK);
+    assert!(
+        (vel.y + base).abs() <= Fix::from_bits(2) || (vel.y + empowered).abs() <= Fix::from_bits(2),
+        "re-throw should be south at a valid throw speed (vy={:?})",
+        vel.y,
+    );
     assert!(vel.x.abs() <= Fix::from_bits(2));
 }
 

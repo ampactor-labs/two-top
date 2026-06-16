@@ -69,9 +69,37 @@ pub struct PreviousPositionF(pub Vec2F);
 pub struct VelocityF(pub Vec2F);
 
 #[derive(Component, Clone, Copy, PartialEq, Eq, Hash, Debug)]
-#[require(Rollback, DashState, StunFrames, Dead, AnimState)]
+#[require(Rollback, DashState, StunFrames, Dead, AnimState, Empowered)]
 pub struct Player {
     pub handle: usize,
+}
+
+/// Phase 17: set true by a *perfect catch* (catching a returning boomerang
+/// within `PERFECT_CATCH_WINDOW_FRAMES` of recall). The player's next throw
+/// consumes the flag and launches faster + deadlier — the signature skill-
+/// expression reward. Rolled back so the empowered state survives
+/// resimulation.
+#[derive(Component, Clone, Copy, PartialEq, Eq, Hash, Debug, Default)]
+#[require(Rollback)]
+pub struct Empowered(pub bool);
+
+/// Catch window (frames after recall begins) that counts as a *perfect
+/// catch*. ~167 ms at 60 Hz — tight enough to demand a read, forgiving
+/// enough to land with practice.
+pub const PERFECT_CATCH_WINDOW_FRAMES: u32 = 10;
+
+/// Throw speed of an empowered (perfect-catch) throw. 65 vs the base 50:
+/// a clearly faster, harder-to-react-to fang.
+pub const EMPOWERED_THROW_SPEED_CM_PER_TICK: i32 = 65;
+
+/// Throw speed (cm/tick) for a throw, empowered or not. The single place
+/// the perfect-catch speed bonus is applied.
+pub fn throw_speed_for(empowered: bool) -> Fix {
+    Fix::const_from_int(if empowered {
+        EMPOWERED_THROW_SPEED_CM_PER_TICK
+    } else {
+        THROW_SPEED_CM_PER_TICK
+    })
 }
 
 /// Dash mechanic per Phase 9. Idle waiting for a DASH_DOWN edge;
@@ -156,7 +184,12 @@ pub const HIT_STOP_FRAMES: u32 = 6;
 pub enum BoomerangState {
     #[default]
     Flying,
-    Returning,
+    /// Homing back to the owner. `since` is the frame the recall began —
+    /// `catch_boomerangs` compares it to the catch frame for the
+    /// perfect-catch window (the data only exists while it's meaningful).
+    Returning {
+        since: u32,
+    },
 }
 
 #[derive(Component, Clone, Copy, PartialEq, Eq, Hash, Debug)]
@@ -969,22 +1002,30 @@ fn award_kill(victim: &mut Dead, killer_handle: usize, frame: u32, score: &mut M
 /// throw whose initial spawn position overlaps the owner would catch
 /// itself on tick 1.
 pub fn catch_boomerangs(
+    frame: Res<FrameCount>,
     mut commands: Commands,
-    mut players: Query<(&Player, &PositionF, &mut AnimState)>,
+    mut players: Query<(&Player, &PositionF, &mut AnimState, &mut Empowered)>,
     boomerangs: Query<(Entity, &Boomerang, &PositionF)>,
 ) {
     for (entity, boom, boom_pos) in &boomerangs {
-        if !matches!(boom.state, BoomerangState::Returning) {
+        let BoomerangState::Returning { since } = boom.state else {
             continue;
-        }
-        let Some((_, owner_pos, mut anim)) = players.iter_mut().find(|(p, _, _)| p.handle == boom.owner_handle)
+        };
+        let Some((_, owner_pos, mut anim, mut empowered)) =
+            players.iter_mut().find(|(p, _, _, _)| p.handle == boom.owner_handle)
         else {
             continue;
         };
         if player_rect(owner_pos.0).overlaps(boomerang_rect(boom_pos.0)) {
             commands.entity(entity).despawn();
+            // Perfect catch: caught within the window of recall starting.
+            // `frame >= since` always (recall began in the past), so this
+            // can't underflow.
+            if frame.0 - since <= PERFECT_CATCH_WINDOW_FRAMES {
+                empowered.0 = true;
+            }
             // Kick the CATCH animation — same pattern as throw_boomerangs
-            // setting THROW at line 1012.
+            // setting THROW.
             anim.anim_id = AnimState::CATCH;
             anim.ticks = 0;
         }
@@ -1001,14 +1042,13 @@ pub fn throw_boomerangs(
     mut commands: Commands,
     inputs: Res<PlayerInputs<GgrsCfg>>,
     history: Res<InputHistory>,
-    mut players: Query<(&Player, &Dead, &PositionF, &mut AnimState)>,
+    mut players: Query<(&Player, &Dead, &PositionF, &mut AnimState, &mut Empowered)>,
     boomerangs: Query<&Boomerang>,
 ) {
     if !match_state.is_in_round() {
         return;
     }
-    let throw_speed = Fix::const_from_int(THROW_SPEED_CM_PER_TICK);
-    for (player, dead, pos, mut anim) in &mut players {
+    for (player, dead, pos, mut anim, mut empowered) in &mut players {
         if dead.is_dying() {
             continue;
         }
@@ -1020,7 +1060,9 @@ pub fn throw_boomerangs(
         let Some(unit_dir) = try_throw_direction(ring, curr, has_existing) else {
             continue;
         };
-        let velocity = unit_dir * throw_speed;
+        // A perfect-catch empowerment is consumed by this throw.
+        let velocity = unit_dir * throw_speed_for(empowered.0);
+        empowered.0 = false;
         commands.spawn((
             Boomerang {
                 owner_handle: player.handle,
@@ -1054,7 +1096,7 @@ pub fn boomerang_wall_collision(
     mut boomerangs: Query<(&Boomerang, &mut PositionF, &mut VelocityF)>,
 ) {
     for (boom, mut pos, mut vel) in &mut boomerangs {
-        if matches!(boom.state, BoomerangState::Returning) {
+        if matches!(boom.state, BoomerangState::Returning { .. }) {
             continue;
         }
         for wall in &walls {
@@ -1092,6 +1134,7 @@ pub fn recall_velocity(boom_pos: Vec2F, owner_pos: Vec2F, speed: Fix) -> Vec2F {
 /// to home toward the owner's current position — this is what lets
 /// the boomerang track a player who's still moving during recall.
 pub fn recall_boomerangs(
+    frame: Res<FrameCount>,
     match_state: Res<MatchState>,
     inputs: Res<PlayerInputs<GgrsCfg>>,
     history: Res<InputHistory>,
@@ -1115,11 +1158,11 @@ pub fn recall_boomerangs(
                 let (curr, _) = inputs[boom.owner_handle];
                 let prev = previous_input(ring);
                 if just_pressed(curr, prev, PlayerInput::THROW_DOWN) {
-                    boom.state = BoomerangState::Returning;
+                    boom.state = BoomerangState::Returning { since: frame.0 };
                     vel.0 = recall_velocity(boom_pos.0, owner_pos.0, recall_speed);
                 }
             }
-            BoomerangState::Returning => {
+            BoomerangState::Returning { .. } => {
                 vel.0 = recall_velocity(boom_pos.0, owner_pos.0, recall_speed);
             }
         }
@@ -1510,6 +1553,7 @@ impl Plugin for SimPlugin {
             .rollback_component_with_copy::<Boomerang>()
             .rollback_component_with_copy::<BoomerangState>()
             .rollback_component_with_copy::<AnimState>()
+            .rollback_component_with_copy::<Empowered>()
             .rollback_component_with_copy::<BonePyre>()
             .rollback_resource_with_copy::<FrameCount>()
             .rollback_resource_with_copy::<MatchScore>()
@@ -1530,6 +1574,7 @@ impl Plugin for SimPlugin {
             .checksum_component_with_hash::<Dead>()
             .checksum_component_with_hash::<Boomerang>()
             .checksum_component_with_hash::<AnimState>()
+            .checksum_component_with_hash::<Empowered>()
             .checksum_component_with_hash::<BonePyre>()
             .checksum_resource_with_hash::<FrameCount>()
             .checksum_resource_with_hash::<MatchScore>()
@@ -1820,7 +1865,7 @@ pub fn boomerang_pyre_collision(
     mut boomerangs: Query<(&Boomerang, &mut PositionF, &mut VelocityF)>,
 ) {
     for (boom, mut pos, mut vel) in &mut boomerangs {
-        if matches!(boom.state, BoomerangState::Returning) {
+        if matches!(boom.state, BoomerangState::Returning { .. }) {
             continue;
         }
         for mut pyre in &mut pyres {
@@ -1921,7 +1966,7 @@ pub fn boomerang_sigil_collision(
 ) {
     // Arena gating is a `run_if(arena_is(Crossing))` on the schedule.
     for (boom, mut pos, mut vel) in &mut boomerangs {
-        if matches!(boom.state, BoomerangState::Returning) {
+        if matches!(boom.state, BoomerangState::Returning { .. }) {
             continue;
         }
         for sigil in crossing_sigils() {
@@ -2081,6 +2126,7 @@ pub struct PlayerSnap {
     pub stun: StunFrames,
     pub dead: Dead,
     pub anim: AnimState,
+    pub empowered: Empowered,
 }
 
 /// All rolled-back component values for a single Boomerang entity.
@@ -2123,9 +2169,10 @@ impl SimSnapshot {
                 &StunFrames,
                 &Dead,
                 &AnimState,
+                &Empowered,
             )>()
             .iter(world)
-            .map(|(p, pos, prev, vel, dash, stun, dead, anim)| PlayerSnap {
+            .map(|(p, pos, prev, vel, dash, stun, dead, anim, empowered)| PlayerSnap {
                 player: *p,
                 pos: *pos,
                 prev_pos: *prev,
@@ -2134,6 +2181,7 @@ impl SimSnapshot {
                 stun: *stun,
                 dead: *dead,
                 anim: *anim,
+                empowered: *empowered,
             })
             .collect();
         players.sort_by_key(|s| s.player.handle);
@@ -2243,6 +2291,9 @@ impl SimSnapshot {
                 if let Some(mut c) = entity_mut.get_mut::<AnimState>() {
                     *c = snap.anim;
                 }
+                if let Some(mut c) = entity_mut.get_mut::<Empowered>() {
+                    *c = snap.empowered;
+                }
             } else {
                 // Snapshot has a player handle the live world doesn't.
                 // Spawn it. Should not happen during normal scrub; the
@@ -2256,6 +2307,7 @@ impl SimSnapshot {
                     snap.stun,
                     snap.dead,
                     snap.anim,
+                    snap.empowered,
                 ));
             }
         }

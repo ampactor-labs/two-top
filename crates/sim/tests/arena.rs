@@ -154,7 +154,7 @@ fn returning_boomerang_phases_through_pyre() {
         .spawn((
             Boomerang {
                 owner_handle: 0,
-                state: BoomerangState::Returning,
+                state: BoomerangState::Returning { since: 0 },
             },
             PositionF(Vec2F::from_cm(20, 0)),
             PreviousPositionF(Vec2F::from_cm(20, 0)),

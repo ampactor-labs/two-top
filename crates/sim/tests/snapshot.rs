@@ -95,7 +95,7 @@ fn seed_app() -> App {
     app.world_mut().spawn((
         Boomerang {
             owner_handle: 0,
-            state: BoomerangState::Returning,
+            state: BoomerangState::Returning { since: 0 },
         },
         PositionF(Vec2F::from_cm(50, 30)),
         PreviousPositionF(Vec2F::from_cm(60, 35)),
@@ -144,7 +144,7 @@ fn snapshot_captures_boomerangs_and_resources() {
     assert_eq!(snap.boomerangs.len(), 1);
     let b = &snap.boomerangs[0];
     assert_eq!(b.boomerang.owner_handle, 0);
-    assert_eq!(b.boomerang.state, BoomerangState::Returning);
+    assert!(matches!(b.boomerang.state, BoomerangState::Returning { .. }));
     assert_eq!(b.pos.0, Vec2F::from_cm(50, 30));
 
     assert_eq!(snap.frame, 412);

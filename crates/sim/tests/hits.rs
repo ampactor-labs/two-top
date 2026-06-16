@@ -146,7 +146,7 @@ fn returning_boomerang_also_kills_on_overlap() {
     app.world_mut().spawn((
         Boomerang {
             owner_handle: 0,
-            state: BoomerangState::Returning,
+            state: BoomerangState::Returning { since: 0 },
         },
         PositionF(Vec2F::from_cm(155, 0)),
         PreviousPositionF(Vec2F::from_cm(155, 0)),
