@@ -1914,6 +1914,87 @@ def bone_pyre_sheet() -> Canvas:
     return c
 
 
+def chasm_strip() -> Canvas:
+    """Vertical blood-chasm tile, 32x64 (tiles down the Crossing band). A
+    dark pit with cracked bone ledges on the left/right edges, blood-dark
+    veins, and a few ember glints from the depths so it reads as deadly."""
+    c = Canvas(32, 64, PALETTE["void"])
+    void = PALETTE["void"]
+    deep = PALETTE["deep_ash"]
+    blood = PALETTE["blood_dark"]
+    ember = PALETTE["ember"]
+    wbs = PALETTE["warm_bone_shade"]
+    char = PALETTE["charcoal_line"]
+    # depth shading toward the centre
+    for x in range(4, 28):
+        col = blood if 12 <= x <= 19 else (deep if x < 12 or x > 19 else void)
+        for y in range(0, 64):
+            if (x + y) % 7 == 0:
+                c.set(x, y, col)
+    # blood veins
+    for y in range(0, 64, 3):
+        c.set(15 + (y // 5) % 3, y, blood)
+        c.set(16 - (y // 7) % 2, y, blood)
+    # ember glints from the depths (tile-safe positions)
+    for (ex, ey) in [(14, 10), (18, 28), (15, 46), (17, 58)]:
+        c.set(ex, ey, ember)
+    # cracked bone ledges hugging both rims
+    for y in range(0, 64):
+        c.set(2, y, wbs if y % 4 else char)
+        c.set(3, y, char)
+        c.set(29, y, wbs if y % 4 else char)
+        c.set(28, y, char)
+    return c
+
+
+def altar_sigil_sheet() -> Canvas:
+    """2-cell strip, 32x32 each: idle (dim teal rune) / lit (bright recall-
+    blue, raises the bridge). Hit by a boomerang to trigger."""
+    c = Canvas(64, 32)
+    for cell, (ring, glow, core) in enumerate(
+        [
+            (PALETTE["deep_teal"], PALETTE["cold_stone"], PALETTE["warm_bone_shade"]),
+            (PALETTE["recall_blue"], PALETTE["p1_cyan"], PALETTE["hit_white"]),
+        ]
+    ):
+        ox = cell * 32
+        cx, cy = 16, 16
+        # outer ring
+        for a in range(0, 360, 12):
+            c.set(ox + cx + round(11 * math.cos(math.radians(a))),
+                  cy + round(11 * math.sin(math.radians(a))), ring)
+        # inscribed triangle (occult glyph)
+        pts = [(cx, cy - 9), (cx - 8, cy + 6), (cx + 8, cy + 6)]
+        for i in range(3):
+            x0, y0 = pts[i]
+            x1, y1 = pts[(i + 1) % 3]
+            c.line(ox + x0, y0, ox + x1, y1, glow)
+        # core
+        c.rect(ox + cx - 1, cy - 1, 2, 2, core)
+    return c
+
+
+def bone_bridge_tile() -> Canvas:
+    """Vertical bone-plank bridge tile, 32x64 — the overlay drawn across the
+    chasm while a sigil bridge is raised (makes the chasm safe)."""
+    c = Canvas(32, 64)
+    bone = PALETTE["bone"]
+    wbs = PALETTE["warm_bone_shade"]
+    char = PALETTE["charcoal_line"]
+    # planks running across (horizontal slats every 6px)
+    for y in range(0, 64):
+        plank = (y % 6) != 0
+        for x in range(3, 29):
+            c.set(x, y, bone if plank else char)
+        if plank:
+            c.set(28, y, wbs)  # right shade
+    # rope rails
+    for y in range(0, 64):
+        c.set(3, y, wbs)
+        c.set(29, y, wbs)
+    return c
+
+
 # ===========================================================================
 # HUD — score pips, timer digits, countdown digits, match-over badge,
 # touch ring states.
@@ -2419,6 +2500,9 @@ def main() -> None:
         ("assets/arenas/training_floor.png", training_floor()),
         ("assets/arenas/tile_sheet.png", arena_tile_sheet()),
         ("assets/sprites/arena/bone_pyre_sheet.png", bone_pyre_sheet()),
+        ("assets/sprites/arena/chasm_strip.png", chasm_strip()),
+        ("assets/sprites/arena/altar_sigil_sheet.png", altar_sigil_sheet()),
+        ("assets/sprites/arena/bone_bridge_tile.png", bone_bridge_tile()),
         ("assets/hud/score_pips.png", score_pips()),
         ("assets/hud/timer_digits.png", timer_digits()),
         ("assets/hud/countdown_digits.png", countdown_digits()),

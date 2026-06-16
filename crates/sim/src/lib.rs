@@ -1486,6 +1486,7 @@ impl Plugin for SimPlugin {
             .init_resource::<MatchState>()
             .init_resource::<InputHistory>()
             .init_resource::<SelectedArena>()
+            .init_resource::<BridgeState>()
             .insert_resource(RollbackFrameRate(TICK_HZ));
 
         // Rollback registrations
@@ -1504,6 +1505,7 @@ impl Plugin for SimPlugin {
             .rollback_resource_with_copy::<FrameCount>()
             .rollback_resource_with_copy::<MatchScore>()
             .rollback_resource_with_copy::<MatchState>()
+            .rollback_resource_with_copy::<BridgeState>()
             .rollback_resource_with_clone::<InputHistory>();
 
         // Checksums — required for SyncTest to detect divergence beyond
@@ -1522,6 +1524,7 @@ impl Plugin for SimPlugin {
             .checksum_resource_with_hash::<FrameCount>()
             .checksum_resource_with_hash::<MatchScore>()
             .checksum_resource_with_hash::<MatchState>()
+            .checksum_resource_with_hash::<BridgeState>()
             .checksum_resource_with_hash::<InputHistory>();
 
         // Sim systems — explicitly ordered per CONVENTIONS.md.
@@ -1545,7 +1548,9 @@ impl Plugin for SimPlugin {
                 boomerang_physics,
                 boomerang_wall_collision,
                 boomerang_pyre_collision,
+                boomerang_sigil_collision,
                 hit_boomerang_player,
+                chasm_kills,
                 catch_boomerangs,
                 throw_boomerangs,
                 tick_player_timers,
@@ -1763,6 +1768,114 @@ pub fn boomerang_pyre_collision(
     }
 }
 
+// ---- Phase 16 cycle 3: Crossing arena (blood chasm + altar bridge) ----
+
+/// Half-width of the Crossing arena's central blood chasm. The chasm is a
+/// VERTICAL band on the x-axis (players spawn at `±100,0`, so a horizontal
+/// chasm at y=0 would kill them on spawn — the chasm separates the two
+/// sides instead). 60 cm leaves a 24 cm gap to each spawn's outer edge.
+pub const CHASM_HALF_WIDTH_CM: i32 = 60;
+
+/// How long an altar-sigil hit keeps the bone bridge raised (5 s at 60 Hz).
+pub const BRIDGE_DURATION_FRAMES: u32 = 300;
+
+/// Half-extent of an altar sigil (boomerang target that raises the bridge).
+pub const ALTAR_SIGIL_HALF_EXTENT_CM: i32 = 24;
+
+/// Rolled-back bridge timer for the Crossing arena. The bone bridge is
+/// raised (the chasm is safe to cross) while `frame < active_until_frame`.
+/// Rolled back + checksummed because it gates a determinism-affecting kill.
+#[derive(Resource, Clone, Copy, PartialEq, Eq, Hash, Debug, Default)]
+pub struct BridgeState {
+    pub active_until_frame: u32,
+}
+
+impl BridgeState {
+    pub fn is_active(self, frame: u32) -> bool {
+        frame < self.active_until_frame
+    }
+}
+
+/// The Crossing arena's central chasm rect — a vertical band on the x-axis
+/// spanning the full arena height.
+pub fn crossing_chasm() -> RectF {
+    let hw = Fix::const_from_int(CHASM_HALF_WIDTH_CM);
+    let hh = Fix::const_from_int(ARENA_HALF_HEIGHT_CM);
+    RectF::from_center_half_extents(Vec2F::ZERO, Vec2F::new(hw, hh))
+}
+
+/// The two altar sigils — one per side at `±250,0`, reachable by a thrown
+/// boomerang. Mirror-symmetric about x=0. Hitting either raises the bridge.
+pub fn crossing_sigils() -> Vec<RectF> {
+    let h = Fix::const_from_int(ALTAR_SIGIL_HALF_EXTENT_CM);
+    let half = Vec2F::new(h, h);
+    vec![
+        RectF::from_center_half_extents(Vec2F::from_cm(-250, 0), half),
+        RectF::from_center_half_extents(Vec2F::from_cm(250, 0), half),
+    ]
+}
+
+/// `GgrsSchedule` system: kill any player standing in the Crossing chasm
+/// while the bridge is down. Environment kill — the opponent is credited,
+/// reusing the same dying-flag + respawn path as `hit_boomerang_player`.
+/// Boomerangs are untouched (they fly over the chasm freely).
+pub fn chasm_kills(
+    frame: Res<FrameCount>,
+    selected: Res<SelectedArena>,
+    bridge: Res<BridgeState>,
+    match_state: Res<MatchState>,
+    mut score: ResMut<MatchScore>,
+    mut players: Query<(&Player, &PositionF, &mut Dead)>,
+) {
+    if selected.0 != ArenaId::Crossing || !match_state.is_in_round() {
+        return;
+    }
+    if bridge.is_active(frame.0) {
+        return;
+    }
+    let chasm = crossing_chasm();
+    for (player, pos, mut dead) in &mut players {
+        if dead.is_dying() {
+            continue;
+        }
+        if chasm.contains(pos.0) {
+            dead.respawn_at_frame = Some(frame.0 + RESPAWN_FRAMES);
+            match player.handle {
+                0 => score.p1 = score.p1.saturating_add(1),
+                1 => score.p0 = score.p0.saturating_add(1),
+                _ => {}
+            }
+        }
+    }
+}
+
+/// `GgrsSchedule` system: ricochet flying boomerangs off the Crossing
+/// altar sigils (same reflection as walls/pyres) and raise the bone bridge
+/// on impact. Sigils don't shatter — they can be re-triggered all match.
+pub fn boomerang_sigil_collision(
+    frame: Res<FrameCount>,
+    selected: Res<SelectedArena>,
+    mut bridge: ResMut<BridgeState>,
+    mut boomerangs: Query<(&Boomerang, &mut PositionF, &mut VelocityF)>,
+) {
+    if selected.0 != ArenaId::Crossing {
+        return;
+    }
+    for (boom, mut pos, mut vel) in &mut boomerangs {
+        if matches!(boom.state, BoomerangState::Returning) {
+            continue;
+        }
+        for sigil in crossing_sigils() {
+            let bb = boomerang_rect(pos.0);
+            if let Some(push) = resolve_collision(bb, sigil) {
+                pos.0 = pos.0 + push;
+                vel.0 = reflect_velocity_for_push(vel.0, push);
+                bridge.active_until_frame = frame.0 + BRIDGE_DURATION_FRAMES;
+            }
+        }
+    }
+}
+
 // ---- Phase 14: SimSnapshot ----
 
 /// In-memory snapshot of every rolled-back sim component + resource at
@@ -1792,6 +1905,7 @@ pub struct SimSnapshot {
     pub frame_count: FrameCount,
     pub match_state: MatchState,
     pub match_score: MatchScore,
+    pub bridge: BridgeState,
     pub input_history: InputHistory,
 }
 
@@ -1837,6 +1951,7 @@ impl SimSnapshot {
         let frame_count = *world.resource::<FrameCount>();
         let match_state = *world.resource::<MatchState>();
         let match_score = *world.resource::<MatchScore>();
+        let bridge = *world.resource::<BridgeState>();
         let input_history = world.resource::<InputHistory>().clone();
 
         let mut players: Vec<PlayerSnap> = world
@@ -1893,6 +2008,7 @@ impl SimSnapshot {
             frame_count,
             match_state,
             match_score,
+            bridge,
             input_history,
         }
     }
@@ -2070,6 +2186,7 @@ impl SimSnapshot {
         *world.resource_mut::<FrameCount>() = self.frame_count;
         *world.resource_mut::<MatchState>() = self.match_state;
         *world.resource_mut::<MatchScore>() = self.match_score;
+        *world.resource_mut::<BridgeState>() = self.bridge;
         *world.resource_mut::<InputHistory>() = self.input_history.clone();
     }
 }

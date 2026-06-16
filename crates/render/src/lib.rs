@@ -125,7 +125,10 @@ pub struct RenderSyncPlugin;
 
 impl Plugin for RenderSyncPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(Update, (sync_transforms_from_sim, sync_pyre_visuals));
+        app.add_systems(
+            Update,
+            (sync_transforms_from_sim, sync_pyre_visuals, sync_crossing_visuals),
+        );
     }
 }
 
@@ -136,7 +139,36 @@ impl Plugin for RenderSyncPlugin {
 /// real pyre sprite lands in cycle 2). Called from both `app` and
 /// `replay_viewer` setup so the two binaries render arenas identically —
 /// the shared helper replaces what was copy-pasted in the reverted diff.
+/// Marker: the bone-bridge overlay (Crossing) — visible only while raised.
+#[derive(Component)]
+pub struct BridgeVisual;
+
+/// Marker: an altar sigil quad (Crossing) — lit while the bridge is raised.
+#[derive(Component)]
+pub struct SigilVisual;
+
 pub fn spawn_arena_props(
+    commands: &mut Commands,
+    asset_server: &AssetServer,
+    atlases: &mut Assets<TextureAtlasLayout>,
+    selected: &sim::SelectedArena,
+) {
+    spawn_pyres(commands, asset_server, atlases, selected);
+    if selected.0 == sim::ArenaId::Crossing {
+        spawn_crossing(commands, asset_server, atlases);
+    }
+}
+
+fn rect_center_size(rect: fixed_math::RectF) -> (Vec2, Vec2) {
+    let (min_x, min_y) = rect.min.to_f32();
+    let (max_x, max_y) = rect.max.to_f32();
+    (
+        Vec2::new((min_x + max_x) * 0.5, (min_y + max_y) * 0.5),
+        Vec2::new(max_x - min_x, max_y - min_y),
+    )
+}
+
+fn spawn_pyres(
     commands: &mut Commands,
     asset_server: &AssetServer,
     atlases: &mut Assets<TextureAtlasLayout>,
@@ -146,10 +178,7 @@ pub fn spawn_arena_props(
     let layout = atlases.add(TextureAtlasLayout::from_grid(UVec2::splat(32), 3, 1, None, None));
     let image = asset_server.load("sprites/arena/bone_pyre_sheet.png");
     for pyre in sim::arena_pyres_for(selected.0) {
-        let (min_x, min_y) = pyre.rect.min.to_f32();
-        let (max_x, max_y) = pyre.rect.max.to_f32();
-        let center = Vec2::new((min_x + max_x) * 0.5, (min_y + max_y) * 0.5);
-        let size = Vec2::new(max_x - min_x, max_y - min_y);
+        let (center, size) = rect_center_size(pyre.rect);
         commands.spawn((
             pyre,
             Sprite {
@@ -164,6 +193,81 @@ pub fn spawn_arena_props(
             // Just above the floor (z=-1), below players/boomerangs (z=0).
             Transform::from_xyz(center.x, center.y, -0.5),
         ));
+    }
+}
+
+fn spawn_crossing(
+    commands: &mut Commands,
+    asset_server: &AssetServer,
+    atlases: &mut Assets<TextureAtlasLayout>,
+) {
+    let (chasm_c, chasm_sz) = rect_center_size(sim::crossing_chasm());
+    let tile_h = chasm_sz.x * 2.0; // chasm/bridge tiles are 1:2 (32x64 source)
+    let n = (chasm_sz.y / tile_h).ceil() as i32 + 1;
+    let chasm_img = asset_server.load("sprites/arena/chasm_strip.png");
+    let bridge_img = asset_server.load("sprites/arena/bone_bridge_tile.png");
+    let start = chasm_c.y - (n as f32 - 1.0) * tile_h * 0.5;
+    for i in 0..n {
+        let y = start + i as f32 * tile_h;
+        // Chasm pit (z=-0.9, just above floor).
+        commands.spawn((
+            Sprite {
+                image: chasm_img.clone(),
+                custom_size: Some(Vec2::new(chasm_sz.x, tile_h)),
+                ..default()
+            },
+            Transform::from_xyz(chasm_c.x, y, -0.9),
+        ));
+        // Bone bridge overlay (z=-0.8), hidden until a sigil raises it.
+        commands.spawn((
+            BridgeVisual,
+            Sprite {
+                image: bridge_img.clone(),
+                custom_size: Some(Vec2::new(chasm_sz.x, tile_h)),
+                ..default()
+            },
+            Transform::from_xyz(chasm_c.x, y, -0.8),
+            Visibility::Hidden,
+        ));
+    }
+    // Altar sigils (2-cell sheet: 0 idle / 1 lit) on each side.
+    let sigil_layout = atlases.add(TextureAtlasLayout::from_grid(UVec2::splat(32), 2, 1, None, None));
+    let sigil_img = asset_server.load("sprites/arena/altar_sigil_sheet.png");
+    for sigil in sim::crossing_sigils() {
+        let (center, size) = rect_center_size(sigil);
+        commands.spawn((
+            SigilVisual,
+            Sprite {
+                image: sigil_img.clone(),
+                texture_atlas: Some(TextureAtlas {
+                    layout: sigil_layout.clone(),
+                    index: 0,
+                }),
+                custom_size: Some(size * 1.6),
+                ..default()
+            },
+            Transform::from_xyz(center.x, center.y, -0.7),
+        ));
+    }
+}
+
+/// Toggle the Crossing bone-bridge overlay + sigil lit-state from the
+/// rolled-back `BridgeState`. Runs in `Update` (post-rollback) so it reads
+/// the authoritative bridge timer. A no-op on other arenas (no markers).
+pub fn sync_crossing_visuals(
+    frame: Res<sim::FrameCount>,
+    bridge: Res<sim::BridgeState>,
+    mut bridges: Query<&mut Visibility, With<BridgeVisual>>,
+    mut sigils: Query<&mut Sprite, With<SigilVisual>>,
+) {
+    let active = bridge.is_active(frame.0);
+    for mut vis in &mut bridges {
+        *vis = if active { Visibility::Visible } else { Visibility::Hidden };
+    }
+    for mut sprite in &mut sigils {
+        if let Some(atlas) = sprite.texture_atlas.as_mut() {
+            atlas.index = if active { 1 } else { 0 };
+        }
     }
 }
 
