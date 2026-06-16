@@ -1,0 +1,16 @@
+[package]
+name = "input_desktop"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+publish.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+# Desktop keyboard input source. Reads Bevy's `ButtonInput<KeyCode>` and
+# emits wire-format `PlayerInput` for the GGRS `ReadInputs` schedule. Per
+# CONVENTIONS the wire carries level signals only — never rolled back,
+# never serialized.
+bevy = { version = "=0.18.1", default-features = false, features = ["std", "keyboard"] }
+bevy_ggrs = "=0.21"
+sim = { path = "../sim" }

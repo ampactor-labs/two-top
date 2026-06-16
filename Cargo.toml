@@ -7,6 +7,7 @@ members = [
     "crates/replay",
     "crates/render",
     "crates/input_touch",
+    "crates/input_desktop",
     "crates/app",
     "crates/sync_test",
     "crates/replay_sync",

@@ -156,6 +156,7 @@ dependencies = [
  "bevy",
  "bevy_ggrs",
  "fixed_math",
+ "input_desktop",
  "input_touch",
  "net",
  "render",
@@ -3111,6 +3112,15 @@ checksum = "879f10e63c20629ecabbb64a8010319738c66a5cd0c29b02d63d272b03751d01"
 dependencies = [
  "block-padding",
  "generic-array",
+]
+
+[[package]]
+name = "input_desktop"
+version = "0.0.0"
+dependencies = [
+ "bevy",
+ "bevy_ggrs",
+ "sim",
 ]
 
 [[package]]

@@ -16,7 +16,7 @@ use bevy::prelude::*;
 use bevy_ggrs::GgrsPlugin;
 use bevy_ggrs::prelude::*;
 use fixed_math::Vec2F;
-use input_touch::{CursorPosition, TouchInputsPlugin, WindowSize, update_touch_state};
+use input_touch::{CursorPosition, InputTouchPlugin, WindowSize, update_touch_state};
 use render::{EffectsPlugin, RenderSyncPlugin, player_atlas_layout, PLAYER_RENDER_SIZE};
 use sim::{
     AnimState, BOOMERANG_HALF_EXTENT_CM, Boomerang, GgrsCfg, Player, PositionF, PreviousPositionF,
@@ -54,11 +54,18 @@ pub fn run() {
         "two-top starting",
     );
 
+    // Local play (PC couch versus + the touch dev build) runs a SyncTest
+    // session with both players LOCAL: the input source feeds DISTINCT
+    // per-handle inputs (keyboard P0/P1 on desktop), so it's a real versus
+    // that also self-verifies determinism every frame. Input delay is 0 —
+    // there's no network latency to hide locally, so inputs apply at once
+    // for a snappy feel. (M4 swaps in a P2PSession with its own delay for
+    // online play.)
     let mut sb = SessionBuilder::<GgrsCfg>::new()
         .with_num_players(2)
         .expect("with_num_players")
         .with_check_distance(2)
-        .with_input_delay(2);
+        .with_input_delay(0);
     for i in 0..2 {
         sb = sb.add_player(PlayerType::Local, i).expect("add_player");
     }
@@ -68,11 +75,12 @@ pub fn run() {
         kind = "synctest",
         num_players = 2,
         check_distance = 2,
-        input_delay = 2,
+        input_delay = 0,
         "ggrs session started",
     );
 
-    App::new()
+    let mut app = App::new();
+    app
         // Disable bevy's LogPlugin: we own the subscriber installed
         // above. LogPlugin would try to call `set_global_default` again
         // and emit a noisy "global default subscriber set" complaint
@@ -91,7 +99,12 @@ pub fn run() {
         // ceremonies (sync_test, replay_sync) intentionally don't add
         // this plugin.
         .add_plugins(SimLifecycleLogPlugin)
-        .add_plugins(TouchInputsPlugin)
+        // Touch *state* tracking + window/cursor metrics on every platform
+        // (harmless on desktop — no touches arrive). The ReadInputs *source*
+        // that turns local state into wire-format `PlayerInput` is wired
+        // per-platform below; the two must never both be installed or
+        // they'd race over `LocalInputs<GgrsCfg>`.
+        .add_plugins(InputTouchPlugin)
         .add_plugins(RenderSyncPlugin)
         .add_plugins(EffectsPlugin)
         .add_plugins(CameraFollowPlugin)
@@ -108,8 +121,20 @@ pub fn run() {
                 sync_sprite_atlas_from_anim,
                 log_app_exit,
             ),
-        )
-        .run();
+        );
+
+    // Platform input source (level signals only; exactly one source).
+    // Android: touch. Everything else (PC): keyboard — WASD for P0, arrows
+    // for P1, so two friends play couch versus on one keyboard.
+    #[cfg(target_os = "android")]
+    app.add_systems(
+        bevy_ggrs::prelude::ReadInputs,
+        input_touch::read_local_touch_inputs,
+    );
+    #[cfg(not(target_os = "android"))]
+    app.add_plugins(input_desktop::DesktopInputsPlugin);
+
+    app.run();
 
     tracing::info!(target: "two_top::app", "two-top exiting cleanly");
 }

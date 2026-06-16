@@ -41,6 +41,10 @@ bevy = { version = "=0.18.1", default-features = false, features = [
 bevy_ggrs = "=0.21"
 fixed_math = { path = "../fixed_math" }
 input_touch = { path = "../input_touch" }
+# Desktop keyboard input source (PC couch versus + PC online). Only its
+# ReadInputs system is wired in on non-android targets; android keeps the
+# touch source. Pulls the `keyboard` bevy feature in transitively.
+input_desktop = { path = "../input_desktop" }
 net = { path = "../net" }
 render = { path = "../render" }
 sim = { path = "../sim" }
