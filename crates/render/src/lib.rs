@@ -127,7 +127,12 @@ impl Plugin for RenderSyncPlugin {
     fn build(&self, app: &mut App) {
         app.add_systems(
             Update,
-            (sync_transforms_from_sim, sync_pyre_visuals, sync_crossing_visuals),
+            (
+                sync_transforms_from_sim,
+                sync_pyre_visuals,
+                sync_crossing_visuals,
+                sync_reliquary_visuals,
+            ),
         );
     }
 }
@@ -147,6 +152,10 @@ pub struct BridgeVisual;
 #[derive(Component)]
 pub struct SigilVisual;
 
+/// Marker: a sigil door (Reliquary) — dimmed while on cooldown.
+#[derive(Component)]
+pub struct DoorVisual;
+
 pub fn spawn_arena_props(
     commands: &mut Commands,
     asset_server: &AssetServer,
@@ -154,8 +163,10 @@ pub fn spawn_arena_props(
     selected: &sim::SelectedArena,
 ) {
     spawn_pyres(commands, asset_server, atlases, selected);
-    if selected.0 == sim::ArenaId::Crossing {
-        spawn_crossing(commands, asset_server, atlases);
+    match selected.0 {
+        sim::ArenaId::Crossing => spawn_crossing(commands, asset_server, atlases),
+        sim::ArenaId::Reliquary => spawn_reliquary(commands, asset_server, atlases),
+        sim::ArenaId::Anchor => {}
     }
 }
 
@@ -248,6 +259,47 @@ fn spawn_crossing(
             },
             Transform::from_xyz(center.x, center.y, -0.7),
         ));
+    }
+}
+
+fn spawn_reliquary(
+    commands: &mut Commands,
+    asset_server: &AssetServer,
+    atlases: &mut Assets<TextureAtlasLayout>,
+) {
+    // 2-cell door sheet: 0 active / 1 cooldown.
+    let layout = atlases.add(TextureAtlasLayout::from_grid(UVec2::splat(32), 2, 1, None, None));
+    let image = asset_server.load("sprites/arena/sigil_door_sheet.png");
+    for (footprint, _exit) in sim::reliquary_doors() {
+        let (center, size) = rect_center_size(footprint);
+        commands.spawn((
+            DoorVisual,
+            Sprite {
+                image: image.clone(),
+                texture_atlas: Some(TextureAtlas {
+                    layout: layout.clone(),
+                    index: 0,
+                }),
+                custom_size: Some(size * 1.5),
+                ..default()
+            },
+            Transform::from_xyz(center.x, center.y, -0.6),
+        ));
+    }
+}
+
+/// Dim the Reliquary sigil doors while they're on cooldown (cell 1), active
+/// otherwise (cell 0). Reads the rolled-back `DoorCooldown` in `Update`.
+pub fn sync_reliquary_visuals(
+    frame: Res<sim::FrameCount>,
+    cooldown: Res<sim::DoorCooldown>,
+    mut doors: Query<&mut Sprite, With<DoorVisual>>,
+) {
+    let on_cooldown = frame.0 < cooldown.until_frame;
+    for mut sprite in &mut doors {
+        if let Some(atlas) = sprite.texture_atlas.as_mut() {
+            atlas.index = if on_cooldown { 1 } else { 0 };
+        }
     }
 }
 

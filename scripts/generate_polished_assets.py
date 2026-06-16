@@ -1974,6 +1974,39 @@ def altar_sigil_sheet() -> Canvas:
     return c
 
 
+def sigil_door_sheet() -> Canvas:
+    """2-cell strip, 32x32 each: active (glowing recall-blue portal rune) /
+    cooldown (dimmed). A stone archway framing an occult teleport rune."""
+    c = Canvas(64, 32)
+    stone = PALETTE["cold_stone"]
+    char = PALETTE["charcoal_line"]
+    dark = PALETTE["bruise_shadow"]
+    for cell, (rune, glow, core) in enumerate(
+        [
+            (PALETTE["recall_blue"], PALETTE["p1_cyan"], PALETTE["hit_white"]),
+            (PALETTE["charcoal_line"], PALETTE["deep_teal"], PALETTE["cold_stone"]),
+        ]
+    ):
+        ox = cell * 32
+        # archway frame: two pillars + a lintel
+        c.rect(ox + 4, 4, 3, 24, stone)
+        c.rect(ox + 25, 4, 3, 24, stone)
+        c.rect(ox + 4, 4, 24, 3, stone)
+        for y in range(4, 28):
+            c.set(ox + 6, y, char)
+            c.set(ox + 25, y, char)
+        # portal interior (dark)
+        c.rect(ox + 8, 7, 16, 21, dark)
+        # occult rune: nested chevrons + core
+        cx = ox + 16
+        for i, yy in enumerate((11, 15, 19)):
+            c.line(cx - 5, yy, cx, yy - 3, rune)
+            c.line(cx, yy - 3, cx + 5, yy, rune)
+        c.set(cx, 23, glow)
+        c.set(cx, 13, core)
+    return c
+
+
 def bone_bridge_tile() -> Canvas:
     """Vertical bone-plank bridge tile, 32x64 — the overlay drawn across the
     chasm while a sigil bridge is raised (makes the chasm safe)."""
@@ -2503,6 +2536,7 @@ def main() -> None:
         ("assets/sprites/arena/chasm_strip.png", chasm_strip()),
         ("assets/sprites/arena/altar_sigil_sheet.png", altar_sigil_sheet()),
         ("assets/sprites/arena/bone_bridge_tile.png", bone_bridge_tile()),
+        ("assets/sprites/arena/sigil_door_sheet.png", sigil_door_sheet()),
         ("assets/hud/score_pips.png", score_pips()),
         ("assets/hud/timer_digits.png", timer_digits()),
         ("assets/hud/countdown_digits.png", countdown_digits()),

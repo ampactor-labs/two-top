@@ -915,20 +915,12 @@ pub fn hit_boomerang_player(
         // Mutate the victim: mark dying via a value update on the
         // always-present `Dead` component (no archetype change, so
         // bevy_ggrs's snapshot/restore stays bit-stable across
-        // rollback resimulation).
+        // rollback resimulation) and credit the kill to the thrower —
+        // both through the shared `award_kill` path.
         if let Ok((_, _, _, mut dead, _)) = players.get_mut(player_entity) {
-            dead.respawn_at_frame = Some(frame.0 + RESPAWN_FRAMES);
+            award_kill(&mut dead, boom.owner_handle, frame.0, &mut score);
         }
         commands.entity(boom_entity).despawn();
-
-        // Award the kill to the boomerang's owner. saturating_add
-        // is bookkeeping-safe; in practice MatchOver fires at 5
-        // and resets, so the u8 ceiling is unreachable.
-        match boom.owner_handle {
-            0 => score.p0 = score.p0.saturating_add(1),
-            1 => score.p1 = score.p1.saturating_add(1),
-            _ => {}
-        }
 
         // Hit-stop on the killer, deferred via Commands. Snapshot
         // the existing `StunFrames` so a mid-dash killer keeps any
@@ -944,6 +936,22 @@ pub fn hit_boomerang_player(
                 .entity(killer_entity)
                 .insert(StunFrames(existing_stun.max(HIT_STOP_FRAMES)));
         }
+    }
+}
+
+/// Single source of truth for a kill: mark the victim dying on the
+/// always-present `Dead` value component and credit the kill to
+/// `killer_handle`. Used by boomerang hits AND arena hazards (the chasm
+/// credits the opponent) so the dying-flag + scoring stay byte-identical
+/// across every kill source. `saturating_add` is bookkeeping-safe; in
+/// practice MatchOver fires at 5 and resets long before the ceiling.
+#[inline]
+fn award_kill(victim: &mut Dead, killer_handle: usize, frame: u32, score: &mut MatchScore) {
+    victim.respawn_at_frame = Some(frame + RESPAWN_FRAMES);
+    match killer_handle {
+        0 => score.p0 = score.p0.saturating_add(1),
+        1 => score.p1 = score.p1.saturating_add(1),
+        _ => {}
     }
 }
 
@@ -1487,6 +1495,7 @@ impl Plugin for SimPlugin {
             .init_resource::<InputHistory>()
             .init_resource::<SelectedArena>()
             .init_resource::<BridgeState>()
+            .init_resource::<DoorCooldown>()
             .insert_resource(RollbackFrameRate(TICK_HZ));
 
         // Rollback registrations
@@ -1506,6 +1515,7 @@ impl Plugin for SimPlugin {
             .rollback_resource_with_copy::<MatchScore>()
             .rollback_resource_with_copy::<MatchState>()
             .rollback_resource_with_copy::<BridgeState>()
+            .rollback_resource_with_copy::<DoorCooldown>()
             .rollback_resource_with_clone::<InputHistory>();
 
         // Checksums — required for SyncTest to detect divergence beyond
@@ -1525,6 +1535,7 @@ impl Plugin for SimPlugin {
             .checksum_resource_with_hash::<MatchScore>()
             .checksum_resource_with_hash::<MatchState>()
             .checksum_resource_with_hash::<BridgeState>()
+            .checksum_resource_with_hash::<DoorCooldown>()
             .checksum_resource_with_hash::<InputHistory>();
 
         // Sim systems — explicitly ordered per CONVENTIONS.md.
@@ -1535,6 +1546,10 @@ impl Plugin for SimPlugin {
         // position the render layer sees. advance_input_history runs
         // LAST so edge consumers see the ring's last entry as "previous
         // tick" until end-of-tick rolls it forward.
+        // The boomerang + arena-interaction cluster is a nested chain: it
+        // keeps the per-tick order explicit while holding the outer tuple
+        // under Bevy's 20-element `.chain()` arity limit. Arena-specific
+        // systems are gated declaratively with `run_if(arena_is(_))`.
         app.add_systems(
             GgrsSchedule,
             (
@@ -1544,15 +1559,20 @@ impl Plugin for SimPlugin {
                 start_dash,
                 player_movement,
                 wall_collision,
-                recall_boomerangs,
-                boomerang_physics,
-                boomerang_wall_collision,
-                boomerang_pyre_collision,
-                boomerang_sigil_collision,
-                hit_boomerang_player,
-                chasm_kills,
-                catch_boomerangs,
-                throw_boomerangs,
+                (
+                    recall_boomerangs,
+                    boomerang_physics,
+                    boomerang_wall_collision,
+                    boomerang_pyre_collision,
+                    chain_ignition.run_if(arena_is(ArenaId::Reliquary)),
+                    boomerang_sigil_collision.run_if(arena_is(ArenaId::Crossing)),
+                    hit_boomerang_player,
+                    chasm_kills.run_if(arena_is(ArenaId::Crossing)),
+                    sigil_door_teleport.run_if(arena_is(ArenaId::Reliquary)),
+                    catch_boomerangs,
+                    throw_boomerangs,
+                )
+                    .chain(),
                 tick_player_timers,
                 advance_animation,
                 advance_frame_count,
@@ -1710,6 +1730,25 @@ pub struct SelectedArena(pub ArenaId);
 pub struct BonePyre {
     pub rect: RectF,
     pub shattered: bool,
+    /// Chain group for the Reliquary's linked pyres (0 = unlinked).
+    /// Shattering one pyre in a group ignites the rest after
+    /// `CHAIN_IGNITION_DELAY_FRAMES`.
+    pub chain_group: u8,
+    /// Pending chain-ignition frame: `Some(f)` once a group-mate has
+    /// shattered; this pyre auto-shatters when `frame >= f`.
+    pub chain_delay: Option<u32>,
+}
+
+impl BonePyre {
+    /// Construct an unlinked, intact pyre at the given rect.
+    pub fn intact(rect: RectF) -> Self {
+        Self {
+            rect,
+            shattered: false,
+            chain_group: 0,
+            chain_delay: None,
+        }
+    }
 }
 
 /// Half-extent of every bone pyre. 24 cm = 48 cm full extent — sized
@@ -1723,18 +1762,26 @@ pub const BONE_PYRE_HALF_EXTENT_CM: i32 = 24;
 /// fairness — players never get an asymmetric advantage).
 pub fn arena_pyres_for(arena: ArenaId) -> Vec<BonePyre> {
     let pyre_half = Fix::const_from_int(BONE_PYRE_HALF_EXTENT_CM);
+    let square = |cx: i32, cy: i32| {
+        RectF::from_center_half_extents(Vec2F::from_cm(cx, cy), Vec2F::new(pyre_half, pyre_half))
+    };
     match arena {
-        ArenaId::Anchor => vec![BonePyre {
-            // One central pyre, exactly on the y-axis (mirror-symmetric
-            // about x=0).
-            rect: RectF::from_center_half_extents(
-                Vec2F::ZERO,
-                Vec2F::new(pyre_half, pyre_half),
-            ),
-            shattered: false,
-        }],
-        // Cycle 3 + 4 populate these. Empty for now.
-        ArenaId::Crossing | ArenaId::Reliquary => Vec::new(),
+        // One central pyre on the y-axis (mirror-symmetric about x=0).
+        ArenaId::Anchor => vec![BonePyre::intact(square(0, 0))],
+        // The chasm owns the centre; no pyres.
+        ArenaId::Crossing => Vec::new(),
+        // Two chain-linked pyres flanking the centre: shattering one
+        // ignites the other after CHAIN_IGNITION_DELAY_FRAMES.
+        ArenaId::Reliquary => vec![
+            BonePyre {
+                chain_group: 1,
+                ..BonePyre::intact(square(-200, 0))
+            },
+            BonePyre {
+                chain_group: 1,
+                ..BonePyre::intact(square(200, 0))
+            },
+        ],
     }
 }
 
@@ -1821,16 +1868,13 @@ pub fn crossing_sigils() -> Vec<RectF> {
 /// Boomerangs are untouched (they fly over the chasm freely).
 pub fn chasm_kills(
     frame: Res<FrameCount>,
-    selected: Res<SelectedArena>,
     bridge: Res<BridgeState>,
     match_state: Res<MatchState>,
     mut score: ResMut<MatchScore>,
     mut players: Query<(&Player, &PositionF, &mut Dead)>,
 ) {
-    if selected.0 != ArenaId::Crossing || !match_state.is_in_round() {
-        return;
-    }
-    if bridge.is_active(frame.0) {
+    // Arena gating is a `run_if(arena_is(Crossing))` on the schedule.
+    if !match_state.is_in_round() || bridge.is_active(frame.0) {
         return;
     }
     let chasm = crossing_chasm();
@@ -1839,12 +1883,8 @@ pub fn chasm_kills(
             continue;
         }
         if chasm.contains(pos.0) {
-            dead.respawn_at_frame = Some(frame.0 + RESPAWN_FRAMES);
-            match player.handle {
-                0 => score.p1 = score.p1.saturating_add(1),
-                1 => score.p0 = score.p0.saturating_add(1),
-                _ => {}
-            }
+            // Environment kill — credit the opponent.
+            award_kill(&mut dead, 1 - player.handle, frame.0, &mut score);
         }
     }
 }
@@ -1854,13 +1894,10 @@ pub fn chasm_kills(
 /// on impact. Sigils don't shatter — they can be re-triggered all match.
 pub fn boomerang_sigil_collision(
     frame: Res<FrameCount>,
-    selected: Res<SelectedArena>,
     mut bridge: ResMut<BridgeState>,
     mut boomerangs: Query<(&Boomerang, &mut PositionF, &mut VelocityF)>,
 ) {
-    if selected.0 != ArenaId::Crossing {
-        return;
-    }
+    // Arena gating is a `run_if(arena_is(Crossing))` on the schedule.
     for (boom, mut pos, mut vel) in &mut boomerangs {
         if matches!(boom.state, BoomerangState::Returning) {
             continue;
@@ -1874,6 +1911,104 @@ pub fn boomerang_sigil_collision(
             }
         }
     }
+}
+
+// ---- Phase 16 cycle 4: Reliquary arena (sigil doors + chain pyres) ----
+
+/// Cooldown after a sigil-door teleport (1.5 s at 60 Hz) — long enough that
+/// you don't instantly bounce back through the paired door you land on.
+pub const DOOR_COOLDOWN_FRAMES: u32 = 90;
+
+/// Delay between a chain-linked pyre shattering and its group-mate igniting
+/// (1 s at 60 Hz) — the visible "fuse" running between the linked pyres.
+pub const CHAIN_IGNITION_DELAY_FRAMES: u32 = 60;
+
+/// Half-extent of a sigil door (the teleport footprint).
+pub const SIGIL_DOOR_HALF_EXTENT_CM: i32 = 28;
+
+/// Rolled-back shared cooldown for the Reliquary's paired sigil doors. The
+/// doors are inert while `frame < until_frame`.
+#[derive(Resource, Clone, Copy, PartialEq, Eq, Hash, Debug, Default)]
+pub struct DoorCooldown {
+    pub until_frame: u32,
+}
+
+/// The Reliquary's paired sigil doors as `(footprint, exit)` — stepping on
+/// a door's footprint teleports the player to the paired door's position.
+/// Mirror-symmetric through the origin (diagonal corners) so neither side
+/// owns a positional advantage.
+pub fn reliquary_doors() -> Vec<(RectF, Vec2F)> {
+    let h = Fix::const_from_int(SIGIL_DOOR_HALF_EXTENT_CM);
+    let half = Vec2F::new(h, h);
+    let a = Vec2F::from_cm(350, -550);
+    let b = Vec2F::from_cm(-350, 550);
+    vec![
+        (RectF::from_center_half_extents(a, half), b),
+        (RectF::from_center_half_extents(b, half), a),
+    ]
+}
+
+/// `GgrsSchedule` system (Reliquary): teleport a player standing on a sigil
+/// door to its paired exit via `snap_position` (no interpolation streak),
+/// then set the shared door cooldown. One teleport per tick; the cooldown
+/// gates the rest, so you can't bounce back through the door you arrive on.
+pub fn sigil_door_teleport(
+    frame: Res<FrameCount>,
+    match_state: Res<MatchState>,
+    mut cooldown: ResMut<DoorCooldown>,
+    mut players: Query<(&mut PositionF, &mut PreviousPositionF, &Dead), With<Player>>,
+) {
+    if !match_state.is_in_round() || frame.0 < cooldown.until_frame {
+        return;
+    }
+    let doors = reliquary_doors();
+    for (mut pos, mut prev, dead) in &mut players {
+        if dead.is_dying() {
+            continue;
+        }
+        for (footprint, exit) in &doors {
+            if footprint.contains(pos.0) {
+                snap_position(&mut pos, &mut prev, *exit);
+                cooldown.until_frame = frame.0 + DOOR_COOLDOWN_FRAMES;
+                return;
+            }
+        }
+    }
+}
+
+/// `GgrsSchedule` system: propagate shatter across chain-linked pyres. When
+/// any pyre in a group shatters, its intact group-mates arm a fuse and
+/// shatter `CHAIN_IGNITION_DELAY_FRAMES` later. Runs right after
+/// `boomerang_pyre_collision` so a fresh shatter arms the chain the same
+/// tick. A no-op when no pyre carries a chain group (every other arena).
+pub fn chain_ignition(frame: Res<FrameCount>, mut pyres: Query<&mut BonePyre>) {
+    let mut shattered_groups: BTreeSet<u8> = BTreeSet::new();
+    for pyre in &pyres {
+        if pyre.shattered && pyre.chain_group != 0 {
+            shattered_groups.insert(pyre.chain_group);
+        }
+    }
+    for mut pyre in &mut pyres {
+        if pyre.chain_group == 0 || pyre.shattered {
+            continue;
+        }
+        if pyre.chain_delay.is_none() && shattered_groups.contains(&pyre.chain_group) {
+            pyre.chain_delay = Some(frame.0 + CHAIN_IGNITION_DELAY_FRAMES);
+        }
+        if let Some(d) = pyre.chain_delay
+            && frame.0 >= d
+        {
+            pyre.shattered = true;
+            pyre.chain_delay = None;
+        }
+    }
+}
+
+/// Run condition: gate an arena-specific system to a single `ArenaId`.
+/// Declarative replacement for `if selected.0 != X { return }` early-returns
+/// inside the systems.
+pub fn arena_is(id: ArenaId) -> impl Fn(Res<SelectedArena>) -> bool + Clone {
+    move |selected: Res<SelectedArena>| selected.0 == id
 }
 
 // ---- Phase 14: SimSnapshot ----
@@ -1906,6 +2041,7 @@ pub struct SimSnapshot {
     pub match_state: MatchState,
     pub match_score: MatchScore,
     pub bridge: BridgeState,
+    pub door_cooldown: DoorCooldown,
     pub input_history: InputHistory,
 }
 
@@ -1952,6 +2088,7 @@ impl SimSnapshot {
         let match_state = *world.resource::<MatchState>();
         let match_score = *world.resource::<MatchScore>();
         let bridge = *world.resource::<BridgeState>();
+        let door_cooldown = *world.resource::<DoorCooldown>();
         let input_history = world.resource::<InputHistory>().clone();
 
         let mut players: Vec<PlayerSnap> = world
@@ -2009,6 +2146,7 @@ impl SimSnapshot {
             match_state,
             match_score,
             bridge,
+            door_cooldown,
             input_history,
         }
     }
@@ -2187,6 +2325,7 @@ impl SimSnapshot {
         *world.resource_mut::<MatchState>() = self.match_state;
         *world.resource_mut::<MatchScore>() = self.match_score;
         *world.resource_mut::<BridgeState>() = self.bridge;
+        *world.resource_mut::<DoorCooldown>() = self.door_cooldown;
         *world.resource_mut::<InputHistory>() = self.input_history.clone();
     }
 }

@@ -18,10 +18,11 @@ use bevy_ggrs::prelude::*;
 use fixed_math::{Fix, RectF, Vec2F};
 use sim::{
     ArenaId, BONE_PYRE_HALF_EXTENT_CM, BRIDGE_DURATION_FRAMES, BonePyre, Boomerang, BoomerangState,
-    BridgeState, Dead, FrameCount, GgrsCfg, MatchScore, MatchState, Player, PositionF,
-    PreviousPositionF, RESPAWN_FRAMES, SelectedArena, SimPlugin, SimSnapshot, VelocityF,
-    arena_pyres_for, boomerang_pyre_collision, boomerang_sigil_collision, chasm_kills,
-    crossing_sigils,
+    BridgeState, CHAIN_IGNITION_DELAY_FRAMES, DOOR_COOLDOWN_FRAMES, Dead, DoorCooldown, FrameCount,
+    GgrsCfg, MatchScore, MatchState, Player, PositionF, PreviousPositionF, RESPAWN_FRAMES,
+    SelectedArena, SimPlugin, SimSnapshot, VelocityF, arena_pyres_for, boomerang_pyre_collision,
+    boomerang_sigil_collision, chain_ignition, chasm_kills, crossing_sigils, reliquary_doors,
+    sigil_door_teleport,
 };
 
 fn bare_app() -> App {
@@ -47,10 +48,10 @@ fn bare_app() -> App {
 
 fn pyre_at(cx_cm: i32, cy_cm: i32) -> BonePyre {
     let h = Fix::const_from_int(BONE_PYRE_HALF_EXTENT_CM);
-    BonePyre {
-        rect: RectF::from_center_half_extents(Vec2F::from_cm(cx_cm, cy_cm), Vec2F::new(h, h)),
-        shattered: false,
-    }
+    BonePyre::intact(RectF::from_center_half_extents(
+        Vec2F::from_cm(cx_cm, cy_cm),
+        Vec2F::new(h, h),
+    ))
 }
 
 #[test]
@@ -67,9 +68,22 @@ fn arena_pyres_for_anchor_is_mirror_symmetric() {
 }
 
 #[test]
-fn other_arenas_have_no_pyres_yet() {
+fn crossing_has_no_pyres() {
+    // The chasm owns the Crossing centre.
     assert!(arena_pyres_for(ArenaId::Crossing).is_empty());
-    assert!(arena_pyres_for(ArenaId::Reliquary).is_empty());
+}
+
+#[test]
+fn reliquary_has_two_chain_linked_pyres() {
+    let pyres = arena_pyres_for(ArenaId::Reliquary);
+    assert_eq!(pyres.len(), 2);
+    assert!(pyres.iter().all(|p| p.chain_group == 1), "both pyres share a chain group");
+    assert!(pyres.iter().all(|p| !p.shattered && p.chain_delay.is_none()));
+    // Mirror-symmetric about x=0.
+    assert_eq!(
+        pyres[0].rect.min.x + pyres[1].rect.max.x,
+        Fix::const_from_int(0)
+    );
 }
 
 #[test]
@@ -297,4 +311,133 @@ fn sigil_hit_activates_bridge_and_ricochets() {
     );
     let vy = app.world().entity(bm).get::<VelocityF>().unwrap().0.y;
     assert!(vy < fixed_math::Fix::const_from_int(0), "boomerang ricochets off the sigil");
+}
+
+// ---- Reliquary arena: sigil-door teleports + chain-linked pyres ----
+
+fn reliquary_app() -> App {
+    let mut app = bare_app();
+    *app.world_mut().resource_mut::<SelectedArena>() = SelectedArena(ArenaId::Reliquary);
+    *app.world_mut().resource_mut::<MatchState>() = MatchState::InRound {
+        expires_at_frame: 1_000_000,
+    };
+    app
+}
+
+#[test]
+fn door_teleports_player_to_paired_exit() {
+    let mut app = reliquary_app();
+    *app.world_mut().resource_mut::<FrameCount>() = FrameCount(100);
+    let (door_a, exit_a) = reliquary_doors()[0];
+    let center_a = (door_a.min + door_a.max) * fixed_math::Fix::from_bits(1 << 15);
+    let e = app
+        .world_mut()
+        .spawn((
+            Player { handle: 0 },
+            PositionF(center_a),
+            PreviousPositionF(center_a),
+        ))
+        .id();
+
+    app.world_mut().run_system_once(sigil_door_teleport).unwrap();
+
+    assert_eq!(
+        app.world().entity(e).get::<PositionF>().unwrap().0,
+        exit_a,
+        "teleported to the paired exit"
+    );
+    assert_eq!(
+        app.world().entity(e).get::<PreviousPositionF>().unwrap().0,
+        exit_a,
+        "prev snapped too — no interpolation streak across the teleport"
+    );
+    assert_eq!(
+        app.world().resource::<DoorCooldown>().until_frame,
+        100 + DOOR_COOLDOWN_FRAMES
+    );
+}
+
+#[test]
+fn door_cooldown_blocks_immediate_reentry() {
+    let mut app = reliquary_app();
+    *app.world_mut().resource_mut::<FrameCount>() = FrameCount(100);
+    *app.world_mut().resource_mut::<DoorCooldown>() = DoorCooldown { until_frame: 200 };
+    let (door_a, _) = reliquary_doors()[0];
+    let center_a = (door_a.min + door_a.max) * fixed_math::Fix::from_bits(1 << 15);
+    let e = app
+        .world_mut()
+        .spawn((
+            Player { handle: 0 },
+            PositionF(center_a),
+            PreviousPositionF(center_a),
+        ))
+        .id();
+
+    app.world_mut().run_system_once(sigil_door_teleport).unwrap();
+
+    assert_eq!(
+        app.world().entity(e).get::<PositionF>().unwrap().0,
+        center_a,
+        "cooldown blocks the teleport"
+    );
+}
+
+#[test]
+fn chain_ignition_fires_after_delay() {
+    let mut app = reliquary_app();
+    let mut shattered = pyre_at(-200, 0);
+    shattered.chain_group = 1;
+    shattered.shattered = true;
+    app.world_mut().spawn(shattered);
+    let mut linked = pyre_at(200, 0);
+    linked.chain_group = 1;
+    let e = app.world_mut().spawn(linked).id();
+
+    // Frame 500 arms the fuse on the intact group-mate.
+    *app.world_mut().resource_mut::<FrameCount>() = FrameCount(500);
+    app.world_mut().run_system_once(chain_ignition).unwrap();
+    let p = *app.world().entity(e).get::<BonePyre>().unwrap();
+    assert_eq!(p.chain_delay, Some(500 + CHAIN_IGNITION_DELAY_FRAMES));
+    assert!(!p.shattered, "armed but not yet ignited");
+
+    // At the exact ignition frame it shatters.
+    *app.world_mut().resource_mut::<FrameCount>() = FrameCount(500 + CHAIN_IGNITION_DELAY_FRAMES);
+    app.world_mut().run_system_once(chain_ignition).unwrap();
+    let p = *app.world().entity(e).get::<BonePyre>().unwrap();
+    assert!(p.shattered, "chain fires at the delay");
+    assert_eq!(p.chain_delay, None, "fuse consumed");
+}
+
+#[test]
+fn chain_delay_survives_snapshot_restore() {
+    let mut app = reliquary_app();
+    let mut shattered = pyre_at(-200, 0);
+    shattered.chain_group = 1;
+    shattered.shattered = true;
+    app.world_mut().spawn(shattered);
+    let mut linked = pyre_at(200, 0);
+    linked.chain_group = 1;
+    let e = app.world_mut().spawn(linked).id();
+
+    *app.world_mut().resource_mut::<FrameCount>() = FrameCount(500);
+    app.world_mut().run_system_once(chain_ignition).unwrap();
+    // Capture mid-fuse.
+    let mid = SimSnapshot::capture(app.world_mut());
+
+    // Force the fuse to fire, then restore the mid-fuse snapshot.
+    *app.world_mut().resource_mut::<FrameCount>() = FrameCount(900);
+    app.world_mut().run_system_once(chain_ignition).unwrap();
+    assert!(app.world().entity(e).get::<BonePyre>().unwrap().shattered);
+    mid.restore(app.world_mut());
+
+    let mut q = app.world_mut().query::<&BonePyre>();
+    let linked = q
+        .iter(app.world())
+        .find(|p| !p.shattered)
+        .expect("the linked pyre is intact again after restore");
+    assert_eq!(
+        linked.chain_delay,
+        Some(500 + CHAIN_IGNITION_DELAY_FRAMES),
+        "restore brings back the armed fuse"
+    );
 }
