@@ -197,12 +197,12 @@ def paint(canvas: Canvas, ox: int, oy: int, art: str, side: str = "p0") -> None:
 # antlered silhouette lands in a later cycle (for now P1 = P0 recolored via
 # keys_for("p1")).
 #
-# Rather than 41 hand-typed ASCII grids, the duelist is drawn procedurally
-# from a parametric skeleton: filled body spans + committed top-left lighting
-# + an auto-outline pass. Poses are parameters (lean / bob / arm / leg /
-# flash / gore), so the 41-frame animation set is consistent frame-to-frame
-# and tunable without redrawing. Output is the same char-grid the rest of the
-# generator paints, so keys_for() still swaps P0<->P1 colors.
+# The duelist is a broad, hunched demon-brute drawn procedurally from a
+# parametric skeleton so the 41-frame set stays anatomically consistent and
+# tunable. Form (pecs / abs / flank / cloak folds) is placed as explicit
+# shadow; a thin auto rim-shade + auto outline finish the silhouette. Output
+# is the same char-grid the rest of the generator paints, so keys_for() still
+# swaps P0<->P1 colors.
 #
 # Grid chars (consumed by paint()):
 #   k void outline   l charcoal inner-line   M body   m body-shadow
@@ -234,17 +234,15 @@ def _grid_to_str(g: list[list[str]]) -> str:
     return "\n".join("".join(row) for row in g)
 
 
-# Body cells that participate in silhouette / shading / outline.
 _BODY = {"M", "m", "h"}
 _BONE = {"b", "B", "w"}
 _SOLID = _BODY | _BONE | {"l", "y", "e", "o"}
 
 
 def _shade(g: list[list[str]]) -> None:
-    """Commit light from the top-left: the right ~third of every body span and
-    its lowest row drop to shadow tone. Bone gets a hot-bone gleam on its
-    upper-left, warm-shade on its lower-right."""
-    # Body shadow: per row, shade the right portion of each contiguous M run.
+    """Thin rim-light commit (light from top-left): the rightmost pixel of each
+    body run drops to shadow, and bone gets a hot gleam top-left / warm shade
+    bottom-right. Body *form* is placed explicitly by the part functions."""
     for y in range(PLAYER_PX):
         x = 0
         while x < PLAYER_PX:
@@ -253,13 +251,10 @@ def _shade(g: list[list[str]]) -> None:
                 while x < PLAYER_PX and g[y][x] == "M":
                     x += 1
                 x1 = x - 1
-                run = x1 - x0 + 1
-                shade_from = x1 - max(1, run // 3) + 1
-                for xx in range(shade_from, x1 + 1):
-                    g[y][xx] = "m"
+                if x1 - x0 >= 3:
+                    g[y][x1] = "m"  # 1px right rim
             else:
                 x += 1
-    # Bone gleam / shade.
     for y in range(PLAYER_PX):
         for x in range(PLAYER_PX):
             if g[y][x] == "b":
@@ -277,22 +272,18 @@ def _shade(g: list[list[str]]) -> None:
 
 
 def _outline(g: list[list[str]]) -> None:
-    """Wrap the silhouette in a 1px void outline on every empty 4-neighbour of
-    a solid cell. Readability (gameplay priority #1) beats the broken-outline
-    refinement, so the outline is closed."""
+    """Wrap the silhouette in a closed 1px void outline (gameplay readability
+    is priority #1)."""
     adds = []
     for y in range(PLAYER_PX):
         for x in range(PLAYER_PX):
             if g[y][x] != ".":
                 continue
-            touch = False
             for dx, dy in ((1, 0), (-1, 0), (0, 1), (0, -1)):
                 nx, ny = x + dx, y + dy
                 if 0 <= nx < PLAYER_PX and 0 <= ny < PLAYER_PX and g[ny][nx] in _SOLID:
-                    touch = True
+                    adds.append((x, y))
                     break
-            if touch:
-                adds.append((x, y))
     for x, y in adds:
         g[y][x] = "k"
 
@@ -300,162 +291,230 @@ def _outline(g: list[list[str]]) -> None:
 # --- body parts ------------------------------------------------------------
 
 def _horns(g: list[list[str]], dx: int, dy: int) -> None:
-    """Two hooked bull horns rooted on the skull, curving up and out to a
-    hot-bone tip. Wider spread reads more menacing at thumbnail size."""
+    """Massive ram horns sweeping up and out to hot-bone tips near the top
+    corners — the dominant menace cue at thumbnail size."""
     cx = _CX + dx
-    # left horn
-    _put(g, cx - 4, 4 + dy, "b")
-    _put(g, cx - 4, 3 + dy, "b")
-    _put(g, cx - 5, 2 + dy, "b")
-    _put(g, cx - 5, 1 + dy, "B")
-    _put(g, cx - 6, 1 + dy, "B")  # hooked tip
-    # right horn
-    _put(g, cx + 4, 4 + dy, "b")
-    _put(g, cx + 4, 3 + dy, "b")
-    _put(g, cx + 5, 2 + dy, "b")
-    _put(g, cx + 5, 1 + dy, "B")
-    _put(g, cx + 6, 1 + dy, "B")
+    # left horn — thick curve, root on the skull out to the corner
+    for (x, y, c) in [
+        (cx - 4, 5, "b"), (cx - 5, 5, "b"),
+        (cx - 5, 4, "b"), (cx - 6, 4, "b"),
+        (cx - 6, 3, "b"), (cx - 7, 3, "b"),
+        (cx - 7, 2, "b"), (cx - 8, 2, "B"),
+        (cx - 8, 1, "B"), (cx - 7, 1, "B"),
+    ]:
+        _put(g, x, y + dy, c)
+    # right horn — mirror
+    for (x, y, c) in [
+        (cx + 4, 5, "b"), (cx + 5, 5, "b"),
+        (cx + 5, 4, "b"), (cx + 6, 4, "b"),
+        (cx + 6, 3, "b"), (cx + 7, 3, "b"),
+        (cx + 7, 2, "b"), (cx + 8, 2, "B"),
+        (cx + 8, 1, "B"), (cx + 7, 1, "B"),
+    ]:
+        _put(g, x, y + dy, c)
+
+
+def _antlers(g: list[list[str]], dx: int, dy: int) -> None:
+    """The Stag's crown — twin antlers branching up and out, taller and forked
+    where the Cur's horns are stubby and curled, so P1 reads as a different
+    creature by silhouette alone (priority over color)."""
+    cx = _CX + dx
+    left = [
+        (cx - 3, 4), (cx - 3, 3), (cx - 4, 2), (cx - 5, 1),  # main beam
+        (cx - 6, 0), (cx - 2, 1), (cx - 2, 0), (cx - 4, 0),  # tines
+    ]
+    right = [(cx + (cx - x), y) for (x, y) in left]
+    for (x, y) in left + right:
+        _put(g, x, y + dy, "b")
+    for (x, y) in [(cx - 6, 0), (cx - 4, 0), (cx - 2, 0),
+                   (cx + 6, 0), (cx + 4, 0), (cx + 2, 0)]:
+        _put(g, x, y + dy, "B")  # hot tine tips
 
 
 def _head(g: list[list[str]], dx: int, dy: int) -> None:
-    """Solid skull dome, sunk between the shoulders, with a heavy brow, two
-    burning spark eyes set in void sockets, and a fanged snarl."""
+    """Heavy skull sunk between the traps: angled angry brow, burning ember
+    eyes, a snarling fanged maw."""
     cx = _CX + dx
-    # solid dome
+    # symmetric skull
     _span(g, 4 + dy, cx - 3, cx + 3, "M")
     _span(g, 5 + dy, cx - 4, cx + 4, "M")
     _span(g, 6 + dy, cx - 4, cx + 4, "M")
     _span(g, 7 + dy, cx - 4, cx + 4, "M")
     _span(g, 8 + dy, cx - 4, cx + 4, "M")
-    _span(g, 9 + dy, cx - 3, cx + 3, "M")  # jaw
-    # eyes: void sockets with burning spark pupils
-    _put(g, cx - 3, 7 + dy, "k")
-    _put(g, cx + 3, 7 + dy, "k")
-    _put(g, cx - 2, 7 + dy, "y")
-    _put(g, cx + 2, 7 + dy, "y")
-    _put(g, cx - 2, 6 + dy, "e")  # eye glow bleed
-    _put(g, cx + 2, 6 + dy, "e")
-    # fanged snarl
-    _span(g, 9 + dy, cx - 2, cx + 2, "l")
-    _put(g, cx - 1, 9 + dy, "B")
-    _put(g, cx + 1, 9 + dy, "B")
+    _span(g, 9 + dy, cx - 3, cx + 3, "M")
+    _span(g, 10 + dy, cx - 2, cx + 2, "M")  # jaw
+    # angry brow: two strokes angling down toward the centre (\\ /)
+    _put(g, cx - 4, 6 + dy, "l")
+    _put(g, cx - 3, 7 + dy, "l")
+    _put(g, cx + 4, 6 + dy, "l")
+    _put(g, cx + 3, 7 + dy, "l")
+    # burning eyes under the brow: spark core + ember glow below
+    _put(g, cx - 3, 8 + dy, "y")
+    _put(g, cx + 3, 8 + dy, "y")
+    _put(g, cx - 2, 8 + dy, "e")
+    _put(g, cx + 2, 8 + dy, "e")
+    # snarling fanged maw
+    _span(g, 9 + dy, cx - 2, cx + 2, "k")
+    _put(g, cx - 2, 9 + dy, "B")
+    _put(g, cx + 2, 9 + dy, "B")
+    _put(g, cx, 10 + dy, "l")
+
+
+def _spaulder(g: list[list[str]], dx: int, dy: int) -> None:
+    """A bone pauldron strapped over the left shoulder — asymmetry + status."""
+    cx = _CX + dx
+    sy = 11 + dy
+    for (x, y, c) in [
+        (cx - 9, sy + 1, "b"), (cx - 8, sy, "b"), (cx - 7, sy, "b"),
+        (cx - 9, sy + 2, "b"), (cx - 8, sy + 1, "B"), (cx - 7, sy + 1, "b"),
+        (cx - 9, sy + 3, "w"), (cx - 8, sy + 2, "b"),
+    ]:
+        _put(g, x, y, c)
 
 
 def _torso(g: list[list[str]], dx: int, dy: int, hunch: int = 0) -> None:
-    """Hunched shoulders tapering to a waist, then a ragged cloak that always
-    reaches down to the legs (filled to a fixed hem row so the torso never
-    floats free of the legs when the upper body bobs)."""
+    """Broad hunched brute: traps, pecs with an under-shadow, an ab column, a
+    flank shadow, then a tattered cloak that always reaches the legs."""
     cx = _CX + dx
     sy = 11 + dy + hunch
-    # shoulders (widest, hunched up)
-    _span(g, sy, cx - 5, cx + 5, "M")
-    _span(g, sy + 1, cx - 5, cx + 5, "M")
-    _put(g, cx, sy + 3, "b")  # bone amulet
-    # fill the body from the shoulders down to the cloak hem at a fixed row,
-    # tapering at the waist then flaring for the cloak.
-    for y in range(sy + 2, 22):
-        if y < sy + 5:
-            w = 4
-        elif y < 19:
-            w = 3
-        else:
-            w = min(6, 5 + (y - 19))
+    # traps / massive shoulders
+    _span(g, sy, cx - 7, cx + 7, "M")
+    _span(g, sy + 1, cx - 8, cx + 8, "M")
+    _span(g, sy + 2, cx - 8, cx + 8, "M")
+    # pecs
+    _span(g, sy + 3, cx - 7, cx + 7, "M")
+    _span(g, sy + 4, cx - 6, cx + 6, "M")
+    _put(g, cx, sy + 3, "m")       # sternum line
+    _put(g, cx, sy + 4, "m")
+    _span(g, sy + 5, cx - 6, cx - 2, "m")  # under-pec shadow L
+    _span(g, sy + 5, cx + 2, cx + 6, "m")  # under-pec shadow R
+    _span(g, sy + 5, cx - 1, cx + 1, "M")
+    # bone gorget at the throat
+    _put(g, cx, sy, "b")
+    _put(g, cx - 1, sy, "b")
+    # abs / midsection, tapering
+    for i, y in enumerate(range(sy + 6, 20)):
+        w = max(3, 6 - i)
         _span(g, y, cx - w, cx + w, "M")
-    # jagged cloak hem (deterministic notch pattern), rows 22-23
+    # ab divisions + flank shadow (right side, light from top-left)
+    _put(g, cx, sy + 6, "m")
+    _put(g, cx, sy + 8, "m")
+    _put(g, cx + 4, sy + 6, "m")
+    _put(g, cx + 4, sy + 7, "m")
+    # tattered cloak from the waist down to the legs (fixed hem rows)
+    for y in range(20, 23):
+        _span(g, y, cx - 6, cx + 6, "M")
+    # jagged hem tongues
     for x in range(cx - 6, cx + 7):
-        if (x - cx) % 2 == 0:
-            _put(g, x, 22, "M")
-            _put(g, x, 23, "m")
-        else:
-            _put(g, x, 22, "m")
+        n = (x - cx) % 3
+        _put(g, x, 23, "M" if n != 1 else "m")
+        if n == 0:
+            _put(g, x, 24, "m")
+    # a couple of cloak fold shadows
+    _put(g, cx - 3, 21, "m")
+    _put(g, cx + 2, 21, "m")
+
+
+def _claw(g: list[list[str]], x: int, y: int) -> None:
+    """A three-prong bone claw/hand."""
+    _put(g, x, y, "b")
+    _put(g, x - 1, y + 1, "b")
+    _put(g, x + 1, y + 1, "b")
+    _put(g, x, y + 1, "w")
 
 
 def _arm(g: list[list[str]], side: int, dx: int, dy: int, pose: str) -> None:
-    """side -1 left / +1 right. pose: rest|back|fwd|up|reach. Arms are 2px so
-    they read as limbs, not twigs, and end in a bone claw."""
+    """side -1 left / +1 right. pose: rest|back|fwd|up|reach. Thick muscled
+    limb (bicep bulge) ending in a bone claw."""
     cx = _CX + dx
     sy = 12 + dy
-    sx = cx + side * 5
+    sx = cx + side * 8  # hangs off the broad shoulder
     if pose == "rest":
-        for i in range(5):
+        for i in range(7):
             _put(g, sx, sy + i, "M")
-            _put(g, sx + side, sy + i, "M")
-        _put(g, sx, sy + 5, "b")
+            _put(g, sx - side, sy + i, "M")
+        _put(g, sx, sy + 1, "M")  # bicep bulge already 2px
+        _claw(g, sx, sy + 7)
     elif pose == "back":
-        # cocked back over the shoulder (throw anticipation)
-        _put(g, sx, sy, "M")
-        _put(g, sx - side, sy - 1, "M")
-        _put(g, sx - side, sy, "M")
-        _put(g, sx - side * 2, sy - 2, "M")
-        _put(g, sx - side * 3, sy - 2, "b")
-        _put(g, sx - side * 3, sy - 3, "b")
+        # cocked back over the shoulder, fang ready (throw anticipation)
+        for (ox, oy) in [(0, 0), (-1, -1), (-1, 0), (-2, -2), (-2, -1), (-3, -3)]:
+            _put(g, sx + side * ox, sy + oy, "M")
+        _claw(g, sx - side * 3, sy - 4)
     elif pose == "fwd":
-        # thrust forward, 2px thick
+        # thrust forward, thick
         for i in range(6):
             _put(g, sx + side * i, sy + 1, "M")
             _put(g, sx + side * i, sy + 2, "M")
-        _put(g, sx + side * 6, sy + 1, "b")
-        _put(g, sx + side * 6, sy + 2, "b")
+        _put(g, sx, sy, "M")
+        _claw(g, sx + side * 6, sy + 1)
     elif pose == "up":
-        for i in range(6):
+        for i in range(7):
             _put(g, sx, sy - i, "M")
-            _put(g, sx + side, sy - i, "M")
-        _put(g, sx, sy - 6, "b")
+            _put(g, sx - side, sy - i, "M")
+        _claw(g, sx, sy - 7)
     elif pose == "reach":
-        for i in range(4):
+        for i in range(5):
             _put(g, sx + side * i, sy - i, "M")
             _put(g, sx + side * i, sy - i + 1, "M")
-        _put(g, sx + side * 4, sy - 4, "b")
+        _claw(g, sx + side * 5, sy - 5)
+
+
+def _talon(g: list[list[str]], x: int, y: int) -> None:
+    _span(g, y, x - 1, x + 2, "b")
+    _put(g, x - 1, y + 1, "w")
+    _put(g, x + 2, y + 1, "w")
 
 
 def _legs(g: list[list[str]], dx: int, dy: int, phase: str) -> None:
-    """phase: stand|strideR|strideL|air|kneel|splay."""
+    """phase: stand|strideR|strideL|air|kneel|splay. Thick legs (4px) in a
+    wide power stance with bone talons."""
     cx = _CX + dx
     ty = 24 + dy
     if phase == "stand":
         for i in range(5):
-            _span(g, ty + i, cx - 3, cx - 1, "M")
-            _span(g, ty + i, cx + 1, cx + 3, "M")
-        _span(g, ty + 5, cx - 4, cx - 1, "b")  # clawed feet
-        _span(g, ty + 5, cx + 1, cx + 4, "b")
+            _span(g, ty + i, cx - 6, cx - 3, "M")
+            _span(g, ty + i, cx + 3, cx + 6, "M")
+        _put(g, cx - 4, ty + 2, "m")
+        _put(g, cx + 5, ty + 2, "m")
+        _talon(g, cx - 5, ty + 5)
+        _talon(g, cx + 4, ty + 5)
     elif phase == "strideR":
         for i in range(5):
-            _span(g, ty + i, cx + 1 + i // 2, cx + 3 + i // 2, "M")  # right fwd
-            _span(g, ty + i, cx - 4 + (4 - i) // 2, cx - 2 + (4 - i) // 2, "M")  # left back
-        _span(g, ty + 5, cx + 3, cx + 6, "b")
-        _span(g, ty + 5, cx - 6, cx - 3, "b")
+            _span(g, ty + i, cx + 2 + i // 2, cx + 5 + i // 2, "M")
+            _span(g, ty + i, cx - 6 + (4 - i) // 2, cx - 3 + (4 - i) // 2, "M")
+        _talon(g, cx + 5, ty + 5)
+        _talon(g, cx - 6, ty + 5)
     elif phase == "strideL":
         for i in range(5):
-            _span(g, ty + i, cx - 3 - i // 2, cx - 1 - i // 2, "M")
-            _span(g, ty + i, cx + 2 - (4 - i) // 2, cx + 4 - (4 - i) // 2, "M")
-        _span(g, ty + 5, cx - 6, cx - 3, "b")
-        _span(g, ty + 5, cx + 3, cx + 6, "b")
+            _span(g, ty + i, cx - 5 - i // 2, cx - 2 - i // 2, "M")
+            _span(g, ty + i, cx + 2 - (4 - i) // 2, cx + 5 - (4 - i) // 2, "M")
+        _talon(g, cx - 6, ty + 5)
+        _talon(g, cx + 5, ty + 5)
     elif phase == "air":
-        # both legs tucked up, body airborne
         for i in range(3):
-            _span(g, ty + i, cx - 3, cx - 1, "M")
-            _span(g, ty + i, cx + 1, cx + 3, "M")
-        _span(g, ty + 3, cx - 4, cx - 2, "b")
-        _span(g, ty + 3, cx + 2, cx + 4, "b")
+            _span(g, ty + i, cx - 5, cx - 2, "M")
+            _span(g, ty + i, cx + 2, cx + 5, "M")
+        _talon(g, cx - 5, ty + 3)
+        _talon(g, cx + 3, ty + 3)
     elif phase == "kneel":
-        # right leg folded under, left planted
         for i in range(4):
-            _span(g, ty + i, cx + 1, cx + 3, "M")
-        _span(g, ty + 4, cx + 1, cx + 4, "b")
-        _span(g, ty + 2, cx - 4, cx - 1, "M")
-        _span(g, ty + 3, cx - 5, cx - 2, "b")
+            _span(g, ty + i, cx + 2, cx + 5, "M")
+        _talon(g, cx + 3, ty + 4)
+        _span(g, ty + 1, cx - 6, cx - 2, "M")
+        _span(g, ty + 2, cx - 7, cx - 3, "M")
+        _talon(g, cx - 7, ty + 3)
     elif phase == "splay":
         for i in range(5):
-            _span(g, ty + i, cx - 5 + i // 2, cx - 3 + i // 2, "M")
-            _span(g, ty + i, cx + 3 - i // 2, cx + 5 - i // 2, "M")
-        _span(g, ty + 5, cx - 7, cx - 4, "b")
-        _span(g, ty + 5, cx + 4, cx + 7, "b")
+            _span(g, ty + i, cx - 8 + i // 2, cx - 5 + i // 2, "M")
+            _span(g, ty + i, cx + 5 - i // 2, cx + 8 - i // 2, "M")
+        _talon(g, cx - 9, ty + 5)
+        _talon(g, cx + 6, ty + 5)
 
 
 def _ground(g: list[list[str]], dx: int) -> None:
     cx = _CX + dx
-    _span(g, 30, cx - 4, cx + 4, "o")
-    _span(g, 31, cx - 3, cx + 3, "o")
+    _span(g, 30, cx - 6, cx + 6, "o")
+    _span(g, 31, cx - 4, cx + 4, "o")
 
 
 def _draw_duelist(
@@ -467,23 +526,29 @@ def _draw_duelist(
     arm_r: str = "rest",
     leg: str = "stand",
     ground: bool = True,
+    spaulder: bool = True,
+    headgear: str = "horns",
 ) -> list[list[str]]:
     g = _blank()
     if ground:
         _ground(g, lean)
-    _legs(g, lean, 0, leg)  # legs stay planted (no bob)
-    _torso(g, lean, bob, hunch)
+    _legs(g, lean, 0, leg)
     _arm(g, -1, lean, bob, arm_l)
     _arm(g, +1, lean, bob, arm_r)
+    _torso(g, lean, bob, hunch)
+    if spaulder:
+        _spaulder(g, lean, bob + hunch)
     _head(g, lean, bob)
-    _horns(g, lean, bob)
+    if headgear == "antlers":
+        _antlers(g, lean, bob)
+    else:
+        _horns(g, lean, bob)
     _shade(g)
     _outline(g)
     return g
 
 
 def _flash(g: list[list[str]]) -> list[list[str]]:
-    """White-hot hit silhouette: every body/bone cell -> hit-white, outline kept."""
     out = [row[:] for row in g]
     for y in range(PLAYER_PX):
         for x in range(PLAYER_PX):
@@ -494,52 +559,57 @@ def _flash(g: list[list[str]]) -> list[list[str]]:
 
 
 def _spark_burst(g: list[list[str]], x: int, y: int) -> None:
-    """A small spark/ember pop at a hand (perfect-catch flair)."""
     _put(g, x, y, "B")
     _put(g, x - 1, y, "y")
     _put(g, x + 1, y, "y")
     _put(g, x, y - 1, "y")
     _put(g, x, y + 1, "e")
+    _put(g, x - 1, y - 1, "e")
 
 
 def _gore_chunks(g: list[list[str]], stage: int) -> None:
-    """Deterministic gore chunks flung outward, growing with the death stage."""
-    # (dx, dy, char) fixed offsets relative to centre — no RNG (sim-safe ethos).
     chunks = [
-        (-6, 12, "M"), (6, 11, "m"), (-8, 16, "m"), (8, 15, "M"),
-        (-4, 8, "M"), (5, 7, "m"), (-9, 20, "m"), (9, 19, "M"),
-        (-2, 6, "y"), (3, 5, "e"), (-7, 23, "m"), (7, 22, "M"),
+        (-8, 12, "M"), (8, 11, "m"), (-10, 16, "m"), (10, 15, "M"),
+        (-5, 8, "M"), (6, 7, "m"), (-11, 20, "m"), (11, 19, "M"),
+        (-3, 6, "y"), (4, 5, "e"), (-9, 23, "m"), (9, 22, "M"),
     ]
     cx = _CX
     for i in range(min(len(chunks), stage * 3)):
         dx, dy, ch = chunks[i]
-        spread = stage  # chunks drift further out each stage
+        spread = stage
         _put(g, cx + dx + (1 if dx > 0 else -1) * spread, dy, ch)
 
 
 def _corpse_heap(lean: int = 0) -> list[list[str]]:
-    """Low corpse mound — reads like the stain corpse-mark frame."""
     g = _blank()
     cx = _CX + lean
     _ground(g, lean)
-    _span(g, 27, cx - 5, cx + 5, "M")
-    _span(g, 28, cx - 6, cx + 6, "M")
-    _span(g, 29, cx - 6, cx + 6, "m")
-    _put(g, cx - 4, 26, "b")  # a horn jutting from the pile
-    _put(g, cx - 5, 25, "B")
-    _put(g, cx + 5, 27, "b")
+    _span(g, 26, cx - 6, cx + 6, "M")
+    _span(g, 27, cx - 7, cx + 7, "M")
+    _span(g, 28, cx - 8, cx + 8, "M")
+    _span(g, 29, cx - 8, cx + 8, "m")
+    # a horn + claw jutting from the pile
+    _put(g, cx - 6, 25, "b")
+    _put(g, cx - 7, 24, "B")
+    _put(g, cx + 6, 26, "b")
+    _put(g, cx + 2, 25, "b")
     _shade(g)
     _outline(g)
     return g
 
 
-def _player_frames() -> list[list[list[str]]]:
-    """The 41-frame v2 sequence: IDLE6 RUN6 THROW8 DASH4 HIT4 CATCH3 DEATH10."""
+def _player_frames(headgear: str = "horns") -> list[list[list[str]]]:
+    """The 41-frame v2 sequence: IDLE6 RUN6 THROW8 DASH4 HIT4 CATCH3 DEATH10.
+    `headgear` ('horns' for the Cur / 'antlers' for the Stag) changes the
+    silhouette so P0 and P1 read apart before color registers."""
+    def D(**kw):
+        return _draw_duelist(headgear=headgear, **kw)
+
     frames: list[list[list[str]]] = []
 
-    # IDLE (6): gentle breath bob of the upper body; horns lag is implicit.
+    # IDLE (6): heavy breath; shoulders rise/settle.
     for bob in (0, 0, -1, -1, 0, 1):
-        frames.append(_draw_duelist(bob=bob, hunch=0))
+        frames.append(D(bob=bob))
 
     # RUN (6): forward lean, leg cycle, body lifts on the passing/air beats.
     run_cycle = [
@@ -547,92 +617,89 @@ def _player_frames() -> list[list[list[str]]]:
         ("strideR", -1), ("air", -1), ("strideL", 0),
     ]
     for leg, bob in run_cycle:
-        frames.append(_draw_duelist(lean=1, bob=bob, leg=leg, arm_l="back", arm_r="fwd"))
+        frames.append(D(lean=1, bob=bob, leg=leg, arm_l="back", arm_r="fwd"))
 
-    # THROW (8): 3 anticipation (coil back, lean back), 1 release smear,
-    # 4 follow-through settling to rest.
-    frames.append(_draw_duelist(lean=-1, arm_r="back", arm_l="rest"))      # ready
-    frames.append(_draw_duelist(lean=-1, arm_r="back", hunch=-1))          # coil
-    frames.append(_draw_duelist(lean=-2, arm_r="back", hunch=-1))          # wind
-    rel = _draw_duelist(lean=1, arm_r="fwd")                                # release smear
-    for i in range(6):  # arm smear streak
-        _put(rel, _CX + 6 + i, 13, "e")
+    # THROW (8): 3 anticipation, 1 release smear, 4 follow-through.
+    frames.append(D(lean=-1, arm_r="back"))
+    frames.append(D(lean=-1, arm_r="back", hunch=-1))
+    frames.append(D(lean=-2, arm_r="back", hunch=-1))
+    rel = D(lean=1, arm_r="fwd")
+    for i in range(7):
+        _put(rel, min(31, _CX + 9 + i), 13, "e")
     frames.append(rel)
-    frames.append(_draw_duelist(lean=1, arm_r="fwd"))                      # follow 1
-    frames.append(_draw_duelist(lean=0, arm_r="fwd"))                      # follow 2
-    frames.append(_draw_duelist(lean=0, arm_r="rest"))                     # recover
-    frames.append(_draw_duelist(lean=0))                                   # settle
+    frames.append(D(lean=1, arm_r="fwd"))
+    frames.append(D(lean=0, arm_r="fwd"))
+    frames.append(D(lean=0, arm_r="rest"))
+    frames.append(D(lean=0))
 
-    # DASH (4): hard forward lunge, legs splayed, motion afterimage behind.
+    # DASH (4): hard lunge, splayed legs, motion afterimage trailing back.
     for k in range(4):
-        d = _draw_duelist(lean=2 + (k % 2), leg="splay", arm_l="back", arm_r="fwd", ground=False)
-        # afterimage smear trailing back-left (darker body tone + accent)
+        d = D(lean=2 + (k % 2), leg="splay", arm_l="back", arm_r="fwd", ground=False)
         for t in (3, 5, 7):
             for y in range(12, 24):
-                if d[y][max(0, _CX - 2)] in _BODY:
-                    _put(d, max(0, _CX - t), y, "e" if t == 3 else "m")
+                xx = max(0, _CX - 4)
+                if d[y][xx] in _BODY:
+                    _put(d, max(0, _CX - 3 - t), y, "e" if t == 3 else "m")
         frames.append(d)
 
-    # HIT (4): full white flash, then a recoiling stagger back to normal.
-    base_hit = _draw_duelist(lean=0)
-    frames.append(_flash(base_hit))                       # flash
-    frames.append(_draw_duelist(lean=-2, hunch=-1))       # recoil
-    frames.append(_draw_duelist(lean=-1))                 # settle 1
-    frames.append(_draw_duelist(lean=0))                  # settle 2
+    # HIT (4): white flash, then a recoiling stagger.
+    frames.append(_flash(D()))
+    frames.append(D(lean=-2, hunch=-1))
+    frames.append(D(lean=-1))
+    frames.append(D(lean=0))
 
-    # CATCH (3): arm snaps up, spark pops at the hand, then lowers.
-    c0 = _draw_duelist(arm_r="up")
-    frames.append(c0)
-    c1 = _draw_duelist(arm_r="up")
-    _spark_burst(c1, _CX + 6, 6)
+    # CATCH (3): claw snaps up, spark pops, lowers.
+    frames.append(D(arm_r="up"))
+    c1 = D(arm_r="up")
+    _spark_burst(c1, _CX + 8, 5)
     frames.append(c1)
-    frames.append(_draw_duelist(arm_r="reach"))
+    frames.append(D(arm_r="reach"))
 
-    # DEATH (10): stagger -> fold -> buckle -> gore burst -> disperse -> heap.
-    frames.append(_draw_duelist(lean=-1, hunch=-1))                       # stagger
-    frames.append(_draw_duelist(lean=-2, hunch=0))                        # stagger 2
-    frames.append(_draw_duelist(lean=-1, hunch=1, arm_l="rest", arm_r="rest"))  # fold
-    frames.append(_draw_duelist(lean=0, hunch=2, leg="kneel"))            # bow
-    buckle = _draw_duelist(lean=0, hunch=3, leg="kneel")
+    # DEATH (10): stagger -> fold -> buckle -> gore burst -> heap.
+    frames.append(D(lean=-1, hunch=-1))
+    frames.append(D(lean=-2))
+    frames.append(D(lean=-1, hunch=1))
+    frames.append(D(lean=0, hunch=2, leg="kneel"))
+    buckle = D(lean=0, hunch=3, leg="kneel")
     _gore_chunks(buckle, 1)
-    frames.append(buckle)                                                 # buckle
-    burst = _draw_duelist(lean=0, hunch=3, leg="kneel")
+    frames.append(buckle)
+    burst = D(lean=0, hunch=3, leg="kneel")
     _gore_chunks(burst, 2)
-    frames.append(burst)                                                  # burst
-    burst2 = _draw_duelist(lean=0, hunch=4, leg="kneel", ground=True)
+    frames.append(burst)
+    burst2 = D(lean=0, hunch=4, leg="kneel")
     _gore_chunks(burst2, 3)
-    frames.append(burst2)                                                 # burst 2
+    frames.append(burst2)
     disperse = _corpse_heap()
     _gore_chunks(disperse, 4)
-    frames.append(disperse)                                               # disperse
-    frames.append(_corpse_heap())                                         # heap
-    frames.append(_corpse_heap())                                         # corpse mark
+    frames.append(disperse)
+    frames.append(_corpse_heap())
+    frames.append(_corpse_heap())
 
     assert len(frames) == 41, f"expected 41 frames, got {len(frames)}"
     return frames
 
 
-_PLAYER_FRAME_CACHE: list[list[list[str]]] | None = None
+_PLAYER_FRAME_CACHE: dict[str, list[list[list[str]]]] = {}
 
 
-def _player_frame_strs() -> list[str]:
-    global _PLAYER_FRAME_CACHE
-    if _PLAYER_FRAME_CACHE is None:
-        _PLAYER_FRAME_CACHE = _player_frames()
-    return [_grid_to_str(f) for f in _PLAYER_FRAME_CACHE]
+def _frames_for(side: str) -> list[list[list[str]]]:
+    headgear = "antlers" if side == "p1" else "horns"
+    if headgear not in _PLAYER_FRAME_CACHE:
+        _PLAYER_FRAME_CACHE[headgear] = _player_frames(headgear)
+    return _PLAYER_FRAME_CACHE[headgear]
 
 
 def player_sheet(side: str) -> Canvas:
     """41-frame strip (32x32 cells): IDLE6 RUN6 THROW8 DASH4 HIT4 CATCH3 DEATH10.
-    Per ART_DIRECTION.md v2. P0/P1 share geometry; keys_for(side) recolors."""
-    frames = _player_frame_strs()
+    Per ART_DIRECTION.md v2. P0 'the Cur' (horns) / P1 'the Stag' (antlers);
+    keys_for(side) recolors red->cyan."""
+    frames = _frames_for(side)
     canvas = Canvas(PLAYER_PX * 41, PLAYER_PX)
     for i, art in enumerate(frames):
-        paint(canvas, i * PLAYER_PX, 0, art, side=side)
+        paint(canvas, i * PLAYER_PX, 0, _grid_to_str(art), side=side)
     return canvas
 
 
-# Animation row layout for the review contact sheet.
 _ANIM_ROWS = [
     ("idle", 0, 6),
     ("run", 6, 6),
@@ -645,10 +712,9 @@ _ANIM_ROWS = [
 
 
 def duelist_contact_sheet(side: str) -> Canvas:
-    """Review sheet: each animation on its own row, scaled 5x on a void bg, so
-    the 41-frame set can be eyeballed against the craft checklist."""
-    frames = _PLAYER_FRAME_CACHE or _player_frames()
-    scale = 5
+    """Review sheet: each animation on its own row, scaled 6x on a void bg."""
+    frames = _frames_for(side)
+    scale = 6
     cell = PLAYER_PX * scale
     cols = max(n for _, _, n in _ANIM_ROWS)
     rows = len(_ANIM_ROWS)
