@@ -15,6 +15,7 @@ used to write — same atlas layout, polished art.
 
 from __future__ import annotations
 
+import math
 import os
 import struct
 import zlib
@@ -1758,45 +1759,100 @@ def arena_tile_sheet() -> Canvas:
 
 
 def training_floor() -> Canvas:
-    """Composed training arena: 10 tiles wide x 15 tiles tall = 160x240 px.
+    """Moody Bone Cathedral floor — the 1000x1500 cm Anchor arena at 320x480
+    source (rendered at fixed world size, so higher res is free detail).
 
-    Arrangement: walls around the perimeter, checker floor inside, spawn
-    marks at the standard duel positions, duel-diamond geometry at center.
+    Deliberately dark and low-contrast: dark mottled stone, faint tile grout,
+    old blood, a subdued central occult duel-sigil, and a bone-crenellated
+    wall band under an edge vignette. The players + boomerang stay the
+    readable foreground; the floor only sets mood.
     """
-    cols, rows = 10, 15
-    c = Canvas(cols * 16, rows * 16)
-    # Floor checker.
-    for r in range(rows):
-        for col in range(cols):
-            primary = (col + r) % 2 == 0
-            paint(c, col * 16, r * 16,
-                  FLOOR_PRIMARY if primary else FLOOR_SECONDARY, side="p0")
-    # Walls — top + bottom rows, left + right cols. Corners take precedence.
-    for col in range(1, cols - 1):
-        paint(c, col * 16, 0, WALL_EDGE_TOP, side="p0")
-        paint(c, col * 16, (rows - 1) * 16, WALL_EDGE_BOTTOM, side="p0")
-    for r in range(1, rows - 1):
-        paint(c, 0, r * 16, WALL_EDGE_LEFT, side="p0")
-        paint(c, (cols - 1) * 16, r * 16, WALL_EDGE_RIGHT, side="p0")
-    paint(c, 0, 0, WALL_CORNER_TL, side="p0")
-    paint(c, (cols - 1) * 16, 0, WALL_CORNER_TR, side="p0")
-    paint(c, 0, (rows - 1) * 16, WALL_CORNER_BL, side="p0")
-    paint(c, (cols - 1) * 16, (rows - 1) * 16, WALL_CORNER_BR, side="p0")
-    # Spawn marks — opposite mid-arena positions.
-    paint(c, 1 * 16, 7 * 16, SPAWN_MARK_P0, side="p0")
-    paint(c, 8 * 16, 7 * 16, SPAWN_MARK_P1, side="p0")
-    # Center duel motif — a thin charcoal-line vertical, plus a diamond
-    # outlined in cold-stone for parallax.
-    cx = c.width // 2
-    cy = c.height // 2
-    for y in range(20, c.height - 20):
-        c.set(cx - 1, y, PALETTE["charcoal_line"])
-    # Diamond from cardinal points.
-    for r in range(28):
-        c.set(cx - 1 - r, cy + r - 28, PALETTE["cold_stone"])
-        c.set(cx - 1 - r, cy - r + 28, PALETTE["cold_stone"])
-        c.set(cx - 1 + r, cy + r - 28, PALETTE["cold_stone"])
-        c.set(cx - 1 + r, cy - r + 28, PALETTE["cold_stone"])
+    W, H = 320, 480
+    void = PALETTE["void"]
+    ash = PALETTE["deep_ash"]
+    bruise = PALETTE["bruise_shadow"]
+    char = PALETTE["charcoal_line"]
+    wbs = PALETTE["warm_bone_shade"]
+    bone = PALETTE["bone"]
+    teal = PALETTE["deep_teal"]
+    blood = PALETTE["blood_dark"]
+    c = Canvas(W, H, ash)
+
+    def dhash(x: int, y: int) -> int:
+        return ((x * 73856093) ^ (y * 19349663)) & 0xFF
+
+    # Dark stone mottle (deterministic — no RNG).
+    for y in range(H):
+        for x in range(W):
+            v = dhash(x // 4, y // 4)
+            if v < 36:
+                c.set(x, y, void)
+            elif v < 70:
+                c.set(x, y, bruise)
+
+    # Tile grout grid every 32px.
+    for gx in range(0, W, 32):
+        for y in range(H):
+            c.set(gx, y, char)
+    for gy in range(0, H, 32):
+        for x in range(W):
+            c.set(x, gy, char)
+
+    # Hairline cracks across the slabs.
+    for (x0, y0, x1, y1) in [(48, 60, 78, 128), (250, 392, 226, 452), (150, 300, 168, 358)]:
+        c.line(x0, y0, x1, y1, char)
+
+    # Old dried blood soaked into the stone (faint).
+    for (sx, sy, rad) in [(72, 150, 11), (250, 330, 13), (176, 96, 8), (96, 392, 9)]:
+        for a in range(0, 360, 18):
+            for rr in range(rad):
+                if (a + rr) % 3:
+                    continue
+                c.set(round(sx + rr * math.cos(math.radians(a))),
+                      round(sy + rr * 0.7 * math.sin(math.radians(a))), blood)
+
+    # Central occult duel-sigil (subdued — teal ring + warm-bone diamond).
+    cx, cy = W // 2, H // 2
+    for a in range(0, 360, 5):
+        c.set(round(cx + 42 * math.cos(math.radians(a))),
+              round(cy + 42 * math.sin(math.radians(a))), teal)
+        c.set(round(cx + 30 * math.cos(math.radians(a))),
+              round(cy + 30 * math.sin(math.radians(a))), wbs)
+    for r in range(36):
+        for (sx, sy) in [(cx - r, cy - 36 + r), (cx + r, cy - 36 + r),
+                         (cx - r, cy + 36 - r), (cx + r, cy + 36 - r)]:
+            c.set(sx, sy, wbs)
+    c.line(cx - 16, cy, cx + 16, cy, wbs)
+    c.line(cx, cy - 16, cx, cy + 16, wbs)
+
+    # Spawn sigils at the left/right mid duel positions.
+    for sx in (48, W - 48):
+        for a in range(0, 360, 24):
+            c.set(round(sx + 9 * math.cos(math.radians(a))),
+                  round(cy + 9 * math.sin(math.radians(a))), wbs)
+
+    # Bone-crenellated wall band around the perimeter.
+    band = 12
+    c.rect(0, 0, W, band, void)
+    c.rect(0, H - band, W, band, void)
+    c.rect(0, 0, band, H, void)
+    c.rect(W - band, 0, band, H, void)
+    for x in range(0, W, 8):
+        c.set(x, band - 2, wbs)
+        c.set(x + 1, band - 2, bone)
+        c.set(x, H - band + 1, wbs)
+    for y in range(0, H, 8):
+        c.set(band - 2, y, wbs)
+        c.set(W - band + 1, y, wbs)
+
+    # Edge vignette toward void.
+    for y in range(H):
+        for x in range(W):
+            edge = min(x, W - 1 - x, y, H - 1 - y)
+            if edge < 26:
+                px = c.pixels[y * W + x]
+                f = (26 - edge) / 26 * 0.7
+                c.pixels[y * W + x] = tuple(round(px[i] * (1 - f) + void[i] * f) for i in range(4))
     return c
 
 
