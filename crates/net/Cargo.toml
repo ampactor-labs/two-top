@@ -24,6 +24,13 @@ bincode = { version = "2.0", default-features = false, features = [
 # subscriber the app crate installs; here we just emit. Default-features
 # off to keep the dep skinny — `std` is the only one we use.
 tracing = { version = "0.1", default-features = false, features = ["std"] }
+# The ggrs `Config::Address` slot is `sim::NetAddr(u128)` so the
+# determinism core stays free of any networking crate. The bridge maps
+# that neutral handle to/from matchbox's `PeerId(Uuid)` via a trivial
+# u128 bijection, so we call `Uuid::from_u128` / `Uuid::as_u128` here.
+# matchbox already pulls uuid transitively; declaring it explicitly
+# makes the bridge's dependency obvious.
+uuid = "1"
 # Bevy without render features — same posture as the sim crate.
 # We need `Resource` and the plugin/system traits, nothing else.
 bevy = { version = "=0.18.1", default-features = false, features = [
@@ -37,7 +44,5 @@ bevy = { version = "=0.18.1", default-features = false, features = [
 # ended" is the rolled-back source of truth).
 sim = { path = "../sim" }
 
-[dev-dependencies]
-# Used in tests for constructing dummy `PeerId(Uuid)` values when
-# round-tripping packets through the bridge encoders.
-uuid = "1"
+# (uuid is a normal dependency above — the bridge needs it at build
+# time, not just in tests.)

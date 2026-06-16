@@ -14,8 +14,8 @@
 | M1 | Art 2.0 | New art spec + generator rewrite + AnimState v2 | Yes (AnimState) | ✅ done |
 | M2 | Phase 16: arenas | BonePyre re-land, Crossing, Reliquary, arena select | Yes | ✅ done |
 | M3 | Phase 17: pickups + perfect catch | 6 pickups, spawn system, perfect-catch | Yes | 🔶 3.1–3.3 done; 3.4 (art) left |
-| **MP** | **PC + Web platform track** | **Desktop input, local couch versus, desktop/web builds, cross-play** | **No (input/app/build)** | 🔶 P.1–P.3 landed (couch versus playable, keyboard+gamepad, whole-arena window); P.4 online / P.5–P.6 web left |
-| M4 | Phase 12 completion | Real matchbox wiring, P2P swap, loopback verified | No (net/app) | ⬜ planned |
+| **MP** | **PC + Web platform track** | **Desktop input, local couch versus, desktop/web builds, cross-play** | **No (input/app/build)** | 🔶 P.1–P.4 landed (couch versus, keyboard+gamepad, whole-arena window, online PC-vs-PC loopback-verified); P.3b packaging / P.5–P.6 web left |
+| M4 | Phase 12 completion | Real matchbox wiring, P2P swap, loopback verified | No (net/app) | ✅ done |
 | M5 | Phase 18: polish | Shake, kill-cam, audio, haptics, UI, perf pass | Mostly render | ⬜ planned |
 | M6 | Release readiness | SIM_VERSION=1, tag, operator checklist | Yes (version) | ⬜ planned |
 
@@ -59,15 +59,15 @@ Why this is cheap: the sim is deterministic in fixed-point, so it already runs b
 - [x] Task P.1: **Desktop input source** — `input_desktop` crate mirroring `input_touch`'s `ReadInputs` shape. Maps **keyboard + gamepad** to per-handle `LocalInputs<GgrsCfg>` in the 4-byte wire format, level signals only. Pure mapping unit-tested (8 cases). Gamepad is opt-in (`--features gamepad`; gilrs needs libudev on Linux) so the default build needs no system libs.
 - [x] Task P.2: **Local couch versus (one PC, no network)** — desktop `ReadInputs` source emits **distinct** inputs per handle (P0 = WASD/Space/LShift / pad 0, P1 = arrows/RShift/RCtrl / pad 1) into the 2-local-player SyncTest session (which self-verifies determinism every frame), input delay 0. Boots clean. **Fastest "play with a friend" path; zero dependency on M4.** 🛑 *Operator playtest pending: confirm two players move independently + scoring/round flow on real hardware.* A non-SyncTest local session is a later optimization, not a blocker.
 - [x] Task P.3: **Desktop window + whole-arena camera** — portrait 600×900 window titled "2-Top"; desktop camera frames the whole arena via `ScalingMode::AutoMin` (no follow; mobile keeps the zoomed `FollowCam`); world-space control legend; F11 borderless fullscreen toggle. Boots clean.
-- [ ] Task P.3: **Desktop windowing + packaging** — resizable/fullscreen window; landscape/desktop camera + HUD scale (the layout is portrait-phone today); on-screen control-scheme hint; release artifacts for Linux/macOS/Windows. Add `x86_64-pc-windows-msvc` to the determinism matrix.
-- [ ] Task P.4: **Desktop online netplay** — after M4 lands, the same Matchbox driver gives remote PC-vs-PC. Verify two desktop windows + local signaling server complete a match desync-free (extends M4's loopback gate).
+- [ ] Task P.3b: **Desktop packaging** — landscape/desktop HUD scale (the layout is portrait-phone today); release artifacts for Linux/macOS/Windows. Add `x86_64-pc-windows-msvc` to the determinism matrix.
+- [x] Task P.4: **Desktop online netplay** — the M4 Matchbox driver gives remote PC-vs-PC. Verified on loopback: two desktop instances + local `matchbox_server` swap to `P2P`, complete a live match desync-free, and forfeit on kill (this *is* M4's Gate 0). Cross-network play remains an M6 operator gate.
 - [ ] Task P.5: **Web / WASM (PWA)** — `wasm32-unknown-unknown` target, trunk/wasm-bindgen build, asset loading, web-audio path, mouse+touch+keyboard input, PWA manifest + service worker. Matchbox is browser-native, so netplay carries over unchanged. Add a wasm build (and, if feasible headless, a wasm sim-checksum check) to CI.
 - [ ] Task P.6: **Cross-play verification** — assert the WASM sim checksums match the native determinism matrix (fixed-point should already guarantee it), then document phone ↔ PC ↔ browser cross-play as a supported configuration.
 
 ## Milestone 4 — Phase 12 Completion: Real Netplay
 
-- [ ] Task 4.1: Matchbox driver in app
-- [ ] Task 4.2: Desktop loopback verification
+- [x] Task 4.1: Matchbox driver in app — `sim::NetAddr(u128)` neutral address (sim stays networking-free) at the ggrs `Config::Address` slot; `net::MatchboxBridge` maps `PeerId`↔`NetAddr` via a u128 bijection; `app::netplay::MatchboxPlugin` builds the unreliable-channel `WebRtcSocket` (driven on `IoTaskPool`), drives the `LobbyState` FSM, swaps `SyncTest`→`P2PSession` on connect (lower `PeerId` = handle 0), enables desync detection (interval 30) + 3 s disconnect timeout, and drains ggrs events (loud `error!` on `DesyncDetected`, forfeit→`MatchOver` on `Disconnected`). Opt-in via `--room`/`MATCHBOX_ROOM`; default build unchanged.
+- [x] Task 4.2: Desktop loopback verification — `matchbox_server` + two `app --room ws://127.0.0.1:3536/two-top?next=2` instances: both reach `Connected`, swap to `P2P` with agreed handles, sync (5 steps), run a live match with **zero desync**, and forfeit on kill (`Disconnected → MatchOver → Forfeited`, ~2.5 s). `SIGNALING.md` updated (TBD removed, wiring + handle rule documented). Real-network gates batched to M6.
 
 ## Milestone 5 — Phase 18: Game Feel, Audio, UI
 

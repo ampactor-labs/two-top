@@ -95,16 +95,53 @@ room-code text-entry field would go.
 
 ## Configuring the build
 
-The room URL is currently hard-coded in the operator's local edits to
-`crates/app/src/lib.rs` — Phase 12 does not surface a settings menu
-for it yet. To point the build at your signaling server:
+The room URL is a **runtime argument**, not a build-time constant —
+the live matchbox driver landed in `crates/app/src/netplay.rs` (M4).
+Online play is opt-in; the default build is unchanged (local SyncTest
+couch-versus).
 
-1. Edit the matchbox driver call site (TBD: lands when the operator
-   adds the actual `WebRtcSocket::new_unreliable_with_room_url(...)`
-   call to `app::run`).
-2. Rebuild: `cargo run -p app --release`.
-3. Confirm the lobby overlay (top-right corner, yellow text) cycles
-   through `idle → connecting → waiting peer → connected` as expected.
+1. Start a signaling server (local dev): `matchbox_server` (defaults to
+   `0.0.0.0:3536`). For a real deployment see "Running the server" above.
+2. Launch the game pointed at a room:
+
+   ```bash
+   cargo run -p app -- --room ws://<host>:3536/two-top?next=2
+   # or, equivalently:
+   MATCHBOX_ROOM=ws://<host>:3536/two-top?next=2 cargo run -p app
+   ```
+
+   `--room <url>` takes precedence over `MATCHBOX_ROOM`. Absent both,
+   the build runs the local SyncTest session (no network).
+3. The lobby overlay (top-right, yellow text) cycles
+   `idle → connecting → waiting peer → connected`; on connect the
+   driver swaps the SyncTest session for a live `P2PSession`.
+
+### Handle assignment (deterministic, peer-agreed)
+
+Both peers must agree on which is player 0. The rule: **the lower
+`PeerId` is handle 0**, the higher is handle 1. Each peer learns both
+ids from the signaling handshake and computes the same assignment
+locally — no negotiation round-trip. Player *entities* are spawned
+identically on both sides (same `setup`), so only "which handle reads
+local input" differs; the deterministic sim guarantees the rest.
+
+The ggrs session is built with `input_delay = 2`, desync detection on
+(`interval = 30`, ~2 checks/sec), and a 3 s disconnect timeout. A
+`DesyncDetected` event logs a loud `ERROR` on `target: two_top::net`;
+a `Disconnected` event forfeits the match (sets
+`sim::MatchState::MatchOver`).
+
+### Loopback verification (Gate 0 — done, automatable)
+
+Verified on a single box: `matchbox_server` + two `app --room
+ws://127.0.0.1:3536/two-top?next=2` instances. Both reach `connected`,
+swap to `P2P` with agreed handles, complete the 5-step sync handshake,
+and run a live match with **zero `DesyncDetected` events**. Killing one
+instance forfeits the survivor (`peer disconnected → MatchOver →
+Forfeited`) within ~2.5 s. A transient stall (CPU contention) surfaced
+as `NetworkInterrupted` and cleanly `NetworkResumed` with no desync.
+The three gates below additionally require **real devices / real
+networks** and remain operator-executed.
 
 ---
 

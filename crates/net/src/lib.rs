@@ -13,7 +13,7 @@
 //! bevy_roll_safe" for the broader rationale on owning small adapters.
 //!
 //! The bridge is a transparent wrapper around `WebRtcChannel` that
-//! impls `NonBlockingSocket<PeerId>` by:
+//! impls `NonBlockingSocket<sim::NetAddr>` by:
 //!   1. bincode-serializing each outbound `ggrs::Message` to a
 //!      `Box<[u8]>` packet and forwarding to `WebRtcChannel::send`.
 //!   2. draining inbound `(PeerId, Packet)` pairs and
@@ -21,10 +21,49 @@
 //!
 //! This matches matchbox's own reference impl byte-for-byte at the
 //! wire level, just bound to ggrs 0.12 instead of 0.11.
+//!
+//! ## Address type: `sim::NetAddr`, not `PeerId`
+//!
+//! ggrs's `Config::Address` is `sim::NetAddr(u128)`, a neutral handle
+//! that keeps the `sim` crate free of any networking dependency
+//! (CONVENTIONS: the determinism core is headless). Matchbox identifies
+//! peers with `PeerId(Uuid)`; the bridge converts at the ggrs boundary
+//! via a trivial bijection — `PeerId(Uuid::from_u128(addr.0))` outbound
+//! and `NetAddr(peer.0.as_u128())` inbound. A `Uuid` is exactly 128 bits,
+//! so the round-trip is lossless and total.
 
 use bevy::prelude::*;
 use ggrs::{Message, NonBlockingSocket};
 use matchbox_socket::{Packet, PeerId, WebRtcChannel};
+use sim::NetAddr;
+use uuid::Uuid;
+
+// Re-export the matchbox types the app crate's live driver needs, so the
+// driver can build/poll a socket without declaring its own
+// `matchbox_socket` dependency (which would risk feature-set drift from
+// ours). The session-swap itself lives in `app` because it constructs a
+// `bevy_ggrs::Session`, and `net` deliberately depends only on raw `ggrs`
+// (no bevy_ggrs) to stay headless.
+pub use matchbox_socket::{
+    ChannelConfig, MessageLoopFuture, PeerId as MatchboxPeerId, PeerState, WebRtcSocket,
+    WebRtcSocketBuilder,
+};
+
+/// Convert a matchbox `PeerId` to the neutral `sim::NetAddr` used at the
+/// ggrs `Config::Address` boundary. A `Uuid` is 128 bits, so this is
+/// lossless.
+#[inline]
+pub fn peer_to_addr(peer: PeerId) -> NetAddr {
+    NetAddr(peer.0.as_u128())
+}
+
+/// Inverse of [`peer_to_addr`]: rebuild the matchbox `PeerId` from a
+/// `sim::NetAddr` so ggrs's per-peer routing can be handed back to
+/// `WebRtcChannel::send`.
+#[inline]
+pub fn addr_to_peer(addr: NetAddr) -> PeerId {
+    PeerId(Uuid::from_u128(addr.0))
+}
 
 /// Newtype wrapper that owns a `WebRtcChannel` and exposes ggrs's
 /// `NonBlockingSocket` interface. Construct one per ggrs session,
@@ -73,24 +112,25 @@ pub fn encode_message(msg: &Message) -> Packet {
         .into_boxed_slice()
 }
 
-/// Decode a packet back into `(PeerId, ggrs::Message)`. Panics on
+/// Decode a packet back into `(NetAddr, ggrs::Message)`. Panics on
 /// deserialization failure — peers that send malformed bincode are
 /// either lying or running an incompatible build, and ggrs has no
 /// recovery semantics for either case. The matchbox reference impl
-/// does the same.
-pub fn decode_packet(message: (PeerId, Packet)) -> (PeerId, Message) {
+/// does the same. The inbound `PeerId` is mapped to the neutral
+/// `sim::NetAddr` ggrs expects (see module docs).
+pub fn decode_packet(message: (PeerId, Packet)) -> (NetAddr, Message) {
     let (peer, bytes) = message;
     let (msg, _) = bincode::serde::decode_from_slice(&bytes, bincode::config::standard())
         .expect("peer sent malformed ggrs packet");
-    (peer, msg)
+    (peer_to_addr(peer), msg)
 }
 
-impl NonBlockingSocket<PeerId> for MatchboxBridge {
-    fn send_to(&mut self, msg: &Message, addr: &PeerId) {
-        self.channel.send(encode_message(msg), *addr);
+impl NonBlockingSocket<NetAddr> for MatchboxBridge {
+    fn send_to(&mut self, msg: &Message, addr: &NetAddr) {
+        self.channel.send(encode_message(msg), addr_to_peer(*addr));
     }
 
-    fn receive_all_messages(&mut self) -> Vec<(PeerId, Message)> {
+    fn receive_all_messages(&mut self) -> Vec<(NetAddr, Message)> {
         self.channel.receive().into_iter().map(decode_packet).collect()
     }
 }
@@ -363,18 +403,32 @@ mod tests {
     use super::*;
 
     /// Compile-time check: `MatchboxBridge` must impl
-    /// `NonBlockingSocket<PeerId>` so it can be plugged into a
+    /// `NonBlockingSocket<sim::NetAddr>` so it can be plugged into a
     /// `ggrs::SessionBuilder<GgrsCfg>::start_p2p_session(socket)`
-    /// call in cycle 3. ggrs 0.12's `Message` has private fields
-    /// (only the struct itself is `pub`), so we can't construct one
-    /// in a unit test — the wire-format round-trip is implicitly
-    /// covered the moment two real peers exchange a sync handshake
-    /// at runtime. This compile-fence is the strongest static
-    /// guarantee we can author from outside the ggrs crate.
+    /// call — `GgrsCfg::Address` is `sim::NetAddr`, so the socket's
+    /// address type must match exactly. ggrs 0.12's `Message` has
+    /// private fields (only the struct itself is `pub`), so we can't
+    /// construct one in a unit test — the wire-format round-trip is
+    /// implicitly covered the moment two real peers exchange a sync
+    /// handshake at runtime. This compile-fence is the strongest
+    /// static guarantee we can author from outside the ggrs crate.
     #[test]
     fn matchbox_bridge_impls_non_blocking_socket() {
-        fn assert_impl<T: NonBlockingSocket<PeerId>>() {}
+        fn assert_impl<T: NonBlockingSocket<NetAddr>>() {}
         assert_impl::<MatchboxBridge>();
+    }
+
+    /// The `PeerId` ↔ `NetAddr` bijection must round-trip losslessly
+    /// in both directions — ggrs routes by `NetAddr` while matchbox
+    /// routes by `PeerId`, so a lossy conversion would misroute
+    /// packets between peers and desync the session.
+    #[test]
+    fn peer_addr_bijection_round_trips() {
+        let peer = PeerId(Uuid::from_u128(0x1234_5678_9abc_def0_1122_3344_5566_7788));
+        assert_eq!(addr_to_peer(peer_to_addr(peer)), peer);
+
+        let addr = NetAddr(0xdead_beef_cafe_f00d);
+        assert_eq!(peer_to_addr(addr_to_peer(addr)), addr);
     }
 
     /// Sanity check that `decode_packet` preserves the `PeerId`

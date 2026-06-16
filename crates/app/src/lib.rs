@@ -27,9 +27,11 @@ mod camera;
 mod debug_overlay;
 mod lobby_overlay;
 mod logging;
+mod netplay;
 use camera::CameraFollowPlugin;
 use debug_overlay::DebugInputOverlayPlugin;
 use lobby_overlay::LobbyOverlayPlugin;
+use netplay::{MatchboxPlugin, NetplayConfig};
 
 /// Pick the arena from the `TWOTOP_ARENA` env var (desktop testing handle
 /// until the lobby arena-picker lands). Defaults to the tournament Anchor.
@@ -54,30 +56,37 @@ pub fn run() {
         "two-top starting",
     );
 
-    // Local play (PC couch versus + the touch dev build) runs a SyncTest
-    // session with both players LOCAL: the input source feeds DISTINCT
-    // per-handle inputs (keyboard P0/P1 on desktop), so it's a real versus
-    // that also self-verifies determinism every frame. Input delay is 0 —
-    // there's no network latency to hide locally, so inputs apply at once
-    // for a snappy feel. (M4 swaps in a P2PSession with its own delay for
-    // online play.)
-    let mut sb = SessionBuilder::<GgrsCfg>::new()
-        .with_num_players(2)
-        .expect("with_num_players")
-        .with_check_distance(2)
-        .with_input_delay(0);
-    for i in 0..2 {
-        sb = sb.add_player(PlayerType::Local, i).expect("add_player");
-    }
-    let session = sb.start_synctest_session().expect("synctest");
-    tracing::info!(
-        target: "two_top::app",
-        kind = "synctest",
-        num_players = 2,
-        check_distance = 2,
-        input_delay = 0,
-        "ggrs session started",
-    );
+    // Netplay is opt-in via `--room <url>` / `MATCHBOX_ROOM`. Online: the
+    // P2P session is built by the matchbox driver once a peer connects, so
+    // NO session is inserted up front (the sim idles at frame 0 until the
+    // swap). Local (the default — PC couch versus + the touch dev build):
+    // a SyncTest session with both players LOCAL, fed DISTINCT per-handle
+    // inputs (keyboard P0/P1 on desktop) — a real versus that also
+    // self-verifies determinism every frame. Input delay 0: no network
+    // latency to hide locally, so inputs apply at once for a snappy feel.
+    let netplay = NetplayConfig::from_env_and_args();
+    let online = netplay.room_url.is_some();
+
+    let local_session = (!online).then(|| {
+        let mut sb = SessionBuilder::<GgrsCfg>::new()
+            .with_num_players(2)
+            .expect("with_num_players")
+            .with_check_distance(2)
+            .with_input_delay(0);
+        for i in 0..2 {
+            sb = sb.add_player(PlayerType::Local, i).expect("add_player");
+        }
+        let session = sb.start_synctest_session().expect("synctest");
+        tracing::info!(
+            target: "two_top::app",
+            kind = "synctest",
+            num_players = 2,
+            check_distance = 2,
+            input_delay = 0,
+            "ggrs session started",
+        );
+        session
+    });
 
     let mut app = App::new();
     app
@@ -125,7 +134,7 @@ pub fn run() {
         .add_plugins(DebugInputOverlayPlugin)
         .add_plugins(net::NetPlugin)
         .add_plugins(LobbyOverlayPlugin)
-        .insert_resource(Session::SyncTest(session))
+        .insert_resource(netplay.clone())
         .add_systems(Startup, setup)
         .add_systems(PreUpdate, update_window_metrics.before(update_touch_state))
         .add_systems(
@@ -136,6 +145,15 @@ pub fn run() {
                 log_app_exit,
             ),
         );
+
+    // Session install. Online: the matchbox driver builds + inserts the
+    // P2P session on peer connect — nothing inserted now. Local: the
+    // pre-built SyncTest session goes in immediately.
+    if let Some(session) = local_session {
+        app.insert_resource(Session::SyncTest(session));
+    } else {
+        app.add_plugins(MatchboxPlugin);
+    }
 
     // Platform input source (level signals only; exactly one source).
     // Android: touch. Everything else (PC): keyboard — WASD for P0, arrows

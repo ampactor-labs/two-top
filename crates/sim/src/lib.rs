@@ -5,7 +5,6 @@ use bevy_ggrs::{
     RollbackApp, SyncTestMismatch,
 };
 use bytemuck::{Pod, Zeroable};
-use core::net::SocketAddr;
 use fixed_math::{Fix, RectF, Vec2F};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -37,7 +36,19 @@ impl PlayerInput {
 
 // ---- ggrs config ----
 
-pub type GgrsCfg = GgrsConfig<PlayerInput, SocketAddr>;
+/// Neutral peer-address type for the ggrs `Config::Address` slot.
+///
+/// `ggrs` requires `Address: Clone + PartialEq + Eq + Hash + Send + Sync +
+/// Debug`. The transport (Matchbox) identifies peers with a `PeerId`
+/// (a `Uuid` newtype), but `sim` must stay free of any networking crate
+/// (CONVENTIONS: the determinism core is headless). `NetAddr` is the
+/// neutral handle the bridge maps to/from a `PeerId` via a trivial u128
+/// bijection (`PeerId(Uuid::from_u128(n))` ↔ `peer.0.as_u128()`), so the
+/// address only ever appears at the ggrs boundary and never in sim logic.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, PartialOrd, Ord)]
+pub struct NetAddr(pub u128);
+
+pub type GgrsCfg = GgrsConfig<PlayerInput, NetAddr>;
 
 pub const TICK_HZ: usize = 60;
 pub const TICK_DT: Fix = Fix::lit("0.01666666666");
