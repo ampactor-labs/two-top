@@ -374,7 +374,7 @@ fn setup(
 
     // Phase 16: spawn the selected arena's bone-pyre cover (same shared
     // helper as the app crate, so the viewer renders arenas identically).
-    render::spawn_arena_props(&mut commands, &selected);
+    render::spawn_arena_props(&mut commands, &asset_server, &mut atlases, &selected);
 
     // Frame counter HUD pinned to the upper-left, world-space (matches
     // the existing debug overlay convention in the app crate).

@@ -195,7 +195,7 @@ fn setup(
 
     // Phase 16: spawn the selected arena's bone-pyre cover (shared helper
     // so app + replay_viewer render arenas identically).
-    render::spawn_arena_props(&mut commands, &selected);
+    render::spawn_arena_props(&mut commands, &asset_server, &mut atlases, &selected);
 }
 
 /// `Update`-schedule system: attaches a placeholder sprite + transform

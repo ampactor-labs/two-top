@@ -136,7 +136,15 @@ impl Plugin for RenderSyncPlugin {
 /// real pyre sprite lands in cycle 2). Called from both `app` and
 /// `replay_viewer` setup so the two binaries render arenas identically —
 /// the shared helper replaces what was copy-pasted in the reverted diff.
-pub fn spawn_arena_props(commands: &mut Commands, selected: &sim::SelectedArena) {
+pub fn spawn_arena_props(
+    commands: &mut Commands,
+    asset_server: &AssetServer,
+    atlases: &mut Assets<TextureAtlasLayout>,
+    selected: &sim::SelectedArena,
+) {
+    // 3-cell bone-pyre sheet: 0 intact / 1 cracked / 2 shattered-rubble.
+    let layout = atlases.add(TextureAtlasLayout::from_grid(UVec2::splat(32), 3, 1, None, None));
+    let image = asset_server.load("sprites/arena/bone_pyre_sheet.png");
     for pyre in sim::arena_pyres_for(selected.0) {
         let (min_x, min_y) = pyre.rect.min.to_f32();
         let (max_x, max_y) = pyre.rect.max.to_f32();
@@ -145,7 +153,11 @@ pub fn spawn_arena_props(commands: &mut Commands, selected: &sim::SelectedArena)
         commands.spawn((
             pyre,
             Sprite {
-                color: palette::BONE,
+                image: image.clone(),
+                texture_atlas: Some(TextureAtlas {
+                    layout: layout.clone(),
+                    index: 0,
+                }),
                 custom_size: Some(size),
                 ..default()
             },
@@ -155,18 +167,16 @@ pub fn spawn_arena_props(commands: &mut Commands, selected: &sim::SelectedArena)
     }
 }
 
-/// Re-tint a pyre quad when its shatter state changes: bone while intact,
-/// charcoal once shattered. Runs on `Changed<BonePyre>` so it's free on
-/// the ticks nothing shatters.
+/// Swap a pyre's atlas frame when its shatter state changes: intact (cell 0)
+/// while whole, shattered rubble (cell 2) once broken. Runs on
+/// `Changed<BonePyre>` so it's free on the ticks nothing shatters.
 pub fn sync_pyre_visuals(
     mut q: Query<(&sim::BonePyre, &mut Sprite), Changed<sim::BonePyre>>,
 ) {
     for (pyre, mut sprite) in &mut q {
-        sprite.color = if pyre.shattered {
-            palette::CHARCOAL_LINE
-        } else {
-            palette::BONE
-        };
+        if let Some(atlas) = sprite.texture_atlas.as_mut() {
+            atlas.index = if pyre.shattered { 2 } else { 0 };
+        }
     }
 }
 

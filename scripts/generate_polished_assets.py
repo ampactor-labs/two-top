@@ -1857,6 +1857,64 @@ def training_floor() -> Canvas:
 
 
 # ===========================================================================
+# Bone pyre — Phase 16 arena cover. 3 cells @ 32x32: intact / cracked /
+# shattered-rubble. Kept muted (warm-bone dominant, small ember eye glints)
+# so the cover stays below players + boomerang in the readability hierarchy.
+# ===========================================================================
+
+def _pyre_cell(stage: int) -> Canvas:
+    c = Canvas(32, 32)
+    bone = PALETTE["bone"]
+    wbs = PALETTE["warm_bone_shade"]
+    void = PALETTE["void"]
+    char = PALETTE["charcoal_line"]
+    ember = PALETTE["ember"]
+    dark = PALETTE["bruise_shadow"]
+    cx = 16
+
+    if stage < 2:
+        # Base rubble.
+        c.rect(cx - 9, 26, 18, 5, dark)
+        c.rect(cx - 8, 25, 16, 2, wbs)
+        # Stacked skulls (muted bone, right-side shade, void eye sockets).
+        skulls = [(cx, 21, 5), (cx - 4, 16, 4), (cx + 4, 16, 4), (cx - 1, 10, 5)]
+        for (sx, sy, r) in skulls:
+            c.rect(sx - r, sy - r, 2 * r, 2 * r, wbs)
+            c.rect(sx - r, sy - r, 2 * r - 1, r, bone)  # lit top-left
+            for yy in range(sy - r, sy + r):
+                c.set(sx + r - 1, yy, dark)
+            c.set(sx - r + 1, sy, void)
+            c.set(sx + r - 2, sy, void)
+        # Top skull's burning eyes.
+        c.set(cx - 2, 9, ember)
+        c.set(cx + 1, 9, ember)
+        if stage == 1:
+            # Cracks spider across the stack.
+            c.line(cx - 3, 11, cx + 2, 22, char)
+            c.line(cx + 3, 13, cx - 1, 24, char)
+            c.set(cx + 5, 14, char)
+    else:
+        # Collapsed rubble heap — dead, no ember.
+        c.rect(cx - 10, 27, 20, 4, dark)
+        c.rect(cx - 9, 25, 18, 2, wbs)
+        for (sx, sy) in [(cx - 6, 24), (cx + 5, 24), (cx + 2, 22)]:
+            c.rect(sx, sy, 3, 2, bone)
+        c.rect(cx - 3, 22, 6, 4, wbs)
+        c.set(cx - 2, 23, void)
+        c.set(cx + 1, 23, void)
+        c.line(cx - 3, 22, cx + 2, 26, char)
+    return c
+
+
+def bone_pyre_sheet() -> Canvas:
+    """3-cell strip: intact / cracked / shattered-rubble (32x32 each)."""
+    c = Canvas(96, 32)
+    for i in range(3):
+        c.blit(_pyre_cell(i), i * 32, 0, 1)
+    return c
+
+
+# ===========================================================================
 # HUD — score pips, timer digits, countdown digits, match-over badge,
 # touch ring states.
 # ===========================================================================
@@ -2360,6 +2418,7 @@ def main() -> None:
         ("assets/sprites/stains/p1_stain_sheet.png", stain_sheet("p1")),
         ("assets/arenas/training_floor.png", training_floor()),
         ("assets/arenas/tile_sheet.png", arena_tile_sheet()),
+        ("assets/sprites/arena/bone_pyre_sheet.png", bone_pyre_sheet()),
         ("assets/hud/score_pips.png", score_pips()),
         ("assets/hud/timer_digits.png", timer_digits()),
         ("assets/hud/countdown_digits.png", countdown_digits()),
