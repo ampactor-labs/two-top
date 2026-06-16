@@ -31,6 +31,17 @@ use camera::CameraFollowPlugin;
 use debug_overlay::DebugInputOverlayPlugin;
 use lobby_overlay::LobbyOverlayPlugin;
 
+/// Pick the arena from the `TWOTOP_ARENA` env var (desktop testing handle
+/// until the lobby arena-picker lands). Defaults to the tournament Anchor.
+fn arena_from_env() -> SelectedArena {
+    let id = match std::env::var("TWOTOP_ARENA").as_deref() {
+        Ok("crossing") => sim::ArenaId::Crossing,
+        Ok("reliquary") => sim::ArenaId::Reliquary,
+        _ => sim::ArenaId::Anchor,
+    };
+    SelectedArena(id)
+}
+
 pub fn run() {
     // Phase 13: install the tracing subscriber FIRST. The guard owns
     // the non-blocking appender's worker thread in release; binding it
@@ -70,6 +81,10 @@ pub fn run() {
         .add_plugins(DefaultPlugins.build().disable::<bevy::log::LogPlugin>())
         .add_plugins(GgrsPlugin::<GgrsCfg>::default())
         .add_plugins(SimPlugin)
+        // Phase 16: arena selection. Until the lobby arena-picker UI lands
+        // (polish), choose via TWOTOP_ARENA=anchor|crossing|reliquary. Must
+        // be inserted AFTER SimPlugin (which defaults it to Anchor).
+        .insert_resource(arena_from_env())
         // Phase 13: edge-detect MatchState/MatchScore transitions in
         // Update so the diagnostic log captures round flow without
         // duplicating events on each rollback resimulation. Headless

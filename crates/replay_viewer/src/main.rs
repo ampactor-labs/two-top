@@ -98,6 +98,9 @@ fn main() -> ExitCode {
     };
 
     let total_frames = replay.header.frame_count;
+    // Phase 16: reproduce the recorded arena (gates arena systems + drives
+    // spawn_arena_props). Read before `replay` is moved into ReplayPlayback.
+    let selected_arena = SelectedArena(sim::ArenaId::from_u8(replay.header.arena_id));
     eprintln!(
         "replay_viewer: loaded {} (sim_version={}, frames={}, players={})",
         path.display(),
@@ -150,6 +153,7 @@ fn main() -> ExitCode {
         .add_plugins(RenderSyncPlugin)
         .add_plugins(EffectsPlugin)
         .insert_resource(Session::SyncTest(session))
+        .insert_resource(selected_arena)
         .insert_resource(ReplayPlayback::new(replay))
         .insert_resource(TotalFrames(total_frames))
         .insert_resource(SnapshotBuffer::default())

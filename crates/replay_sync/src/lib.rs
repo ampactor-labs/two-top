@@ -239,6 +239,13 @@ pub fn build_app_configurable(
     app.add_plugins(ReplayPlaybackPlugin);
     app.insert_resource(Session::SyncTest(session));
 
+    // Phase 16: reproduce the recorded arena. SelectedArena gates the
+    // arena-specific systems; the pyres are rollback entities that
+    // boomerang_pyre_collision / chain_ignition act on, so the headless
+    // determinism check must spawn them exactly as the live game does.
+    let arena = sim::ArenaId::from_u8(replay.header.arena_id);
+    app.insert_resource(sim::SelectedArena(arena));
+
     for handle in 0..replay.header.num_players as usize {
         app.world_mut().spawn((
             Player { handle },
@@ -254,6 +261,9 @@ pub fn build_app_configurable(
     // shot spawn at app build time.
     for wall in arena_walls() {
         app.world_mut().spawn(wall);
+    }
+    for pyre in sim::arena_pyres_for(arena) {
+        app.world_mut().spawn(pyre);
     }
 
     app.insert_resource(ReplayPlayback::new(replay));

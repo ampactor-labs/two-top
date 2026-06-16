@@ -82,7 +82,11 @@ pub fn fuzz_replay(seed: u64) -> Replay {
             recorded_at: 0,
             winner: None,
             player_handles: [None, None],
-            arena_id: 0,
+            // Spread fuzz coverage across all three arenas by seed, so the
+            // nightly 100-seed sweep exercises Anchor / Crossing / Reliquary
+            // determinism with no extra CLI plumbing. Deterministic per seed,
+            // so the seed stays a complete reproduction recipe.
+            arena_id: (seed % 3) as u8,
         },
         inputs,
     }

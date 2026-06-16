@@ -1708,6 +1708,28 @@ pub enum ArenaId {
     Reliquary,
 }
 
+impl ArenaId {
+    /// Stable wire encoding for the replay header. Do not renumber —
+    /// archived replays decode against these values.
+    pub fn as_u8(self) -> u8 {
+        match self {
+            ArenaId::Anchor => 0,
+            ArenaId::Crossing => 1,
+            ArenaId::Reliquary => 2,
+        }
+    }
+
+    /// Decode a replay header's arena byte. Unknown values fall back to the
+    /// tournament-default Anchor rather than failing the load.
+    pub fn from_u8(v: u8) -> Self {
+        match v {
+            1 => ArenaId::Crossing,
+            2 => ArenaId::Reliquary,
+            _ => ArenaId::Anchor,
+        }
+    }
+}
+
 #[derive(Resource, Clone, Copy, PartialEq, Eq, Hash, Debug, Default)]
 pub struct SelectedArena(pub ArenaId);
 
