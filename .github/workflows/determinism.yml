@@ -49,6 +49,20 @@ jobs:
             replay-sync: false
     steps:
       - uses: actions/checkout@v5
+      # Free disk on the GitHub-hosted Linux runners before building. The
+      # `net` crate pulls the full webrtc dependency tree (webrtc → dtls/
+      # srtp/ice/sctp/turn/…), which together with the cross-toolchain and
+      # target artifacts pushed the aarch64-linux-android job over the
+      # runner's disk ceiling ("No space left on device") — it only passed
+      # on retry. Reclaiming the preinstalled Android SDK / .NET / GHC
+      # toolchains (none of which this build uses) frees ~20 GB and makes
+      # the build deterministic w.r.t. disk, not just lucky. Inline `rm`
+      # rather than a third-party action to avoid a new CI dependency.
+      - name: Free disk space
+        if: runner.os == 'Linux'
+        run: |
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /usr/local/.ghcup /opt/hostedtoolcache/CodeQL
+          df -h /
       - uses: taiki-e/setup-cross-toolchain-action@v1
         with:
           target: ${{ matrix.target }}
