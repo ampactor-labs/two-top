@@ -102,6 +102,23 @@ pub fn throw_speed_for(empowered: bool) -> Fix {
     })
 }
 
+/// Throw speed (cm/tick) accounting for empowerment AND a pickup modifier:
+/// Fire launches faster, Heavy slower, everything else at the base/empowered
+/// speed. The single source of truth for launch speed.
+pub fn modified_throw_speed(empowered: bool, modifier: Option<PickupKind>) -> Fix {
+    let base: i32 = if empowered {
+        EMPOWERED_THROW_SPEED_CM_PER_TICK
+    } else {
+        THROW_SPEED_CM_PER_TICK
+    };
+    let cm = match modifier {
+        Some(PickupKind::Fire) => base + 15,
+        Some(PickupKind::Heavy) => base * 4 / 5,
+        _ => base,
+    };
+    Fix::const_from_int(cm)
+}
+
 /// Dash mechanic per Phase 9. Idle waiting for a DASH_DOWN edge;
 /// Dashing for `DASH_DURATION_FRAMES` after a successful trigger,
 /// applying a locked-direction high-speed velocity each tick;
@@ -1082,12 +1099,11 @@ pub fn throw_boomerangs(
         let Some(unit_dir) = try_throw_direction(ring, curr, has_existing) else {
             continue;
         };
-        // A perfect-catch empowerment is consumed by this throw.
-        let velocity = unit_dir * throw_speed_for(empowered.0);
-        empowered.0 = false;
-        // A held pickup rides this throw (cycle 3 gives each modifier its
-        // behavior). Consumed on throw.
+        // A held pickup rides this throw; consumed here. Perfect-catch
+        // empowerment is also consumed.
         let modifier = held.0.take();
+        let velocity = unit_dir * modified_throw_speed(empowered.0, modifier);
+        empowered.0 = false;
         commands.spawn((
             Boomerang {
                 owner_handle: player.handle,
@@ -1122,18 +1138,55 @@ pub fn throw_boomerangs(
 /// recompute would override any reflection on the next tick anyway.
 pub fn boomerang_wall_collision(
     walls: Query<&Wall>,
-    mut boomerangs: Query<(&Boomerang, &mut PositionF, &mut VelocityF)>,
+    mut boomerangs: Query<(&Boomerang, &BoomerangMods, &mut PositionF, &mut VelocityF)>,
 ) {
-    for (boom, mut pos, mut vel) in &mut boomerangs {
+    for (boom, mods, mut pos, mut vel) in &mut boomerangs {
         if matches!(boom.state, BoomerangState::Returning { .. }) {
             continue;
         }
+        // Phantom phases through walls (through-wall snipe).
+        if matches!(mods.modifier, Some(PickupKind::Phantom)) {
+            continue;
+        }
+        let bouncy = matches!(mods.modifier, Some(PickupKind::Bouncy));
         for wall in &walls {
             let bb = boomerang_rect(pos.0);
             if let Some(push) = resolve_collision(bb, wall.rect) {
                 pos.0 = pos.0 + push;
                 vel.0 = reflect_velocity_for_push(vel.0, push);
+                // Bouncy gains speed with every ricochet, capped.
+                if bouncy {
+                    vel.0 = bouncy_accelerate(vel.0);
+                }
             }
+        }
+    }
+}
+
+/// Speed of a Bouncy boomerang after a ricochet: ×1.1, capped at
+/// `BOUNCY_MAX_SPEED`. Direction unchanged (already reflected).
+fn bouncy_accelerate(vel: Vec2F) -> Vec2F {
+    let speed = vel.length();
+    let boosted = (speed * Fix::lit("1.1")).min(Fix::const_from_int(BOUNCY_MAX_SPEED_CM_PER_TICK));
+    vel.normalize() * boosted
+}
+
+/// Bouncy speed ceiling — fast enough to be scary, bounded so it can't run
+/// away past the despawn radius in a single tick.
+pub const BOUNCY_MAX_SPEED_CM_PER_TICK: i32 = 80;
+
+/// Curve's turn rate while flying: 1.5° per tick (≈90°/sec) in radians.
+pub const CURVE_RAD_PER_TICK: Fix = Fix::lit("0.0261799");
+
+/// `GgrsSchedule` system: bend Curve boomerangs each flying tick (banana
+/// throw). Runs before `boomerang_physics` so the rotated heading is what
+/// moves this tick.
+pub fn curve_boomerangs(mut q: Query<(&Boomerang, &BoomerangMods, &mut VelocityF)>) {
+    for (boom, mods, mut vel) in &mut q {
+        if matches!(boom.state, BoomerangState::Flying)
+            && matches!(mods.modifier, Some(PickupKind::Curve))
+        {
+            vel.0 = vel.0.rotate(CURVE_RAD_PER_TICK);
         }
     }
 }
@@ -1647,6 +1700,7 @@ impl Plugin for SimPlugin {
                 wall_collision,
                 (
                     recall_boomerangs,
+                    curve_boomerangs,
                     boomerang_physics,
                     boomerang_wall_collision,
                     boomerang_pyre_collision,
@@ -1906,20 +1960,28 @@ pub fn arena_pyres_for(arena: ArenaId) -> Vec<BonePyre> {
 /// walls — the recall pull is uncanny by design.
 pub fn boomerang_pyre_collision(
     mut pyres: Query<&mut BonePyre>,
-    mut boomerangs: Query<(&Boomerang, &mut PositionF, &mut VelocityF)>,
+    mut boomerangs: Query<(&Boomerang, &BoomerangMods, &mut PositionF, &mut VelocityF)>,
 ) {
-    for (boom, mut pos, mut vel) in &mut boomerangs {
+    for (boom, mods, mut pos, mut vel) in &mut boomerangs {
         if matches!(boom.state, BoomerangState::Returning { .. }) {
             continue;
         }
+        // Phantom phases through cover too.
+        if matches!(mods.modifier, Some(PickupKind::Phantom)) {
+            continue;
+        }
+        // Heavy plows through: it shatters the pyre but doesn't ricochet.
+        let heavy = matches!(mods.modifier, Some(PickupKind::Heavy));
         for mut pyre in &mut pyres {
             if pyre.shattered {
                 continue;
             }
             let bb = boomerang_rect(pos.0);
             if let Some(push) = resolve_collision(bb, pyre.rect) {
-                pos.0 = pos.0 + push;
-                vel.0 = reflect_velocity_for_push(vel.0, push);
+                if !heavy {
+                    pos.0 = pos.0 + push;
+                    vel.0 = reflect_velocity_for_push(vel.0, push);
+                }
                 pyre.shattered = true;
             }
         }
