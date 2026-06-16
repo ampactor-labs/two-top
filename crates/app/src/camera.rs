@@ -10,6 +10,13 @@
 use bevy::prelude::*;
 use sim::{Player, PositionF};
 
+/// Marker for the camera that should track the players. The mobile build
+/// adds it (a zoomed follow cam for a phone); the desktop build omits it
+/// and frames the whole arena statically, so `camera_follow` no-ops there
+/// with no platform `cfg` in this module.
+#[derive(Component)]
+pub struct FollowCam;
+
 /// Damping rate in 1/sec. Higher = camera snaps to target faster.
 /// 4.0 means ~250 ms time constant — responsive but not jarring.
 pub const CAMERA_FOLLOW_RATE: f32 = 4.0;
@@ -33,7 +40,7 @@ impl Plugin for CameraFollowPlugin {
 fn camera_follow(
     time: Res<Time<Real>>,
     players: Query<&PositionF, With<Player>>,
-    mut camera: Query<&mut Transform, With<Camera2d>>,
+    mut camera: Query<&mut Transform, With<FollowCam>>,
 ) {
     let mut sum = Vec2::ZERO;
     let mut count = 0u32;

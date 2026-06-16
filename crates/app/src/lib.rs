@@ -85,8 +85,22 @@ pub fn run() {
         // above. LogPlugin would try to call `set_global_default` again
         // and emit a noisy "global default subscriber set" complaint
         // (and skip its own filter setup). Owning the subscriber lets
-        // the file appender + custom filter survive `App::run()`.
-        .add_plugins(DefaultPlugins.build().disable::<bevy::log::LogPlugin>())
+        // the file appender + custom filter survive `App::run()`. The
+        // window opens portrait (2:3, matching the 1000×1500 cm arena) so
+        // the desktop build frames the playfield with no letterboxing;
+        // android ignores the resolution and fills the device screen.
+        .add_plugins(
+            DefaultPlugins
+                .set(WindowPlugin {
+                    primary_window: Some(Window {
+                        title: "2-Top".to_string(),
+                        resolution: (600u32, 900u32).into(),
+                        ..default()
+                    }),
+                    ..default()
+                })
+                .disable::<bevy::log::LogPlugin>(),
+        )
         .add_plugins(GgrsPlugin::<GgrsCfg>::default())
         .add_plugins(SimPlugin)
         // Phase 16: arena selection. Until the lobby arena-picker UI lands
@@ -132,11 +146,34 @@ pub fn run() {
         input_touch::read_local_touch_inputs,
     );
     #[cfg(not(target_os = "android"))]
-    app.add_plugins(input_desktop::DesktopInputsPlugin);
+    {
+        app.add_plugins(input_desktop::DesktopInputsPlugin);
+        app.add_systems(Update, toggle_fullscreen);
+    }
 
     app.run();
 
     tracing::info!(target: "two_top::app", "two-top exiting cleanly");
+}
+
+/// Desktop: toggle borderless fullscreen on F11 — handy for showing a
+/// couch match on the big screen. Android manages its own fullscreen.
+#[cfg(not(target_os = "android"))]
+fn toggle_fullscreen(
+    keys: Res<bevy::input::ButtonInput<bevy::input::keyboard::KeyCode>>,
+    mut windows: Query<&mut Window>,
+) {
+    use bevy::input::keyboard::KeyCode;
+    use bevy::window::{MonitorSelection, WindowMode};
+    if !keys.just_pressed(KeyCode::F11) {
+        return;
+    }
+    if let Ok(mut window) = windows.single_mut() {
+        window.mode = match window.mode {
+            WindowMode::Windowed => WindowMode::BorderlessFullscreen(MonitorSelection::Current),
+            _ => WindowMode::Windowed,
+        };
+    }
 }
 
 /// Phase 13: surface graceful-shutdown events into the diagnostic log.
@@ -166,7 +203,47 @@ fn setup(
     mut atlases: ResMut<Assets<TextureAtlasLayout>>,
     selected: Res<SelectedArena>,
 ) {
-    commands.spawn(Camera2d);
+    // Camera. Mobile: a bare Camera2d (1:1 pixels) with the follow cam in
+    // `CameraFollowPlugin` keeps it zoomed in for a phone. Desktop: frame
+    // the WHOLE arena at once (couch versus — both players always visible)
+    // via AutoMin scaling, centered at the arena origin, no follow. AutoMin
+    // guarantees the full arena is shown on any window aspect, pillarboxing
+    // a wide monitor rather than cropping the portrait playfield.
+    #[cfg(target_os = "android")]
+    commands.spawn((Camera2d, camera::FollowCam));
+    #[cfg(not(target_os = "android"))]
+    {
+        const VIEW_MARGIN_CM: f32 = 80.0;
+        let min_width = (2 * sim::ARENA_HALF_WIDTH_CM) as f32 + 2.0 * VIEW_MARGIN_CM;
+        let min_height = (2 * sim::ARENA_HALF_HEIGHT_CM) as f32 + 2.0 * VIEW_MARGIN_CM;
+        commands.spawn((
+            Camera2d,
+            Projection::from(OrthographicProjection {
+                scaling_mode: bevy::camera::ScalingMode::AutoMin {
+                    min_width,
+                    min_height,
+                },
+                ..OrthographicProjection::default_2d()
+            }),
+        ));
+        // Couch-play control legend (desktop only — touch needs none).
+        // World-space Text2d (the app has no bevy_ui); the static
+        // whole-arena camera parks it at the top of the playfield without
+        // a per-frame reposition.
+        commands.spawn((
+            Text2d::new(
+                "P0: WASD  ·  Space throw  ·  LShift dash\n\
+                 P1: Arrows  ·  RShift throw  ·  RCtrl dash\n\
+                 F11 fullscreen",
+            ),
+            TextFont {
+                font_size: 26.0,
+                ..default()
+            },
+            TextColor(Color::srgba(0.82, 0.82, 0.78, 0.55)),
+            Transform::from_xyz(0.0, sim::ARENA_HALF_HEIGHT_CM as f32 - 44.0, 100.0),
+        ));
+    }
 
     // ART_DIRECTION.md v2: 41-frame atlases (32x32 source per cell).
     // Render at PLAYER_RENDER_SIZE (64x64 world units).
