@@ -19,8 +19,7 @@ use core::hash::{Hash, Hasher};
 use core::time::Duration;
 use fixed_math::Vec2F;
 use replay::{
-    DEV_SIM_VERSION, FORMAT_VERSION, FrameInputs, MAGIC, Replay, ReplayHeader, ReplayPlayback,
-    ReplayPlaybackPlugin,
+    FORMAT_VERSION, FrameInputs, MAGIC, Replay, ReplayHeader, ReplayPlayback, ReplayPlaybackPlugin,
 };
 use sim::{
     Boomerang, DashState, GgrsCfg, MatchScore, MatchState, Player, PlayerInput, PositionF,
@@ -161,7 +160,13 @@ pub fn canonical_replay() -> Replay {
         header: ReplayHeader {
             magic: MAGIC,
             format_version: FORMAT_VERSION,
-            sim_version: DEV_SIM_VERSION,
+            // The committed demo is the one replay that's encoded to a file and
+            // strict-decoded across binaries (replay_sync/replay_viewer check it
+            // against `sim::SIM_VERSION`), so it must carry the *real* version,
+            // not the `DEV_SIM_VERSION` sentinel the in-process struct-fed test
+            // replays use. Bumping `SIM_VERSION` therefore requires regenerating
+            // this demo (`gen_canonical --write`).
+            sim_version: sim::SIM_VERSION,
             seed: 0,
             num_players: 2,
             frame_rate: 60,
