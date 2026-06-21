@@ -14,13 +14,11 @@
 
 use bevy::prelude::*;
 use bevy_ggrs::GgrsPlugin;
-use bevy_ggrs::prelude::*;
-use fixed_math::Vec2F;
 use input_touch::{CursorPosition, InputTouchPlugin, WindowSize, update_touch_state};
-use render::{EffectsPlugin, RenderSyncPlugin, player_atlas_layout, PLAYER_RENDER_SIZE};
+use render::{EffectsPlugin, RenderSyncPlugin};
 use sim::{
-    AnimState, BOOMERANG_HALF_EXTENT_CM, Boomerang, GgrsCfg, Player, PositionF, PreviousPositionF,
-    SelectedArena, SimLifecycleLogPlugin, SimPlugin, VelocityF, arena_walls,
+    AnimState, BOOMERANG_HALF_EXTENT_CM, Boomerang, GgrsCfg, Player, PositionF, SelectedArena,
+    SimLifecycleLogPlugin, SimPlugin,
 };
 
 mod audio;
@@ -30,12 +28,14 @@ mod haptics;
 mod lobby_overlay;
 mod logging;
 mod netplay;
+mod screen;
 use audio::GameAudioPlugin;
 use camera::CameraFollowPlugin;
 use haptics::HapticsPlugin;
 use debug_overlay::DebugInputOverlayPlugin;
 use lobby_overlay::LobbyOverlayPlugin;
 use netplay::{MatchboxPlugin, NetplayConfig};
+use screen::{AppScreen, ScreenPlugin};
 
 /// Pick the arena from the `TWOTOP_ARENA` env var (desktop testing handle
 /// until the lobby arena-picker lands). Defaults to the tournament Anchor.
@@ -70,27 +70,11 @@ pub fn run() {
     // latency to hide locally, so inputs apply at once for a snappy feel.
     let netplay = NetplayConfig::from_env_and_args();
     let online = netplay.room_url.is_some();
-
-    let local_session = (!online).then(|| {
-        let mut sb = SessionBuilder::<GgrsCfg>::new()
-            .with_num_players(2)
-            .expect("with_num_players")
-            .with_check_distance(2)
-            .with_input_delay(0);
-        for i in 0..2 {
-            sb = sb.add_player(PlayerType::Local, i).expect("add_player");
-        }
-        let session = sb.start_synctest_session().expect("synctest");
-        tracing::info!(
-            target: "two_top::app",
-            kind = "synctest",
-            num_players = 2,
-            check_distance = 2,
-            input_delay = 0,
-            "ggrs session started",
-        );
-        session
-    });
+    // The local SyncTest session is now built on match start (Phase 18 Task
+    // 5.5b — `screen::spawn_match`), not up front: couch boots into the Title
+    // screen with no session (sim idle at frame 0), then installs a fresh
+    // session when the player begins a match. Online still installs nothing
+    // here — the matchbox driver swaps in the P2P session on connect.
 
     let mut app = App::new();
     app
@@ -140,6 +124,7 @@ pub fn run() {
         .add_plugins(DebugInputOverlayPlugin)
         .add_plugins(net::NetPlugin)
         .add_plugins(LobbyOverlayPlugin)
+        .add_plugins(ScreenPlugin)
         .init_resource::<netplay::LocalPlayerHandle>()
         .insert_resource(netplay.clone())
         .add_systems(Startup, setup)
@@ -153,13 +138,15 @@ pub fn run() {
             ),
         );
 
-    // Session install. Online: the matchbox driver builds + inserts the
-    // P2P session on peer connect — nothing inserted now. Local: the
-    // pre-built SyncTest session goes in immediately.
-    if let Some(session) = local_session {
-        app.insert_resource(Session::SyncTest(session));
-    } else {
+    // Screen state. Couch boots into the Title menu (no session → sim idle);
+    // `screen::spawn_match` installs a fresh SyncTest session when a match
+    // begins. Online boots straight into InMatch — its lobby lifecycle is the
+    // netplay FSM, and the matchbox driver inserts the P2P session on connect.
+    if online {
+        app.insert_state(AppScreen::InMatch);
         app.add_plugins(MatchboxPlugin);
+    } else {
+        app.insert_state(AppScreen::Title);
     }
 
     // Platform input source (level signals only; exactly one source).
@@ -222,12 +209,11 @@ fn main() {
     run();
 }
 
-fn setup(
-    mut commands: Commands,
-    asset_server: Res<AssetServer>,
-    mut atlases: ResMut<Assets<TextureAtlasLayout>>,
-    selected: Res<SelectedArena>,
-) {
+/// `Startup`: spawn the *persistent* scene — camera, the desktop control
+/// legend, and the floor backdrop. Match entities (players, walls, arena
+/// props) are spawned per-match by [`screen::spawn_match`] on entering
+/// `AppScreen::InMatch`, so the title screen sits over an empty floor.
+fn setup(mut commands: Commands, asset_server: Res<AssetServer>) {
     // Camera. Mobile: a bare Camera2d (1:1 pixels) with the follow cam in
     // `CameraFollowPlugin` keeps it zoomed in for a phone. Desktop: frame
     // the WHOLE arena at once (couch versus — both players always visible)
@@ -270,57 +256,6 @@ fn setup(
         ));
     }
 
-    // ART_DIRECTION.md v2: 41-frame atlases (32x32 source per cell).
-    // Render at PLAYER_RENDER_SIZE (64x64 world units).
-    let layout = player_atlas_layout(&mut atlases);
-    let p0_image = asset_server.load("sprites/players/duelist_a_sheet.png");
-    let p1_image = asset_server.load("sprites/players/duelist_b_sheet.png");
-
-    commands.spawn((
-        Player { handle: 0 },
-        PositionF(Vec2F::from_cm(-100, 60)),
-        PreviousPositionF(Vec2F::from_cm(-100, 60)),
-        VelocityF(Vec2F::ZERO),
-        Sprite {
-            image: p0_image,
-            texture_atlas: Some(TextureAtlas {
-                layout: layout.clone(),
-                index: 0,
-            }),
-            custom_size: Some(Vec2::splat(PLAYER_RENDER_SIZE)),
-            ..default()
-        },
-        Transform::default(),
-    ));
-
-    commands.spawn((
-        Player { handle: 1 },
-        PositionF(Vec2F::from_cm(100, -60)),
-        PreviousPositionF(Vec2F::from_cm(100, -60)),
-        VelocityF(Vec2F::ZERO),
-        Sprite {
-            image: p1_image,
-            texture_atlas: Some(TextureAtlas {
-                layout,
-                index: 0,
-            }),
-            custom_size: Some(Vec2::splat(PLAYER_RENDER_SIZE)),
-            ..default()
-        },
-        Transform::default(),
-    ));
-
-    // Arena boundary walls. Spawned in the fixed order returned by
-    // `arena_walls()` so entity ids are bit-identical across hosts
-    // (rollback determinism depends on this). Phase 15 cycle 3b:
-    // walls no longer spawn with their own placeholder Sprite; the
-    // training_floor backdrop below already integrates the wall
-    // pattern visually, so an extra dark rectangle would just sit
-    // on top of the polished art and clip it.
-    for wall in arena_walls() {
-        commands.spawn(wall);
-    }
-
     // Phase 15 cycle 3b / A2: arena backdrop. training_floor.png is the
     // composed moody Bone-Cathedral floor (320x480 px source) — scaled to
     // cover roughly the arena's playable area + walls (1100x1600 cm).
@@ -334,10 +269,6 @@ fn setup(
         },
         Transform::from_xyz(0.0, 0.0, -1.0),
     ));
-
-    // Phase 16: spawn the selected arena's bone-pyre cover (shared helper
-    // so app + replay_viewer render arenas identically).
-    render::spawn_arena_props(&mut commands, &asset_server, &mut atlases, &selected);
 }
 
 /// `Update`-schedule system: attaches a placeholder sprite + transform

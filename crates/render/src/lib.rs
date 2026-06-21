@@ -221,6 +221,13 @@ pub struct SigilVisual;
 #[derive(Component)]
 pub struct DoorVisual;
 
+/// Marker on *every* entity [`spawn_arena_props`] creates (pyres, chasm tiles,
+/// bridge, sigils, doors). Lets the app despawn a whole arena's props in one
+/// query when tearing a match down (Phase 18 back-to-lobby / arena switch),
+/// regardless of which per-prop marker an entity also carries.
+#[derive(Component)]
+pub struct ArenaProp;
+
 pub fn spawn_arena_props(
     commands: &mut Commands,
     asset_server: &AssetServer,
@@ -256,6 +263,7 @@ fn spawn_pyres(
     for pyre in sim::arena_pyres_for(selected.0) {
         let (center, size) = rect_center_size(pyre.rect);
         commands.spawn((
+            ArenaProp,
             pyre,
             Sprite {
                 image: image.clone(),
@@ -287,6 +295,7 @@ fn spawn_crossing(
         let y = start + i as f32 * tile_h;
         // Chasm pit (z=-0.9, just above floor).
         commands.spawn((
+            ArenaProp,
             Sprite {
                 image: chasm_img.clone(),
                 custom_size: Some(Vec2::new(chasm_sz.x, tile_h)),
@@ -296,6 +305,7 @@ fn spawn_crossing(
         ));
         // Bone bridge overlay (z=-0.8), hidden until a sigil raises it.
         commands.spawn((
+            ArenaProp,
             BridgeVisual,
             Sprite {
                 image: bridge_img.clone(),
@@ -312,6 +322,7 @@ fn spawn_crossing(
     for sigil in sim::crossing_sigils() {
         let (center, size) = rect_center_size(sigil);
         commands.spawn((
+            ArenaProp,
             SigilVisual,
             Sprite {
                 image: sigil_img.clone(),
@@ -338,6 +349,7 @@ fn spawn_reliquary(
     for (footprint, _exit) in sim::reliquary_doors() {
         let (center, size) = rect_center_size(footprint);
         commands.spawn((
+            ArenaProp,
             DoorVisual,
             Sprite {
                 image: image.clone(),
