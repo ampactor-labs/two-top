@@ -99,6 +99,11 @@ Per `SIGNALING.md`. The online build skips the Title menu and boots straight int
 `InMatch`; its lobby lifecycle is the netplay FSM (top-right yellow overlay).
 Arena selection online is the `TWOTOP_ARENA=anchor|crossing|reliquary` env var.
 
+> **Two peers, not two phones.** These gates need two *peers* on different
+> networks — pair your one Android phone (on cellular) with a **desktop** build
+> (on Wi-Fi). Android↔desktop is a valid (and stronger) cross-platform test;
+> a second Android is not required.
+
 ### B.0 Loopback pre-flight (one box)
 - [ ] **Single-box sanity:** `cargo install matchbox_server && matchbox_server`,
       then two `cargo run -p app -- --room ws://127.0.0.1:3536/two-top?next=2`
@@ -212,8 +217,12 @@ LShift dash; P1 = arrows / RShift throw / RCtrl dash.
       pop-out of fresh effects), and frame rate does **not** monotonically decline.
 - [ ] **On-device 60 fps (Phase 18 exit criterion):** on a Pixel-6 / iPhone-12
       baseline, a full match (incl. a Fire+Multishot slugfest) holds a stable 60 fps
-      (`two_top::perf` windows: `avg_ms` ≤ 16.67, `over_budget` ~0). Older hardware
-      degrades gracefully (lower but steady, no crash, no runaway particles).
+      (`two_top::perf` windows: `avg_ms` ≤ 16.67, `over_budget` ~0). On a
+      **below-baseline budget device** (e.g. a Galaxy A-series — Dimensity-class
+      SoC / Mali GPU), the pass condition is **graceful degradation**, not a strict
+      60 fps: a *steady* frame rate (even if 30–60), no crash, no runaway particle
+      growth, and a `two_top::perf` `avg_ms` that holds flat rather than climbing
+      over a match. A monotonically rising `avg_ms`/`over_budget` is the real fail.
 - [ ] **Release log lens works:** the `two_top::perf` `frame-time window` lines
       appear in a **release** build's log **without** any `RUST_LOG` override
       (confirms `release_max_level_info` keeps `frame_time_watch`'s `info!` in). If
