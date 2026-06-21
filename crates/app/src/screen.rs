@@ -29,6 +29,7 @@ use sim::{
 };
 
 use crate::netplay::NetplayConfig;
+use input_touch::WindowSize;
 
 /// Which screen the app is showing. Couch boots into [`Title`](Self::Title);
 /// online boots straight into [`InMatch`](Self::InMatch) (its lobby lifecycle
@@ -65,11 +66,13 @@ impl Plugin for ScreenPlugin {
             .add_systems(
                 Update,
                 (
+                    pick_arena.run_if(in_state(AppScreen::Title)),
                     start_match.run_if(in_state(AppScreen::Title)),
                     back_to_lobby.run_if(in_state(AppScreen::InMatch)),
                     update_title_overlay,
                     update_summary_overlay,
-                ),
+                )
+                    .chain(),
             );
     }
 }
@@ -194,19 +197,56 @@ fn spawn_overlays(mut commands: Commands) {
     ));
 }
 
-/// Title → InMatch on a start press: Space / Enter (desktop) or any touch
-/// (mobile). The sim input layer is dormant here (no session), so this reads
-/// raw Bevy input directly — it's app-UI, not wire input.
+/// Next arena in the picker cycle (Anchor → Crossing → Reliquary → Anchor).
+fn next_arena(id: sim::ArenaId) -> sim::ArenaId {
+    match id {
+        sim::ArenaId::Anchor => sim::ArenaId::Crossing,
+        sim::ArenaId::Crossing => sim::ArenaId::Reliquary,
+        sim::ArenaId::Reliquary => sim::ArenaId::Anchor,
+    }
+}
+
+/// Title-screen arena picker. Desktop: 1/2/3 pick directly. Touch: a tap in the
+/// *upper* half cycles to the next arena (the lower half is the start zone, so
+/// the two gestures never collide). Mutates [`SelectedArena`] — safe here
+/// because there's no session (the sim is idle) and `spawn_match` only reads it
+/// on match start.
+fn pick_arena(
+    keys: Res<ButtonInput<KeyCode>>,
+    touches: Res<Touches>,
+    window: Res<WindowSize>,
+    mut selected: ResMut<SelectedArena>,
+) {
+    if keys.just_pressed(KeyCode::Digit1) || keys.just_pressed(KeyCode::Numpad1) {
+        selected.0 = sim::ArenaId::Anchor;
+    } else if keys.just_pressed(KeyCode::Digit2) || keys.just_pressed(KeyCode::Numpad2) {
+        selected.0 = sim::ArenaId::Crossing;
+    } else if keys.just_pressed(KeyCode::Digit3) || keys.just_pressed(KeyCode::Numpad3) {
+        selected.0 = sim::ArenaId::Reliquary;
+    }
+    let win = window.0;
+    if win.y > 0.0 && touches.iter_just_pressed().any(|t| t.position().y < win.y * 0.5) {
+        selected.0 = next_arena(selected.0);
+    }
+}
+
+/// Title → InMatch on a start press: Space / Enter (desktop) or a tap in the
+/// *lower* half of the screen (mobile — the upper half is the arena picker).
+/// The sim input layer is dormant here (no session), so this reads raw Bevy
+/// input directly — it's app-UI, not wire input.
 fn start_match(
     keys: Res<ButtonInput<KeyCode>>,
     touches: Res<Touches>,
+    window: Res<WindowSize>,
     mut next: ResMut<NextState<AppScreen>>,
 ) {
-    let pressed = keys.just_pressed(KeyCode::Space)
+    let key_start = keys.just_pressed(KeyCode::Space)
         || keys.just_pressed(KeyCode::Enter)
-        || keys.just_pressed(KeyCode::NumpadEnter)
-        || touches.any_just_pressed();
-    if pressed {
+        || keys.just_pressed(KeyCode::NumpadEnter);
+    let win = window.0;
+    let touch_start =
+        win.y > 0.0 && touches.iter_just_pressed().any(|t| t.position().y >= win.y * 0.5);
+    if key_start || touch_start {
         next.set(AppScreen::InMatch);
     }
 }
@@ -238,9 +278,23 @@ fn update_title_overlay(
     };
     if *screen.get() == AppScreen::Title {
         *vis = Visibility::Visible;
+        let options = [
+            sim::ArenaId::Anchor,
+            sim::ArenaId::Crossing,
+            sim::ArenaId::Reliquary,
+        ]
+        .iter()
+        .map(|&id| {
+            if id == selected.0 {
+                format!("> {} <", arena_name(id))
+            } else {
+                format!("  {}  ", arena_name(id))
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("   ");
         text.0 = format!(
-            "2-TOP\n\narena: {}\n\npress START to begin",
-            arena_name(selected.0),
+            "2-TOP\n\n{options}\n\n1/2/3 or tap top to choose\n\npress START  (Space / tap bottom)",
         );
     } else {
         *vis = Visibility::Hidden;
@@ -322,5 +376,16 @@ mod tests {
         assert_eq!(arena_name(sim::ArenaId::Anchor), "Anchor");
         assert_eq!(arena_name(sim::ArenaId::Crossing), "Crossing");
         assert_eq!(arena_name(sim::ArenaId::Reliquary), "Reliquary");
+    }
+
+    #[test]
+    fn next_arena_cycles_through_all_three() {
+        let mut id = sim::ArenaId::Anchor;
+        id = next_arena(id);
+        assert_eq!(id, sim::ArenaId::Crossing);
+        id = next_arena(id);
+        assert_eq!(id, sim::ArenaId::Reliquary);
+        id = next_arena(id);
+        assert_eq!(id, sim::ArenaId::Anchor, "wraps back to the start");
     }
 }
