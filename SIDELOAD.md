@@ -28,7 +28,25 @@ export ANDROID_NDK_HOME="$HOME/Android/Ndk/android-ndk-r26d"
 
 Persist this in your shell profile (`~/.bashrc`, `~/.zshrc`, etc.) so you don't have to re-export each session.
 
-### 3. cargo-apk
+### 3. Android SDK (build-tools + platform)
+
+`cargo-apk` needs the SDK too — its `aapt2` (resource/manifest compile), `zipalign`, and `apksigner` come from **build-tools**, and it links against a **platform** `android.jar`. The lean, no-Android-Studio path is Google's command-line tools + `sdkmanager`:
+
+```sh
+export ANDROID_HOME="$HOME/Android/Sdk"
+mkdir -p "$ANDROID_HOME/cmdline-tools" && cd "$ANDROID_HOME/cmdline-tools"
+# Grab the current "Command line tools only (Linux)" zip from
+# https://developer.android.com/studio#command-tools and swap the build number:
+curl -fL -o clt.zip "https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip"
+unzip -q clt.zip && mv cmdline-tools latest && rm clt.zip
+yes | latest/bin/sdkmanager --licenses
+# platform-tools also gives you adb; build-tools/platform match target_sdk = 34:
+latest/bin/sdkmanager "platform-tools" "build-tools;34.0.0" "platforms;android-34" "ndk;26.3.11579264"
+```
+
+Then set `ANDROID_HOME`/`ANDROID_SDK_ROOT` (and `ANDROID_NDK_ROOT="$ANDROID_HOME/ndk/26.3.11579264"`) in your shell profile, and add `$ANDROID_HOME/platform-tools` to `PATH`. Installing the NDK via `sdkmanager` (as above) is an alternative to the manual unzip in step 2 — either works, just point `ANDROID_NDK_ROOT` at the resulting dir.
+
+### 4. cargo-apk
 
 ```sh
 cargo install cargo-apk
@@ -36,9 +54,9 @@ cargo install cargo-apk
 
 The vanilla `rust-mobile/cargo-apk` is what 2-Top targets. It uses `android.app.NativeActivity` (the system-framework activity), which matches `crates/sim/Cargo.toml`'s `android-activity` feature choice (`native-activity`). Switching to GameActivity later requires `cargo-apk2` or `xbuild`.
 
-### 4. ADB
+### 5. ADB
 
-Either the Android SDK platform-tools bundle or your distro's package:
+If you installed `platform-tools` via `sdkmanager` (step 3), you already have `adb` at `$ANDROID_HOME/platform-tools/adb` — just make sure it's on `PATH`. Otherwise use your distro's package:
 
 ```sh
 # Fedora
@@ -57,7 +75,7 @@ Confirm it works:
 adb version
 ```
 
-### 5. Phone in dev mode
+### 6. Phone in dev mode
 
 On the device:
 
