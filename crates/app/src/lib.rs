@@ -23,11 +23,13 @@ use sim::{
     SelectedArena, SimLifecycleLogPlugin, SimPlugin, VelocityF, arena_walls,
 };
 
+mod audio;
 mod camera;
 mod debug_overlay;
 mod lobby_overlay;
 mod logging;
 mod netplay;
+use audio::GameAudioPlugin;
 use camera::CameraFollowPlugin;
 use debug_overlay::DebugInputOverlayPlugin;
 use lobby_overlay::LobbyOverlayPlugin;
@@ -130,6 +132,7 @@ pub fn run() {
         .add_plugins(InputTouchPlugin)
         .add_plugins(RenderSyncPlugin)
         .add_plugins(EffectsPlugin)
+        .add_plugins(GameAudioPlugin)
         .add_plugins(CameraFollowPlugin)
         .add_plugins(DebugInputOverlayPlugin)
         .add_plugins(net::NetPlugin)

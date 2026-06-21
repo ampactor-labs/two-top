@@ -63,6 +63,13 @@ jobs:
         run: |
           sudo rm -rf /usr/local/lib/android /usr/share/dotnet /usr/local/.ghcup /opt/hostedtoolcache/CodeQL
           df -h /
+      # Only the linux-x64 job builds the full workspace (incl. `app`, which
+      # Task 5.3 gave a `bevy_audio` → `cpal` → `alsa-sys` build-time link).
+      # The other targets use `--exclude app`, and `render` no longer pulls
+      # cpal, so they need no ALSA headers.
+      - name: Install ALSA dev headers (cpal build dep)
+        if: matrix.target == 'x86_64-unknown-linux-gnu'
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev
       - uses: taiki-e/setup-cross-toolchain-action@v1
         with:
           target: ${{ matrix.target }}

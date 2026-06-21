@@ -15,6 +15,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
+      # Phase 18 Task 5.3 added `bevy_audio` to the `app` crate, which pulls
+      # `cpal` → `alsa-sys`, a build-time link against libasound. The workspace
+      # build includes `app`, so the runner needs the ALSA dev headers.
+      - name: Install ALSA dev headers (cpal build dep)
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: workspace

@@ -13,10 +13,10 @@
 | M0 | Ground truth | Un-staled docs, verified baseline | No | ✅ done |
 | M1 | Art 2.0 | New art spec + generator rewrite + AnimState v2 | Yes (AnimState) | ✅ done |
 | M2 | Phase 16: arenas | BonePyre re-land, Crossing, Reliquary, arena select | Yes | ✅ done |
-| M3 | Phase 17: pickups + perfect catch | 6 pickups, spawn system, perfect-catch | Yes | 🔶 3.1–3.3 done; 3.4 (art) left |
+| M3 | Phase 17: pickups + perfect catch | 6 pickups, spawn system, perfect-catch | Yes | ✅ done |
 | **MP** | **PC + Web platform track** | **Desktop input, local couch versus, desktop/web builds, cross-play** | **No (input/app/build)** | 🔶 P.1–P.4 landed (couch versus, keyboard+gamepad, whole-arena window, online PC-vs-PC loopback-verified); P.3b packaging / P.5–P.6 web left |
 | M4 | Phase 12 completion | Real matchbox wiring, P2P swap, loopback verified | No (net/app) | ✅ done |
-| M5 | Phase 18: polish | Shake, kill-cam, audio, haptics, UI, perf pass | Mostly render | ⬜ planned |
+| M5 | Phase 18: polish | Shake, kill-cam, audio, haptics, UI, perf pass | Mostly render | 🔶 5.1–5.3 done; 5.4–5.6 left |
 | M6 | Release readiness | SIM_VERSION=1, tag, operator checklist | Yes (version) | ⬜ planned |
 
 **Sequencing note (MP):** the architecture is already cross-platform — the determinism matrix proves `x86_64-linux`, `aarch64-linux`, `aarch64-apple-darwin`, and `aarch64-linux-android` are bit-identical, and the fixed-point sim sidesteps the WASM float-nondeterminism problem outright. **MP's local-couch-versus piece (P.1 + P.2) is independent of M4 netplay** and is the fastest path to playtesting with friends on one PC, so it is prioritized to run right after M3. Online PC play (P.4) and Web (P.5–P.6) depend on M4/M5 landing first.
@@ -71,9 +71,9 @@ Why this is cheap: the sim is deterministic in fixed-point, so it already runs b
 
 ## Milestone 5 — Phase 18: Game Feel, Audio, UI
 
-- [ ] Task 5.1: Screen shake + kill flash
-- [ ] Task 5.2: Kill-cam beat
-- [ ] Task 5.3: Synthesized audio + wiring
+- [x] Task 5.1: Screen shake + kill flash
+- [x] Task 5.2: Kill-cam beat
+- [x] Task 5.3: Synthesized audio + wiring
 - [ ] Task 5.4: Haptics (Android)
 - [ ] Task 5.5: Match summary + settings
 - [ ] Task 5.6: Performance pass

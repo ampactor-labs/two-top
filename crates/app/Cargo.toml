@@ -48,6 +48,12 @@ bevy = { version = "=0.18.1", default-features = false, features = [
     "bevy_text",
     "default_font",
     "x11",
+    # Phase 18 Task 5.3 — synthesized audio. `bevy_audio` makes
+    # `DefaultPlugins` include `AudioPlugin` (the audio-device owner); `wav`
+    # adds the decoder for the generated `assets/audio/*.wav` cues. The
+    # render crate hosts the actual playback systems (`GameAudioPlugin`).
+    "bevy_audio",
+    "wav",
 ] }
 bevy_ggrs = "=0.21"
 fixed_math = { path = "../fixed_math" }
