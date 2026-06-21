@@ -180,6 +180,8 @@ dependencies = [
  "fixed_math",
  "input_desktop",
  "input_touch",
+ "jni 0.21.1",
+ "ndk-context",
  "net",
  "rand 0.8.6",
  "render",

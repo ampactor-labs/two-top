@@ -60,6 +60,14 @@ pub struct NetplayConfig {
     pub room_url: Option<String>,
 }
 
+/// Which player handle is *this* device's local player, once a P2P session is
+/// established. `None` until then — and in couch/SyncTest mode it stays `None`
+/// because both players share the one device. Read by render/app concerns that
+/// want "you" vs "them" (Phase 18 haptics; the match-summary banner later).
+/// Init'd in `app::run` so it always exists; set in [`perform_swap`].
+#[derive(Resource, Clone, Copy, Debug, Default)]
+pub struct LocalPlayerHandle(pub Option<usize>);
+
 impl NetplayConfig {
     /// Read the room URL from `--room <url>` (first match) or, failing
     /// that, the `MATCHBOX_ROOM` env var. Returns an all-`None` config for
@@ -236,6 +244,9 @@ fn perform_swap(world: &mut World, peer_id: PeerId) {
 
     world.insert_resource(Session::P2P(session));
     world.resource_mut::<PendingP2PSwap>().0 = None;
+    // Record which player is us, so "your-action" feedback (haptics, summary
+    // banner) can distinguish local from remote.
+    world.resource_mut::<LocalPlayerHandle>().0 = Some(local_handle);
 
     // Pin the silence timer to "now" so net's grace timer never spuriously
     // forfeits a healthy session — real disconnects come via ggrs events.

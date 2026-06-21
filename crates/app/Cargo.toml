@@ -92,6 +92,15 @@ tracing-subscriber = { version = "0.3", default-features = false, features = [
 # builds skip the appender entirely and write to stderr.
 tracing-appender = "0.2"
 
+# Phase 18 Task 5.4 — Android haptics. JNI hop to the platform `Vibrator`
+# via the activity handle from `ndk-context`. Android-only target deps so the
+# desktop build never pulls them; on desktop `vibrate` is a no-op. Versions
+# pinned to the copies already in the lock (via the android-activity stack)
+# so no new crate version is introduced.
+[target.'cfg(target_os = "android")'.dependencies]
+jni = "0.21"
+ndk-context = "0.1"
+
 # cargo-apk metadata for sideloading to Android dev devices.
 # See SIDELOAD.md for the full walkthrough. The repo identifier is
 # `two-top` and the crate is `two_top` because Java package segments
