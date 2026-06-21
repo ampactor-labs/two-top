@@ -59,6 +59,20 @@ pub struct WindowSize(pub Vec2);
 #[derive(Resource, Debug, Clone, Copy, Default)]
 pub struct CursorPosition(pub Vec2);
 
+/// Runtime-adjustable inner deadzone for the virtual stick (Phase 18 Task
+/// 5.5c). Defaults to [`STICK_DEADZONE_INNER`]; the app overwrites it from the
+/// persisted `Settings` (the deadzone feeds the stick *before* quantization to
+/// the wire format — a legal pre-wire input change, never post-wire). Read by
+/// [`update_virtual_stick`].
+#[derive(Resource, Debug, Clone, Copy)]
+pub struct StickDeadzone(pub f32);
+
+impl Default for StickDeadzone {
+    fn default() -> Self {
+        Self(STICK_DEADZONE_INNER)
+    }
+}
+
 /// Sentinel id for the synthesized left-mouse-button touch. `u64::MAX`
 /// is well outside any real touchscreen id space (Bevy/Android emit
 /// small monotonic ids), so it cannot collide with a real touch.
@@ -323,16 +337,21 @@ pub fn update_touch_state(
 /// `Window`. With a zero-sized window (initial frame, no window yet)
 /// `is_lower_left` answers false everywhere and no stick is selected,
 /// which is the right behavior — we'd rather wait one frame than guess.
-pub fn update_virtual_stick(mut state: ResMut<TouchState>, window: Res<WindowSize>) {
+pub fn update_virtual_stick(
+    mut state: ResMut<TouchState>,
+    window: Res<WindowSize>,
+    deadzone: Res<StickDeadzone>,
+) {
     let window_size = window.0;
     state.stick_touch = select_stick_touch(state.stick_touch, &state.touches, window_size);
+    let inner = deadzone.0;
     state.stick = state.stick_touch.and_then(|id| {
         state.find(id).map(|t| {
             compute_stick(
                 t.start_pos,
                 t.current_pos,
                 STICK_MAX_RADIUS_PX,
-                STICK_DEADZONE_INNER,
+                inner,
                 STICK_DEADZONE_SATURATION,
             )
         })
@@ -449,6 +468,7 @@ impl Plugin for InputTouchPlugin {
         app.init_resource::<TouchState>()
             .init_resource::<WindowSize>()
             .init_resource::<CursorPosition>()
+            .init_resource::<StickDeadzone>()
             .add_systems(
                 PreUpdate,
                 (update_touch_state, update_virtual_stick, update_throw_state).chain(),

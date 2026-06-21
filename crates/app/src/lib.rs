@@ -29,6 +29,7 @@ mod lobby_overlay;
 mod logging;
 mod netplay;
 mod screen;
+mod settings;
 use audio::GameAudioPlugin;
 use camera::CameraFollowPlugin;
 use haptics::HapticsPlugin;
@@ -36,6 +37,7 @@ use debug_overlay::DebugInputOverlayPlugin;
 use lobby_overlay::LobbyOverlayPlugin;
 use netplay::{MatchboxPlugin, NetplayConfig};
 use screen::{AppScreen, ScreenPlugin};
+use settings::SettingsPlugin;
 
 /// Pick the arena from the `TWOTOP_ARENA` env var (desktop testing handle
 /// until the lobby arena-picker lands). Defaults to the tournament Anchor.
@@ -125,6 +127,7 @@ pub fn run() {
         .add_plugins(net::NetPlugin)
         .add_plugins(LobbyOverlayPlugin)
         .add_plugins(ScreenPlugin)
+        .add_plugins(SettingsPlugin)
         .init_resource::<netplay::LocalPlayerHandle>()
         .insert_resource(netplay.clone())
         .add_systems(Startup, setup)

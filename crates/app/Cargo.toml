@@ -93,6 +93,15 @@ tracing-subscriber = { version = "0.3", default-features = false, features = [
 # builds skip the appender entirely and write to stderr.
 tracing-appender = "0.2"
 
+# Phase 18 Task 5.5c — persisted settings (deadzone, haptics, volumes) as
+# JSON in the platform config dir. `serde`/`serde_json` are already in the
+# tree (postcard replay codec); `dirs` resolves the per-OS config directory.
+# On Android `dirs` may not resolve a path — settings then stay in-memory
+# (persistence is a desktop convenience; not load-bearing).
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+dirs = "5"
+
 # Phase 18 Task 5.4 — Android haptics. JNI hop to the platform `Vibrator`
 # via the activity handle from `ndk-context`. Android-only target deps so the
 # desktop build never pulls them; on desktop `vibrate` is a no-op. Versions

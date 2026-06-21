@@ -29,6 +29,7 @@ use bevy::platform::collections::HashMap;
 use sim::{Boomerang, BoomerangMods, Dead, Empowered, Player};
 
 use crate::netplay::LocalPlayerHandle;
+use crate::settings::Settings;
 
 /// Throw buzz — a light tick as the fang leaves your hand.
 pub const HAPTIC_THROW_MS: i64 = 10;
@@ -103,6 +104,7 @@ fn haptic_on_throw(
     booms: Query<(&Boomerang, &BoomerangMods)>,
     players: Query<&Player>,
     local: Res<LocalPlayerHandle>,
+    settings: Res<Settings>,
     mut had_primary: Local<HashMap<usize, bool>>,
 ) {
     let mut present: HashMap<usize, bool> = HashMap::default();
@@ -115,7 +117,7 @@ fn haptic_on_throw(
         let handle = player.handle;
         let now = present.get(&handle).copied().unwrap_or(false);
         let was = had_primary.get(&handle).copied().unwrap_or(false);
-        if now && !was && is_local(&local, handle) {
+        if now && !was && settings.haptics && is_local(&local, handle) {
             vibrate(HAPTIC_THROW_MS);
         }
         had_primary.insert(handle, now);
@@ -125,12 +127,13 @@ fn haptic_on_throw(
 /// Kill haptic: any player entering `is_dying` (the round-defining impact).
 fn haptic_on_kill(
     players: Query<(&Player, &Dead)>,
+    settings: Res<Settings>,
     mut prev: Local<HashMap<usize, bool>>,
 ) {
     for (player, dead) in &players {
         let now = dead.is_dying();
         let was = prev.get(&player.handle).copied().unwrap_or(false);
-        if now && !was {
+        if now && !was && settings.haptics {
             vibrate(HAPTIC_KILL_MS);
         }
         prev.insert(player.handle, now);
@@ -142,12 +145,13 @@ fn haptic_on_kill(
 fn haptic_on_perfect_catch(
     players: Query<(&Player, &Empowered)>,
     local: Res<LocalPlayerHandle>,
+    settings: Res<Settings>,
     mut prev: Local<HashMap<usize, bool>>,
 ) {
     for (player, emp) in &players {
         let now = emp.0;
         let was = prev.get(&player.handle).copied().unwrap_or(false);
-        if now && !was && is_local(&local, player.handle) {
+        if now && !was && settings.haptics && is_local(&local, player.handle) {
             vibrate(HAPTIC_PERFECT_CATCH_MS);
         }
         prev.insert(player.handle, now);

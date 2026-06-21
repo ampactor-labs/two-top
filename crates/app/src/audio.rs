@@ -29,12 +29,8 @@ use sim::{
     MatchState, Pickup, PickupKind, Player, VelocityF,
 };
 
-/// SFX bus level. The WAVs are already peak-normalized to −3 dBFS; this leaves
-/// headroom for several stacking at once. Task 5.5 routes it through settings.
-pub const SFX_VOLUME: f32 = 0.7;
-/// Ambient-bed level. The loop asset is already a −18 dBFS bed; this keeps it
-/// politely under the gameplay cues.
-pub const MUSIC_VOLUME: f32 = 0.6;
+use crate::settings::Settings;
+
 /// GO-toll pitch: the countdown toll replayed up a major third (×1.25 speed)
 /// so the "go" reads distinct from the three descending pre-beats.
 pub const GO_TOLL_SPEED: f32 = 1.25;
@@ -89,9 +85,18 @@ fn play_pitched(commands: &mut Commands, clip: &Handle<AudioSource>, volume: f32
     ));
 }
 
+/// Marker on the looping ambient-bed entity so [`sync_ambient_volume`] can
+/// track the music-volume setting live.
+#[derive(Component)]
+struct AmbientLoop;
+
 /// Startup: load every cue handle, insert [`AudioAssets`], and start the
-/// looping ambient bed immediately.
-fn load_audio_and_start_ambient(mut commands: Commands, asset_server: Res<AssetServer>) {
+/// looping ambient bed immediately at the configured music volume.
+fn load_audio_and_start_ambient(
+    mut commands: Commands,
+    asset_server: Res<AssetServer>,
+    settings: Res<Settings>,
+) {
     let assets = AudioAssets {
         throw: asset_server.load("audio/throw.wav"),
         throw_empowered: asset_server.load("audio/throw_empowered.wav"),
@@ -107,10 +112,25 @@ fn load_audio_and_start_ambient(mut commands: Commands, asset_server: Res<AssetS
         ambient_loop: asset_server.load("audio/ambient_loop.wav"),
     };
     commands.spawn((
+        AmbientLoop,
         AudioPlayer::new(assets.ambient_loop.clone()),
-        PlaybackSettings::LOOP.with_volume(Volume::Linear(MUSIC_VOLUME)),
+        PlaybackSettings::LOOP.with_volume(Volume::Linear(settings.music_volume)),
     ));
     commands.insert_resource(assets);
+}
+
+/// Keep the looping ambient bed at the current music-volume setting (the bed
+/// plays from boot, so a Title-screen volume change must reach it live).
+fn sync_ambient_volume(
+    settings: Res<Settings>,
+    mut sinks: Query<&mut AudioSink, With<AmbientLoop>>,
+) {
+    if !settings.is_changed() {
+        return;
+    }
+    for mut sink in &mut sinks {
+        sink.set_volume(Volume::Linear(settings.music_volume));
+    }
 }
 
 /// Per-handle throw-edge tracking: whether each player's *primary* fang was in
@@ -128,6 +148,7 @@ struct ThrowTrack {
 fn play_throw_sfx(
     mut commands: Commands,
     assets: Res<AudioAssets>,
+    settings: Res<Settings>,
     booms: Query<(&Boomerang, &BoomerangMods)>,
     players: Query<(&Player, &Empowered)>,
     mut track: Local<ThrowTrack>,
@@ -149,7 +170,7 @@ fn play_throw_sfx(
             } else {
                 &assets.throw
             };
-            play(&mut commands, clip, SFX_VOLUME);
+            play(&mut commands, clip, settings.sfx_volume);
         }
         track.had_primary.insert(h, now);
     }
@@ -169,6 +190,7 @@ struct RicochetTrack(HashMap<Entity, Vec2>);
 fn play_ricochet_sfx(
     mut commands: Commands,
     assets: Res<AudioAssets>,
+    settings: Res<Settings>,
     booms: Query<(Entity, &Boomerang, &VelocityF)>,
     mut track: Local<RicochetTrack>,
 ) {
@@ -184,7 +206,7 @@ fn play_ricochet_sfx(
             && let Some(prev_dir) = track.0.get(&entity)
             && is_ricochet_turn(*prev_dir, dir)
         {
-            play(&mut commands, &assets.ricochet, SFX_VOLUME);
+            play(&mut commands, &assets.ricochet, settings.sfx_volume);
         }
         track.0.insert(entity, dir);
     }
@@ -202,6 +224,7 @@ struct CatchTrack(HashMap<usize, u8>);
 fn play_catch_sfx(
     mut commands: Commands,
     assets: Res<AudioAssets>,
+    settings: Res<Settings>,
     players: Query<(&Player, &AnimState, &Empowered)>,
     mut track: Local<CatchTrack>,
 ) {
@@ -217,7 +240,7 @@ fn play_catch_sfx(
             } else {
                 &assets.catch
             };
-            play(&mut commands, clip, SFX_VOLUME);
+            play(&mut commands, clip, settings.sfx_volume);
         }
         track.0.insert(player.handle, anim.anim_id);
     }
@@ -232,6 +255,7 @@ struct DyingTrack(HashMap<usize, bool>);
 fn play_kill_sfx(
     mut commands: Commands,
     assets: Res<AudioAssets>,
+    settings: Res<Settings>,
     players: Query<(&Player, &Dead)>,
     mut track: Local<DyingTrack>,
 ) {
@@ -239,7 +263,7 @@ fn play_kill_sfx(
         let now = dead.is_dying();
         let was = track.0.get(&player.handle).copied().unwrap_or(false);
         if now && !was {
-            play(&mut commands, &assets.kill, SFX_VOLUME);
+            play(&mut commands, &assets.kill, settings.sfx_volume);
         }
         track.0.insert(player.handle, now);
     }
@@ -254,13 +278,14 @@ struct ShatterTrack(HashMap<Entity, bool>);
 fn play_shatter_sfx(
     mut commands: Commands,
     assets: Res<AudioAssets>,
+    settings: Res<Settings>,
     pyres: Query<(Entity, &BonePyre)>,
     mut track: Local<ShatterTrack>,
 ) {
     for (entity, pyre) in &pyres {
         let was = track.0.get(&entity).copied().unwrap_or(false);
         if pyre.shattered && !was {
-            play(&mut commands, &assets.shatter, SFX_VOLUME);
+            play(&mut commands, &assets.shatter, settings.sfx_volume);
         }
         track.0.insert(entity, pyre.shattered);
     }
@@ -272,12 +297,13 @@ fn play_shatter_sfx(
 fn play_pickup_spawn_sfx(
     mut commands: Commands,
     assets: Res<AudioAssets>,
+    settings: Res<Settings>,
     pickups: Query<(), With<Pickup>>,
     mut present: Local<bool>,
 ) {
     let now = !pickups.is_empty();
     if now && !*present {
-        play(&mut commands, &assets.pickup_spawn, SFX_VOLUME);
+        play(&mut commands, &assets.pickup_spawn, settings.sfx_volume);
     }
     *present = now;
 }
@@ -293,6 +319,7 @@ struct HeldTrack(HashMap<usize, Option<PickupKind>>);
 fn play_pickup_collect_sfx(
     mut commands: Commands,
     assets: Res<AudioAssets>,
+    settings: Res<Settings>,
     players: Query<(&Player, &HeldModifier)>,
     mut track: Local<HeldTrack>,
 ) {
@@ -300,7 +327,7 @@ fn play_pickup_collect_sfx(
         let now = held.0;
         let was = track.0.get(&player.handle).copied().unwrap_or(None);
         if now.is_some() && now != was {
-            play(&mut commands, &assets.pickup_collect, SFX_VOLUME);
+            play(&mut commands, &assets.pickup_collect, settings.sfx_volume);
         }
         track.0.insert(player.handle, now);
     }
@@ -312,6 +339,7 @@ fn play_pickup_collect_sfx(
 fn play_match_state_sfx(
     mut commands: Commands,
     assets: Res<AudioAssets>,
+    settings: Res<Settings>,
     state: Res<MatchState>,
     mut prev: Local<Option<MatchState>>,
 ) {
@@ -326,14 +354,14 @@ fn play_match_state_sfx(
     // First observation: the match boots straight into Countdown{3}; toll it.
     let Some(prev_state) = prev_state else {
         if is_countdown(now) {
-            play(&mut commands, &assets.countdown_toll, SFX_VOLUME);
+            play(&mut commands, &assets.countdown_toll, settings.sfx_volume);
         }
         return;
     };
 
     // Entering a fresh countdown (a new round begins) → the first toll.
     if is_countdown(now) && !is_countdown(prev_state) {
-        play(&mut commands, &assets.countdown_toll, SFX_VOLUME);
+        play(&mut commands, &assets.countdown_toll, settings.sfx_volume);
         return;
     }
     // Digit ticking down inside the countdown (3→2→1) → a toll per beat.
@@ -343,20 +371,20 @@ fn play_match_state_sfx(
     ) = (prev_state, now)
     {
         if nd != pd {
-            play(&mut commands, &assets.countdown_toll, SFX_VOLUME);
+            play(&mut commands, &assets.countdown_toll, settings.sfx_volume);
         }
         return;
     }
     // Countdown → InRound: the GO toll, pitched up.
     if is_countdown(prev_state) && matches!(now, MatchState::InRound { .. }) {
-        play_pitched(&mut commands, &assets.countdown_toll, SFX_VOLUME, GO_TOLL_SPEED);
+        play_pitched(&mut commands, &assets.countdown_toll, settings.sfx_volume, GO_TOLL_SPEED);
         return;
     }
     // Entering RoundOver or MatchOver → the descending sting.
     if (is_roundover(now) && !is_roundover(prev_state))
         || (is_matchover(now) && !is_matchover(prev_state))
     {
-        play(&mut commands, &assets.round_over_sting, SFX_VOLUME);
+        play(&mut commands, &assets.round_over_sting, settings.sfx_volume);
     }
 }
 
@@ -380,6 +408,7 @@ impl Plugin for GameAudioPlugin {
                     play_pickup_spawn_sfx,
                     play_pickup_collect_sfx,
                     play_match_state_sfx,
+                    sync_ambient_volume,
                 ),
             );
     }

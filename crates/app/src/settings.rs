@@ -1,0 +1,197 @@
+//! Phase 18 Task 5.5c: persisted player settings.
+//!
+//! A small [`Settings`] resource — stick deadzone, haptics on/off, and the
+//! SFX/music volumes — loaded from (and saved to) a JSON file in the platform
+//! config dir. The audio cues and haptics read it live; the deadzone is pushed
+//! into `input_touch`'s [`StickDeadzone`] so it shapes the virtual stick
+//! *before* quantization to the wire format (a legal pre-wire input change —
+//! never post-wire). Adjusted from the title screen.
+//!
+//! Persistence is best-effort: if the config dir can't be resolved (e.g. some
+//! Android setups) settings simply stay in-memory for the session.
+
+use bevy::prelude::*;
+use input_touch::StickDeadzone;
+use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
+
+use crate::screen::AppScreen;
+
+/// Default SFX bus level (the cues are peak-normalized to −3 dBFS).
+pub const SFX_VOLUME_DEFAULT: f32 = 0.7;
+/// Default music/ambient-bed level (the loop asset is a −18 dBFS bed).
+pub const MUSIC_VOLUME_DEFAULT: f32 = 0.6;
+/// Default virtual-stick inner deadzone (matches `input_touch`'s baseline).
+pub const DEADZONE_DEFAULT: f32 = 0.12;
+/// Upper bound on the configurable deadzone — past this the stick is unusable.
+pub const DEADZONE_MAX: f32 = 0.40;
+
+#[derive(Resource, Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
+#[serde(default)]
+pub struct Settings {
+    pub stick_deadzone: f32,
+    pub haptics: bool,
+    pub sfx_volume: f32,
+    pub music_volume: f32,
+}
+
+impl Default for Settings {
+    fn default() -> Self {
+        Self {
+            stick_deadzone: DEADZONE_DEFAULT,
+            haptics: true,
+            sfx_volume: SFX_VOLUME_DEFAULT,
+            music_volume: MUSIC_VOLUME_DEFAULT,
+        }
+    }
+}
+
+impl Settings {
+    /// Clamp every field into its valid range (guards against a hand-edited or
+    /// corrupt settings file feeding NaN / out-of-range values into audio and
+    /// input).
+    pub fn clamped(mut self) -> Self {
+        self.stick_deadzone = clamp_finite(self.stick_deadzone, 0.0, DEADZONE_MAX, DEADZONE_DEFAULT);
+        self.sfx_volume = clamp_finite(self.sfx_volume, 0.0, 1.0, SFX_VOLUME_DEFAULT);
+        self.music_volume = clamp_finite(self.music_volume, 0.0, 1.0, MUSIC_VOLUME_DEFAULT);
+        self
+    }
+}
+
+/// Clamp into `[lo, hi]`, falling back to `default` for non-finite input.
+fn clamp_finite(v: f32, lo: f32, hi: f32, default: f32) -> f32 {
+    if v.is_finite() {
+        v.clamp(lo, hi)
+    } else {
+        default
+    }
+}
+
+fn settings_path() -> Option<PathBuf> {
+    dirs::config_dir().map(|d| d.join("two-top").join("settings.json"))
+}
+
+fn load_settings() -> Settings {
+    let Some(path) = settings_path() else {
+        return Settings::default();
+    };
+    match std::fs::read_to_string(&path) {
+        Ok(text) => serde_json::from_str::<Settings>(&text)
+            .map(Settings::clamped)
+            .unwrap_or_default(),
+        Err(_) => Settings::default(),
+    }
+}
+
+fn save_settings(settings: &Settings) {
+    let Some(path) = settings_path() else {
+        return;
+    };
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    if let Ok(json) = serde_json::to_string_pretty(settings)
+        && let Err(e) = std::fs::write(&path, json)
+    {
+        tracing::warn!(target: "two_top::settings", error = %e, "failed to save settings");
+    }
+}
+
+pub struct SettingsPlugin;
+
+impl Plugin for SettingsPlugin {
+    fn build(&self, app: &mut App) {
+        app.insert_resource(load_settings())
+            .add_systems(Startup, push_deadzone)
+            .add_systems(
+                Update,
+                adjust_settings.run_if(in_state(AppScreen::Title)),
+            );
+    }
+}
+
+/// Mirror the deadzone setting into `input_touch`'s resource (boot + on edit).
+fn push_deadzone(settings: Res<Settings>, mut deadzone: ResMut<StickDeadzone>) {
+    deadzone.0 = settings.stick_deadzone;
+}
+
+/// Title-screen settings adjustment. Keys chosen to avoid the arena picker
+/// (1/2/3) and start (Space/Enter): H toggles haptics, −/= the SFX volume,
+/// `[`/`]` the music volume, `,`/`.` the deadzone. Any change re-clamps,
+/// pushes the deadzone to `input_touch`, and saves to disk.
+fn adjust_settings(
+    keys: Res<ButtonInput<KeyCode>>,
+    mut settings: ResMut<Settings>,
+    mut deadzone: ResMut<StickDeadzone>,
+) {
+    let before = *settings;
+    let mut s = *settings;
+
+    if keys.just_pressed(KeyCode::KeyH) {
+        s.haptics = !s.haptics;
+    }
+    if keys.just_pressed(KeyCode::Minus) {
+        s.sfx_volume -= 0.1;
+    }
+    if keys.just_pressed(KeyCode::Equal) {
+        s.sfx_volume += 0.1;
+    }
+    if keys.just_pressed(KeyCode::BracketLeft) {
+        s.music_volume -= 0.1;
+    }
+    if keys.just_pressed(KeyCode::BracketRight) {
+        s.music_volume += 0.1;
+    }
+    if keys.just_pressed(KeyCode::Comma) {
+        s.stick_deadzone -= 0.02;
+    }
+    if keys.just_pressed(KeyCode::Period) {
+        s.stick_deadzone += 0.02;
+    }
+
+    let s = s.clamped();
+    if s != before {
+        *settings = s;
+        deadzone.0 = s.stick_deadzone;
+        save_settings(&s);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn defaults_are_in_range_and_round_trip_through_json() {
+        let s = Settings::default();
+        let json = serde_json::to_string(&s).unwrap();
+        let back: Settings = serde_json::from_str(&json).unwrap();
+        assert_eq!(s, back);
+        assert!(s.haptics);
+    }
+
+    #[test]
+    fn clamping_pins_out_of_range_and_non_finite() {
+        let wild = Settings {
+            stick_deadzone: 9.0,
+            haptics: false,
+            sfx_volume: -3.0,
+            music_volume: f32::NAN,
+        }
+        .clamped();
+        assert_eq!(wild.stick_deadzone, DEADZONE_MAX);
+        assert_eq!(wild.sfx_volume, 0.0);
+        assert_eq!(wild.music_volume, MUSIC_VOLUME_DEFAULT, "NaN falls back to default");
+        assert!(!wild.haptics);
+    }
+
+    #[test]
+    fn partial_json_fills_missing_fields_from_defaults() {
+        // `#[serde(default)]` — a file written by an older build missing a
+        // field still loads, with the new field defaulted.
+        let s: Settings = serde_json::from_str(r#"{ "haptics": false }"#).unwrap();
+        assert!(!s.haptics);
+        assert_eq!(s.sfx_volume, SFX_VOLUME_DEFAULT);
+        assert_eq!(s.stick_deadzone, DEADZONE_DEFAULT);
+    }
+}

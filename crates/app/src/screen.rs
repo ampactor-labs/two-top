@@ -29,6 +29,7 @@ use sim::{
 };
 
 use crate::netplay::NetplayConfig;
+use crate::settings::Settings;
 use input_touch::WindowSize;
 
 /// Which screen the app is showing. Couch boots into [`Title`](Self::Title);
@@ -271,6 +272,7 @@ fn back_to_lobby(
 fn update_title_overlay(
     screen: Res<State<AppScreen>>,
     selected: Res<SelectedArena>,
+    settings: Res<Settings>,
     mut q: Query<(&mut Text2d, &mut Visibility), With<TitleOverlay>>,
 ) {
     let Ok((mut text, mut vis)) = q.single_mut() else {
@@ -293,8 +295,14 @@ fn update_title_overlay(
         })
         .collect::<Vec<_>>()
         .join("   ");
+        let haptics = if settings.haptics { "on" } else { "off" };
         text.0 = format!(
-            "2-TOP\n\n{options}\n\n1/2/3 or tap top to choose\n\npress START  (Space / tap bottom)",
+            "2-TOP\n\n{options}\n\n1/2/3 or tap top to choose\n\npress START  (Space / tap bottom)\
+             \n\n— settings —\n\
+             [H] haptics {haptics}   [-/=] sfx {sfx:.0}%   [ [ / ] ] music {music:.0}%   [ , / . ] deadzone {dz:.0}%",
+            sfx = settings.sfx_volume * 100.0,
+            music = settings.music_volume * 100.0,
+            dz = settings.stick_deadzone * 100.0,
         );
     } else {
         *vis = Visibility::Hidden;
