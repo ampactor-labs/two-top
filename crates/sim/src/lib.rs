@@ -1678,6 +1678,116 @@ pub fn tick_match_state(
     };
 }
 
+/// `GgrsSchedule` system: deterministic "play again". `MatchOver` is terminal
+/// in [`tick_match_state`]; this is the one escape — a THROW rising edge from
+/// *either* player while `MatchOver` restarts the match: score back to 0-0,
+/// state back to the top of the countdown, and the arena wiped to a clean
+/// slate (players respawned to their symmetric spawns with all per-player
+/// state cleared; every in-flight boomerang, floor pickup, and fire cell
+/// despawned; pyres un-shattered; bridge and door cooldowns cleared).
+///
+/// Input-driven on purpose: it resimulates identically under rollback and
+/// stays lockstep across netplay peers, exactly like every other gameplay
+/// transition (CONVENTIONS § Determinism — never reset via out-of-band World
+/// mutation). Reusing the existing `THROW_DOWN` level signal means no
+/// wire-format change. Runs just before `tick_match_state`, which then ticks
+/// the fresh countdown normally. The render-side `clear_stains_on_match_reset`
+/// keys off this same `MatchOver → Countdown` edge to wipe the match's blood.
+/// Every per-player component [`apply_rematch`] resets, aliased to keep the
+/// system signature readable (and clippy's `type_complexity` quiet), mirroring
+/// [`PlayerStateQuery`].
+type RematchPlayerQuery<'w, 's> = Query<
+    'w,
+    's,
+    (
+        &'static Player,
+        &'static mut PositionF,
+        &'static mut PreviousPositionF,
+        &'static mut VelocityF,
+        &'static mut Dead,
+        &'static mut DashState,
+        &'static mut StunFrames,
+        &'static mut Empowered,
+        &'static mut HeldModifier,
+        &'static mut AnimState,
+    ),
+>;
+
+#[allow(clippy::too_many_arguments)]
+pub fn apply_rematch(
+    frame: Res<FrameCount>,
+    inputs: Res<PlayerInputs<GgrsCfg>>,
+    history: Res<InputHistory>,
+    mut state: ResMut<MatchState>,
+    mut score: ResMut<MatchScore>,
+    mut bridge: ResMut<BridgeState>,
+    mut door: ResMut<DoorCooldown>,
+    mut commands: Commands,
+    mut players: RematchPlayerQuery,
+    boomerangs: Query<Entity, With<Boomerang>>,
+    pickups: Query<Entity, With<Pickup>>,
+    fire_cells: Query<Entity, With<FireTrailCell>>,
+    mut pyres: Query<&mut BonePyre>,
+) {
+    if !matches!(*state, MatchState::MatchOver) {
+        return;
+    }
+
+    // Restart on a THROW rising edge from either player (edge derived from the
+    // rolled-back history, never a wire bit — Global rule 4).
+    let restart = players.iter().any(|(player, ..)| {
+        let (curr, _status) = inputs[player.handle];
+        let prev = history
+            .0
+            .get(&player.handle)
+            .map(previous_input)
+            .unwrap_or_default();
+        just_pressed(curr, prev, PlayerInput::THROW_DOWN)
+    });
+    if !restart {
+        return;
+    }
+
+    // Players: symmetric clean reset — the same fields `tick_respawn` clears.
+    for (player, mut pos, mut prev, mut vel, mut dead, mut dash, mut stun, mut emp, mut held, mut anim) in
+        &mut players
+    {
+        snap_position(&mut pos, &mut prev, respawn_position(player.handle));
+        vel.0 = Vec2F::ZERO;
+        *dead = Dead::default();
+        *dash = DashState::default();
+        *stun = StunFrames(0);
+        *emp = Empowered(false);
+        *held = HeldModifier(None);
+        anim.anim_id = AnimState::IDLE;
+        anim.ticks = 0;
+    }
+
+    // Arena entities: wipe to a fresh slate.
+    for entity in &boomerangs {
+        commands.entity(entity).despawn();
+    }
+    for entity in &pickups {
+        commands.entity(entity).despawn();
+    }
+    for entity in &fire_cells {
+        commands.entity(entity).despawn();
+    }
+    for mut pyre in &mut pyres {
+        pyre.shattered = false;
+        pyre.chain_delay = None;
+    }
+    *bridge = BridgeState::default();
+    *door = DoorCooldown::default();
+
+    // Fresh match: score reset, top of the countdown.
+    *score = MatchScore::default();
+    *state = MatchState::Countdown {
+        digit: 3,
+        expires_at_frame: frame.0 + COUNTDOWN_DIGIT_FRAMES,
+    };
+}
+
 pub fn record_last_tick_time(time: Res<Time<Real>>, mut last: ResMut<LastSimTickTime>) {
     last.0 = time.elapsed_secs_f64();
 }
@@ -1873,6 +1983,7 @@ impl Plugin for SimPlugin {
             (
                 snapshot_previous,
                 tick_respawn,
+                apply_rematch,
                 tick_match_state,
                 start_dash,
                 player_movement,
