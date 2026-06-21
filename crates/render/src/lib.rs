@@ -483,6 +483,49 @@ pub fn advance_effect_sprites(
     }
 }
 
+/// Phase 18 Task 5.6 — hard ceiling on live [`EffectSprite`]s. A fire-trail
+/// Multishot slugfest can spray hundreds of bursts per second; this bounds the
+/// render-side particle count so a stress scene can't unbounded-grow the
+/// entity count (and the per-frame `advance_effect_sprites` cost) on a phone.
+pub const EFFECT_SPRITE_CAP: usize = 500;
+
+/// Pure cull selector (testable): given each live sprite's `(id, progress)`
+/// where progress is `current / frames` in `[0, 1]`, return the ids to despawn
+/// to get back to `cap` — the *most-finished* first (nearest to auto-despawn,
+/// so the least visually disruptive to drop, and effectively oldest-first
+/// since a sprite's progress rises monotonically with age). Empty at/under cap.
+fn select_effect_culls<T: Copy>(mut sprites: Vec<(T, f32)>, cap: usize) -> Vec<T> {
+    if sprites.len() <= cap {
+        return Vec::new();
+    }
+    let excess = sprites.len() - cap;
+    // Most-progressed first; NaN sorts as "least" so it survives over real work.
+    sprites.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    sprites.into_iter().take(excess).map(|(id, _)| id).collect()
+}
+
+/// Render-side: enforce [`EFFECT_SPRITE_CAP`]. Free on every frame the count is
+/// under the cap (one query, no allocation); only collects + sorts when over.
+pub fn cull_excess_effects(mut commands: Commands, q: Query<(Entity, &EffectSprite)>) {
+    if q.iter().count() <= EFFECT_SPRITE_CAP {
+        return;
+    }
+    let sprites: Vec<(Entity, f32)> = q
+        .iter()
+        .map(|(entity, effect)| {
+            let progress = if effect.frames == 0 {
+                1.0
+            } else {
+                effect.current as f32 / effect.frames as f32
+            };
+            (entity, progress)
+        })
+        .collect();
+    for entity in select_effect_culls(sprites, EFFECT_SPRITE_CAP) {
+        commands.entity(entity).despawn();
+    }
+}
+
 /// Spawn a one-shot effect sprite at `world_pos`. The sheet must
 /// already be loaded (typically via the [`EffectAssets`] resource
 /// prepared by [`EffectsPlugin`]).
@@ -991,6 +1034,7 @@ impl Plugin for EffectsPlugin {
                 Update,
                 (
                     advance_effect_sprites,
+                    cull_excess_effects,
                     spawn_hit_and_death_bursts,
                     spawn_recall_pulses,
                     spawn_ambient_embers,
@@ -1038,5 +1082,29 @@ mod tests {
         // Stacking past 1.0 saturates rather than overflowing the curve.
         s.add_trauma(1.0);
         assert!((s.trauma - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn effect_cull_is_noop_at_or_under_cap() {
+        let items: Vec<(u32, f32)> = (0..5).map(|i| (i, 0.5)).collect();
+        assert!(select_effect_culls(items, 5).is_empty());
+        let items: Vec<(u32, f32)> = (0..3).map(|i| (i, 0.5)).collect();
+        assert!(select_effect_culls(items, 5).is_empty());
+    }
+
+    #[test]
+    fn effect_cull_drops_most_finished_first_back_to_cap() {
+        // ids 0..6 with rising progress; cap 4 → drop the 2 most-progressed (5, 4).
+        let items: Vec<(u32, f32)> = (0..6).map(|i| (i, i as f32 / 6.0)).collect();
+        let mut culled = select_effect_culls(items, 4);
+        culled.sort_unstable();
+        assert_eq!(culled, vec![4, 5], "the two nearest-done sprites are culled");
+    }
+
+    #[test]
+    fn effect_cull_brings_count_to_exactly_cap() {
+        let items: Vec<(u32, f32)> = (0..500).map(|i| (i, (i % 7) as f32 / 7.0)).collect();
+        let culled = select_effect_culls(items, 120);
+        assert_eq!(culled.len(), 500 - 120);
     }
 }

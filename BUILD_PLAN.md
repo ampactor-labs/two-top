@@ -389,4 +389,25 @@ This is not a numbered phase — it's the smallest viable cross-platform-build u
 - Subjective: game feels good to play for 30+ minutes
 - Performance: stable 60fps on iPhone 12 / Pixel 6 baseline; degrades gracefully on older hardware
 
+### Phase 18 performance-pass notes (Task 5.6)
+
+- **EffectSprite ceiling.** Live cosmetic particles are hard-capped at
+  `render::EFFECT_SPRITE_CAP = 500` by `cull_excess_effects`. A Fire-trail +
+  Multishot slugfest can spray hundreds of bursts/sec; without a cap the entity
+  count (and the per-frame `advance_effect_sprites` walk) grows unbounded. The
+  cull is free under the cap (one count, no allocation) and only when over does
+  it collect + sort, dropping the *most-finished* sprites first (nearest to
+  auto-despawn → least visible, and effectively oldest-first since progress
+  rises monotonically with age). Selector logic is unit-tested
+  (`select_effect_culls`).
+- **Frame-time instrumentation.** `app::frame_time_watch` accumulates
+  `Time<Real>` deltas and emits an `info!`-level `two_top::perf` summary every
+  5 s (frames, avg ms, max ms, count over the 16.67 ms / 60 fps budget). It's
+  `info!` so it survives the release `release_max_level_info` filter — the
+  operator's on-device session logs frame-time windows to investigate.
+- **Operator-batched (M6 checklist).** The 5-minute desktop profiling session
+  (investigate any window with high `max_ms` / `over_budget`) and the on-device
+  stable-60fps verification on Pixel-6-class hardware require real hardware and
+  are batched into `docs/OPERATOR_CHECKLIST.md`, not run by CI.
+
 ---

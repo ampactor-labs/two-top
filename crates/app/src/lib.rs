@@ -137,6 +137,7 @@ pub fn run() {
             (
                 ensure_boomerang_visuals,
                 sync_sprite_atlas_from_anim,
+                frame_time_watch,
                 log_app_exit,
             ),
         );
@@ -197,6 +198,52 @@ fn toggle_fullscreen(
 /// here gives the log a clear "shutdown initiated" line right before
 /// the `App::run()` loop unwinds — useful for distinguishing a clean
 /// exit from a panic-driven termination.
+/// Phase 18 Task 5.6 — frame-time instrumentation. Accumulates per-frame
+/// `Time<Real>` deltas and emits a periodic `two_top::perf` summary (avg / max
+/// / count over the 60 fps budget) so a profiling session surfaces slow
+/// windows in the log without per-frame spam. `info!` level so it survives the
+/// release `release_max_level_info` filter (the operator's device session runs
+/// release). The 5-minute session + on-device 60 fps verification are the
+/// operator's batch (M6); this is the lens they read it through.
+#[derive(Default)]
+struct FrameStats {
+    window_start: f32,
+    frames: u32,
+    over_budget: u32,
+    max_ms: f32,
+}
+
+fn frame_time_watch(time: Res<Time<Real>>, mut stats: Local<FrameStats>) {
+    const BUDGET_MS: f32 = 1000.0 / 60.0;
+    const REPORT_SECS: f32 = 5.0;
+    let dt_ms = time.delta_secs() * 1000.0;
+    stats.frames += 1;
+    stats.max_ms = stats.max_ms.max(dt_ms);
+    if dt_ms > BUDGET_MS {
+        stats.over_budget += 1;
+    }
+    let now = time.elapsed_secs();
+    if stats.window_start == 0.0 {
+        stats.window_start = now;
+    }
+    let elapsed = now - stats.window_start;
+    if elapsed >= REPORT_SECS && stats.frames > 0 {
+        tracing::info!(
+            target: "two_top::perf",
+            window_s = elapsed,
+            frames = stats.frames,
+            avg_ms = elapsed * 1000.0 / stats.frames as f32,
+            max_ms = stats.max_ms,
+            over_budget = stats.over_budget,
+            "frame-time window",
+        );
+        *stats = FrameStats {
+            window_start: now,
+            ..Default::default()
+        };
+    }
+}
+
 fn log_app_exit(mut events: MessageReader<AppExit>) {
     for ev in events.read() {
         tracing::info!(
