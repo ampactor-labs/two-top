@@ -2,7 +2,7 @@
 
 How to put 2-Top on a physical Android device for testing. This is the dev-time install path — cheap, fast, and intentionally minimal. Store packaging (Play Store, signing, ProGuard, R8 minification) is a later concern.
 
-> **Status:** Phase 7.5 unblock. The APK builds and installs; what runs is the Phase 7 visual smoke test (two pink/blue quads sliding under a SyncTestSession). Real gameplay lands later in BUILD_PLAN.
+> **Status:** Phases 0–18 complete, v1.0.0-rc1. A sideloaded build now launches the *full* game: it boots into the Title/arena-picker screen and plays full matches — movement, dash, boomerang throw/recall, pickups, audio, and Android haptics. Online is opt-in via `--room`/`MATCHBOX_ROOM` (see `SIGNALING.md`).
 
 ## Prerequisites (one-time)
 
@@ -90,6 +90,14 @@ That single command:
 
 You'll see the launcher icon labeled **2-Top** on the device. The first launch may take a second; subsequent launches are immediate.
 
+### Assets are bundled
+
+The runtime assets are packaged into the APK via `assets = "../../assets"` in the `[package.metadata.android]` block. The app loads `assets/audio/*.wav` (12 cues) + `assets/sprites/**` through the `AssetServer` at runtime, and the bundled dir becomes the APK asset root so the in-code load paths line up unchanged. On your first sideload, confirm sprites render and audio plays — a blank/silent build means the assets path is wrong.
+
+### Audio and haptics are device-only
+
+Synthesized SFX (`bevy_audio` + `wav`, 12 cues) and Android haptics (the JNI `Vibrator`) are excluded from CI and the determinism matrix *by design* — a real device is the only verification surface. After install, verify that throw / kill / perfect-catch buzz (needs `VIBRATE` granted **and** haptics enabled in `Settings`) and that the SFX play. On desktop, `vibrate` is a no-op.
+
 ### Build only (no install)
 
 ```sh
@@ -122,11 +130,12 @@ adb logcat --pid=$(adb shell pidof com.ampactorlabs.twotop)
 | `INSTALL_FAILED_USER_RESTRICTED` | Some Samsung devices block sideload | Settings → Apps → Special access → Install unknown apps → enable for the source (file manager, etc.) |
 | App installs but launches to a black screen, no error | wgpu can't find a Vulkan-capable GPU | Verify device supports Vulkan 1.1+ (`adb shell pm list features | grep vulkan`); some pre-2018 devices won't. |
 | App immediately exits | Look at `adb logcat` for a Rust panic — the SyncTest mismatch observer is intentional and any output containing "SyncTestMismatch" indicates a real determinism violation, not a build issue |
+| Launches but silent / untextured sprites | Assets dir not packaged into the APK | Confirm `assets = "../../assets"` in `[package.metadata.android]` packages `assets/audio` + `assets/sprites` into the APK |
+| Throw / kill don't vibrate | `VIBRATE` missing, or haptics disabled in settings | `VIBRATE` is now declared in the manifest; enable haptics in the Title-screen settings |
 
 ## What's deliberately deferred
 
 * **GameActivity** — better gamepad routing. One feature flip + a packager swap when the time comes (see `crates/sim/Cargo.toml` comment).
 * **Multi-arch APK** — `build_targets` currently lists arm64 only. Add `armv7-linux-androideabi` and `x86_64-linux-android` (the latter for emulators) when broader compatibility matters.
 * **Release signing** — the debug cert cargo-apk generates is fine for sideload but not for distribution. Play Store submission needs an upload key and Play App Signing.
-* **Asset bundling** — once we have sprites/audio (Phase 15+), set `assets = "assets"` in the metadata block and put the assets dir there.
-* **Permissions** — only `INTERNET` is requested today (forward-compat with matchbox). Networking-permission opt-ins for Wi-Fi state, Bluetooth (LAN play), etc., are added when the relevant phase lands.
+* **Permissions** — `INTERNET` (netplay) and `VIBRATE` (haptics) are both declared in the metadata block. Without `VIBRATE`, the JNI Vibrator call throws a swallowed `SecurityException` and haptics silently never fire. Further networking-permission opt-ins (Wi-Fi state, Bluetooth for LAN play, etc.) are added when the relevant phase lands.

@@ -12,7 +12,7 @@ higher craft bar.
 **Lineage A — gore-pixel revival.** Duke Nukem 3D, classic Doom, and
 the modern revival scene that leans into chunky pixels, hard color
 contrast, blood, and attitude. This is where 2-Top's combat lives:
-one-hit kills, 60-second rounds, contact frames that *land*.
+one-hit kills, 30-second rounds, contact frames that *land*.
 
 **Lineage B — Hyper Light Drifter slickness.** Considered animation,
 restrained palettes, atmospheric tilework, compositional discipline.

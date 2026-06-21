@@ -254,7 +254,7 @@ This is not a numbered phase — it's the smallest viable cross-platform-build u
 - `MatchState` as a plain rolled-back `Resource` enum: `Countdown(3,2,1)`, `InRound`, `RoundOver`, `MatchOver`. (See MORGAN_NOTES § "Why we cut bevy_roll_safe" — `bevy_roll_safe` 0.7 caps `bevy_ggrs` at `^0.20` and we're on `=0.21`.)
 - `MatchScore` resource, rolled back
 - Round timer: 30 seconds, transitions through states accordingly
-- First to 5 round wins ends the match
+- First to 5 kills ends the match (the round timer/RoundOver state rotates for input-gating but does not independently end the match)
 
 **Exit criteria:**
 - Full match playable end-to-end with two `sync_test` instances
@@ -362,7 +362,7 @@ This is not a numbered phase — it's the smallest viable cross-platform-build u
 
 **Produces:**
 - Pickup spawning system: at fixed map positions, on a timer, in deterministic locations chosen by `SimRng`
-- Pickup types: Fire (lingering trail damages), Ice (freeze on hit), Bouncy (extra ricochets), Multishot (3 boomerangs), Curve (stronger curve trajectory), Heavy (slower, larger hitbox)
+- Pickup types: Fire (lingering trail damages), Heavy (slower, plows through cover without ricocheting), Bouncy (gains speed with every ricochet), Curve (banana-throw trajectory), Multishot (3-fang fan), Phantom (phases through walls + cover)
 - Pickups apply temporarily (10-15 seconds or 1 throw)
 - Visual + audio cues for each pickup type
 
@@ -379,7 +379,7 @@ This is not a numbered phase — it's the smallest viable cross-platform-build u
 **Produces:**
 - Screen shake on hits and deaths (render-side only)
 - Hit-stop tuning per attack type
-- Camera zoom-in on kill cam (1-second slow-mo replay of the killing throw)
+- Kill-cam beat on a round/match-ending kill: ease + zoom in (~1.6x) onto the kill position, hold through the RoundOver/MatchOver beat, then ease back during the next Countdown (no slow-motion, no throw replay)
 - Haptics: subtle on throw, harder on hit, sharp on death
 - Audio: throw, recall, hit, death, ambient demonic background
 - UI: score display, round timer, match summary screen

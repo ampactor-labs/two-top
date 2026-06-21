@@ -51,8 +51,10 @@ bevy = { version = "=0.18.1", default-features = false, features = [
     "x11",
     # Phase 18 Task 5.3 — synthesized audio. `bevy_audio` makes
     # `DefaultPlugins` include `AudioPlugin` (the audio-device owner); `wav`
-    # adds the decoder for the generated `assets/audio/*.wav` cues. The
-    # render crate hosts the actual playback systems (`GameAudioPlugin`).
+    # adds the decoder for the generated `assets/audio/*.wav` cues. This `app`
+    # crate hosts the playback systems (`GameAudioPlugin` in `src/audio.rs`) —
+    # audio is a device concern, kept out of `render` so the determinism
+    # matrix never pulls `cpal`.
     "bevy_audio",
     "wav",
 ] }
@@ -123,9 +125,24 @@ target_sdk_version = 34
 min_sdk_version = 24
 build_targets = ["aarch64-linux-android"]
 strip = "default"
+# Bundle the runtime assets into the APK. The app loads sprites
+# (assets/sprites/**), the arena floor, and the 12 synthesized audio cues
+# (assets/audio/*.wav) via the AssetServer at runtime; without this the
+# sideloaded build launches with blank textures and no sound. cargo-apk
+# resolves this path relative to THIS manifest, and the assets dir lives at the
+# workspace root, so it is `../../assets`. The bundled dir becomes the APK
+# asset root, so the in-code load paths ("audio/throw.wav", "sprites/...") line
+# up unchanged. (Verify on first sideload — SIDELOAD.md.)
+assets = "../../assets"
 
 [[package.metadata.android.uses_permission]]
 name = "android.permission.INTERNET"
+
+# Phase 18 haptics (crates/app/src/haptics.rs) call the Android Vibrator via
+# JNI; without VIBRATE the call throws a (swallowed) SecurityException and
+# haptics silently never fire. Required for the on-device haptic feel.
+[[package.metadata.android.uses_permission]]
+name = "android.permission.VIBRATE"
 
 [[package.metadata.android.uses_feature]]
 name = "android.hardware.touchscreen"

@@ -87,9 +87,11 @@ join blocks until one of the first two leaves, then pairs with the
 fourth, and so on.
 
 Room codes (manual pairing) are not yet implemented in `crates/net` —
-add by parameterizing the room URL with a per-match code. The lobby
-UI scaffold in `crates/app/src/lobby_overlay.rs` shows where the
-room-code text-entry field would go.
+add by parameterizing the room URL with a per-match code. Room codes
+and a Find-Match button are future work (noted in the
+`crates/app/src/lobby_overlay.rs` module doc); today that module is
+just a read-only `Text2d` `LobbyState` status label — there is no
+input UI yet.
 
 ---
 
@@ -100,8 +102,16 @@ the live matchbox driver landed in `crates/app/src/netplay.rs` (M4).
 Online play is opt-in; the default build is unchanged (local SyncTest
 couch-versus).
 
+The online build **skips the Title/lobby menu** (that's an M5,
+couch-only screen) and boots straight into `InMatch` — when a room URL
+is present, `lib.rs` inserts `AppScreen::InMatch` directly. Arena
+selection online is therefore via the `TWOTOP_ARENA=anchor|crossing|reliquary`
+env var (the couch arena picker lives on the Title screen, which online
+never shows).
+
 1. Start a signaling server (local dev): `matchbox_server` (defaults to
-   `0.0.0.0:3536`). For a real deployment see "Running the server" above.
+   `0.0.0.0:3536`). For a real deployment see "Choosing a signaling
+   server > Option 2: Self-hosted on a VPS" above.
 2. Launch the game pointed at a room:
 
    ```bash
@@ -113,8 +123,12 @@ couch-versus).
    `--room <url>` takes precedence over `MATCHBOX_ROOM`. Absent both,
    the build runs the local SyncTest session (no network).
 3. The lobby overlay (top-right, yellow text) cycles
-   `idle → connecting → waiting peer → connected`; on connect the
-   driver swaps the SyncTest session for a live `P2PSession`.
+   `idle → connecting → waiting peer → connected`. The online build
+   installs **no** session up front — the sim idles session-less at
+   frame 0 until the peer connects, at which point `perform_swap`
+   *inserts* a live `P2PSession`. (Only the local/couch build runs a
+   SyncTest session, and that one is created on match-start in
+   `screen::spawn_match`, not here.)
 
 ### Handle assignment (deterministic, peer-agreed)
 
@@ -165,6 +179,15 @@ laptop on home wifi), launch the build pointed at the same room URL.
 If either side desyncs visibly, take both `.bmrg.log` files and run
 `scripts/diagnose_desync.sh` against the per-frame checksum logs.
 
+* **Rematch**: after `MatchOver`, *either* player pressing THROW
+  restarts the match in lockstep (`sim::apply_rematch`, which runs in
+  `GgrsSchedule` right before `tick_match_state` and is input-driven,
+  so it's rollback/netplay-safe). Verify both devices restart
+  together — score back to 0-0, fresh countdown, no desync. Note the
+  couch-only ESC back-to-lobby does **not** apply online:
+  `screen::back_to_lobby` early-returns when a room URL is set (the
+  lobby FSM owns teardown).
+
 ### Gate 2: brief disconnection blip
 
 * Launch two peers, get them connected, start a round.
@@ -198,8 +221,12 @@ If either side desyncs visibly, take both `.bmrg.log` files and run
   cross-platform CI matrix is also reproducible locally via
   `replay_sync`. If two real devices desync, save their `.bmrg.log`
   files and use `scripts/diagnose_desync.sh` on the resulting TSVs.
-* **Network logs**: run with `RUST_LOG=net=debug,matchbox_socket=debug`
-  to see the matchbox handshake step-by-step.
+* **Network logs**: run with
+  `RUST_LOG=two_top::net=debug,matchbox_socket=debug` to see the
+  matchbox handshake step-by-step. The app's net logs use the
+  `two_top::net*` target, not bare `net`. Most are `info`/`warn`/`error`
+  (already visible at the default filter); the `debug!`/`trace!` lines
+  are compiled out in release builds.
 
 ---
 

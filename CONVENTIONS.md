@@ -11,6 +11,7 @@ Hard rules. Violations cause subtle bugs that are expensive to find. The CI and 
 - **No `rand::thread_rng()` or `rand::random()` in sim.** Use the `SimRng` resource (which is rolled back).
 - **No `println!` or `eprintln!`.** Use `tracing` macros (`debug!`, `info!`, `warn!`, `error!`).
 - **System ordering is explicit.** Every sim system uses `.before(...)` / `.after(...)` or is part of a labeled `SystemSet`. Never rely on Bevy's default scheduling.
+- **Match/round state transitions are input-driven; never mutate `MatchState` (or score/arena reset) out-of-band.** Canonical pattern: `sim::apply_rematch` — a `THROW` rising edge (from the rolled-back `InputHistory` via `just_pressed`, never a wire bit) during `MatchOver` flips `MatchOver → Countdown`. A "play again" button writing `*match_state` directly from a UI/app system would desync.
 
 ## Component / Resource Rules
 
@@ -34,8 +35,10 @@ Hard rules. Violations cause subtle bugs that are expensive to find. The CI and 
 - **Render systems only read sim components.** Never write to `PositionF`, `VelocityF`, etc. from a render system.
 - **`Transform` is never queried in `GgrsSchedule`.** Only `sync_transforms_from_sim` writes to it, only in `Update`.
 - **Animation does not interpolate.** Pixel art frames snap. The render reads `AnimState` and picks the sprite.
-- **Camera, screen shake, particles, bloom, color grading, audio playback are render-only.**
+- **Camera, screen shake, particles, bloom, color grading are render-only.** Audio playback and haptics are *not* render — they are device-bound and live in `app` (see the device-bound-output rule below).
 - **Visual RNG is separate.** Use a different RNG for cosmetic randomness (sparks, ambient particles); never read from `SimRng`.
+- **Device-bound output lives in `app`, never `render` or `sim`.** Audio (`bevy_audio`/cpal, `GameAudioPlugin` in `crates/app/src/audio.rs`) and Android haptics (JNI `Vibrator`, android-only target deps, `crates/app/src/haptics.rs`) need an output device the same way windowing needs a display. Keeping them out of `render` ensures the determinism matrix — which builds `render` on every target — never pulls cpal/JNI. Audio cues and haptic pulses are cosmetic; `AudioPlayer` entities are never rolled back.
+- **Render/audio/haptics edge detection uses `Local` prev-state, never `Added<T>` / `Changed<T>`.** Rollback re-sim re-runs ticks and respawns entities, so `Added` / `Changed` fire unreliably (`Changed` also fires on spawn). Hold the prior value in a `Local<...>` and diff against current sim state. Canonical: render's `Local<PrevDying>`, audio's per-cue `Local<*Track>`, haptics' `Local<HashMap<handle, bool>>`.
 
 ## Input Rules
 
@@ -43,12 +46,13 @@ Hard rules. Violations cause subtle bugs that are expensive to find. The CI and 
 - **`PlayerInput` is exactly 4 bytes.** Don't bloat the wire format. Reserved bits are reserved.
 - **Touch state is local-only.** `TouchState` is never rolled back, never serialized.
 - **Quantization happens at the input boundary.** `f32` pixel coordinates → `i8`/`u8` wire format → `Fix` in sim. The sim never sees floats.
+- **Input shaping (deadzone) is pre-wire only.** The virtual-stick radial deadzone (`input_touch::StickDeadzone`, runtime-adjustable via persisted `Settings`) applies BEFORE wire quantization. Never alter input post-wire — a deadzone (or any reshaping) on the far side of quantization would diverge from what peers/replays resimulate.
 - **Movement locks during aim.** When `AIM_ACTIVE` is set, stick bytes encode aim direction and power, not movement.
 
 ## Replay and Logging
 
 - **Strict version matching for replays.** Don't write migration code. Bump `sim_version` on any sim-affecting change.
-- **Dev builds use `sim_version = u32::MAX`.** Tagged "🚧 dev replay" in the viewer.
+- **Release builds stamp the real `sim::SIM_VERSION`** (currently `1`, bumped for v1.0.0-rc1). The committed canonical demo (`tests/demos/canonical/match_v1.bmrg`) stamps this value and must be regenerated on any bump. Pre-release main carries `replay::DEV_SIM_VERSION = u32::MAX` (tagged "🚧 dev replay" in the viewer). Strict match goes through `replay::decode_for_sim_version`.
 - **`tracing` features pinned in `Cargo.toml`** with `release_max_level_info`.
 - **Performance category is opt-in.** Don't leave `TRACE!` calls active in shipped builds.
 
@@ -65,9 +69,11 @@ Hard rules. Violations cause subtle bugs that are expensive to find. The CI and 
 ## Module Boundaries
 
 - `fixed_math` depends on `fixed`, `cordic`, `serde`. Nothing else.
-- `sim` depends on `fixed_math`, `bevy` (no `bevy_render`), `bevy_ggrs`, `bytemuck`, `serde` (and once landed: `rand_xoshiro`, `tracing`).
-- `render` depends on `sim`, `bevy` (full), `bevy_audio`. No reverse dependency.
-- `net` depends on `sim`, `matchbox_socket`, `bevy_ggrs`.
+- `sim` depends on `fixed_math`, `bevy` (no `bevy_render`), `bevy_ggrs`, `bytemuck`, `serde`, `tracing`, plus an android-only `android-activity` dep (the `native-activity` feature workaround). `SimRng` is a hand-rolled xorshift64* — `rand_xoshiro` is NOT a sim dep (it lives only in `replay_sync` for the fuzzer).
+- `render` depends on `sim`, `bevy` (features `std`, `bevy_log`, `bevy_asset`, `bevy_render`, `bevy_core_pipeline`, `bevy_sprite`), plus `rand` for cosmetic RNG. No reverse dependency. Render has NO `bevy_audio` — audio is deliberately in `app`, never render (see § Render Layer Rules).
+- `net` depends on `sim`, raw `ggrs` (NOT `bevy_ggrs` — it supplies its own `MatchboxBridge`), `matchbox_socket` (no `ggrs` feature), `bincode`, `uuid`, `tracing`, and `bevy` (no render).
+- `input_touch` depends on `sim`, `bevy` (features `std`, `touch`, `mouse`), `bevy_ggrs`.
+- `input_desktop` depends on `sim`, `bevy` (features `keyboard`, `gamepad`), `bevy_ggrs`.
 - `replay` depends on `sim`, `bevy` (no `bevy_render`), `bevy_ggrs`, `postcard`, `serde`. The codec (`encode`/`decode`) is pure; the `RecordPlugin` / `ReplayPlaybackPlugin` are why `bevy` and `bevy_ggrs` are direct deps.
 - `app` depends on everything.
 - `sync_test` depends on `sim`, `fixed_math`, `bevy` (no `bevy_render`), `bevy_ggrs`. (No `replay` dep — capture is in `replay_sync`.)

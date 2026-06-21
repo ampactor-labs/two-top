@@ -42,11 +42,17 @@ Going DIY instead — `MatchState` as a plain rolled-back `Resource` enum — co
 3. **No lost capability.** Our state transitions live inside frame-counted gameplay systems that already see everything they need. The "init this when state becomes X" pattern is `if curr != prev { ... }`. Three lines beats a plugin abstraction.
 4. **Phase 14 (Replay Viewer) is happier.** Scrubbing through replay-time states becomes "read the resource at frame X" instead of reconstructing `State<>` machinery from rollback snapshots.
 
-We were already planning to build our own `RollbackSound` audio pattern (see "Why no `bevy_roll_safe` audio plugin" below). The states module was the only piece we kept — and it was the part most coupled to bevy version churn. Pulling that thread takes the whole crate out of our dep graph forever.
+We had no use for the crate's audio plugin either (see "Why no `bevy_roll_safe` audio plugin" below — audio never touches the sim, so there's nothing to roll-safe). The states module was the only piece we'd have kept — and it was the part most coupled to bevy version churn. Pulling that thread takes the whole crate out of our dep graph forever.
 
 ## Why no `bevy_roll_safe` audio plugin
 
-`bevy_roll_safe::RollbackAudioPlugin` wraps `bevy_audio` to prevent duplicate sounds during resimulation. It works, but it's a black box and tightly couples our audio to `bevy_audio` specifically. The `RollbackSound` entity pattern (sim spawns tagged entities, render reconciles and plays) is more code, but it's *our* code, gives us per-sound priority control, hit-cancel logic, and lets us swap audio backends later. Worth the extra ~100 lines.
+`bevy_roll_safe::RollbackAudioPlugin` wraps `bevy_audio` to suppress duplicate sounds during resimulation — the plugin exists because, if the sim itself spawned audio, rollback resim would re-fire every cue. We don't need it because *audio is never a sim concern at all.* Cues live entirely in `app` (`crates/app/src/audio.rs`), fired off `Local` previous-state edges that read *current* sim state — never `Added`/`Changed`, never rolled-back `AudioPlayer` entities. Sound is cosmetic and the sim never spawns it, so resim can't double-fire it; there's nothing for a rollback-audio plugin to guard. The plugin solves a problem we structurally don't have.
+
+## Why audio (and haptics) live in `app`, not `render`
+
+Audio needs an output device the way windowing needs a display — so `bevy_audio`/`cpal` belong with the device-owning `app` crate, never the determinism-core `render` crate that the 4-platform replay matrix rebuilds on every target. Keeping `render` `cpal`-free keeps the matrix build lean and keeps audio orthogonal to the bit-identical-sim guarantee: nothing the sound system does can perturb a checksum. The cues are `Local`-edge cosmetic systems in `app/audio.rs`, and the 12 `.wav` files are generated deterministically by `scripts/generate_audio.py` — so even the *content* is reproducible, not a binary blob in the repo's determinism path.
+
+Haptics (`app/haptics.rs`) follow the same logic: a vibrator is a device, exactly like the audio sink and the window. The Android JNI `Vibrator` call lives in `app` and compiles to a no-op on every other target, so the edge-detector systems are identical across platforms and only the leaf call differs. Device-touching code lives where the device lives; the determinism core stays pure.
 
 ## Why CPU particles instead of `bevy_hanabi`
 
@@ -63,6 +69,18 @@ Both serialize Rust types compactly. `postcard` is no_std-friendly, smaller wire
 ## Why level signals only in the wire format
 
 If we encoded "just_pressed" / "just_released" bits and sent them, then under rollback resimulation we'd lose them — the bits would have already been consumed when we predicted. Edges have to be derived inside the sim, from the diff against `PreviousInputs`, which is rolled back. This is the same architectural shape fighting games use. It's tighter, smaller wire format, and inherently rollback-correct.
+
+## Why rematch is driven by an input edge, not a button
+
+A finished match (`MatchOver`) restarts on a THROW rising edge from *either* player, derived in the sim from the rolled-back `InputHistory` (`apply_rematch`). The obvious alternative — a UI "Play Again" button that mutates the `World` directly (reset score, respawn, flip state) — would never resimulate under rollback and would desync netplay peers the instant a frame rolled back across the restart. Routing the restart through the same level-signal input every other gameplay transition already uses keeps it rollback-correct and lockstep *for free*, and reuses `THROW_DOWN` so there's no wire-format change at all. This is the "level signals only" principle applied to the match lifecycle, not just to per-tick actions.
+
+## Why the title screen is the absence of a ggrs `Session`
+
+`AppScreen` has `Title` and `InMatch`, but the sim's idle-vs-running behavior is *not* gated on that flag — it falls out of whether a ggrs `Session` resource exists. With no `Session`, `bevy_ggrs` simply idles `GgrsSchedule`, so the Title screen is literally the no-session state: the sim isn't paused, it has nothing to advance (it sits at frame 0). `start_match` inserts a fresh SyncTest `Session`; `back_to_lobby` removes it (`remove_resource::<Session<GgrsCfg>>()`). `AppScreen` only drives entity spawn/despawn and non-sim UI systems. The payoff is zero special-case pause logic — there's no "is the sim allowed to tick right now" branch to get wrong, and you *can't* accidentally tick the sim from a menu because there's no session to tick it. The arena picker lives in `Title` and only mutates `SelectedArena` *before* the session is built, so it's a safe pre-session local change.
+
+## Why a configurable deadzone is determinism-safe
+
+`Settings.stick_deadzone` is player-local and persisted to disk, which normally screams desync risk — per-machine state feeding the sim is exactly how rollback games break. It's safe here because it acts strictly *pre-wire*: it shapes the analog stick magnitude *before* quantization into the 4-byte `PlayerInput`. Two peers with different deadzones still exchange byte-identical quantized wire inputs and resimulate identically; the deadzone only changes how each player's raw touch maps into those bytes, exactly like controller sensitivity. The rule it illustrates: anything *before* wire-quantization may be local and non-deterministic; anything *consuming* the wire input must be identical everywhere. `StickDeadzone` (in `input_touch`) is read by the touch sampler before it emits `PlayerInput`, and `Settings` just mirrors the persisted value into it. (The volume, music, and haptics settings are cosmetic — they never touch the sim at all.)
 
 ## Why a 6-frame forgiveness window
 
@@ -82,6 +100,8 @@ This was a feel-driven call confirming Boomerang Fu's mental model: committing t
 
 Auto-migration is a tar pit. Every sim change becomes a versioning project. Old replays slowly accumulate as a maintenance burden. Strict matching is honest: "this replay is from a previous version, here's how to view it (archived binaries via git tags)." It also forces version discipline — if I'm changing something that breaks replays, I know it immediately.
 
+Concretely (M6): `sim::SIM_VERSION` is the value stamped into every replay header. Pre-release `main` carried the `u32::MAX` dev sentinel (`replay::DEV_SIM_VERSION`); for v1.0.0-rc1 it became `1`. The committed canonical demo is the special case — it's the one replay actually encoded to a file and verified through the *real* strict-match gate (`decode_for_sim_version` against `sim::SIM_VERSION` in `replay_sync`/`replay_viewer`), so it must stamp the real version, not the dev sentinel that the in-process struct-fed test/fuzz replays use (those never strict-decode). That's why every `SIM_VERSION` bump requires regenerating the canonical `.bmrg` (`gen_canonical --write`): forget it, and the determinism matrix rejects its own demo as a version mismatch.
+
 ## Rejected alternatives, briefly
 
 - **4-player FFA** — rejected for MVP. The chaos hides bad balance, the rollback CPU budget gets tight with 4 players' inputs, and the matchmaking complexity isn't worth it for a portfolio piece. 1v1 is sharper and demos better.
@@ -91,7 +111,7 @@ Auto-migration is a tar pit. Every sim change becomes a versioning project. Old 
 - **Fixed virtual stick** (not floating) — forces players to look at their thumb. Floating is universally better on phones.
 - **Auto-aim throw** — kills the skill expression. Swipe-to-throw is the right answer for aim.
 - **`bevy_hanabi`** — overkill for our aesthetic and adds GPU compute requirements.
-- **`bevy_roll_safe::RollbackAudioPlugin`** — too coupled to bevy_audio.
+- **`bevy_roll_safe::RollbackAudioPlugin`** — unnecessary: audio is cosmetic, handled by `Local`-edge cues in `app`, not a rollback concern.
 - **`bevy_transform_interpolation`** — f32-based, assumes different sim model.
 - **bincode over postcard** — postcard is smaller, no_std-friendly, future-proofs hardware integration.
 - **Float positions with seahash to "make it deterministic"** — fundamentally wrong. The hash is portable; the floats aren't. Still desyncs.

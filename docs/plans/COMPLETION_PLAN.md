@@ -17,7 +17,7 @@
 | **MP** | **PC + Web platform track** | **Desktop input, local couch versus, desktop/web builds, cross-play** | **No (input/app/build)** | 🔶 P.1–P.4 landed (couch versus, keyboard+gamepad, whole-arena window, online PC-vs-PC loopback-verified); P.3b packaging / P.5–P.6 web left |
 | M4 | Phase 12 completion | Real matchbox wiring, P2P swap, loopback verified | No (net/app) | ✅ done |
 | M5 | Phase 18: polish | Shake, kill-cam, audio, haptics, UI, perf pass | Mostly render | ✅ done (CI + 4-platform determinism matrix green) |
-| M6 | Release readiness | SIM_VERSION=1, tag, operator checklist | Yes (version) | ⬜ planned |
+| M6 | Release readiness | SIM_VERSION=1, tag, operator checklist | Yes (version) | 🔶 version + canonical demo done (`d318ea8`), operator checklist written; only the `v1.0.0-rc1` git tag remains |
 
 **Sequencing note (MP):** the architecture is already cross-platform — the determinism matrix proves `x86_64-linux`, `aarch64-linux`, `aarch64-apple-darwin`, and `aarch64-linux-android` are bit-identical, and the fixed-point sim sidesteps the WASM float-nondeterminism problem outright. **MP's local-couch-versus piece (P.1 + P.2) is independent of M4 netplay** and is the fastest path to playtesting with friends on one PC, so it is prioritized to run right after M3. Online PC play (P.4) and Web (P.5–P.6) depend on M4/M5 landing first.
 
@@ -80,5 +80,5 @@ Why this is cheap: the sim is deterministic in fixed-point, so it already runs b
 
 ## Milestone 6 — Release Readiness
 
-- [ ] Task 6.1: Version + demos + tag
-- [ ] Task 6.2: Operator checklist
+- [x] Task 6.1: Version + demos (SIM_VERSION=1 + canonical demo regenerated, `d318ea8`); `v1.0.0-rc1` git tag is the final step
+- [x] Task 6.2: Operator checklist (`docs/OPERATOR_CHECKLIST.md`)
