@@ -160,6 +160,7 @@ fn despawn_match(
             With<Pickup>,
             With<render::FloorStain>,
             With<render::EffectSprite>,
+            With<render::TrailGhost>,
         )>,
     >,
 ) {

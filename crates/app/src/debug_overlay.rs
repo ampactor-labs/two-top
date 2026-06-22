@@ -25,8 +25,11 @@ pub struct DebugInputOverlayPlugin;
 
 impl Plugin for DebugInputOverlayPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(Startup, spawn_overlay)
-            .add_systems(Update, update_overlay);
+        // Audit D-HUD-02: this is raw wire-byte input telemetry — a dev tool.
+        // Gate it behind `debug_assertions` so it never renders over live
+        // gameplay in a release build (the systems compile but never run).
+        app.add_systems(Startup, spawn_overlay.run_if(|| cfg!(debug_assertions)))
+            .add_systems(Update, update_overlay.run_if(|| cfg!(debug_assertions)));
     }
 }
 

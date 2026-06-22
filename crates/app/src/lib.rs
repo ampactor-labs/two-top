@@ -25,6 +25,7 @@ mod audio;
 mod camera;
 mod debug_overlay;
 mod haptics;
+mod hud;
 mod lobby_overlay;
 mod logging;
 mod netplay;
@@ -33,6 +34,7 @@ mod settings;
 use audio::GameAudioPlugin;
 use camera::CameraFollowPlugin;
 use haptics::HapticsPlugin;
+use hud::HudPlugin;
 use debug_overlay::DebugInputOverlayPlugin;
 use lobby_overlay::LobbyOverlayPlugin;
 use netplay::{MatchboxPlugin, NetplayConfig};
@@ -123,6 +125,7 @@ pub fn run() {
         .add_plugins(GameAudioPlugin)
         .add_plugins(HapticsPlugin)
         .add_plugins(CameraFollowPlugin)
+        .add_plugins(HudPlugin)
         .add_plugins(DebugInputOverlayPlugin)
         .add_plugins(net::NetPlugin)
         .add_plugins(LobbyOverlayPlugin)
@@ -139,6 +142,7 @@ pub fn run() {
                 sync_sprite_atlas_from_anim,
                 frame_time_watch,
                 log_app_exit,
+                update_arena_floor,
             ),
         );
 
@@ -263,7 +267,43 @@ fn main() {
 /// legend, and the floor backdrop. Match entities (players, walls, arena
 /// props) are spawned per-match by [`screen::spawn_match`] on entering
 /// `AppScreen::InMatch`, so the title screen sits over an empty floor.
-fn setup(mut commands: Commands, asset_server: Res<AssetServer>) {
+/// Marker on the persistent arena-floor backdrop so [`update_arena_floor`] can
+/// swap its texture when the lobby arena picker changes [`SelectedArena`].
+#[derive(Component)]
+struct ArenaFloor;
+
+/// Composed floor backdrop per arena (DESIGN_DIRECTION § 4 — one quiet shared
+/// composition retinted per arena; props carry the rest of the identity).
+fn arena_floor_asset(id: sim::ArenaId) -> &'static str {
+    match id {
+        sim::ArenaId::Anchor => "arenas/anchor_floor.png",
+        sim::ArenaId::Crossing => "arenas/crossing_floor.png",
+        sim::ArenaId::Reliquary => "arenas/reliquary_floor.png",
+    }
+}
+
+/// Swap the backdrop texture when the lobby arena picker changes the selection,
+/// so the Title screen previews the chosen arena's floor and the match starts on
+/// the right one. Render-only; never touches sim.
+fn update_arena_floor(
+    selected: Res<SelectedArena>,
+    asset_server: Res<AssetServer>,
+    mut q: Query<&mut Sprite, With<ArenaFloor>>,
+) {
+    if !selected.is_changed() {
+        return;
+    }
+    let path = arena_floor_asset(selected.0);
+    for mut sprite in &mut q {
+        sprite.image = asset_server.load(path);
+    }
+}
+
+fn setup(
+    mut commands: Commands,
+    asset_server: Res<AssetServer>,
+    selected: Res<SelectedArena>,
+) {
     // Camera. Mobile: a bare Camera2d (1:1 pixels) with the follow cam in
     // `CameraFollowPlugin` keeps it zoomed in for a phone. Desktop: frame
     // the WHOLE arena at once (couch versus — both players always visible)
@@ -301,19 +341,20 @@ fn setup(mut commands: Commands, asset_server: Res<AssetServer>) {
                 font_size: 26.0,
                 ..default()
             },
-            TextColor(Color::srgba(0.82, 0.82, 0.78, 0.55)),
+            TextColor(render::palette::BONE.with_alpha(0.55)),
             Transform::from_xyz(0.0, sim::ARENA_HALF_HEIGHT_CM as f32 - 44.0, 100.0),
         ));
     }
 
-    // Phase 15 cycle 3b / A2: arena backdrop. training_floor.png is the
-    // composed moody Bone-Cathedral floor (320x480 px source) — scaled to
-    // cover roughly the arena's playable area + walls (1100x1600 cm).
-    // Z below players, stains, and effect sprites so the camera
-    // composition reads as "everything sits ON the cathedral floor".
+    // Arena backdrop: the composed moody Bone-Cathedral floor (320x480 px
+    // source) for the selected arena, scaled to cover the playable area +
+    // walls (1100x1600 cm). Z below players, stains, and effect sprites so the
+    // composition reads as "everything sits ON the cathedral floor". Tagged
+    // `ArenaFloor` so the lobby arena picker can retexture it live.
     commands.spawn((
+        ArenaFloor,
         Sprite {
-            image: asset_server.load("arenas/training_floor.png"),
+            image: asset_server.load(arena_floor_asset(selected.0)),
             custom_size: Some(Vec2::new(1100.0, 1600.0)),
             ..default()
         },

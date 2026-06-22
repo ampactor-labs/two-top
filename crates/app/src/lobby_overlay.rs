@@ -50,10 +50,20 @@ fn spawn_overlay(mut commands: Commands) {
 fn update_overlay(
     state: Res<LobbyState>,
     window: Res<WindowSize>,
-    mut q: Query<(&mut Text2d, &mut Transform), With<LobbyOverlayText>>,
+    mut q: Query<(&mut Text2d, &mut Transform, &mut Visibility), With<LobbyOverlayText>>,
 ) {
-    let Ok((mut text, mut tx)) = q.single_mut() else {
+    let Ok((mut text, mut tx, mut vis)) = q.single_mut() else {
         return;
+    };
+
+    // Audit D-HUD-02: the lobby label is meaningful netplay feedback
+    // (connecting / reconnecting / forfeit), but in the default couch build
+    // `LobbyState` sits at `Idle` forever — so hide the label entirely while
+    // idle and only surface it once a netplay lifecycle is actually underway.
+    *vis = if matches!(*state, LobbyState::Idle) {
+        Visibility::Hidden
+    } else {
+        Visibility::Visible
     };
 
     // Top-right corner — keeps it out of the way of the

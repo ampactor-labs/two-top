@@ -18,14 +18,16 @@ use fixed_math::Vec2F;
 use sim::{AnimState, LastSimTickTime, NoInterpolate, PositionF, PreviousPositionF, TICK_HZ};
 
 /// Shared player atlas layout matching ART_DIRECTION.md v2:
-/// 41 frames × 32×32 px cells in a single-row strip (1312×32 px sheet).
+/// 41 frames × 48×48 px cells in a single-row strip (1968×48 px sheet). The
+/// cloaked-drifter rig (the HLD overhaul) is authored at 48 px for the extra
+/// hood/cloak detail; the world footprint is unchanged (see PLAYER_RENDER_SIZE).
 /// Called from both `app` and `replay_viewer` setup to avoid duplicating
 /// the atlas contract.
 pub fn player_atlas_layout(
     atlases: &mut Assets<TextureAtlasLayout>,
 ) -> Handle<TextureAtlasLayout> {
     atlases.add(TextureAtlasLayout::from_grid(
-        UVec2::splat(32),
+        UVec2::splat(48),
         AnimState::TOTAL_ATLAS_FRAMES as u32,
         1,
         None,
@@ -33,9 +35,10 @@ pub fn player_atlas_layout(
     ))
 }
 
-/// Onscreen render size for player sprites. 32 px source × 2 = 64 world
-/// units — keeps the chunky gore-revival texel at arm's-length phone
-/// distance per ART_DIRECTION.md v2 rationale.
+/// Onscreen render size for player sprites: 64 world units. Unchanged by the
+/// 48 px source bump — the drifter occupies the same gameplay footprint and
+/// just renders at finer texel density (≈1.33 world units/texel) than the old
+/// 32 px rig, per ART_DIRECTION.md v2 rationale.
 pub const PLAYER_RENDER_SIZE: f32 = 64.0;
 
 // ===========================================================================
@@ -400,12 +403,14 @@ pub fn sync_crossing_visuals(
     }
 }
 
-/// Swap a pyre's atlas frame when its shatter state changes: intact (cell 0)
-/// while whole, shattered rubble (cell 2) once broken. Runs on
-/// `Changed<BonePyre>` so it's free on the ticks nothing shatters.
-pub fn sync_pyre_visuals(
-    mut q: Query<(&sim::BonePyre, &mut Sprite), Changed<sim::BonePyre>>,
-) {
+/// Swap a pyre's atlas frame to match its shatter state: intact (cell 0)
+/// while whole, shattered rubble (cell 2) once broken. Runs unconditionally
+/// over every pyre each frame (idempotent) rather than filtering on
+/// `Changed<BonePyre>`: per CONVENTIONS § Render Layer Rules, rollback re-sim
+/// makes `Changed`/`Added` fire unreliably, so an edge-filtered visual can
+/// miss — or wrongly replay — a shatter after a rollback. There are only a
+/// handful of pyres, so the per-frame write is free.
+pub fn sync_pyre_visuals(mut q: Query<(&sim::BonePyre, &mut Sprite)>) {
     for (pyre, mut sprite) in &mut q {
         if let Some(atlas) = sprite.texture_atlas.as_mut() {
             atlas.index = if pyre.shattered { 2 } else { 0 };
@@ -781,10 +786,15 @@ pub fn clear_stains_on_match_reset(
     *prev = Some(*state);
 }
 
-/// Tracks each Boomerang owner's last-observed `BoomerangState`.
-/// Same per-handle-edge pattern as [`PrevDying`].
+/// Tracks each live Boomerang *entity's* last-observed `BoomerangState`.
+/// Keyed by `Entity`, not `owner_handle`: Multishot gives several fangs the
+/// same owner, so an owner-keyed cache lets same-owner fangs clobber each
+/// other's edge within a single frame — masking or duplicating recall pulses.
+/// The map is rebuilt from the live boomerangs each frame, so despawned fangs
+/// drop out and it can't grow unbounded. Mirrors the Entity-keyed
+/// [`PrevShattered`].
 #[derive(Default)]
-pub struct PrevBoomerangState(pub bevy::platform::collections::HashMap<usize, BoomerangState>);
+pub struct PrevBoomerangState(pub bevy::platform::collections::HashMap<Entity, BoomerangState>);
 
 /// Render-side detector: spawns recall_pulse at the boomerang's
 /// position the tick its state transitions from `Flying` to
@@ -792,14 +802,15 @@ pub struct PrevBoomerangState(pub bevy::platform::collections::HashMap<usize, Bo
 pub fn spawn_recall_pulses(
     mut commands: Commands,
     assets: Res<EffectAssets>,
-    boomerangs: Query<(&Boomerang, &Transform)>,
+    boomerangs: Query<(Entity, &Boomerang, &Transform)>,
     mut prev: Local<PrevBoomerangState>,
 ) {
-    for (boom, xform) in &boomerangs {
+    let mut next = bevy::platform::collections::HashMap::default();
+    for (entity, boom, xform) in &boomerangs {
         let curr = boom.state;
         let was = prev
             .0
-            .get(&boom.owner_handle)
+            .get(&entity)
             .copied()
             .unwrap_or(BoomerangState::Flying);
         if matches!(was, BoomerangState::Flying) && matches!(curr, BoomerangState::Returning { .. }) {
@@ -814,7 +825,116 @@ pub fn spawn_recall_pulses(
                 8.0,
             );
         }
-        prev.0.insert(boom.owner_handle, curr);
+        next.insert(entity, curr);
+    }
+    prev.0 = next;
+}
+
+// ---- Boomerang flight trail (DESIGN_DIRECTION § 3) ----
+//
+// Short, hard-edged ghost-stamps of the live fang along its path — a
+// readability aid for priority-#1, NOT a decorative smear. Color encodes
+// state: Recall Blue while returning (the "it's coming back to me" read),
+// the active modifier's color, else a quiet owner channel. Render-only,
+// sampled from the interpolated transform; never feeds sim. The on-fang
+// blood-marks were cut (the floor stains carry violence-memory instead).
+
+/// One faded ghost-stamp of the boomerang. Fades to nothing over `ttl`
+/// real seconds, then despawns — so the trail is always short.
+#[derive(Component)]
+pub struct TrailGhost {
+    pub age: f32,
+    pub ttl: f32,
+}
+
+/// Per-boomerang last-stamp position, so stamps are spaced by distance
+/// (framerate-independent) rather than per-frame. Rebuilt from live
+/// boomerangs each frame, so despawned fangs drop out (no unbounded growth).
+#[derive(Default)]
+pub struct TrailStampPos(pub bevy::platform::collections::HashMap<Entity, Vec2>);
+
+/// World-units of travel between ghost-stamps (~half a fang).
+pub const TRAIL_STAMP_SPACING: f32 = 22.0;
+/// Real seconds a ghost-stamp lives — short so the trail never walls off
+/// the arena.
+pub const TRAIL_GHOST_TTL: f32 = 0.13;
+/// Starting opacity of a fresh stamp (the wake stays quieter than the fang).
+pub const TRAIL_GHOST_ALPHA: f32 = 0.5;
+
+/// State→color for a trail stamp. Returning overrides everything (the return
+/// read is the one players most need); else the active modifier's color; else
+/// a quiet owner channel that doubles as a who-threw-it cue.
+pub fn trail_tint(returning: bool, owner_handle: usize, modifier: Option<sim::PickupKind>) -> Color {
+    if returning {
+        palette::RECALL_BLUE
+    } else if modifier.is_some() {
+        boomerang_tint(modifier)
+    } else if owner_handle == 0 {
+        palette::BLOOD_DARK
+    } else {
+        palette::DEEP_TEAL
+    }
+}
+
+/// Render-side: stamp a faded fang ghost each time a live boomerang has
+/// travelled `TRAIL_STAMP_SPACING` since its last stamp.
+pub fn spawn_boomerang_trail(
+    mut commands: Commands,
+    asset_server: Res<AssetServer>,
+    mut image: Local<Option<Handle<Image>>>,
+    mut last: Local<TrailStampPos>,
+    boomerangs: Query<(Entity, &Boomerang, &Transform, &sim::BoomerangMods)>,
+) {
+    let img = image
+        .get_or_insert_with(|| asset_server.load("sprites/projectiles/bone_fang.png"))
+        .clone();
+    let mut next = bevy::platform::collections::HashMap::default();
+    for (entity, boom, xform, mods) in &boomerangs {
+        let pos = xform.translation.truncate();
+        let prev = last.0.get(&entity).copied();
+        let stamp = prev.is_none_or(|p| pos.distance(p) >= TRAIL_STAMP_SPACING);
+        if stamp {
+            let returning = matches!(boom.state, BoomerangState::Returning { .. });
+            let tint = trail_tint(returning, boom.owner_handle, mods.modifier);
+            commands.spawn((
+                Sprite {
+                    image: img.clone(),
+                    color: tint.with_alpha(TRAIL_GHOST_ALPHA),
+                    custom_size: Some(Vec2::splat(32.0)),
+                    ..default()
+                },
+                // Just under the boomerang (z=0.5) so the live fang stays the
+                // brightest, cleanest read.
+                Transform::from_xyz(pos.x, pos.y, 0.45),
+                TrailGhost {
+                    age: 0.0,
+                    ttl: TRAIL_GHOST_TTL,
+                },
+            ));
+            next.insert(entity, pos);
+        } else {
+            // keep the *old* anchor so distance keeps accumulating to threshold
+            next.insert(entity, prev.unwrap_or(pos));
+        }
+    }
+    last.0 = next;
+}
+
+/// Render-side: fade + despawn trail ghosts.
+pub fn advance_trail_ghosts(
+    time: Res<Time<Real>>,
+    mut commands: Commands,
+    mut q: Query<(Entity, &mut TrailGhost, &mut Sprite)>,
+) {
+    let dt = time.delta_secs();
+    for (entity, mut ghost, mut sprite) in &mut q {
+        ghost.age += dt;
+        if ghost.age >= ghost.ttl {
+            commands.entity(entity).despawn();
+            continue;
+        }
+        let k = 1.0 - ghost.age / ghost.ttl;
+        sprite.color = sprite.color.with_alpha(TRAIL_GHOST_ALPHA * k);
     }
 }
 
@@ -1038,6 +1158,8 @@ impl Plugin for EffectsPlugin {
                     spawn_hit_and_death_bursts,
                     spawn_recall_pulses,
                     spawn_ambient_embers,
+                    spawn_boomerang_trail,
+                    advance_trail_ghosts,
                     clear_stains_on_match_reset,
                     advance_kill_flash,
                     shake_on_perfect_catch,
@@ -1106,5 +1228,19 @@ mod tests {
         let items: Vec<(u32, f32)> = (0..500).map(|i| (i, (i % 7) as f32 / 7.0)).collect();
         let culled = select_effect_culls(items, 120);
         assert_eq!(culled.len(), 500 - 120);
+    }
+
+    #[test]
+    fn trail_tint_encodes_state() {
+        // Returning overrides everything — the load-bearing "coming back" read.
+        assert_eq!(
+            trail_tint(true, 0, Some(sim::PickupKind::Fire)),
+            palette::RECALL_BLUE
+        );
+        // Outbound with a modifier shows that modifier's color.
+        assert_eq!(trail_tint(false, 0, Some(sim::PickupKind::Fire)), palette::EMBER);
+        // Outbound, no modifier → a quiet per-owner channel (who threw it).
+        assert_eq!(trail_tint(false, 0, None), palette::BLOOD_DARK);
+        assert_eq!(trail_tint(false, 1, None), palette::DEEP_TEAL);
     }
 }
