@@ -79,12 +79,15 @@ Composition is most of the round; contact is brief frames.
 
 ## Asset Sizes (v2)
 
-- Player source frames: **32×32 px**, rendered at **64×64 world units**.
-  The collision body is smaller than the sprite, so the sprite can carry
-  an outline, horns, and animation smear without changing gameplay.
-- Boomerang source frames: **20×20 px**, rendered at **40×40 world units**.
+- Player source frames: **48×48 px**, rendered at **64×64 world units**.
+  The cloaked-drifter rig (the HLD overhaul) is authored at 48 px for the
+  hood/cloak detail; the collision body is smaller than the sprite, so the
+  sprite can carry an outline, the cloak hem/scarf, and animation smear
+  without changing gameplay (the world footprint is unchanged from the old
+  32 px rig).
+- Boomerang source frames: **12×12 px**, rendered at **40×40 world units**.
   The boomerang must remain brighter than floor detail in every arena.
-- Arena tiles: **32×32 px**. Floor motifs should stay low contrast and
+- Arena tiles: **16×16 px**. Floor motifs should stay low contrast and
   never use the same high-value accents as players, boomerangs, or hits.
 - Particles: source cells vary per effect (see asset table below).
   Prefer hard opaque pixels over translucent haze.
@@ -95,10 +98,13 @@ Composition is most of the round; contact is brief frames.
 Use nearest-neighbor filtering for all sprite assets. Avoid fractional
 pixel scaling where possible.
 
-Rationale (recorded so nobody "fixes" it back): 32×32 @ 2× world scale
-keeps the chunky gore-revival texel on a phone held at arm's length;
-HLD-ness comes from animation acting + composition, not resolution.
-Boomerang stays 40×40 world so gameplay feel is untouched.
+Rationale (recorded so nobody "fixes" it back): the duelists moved to
+48×48 with the cloaked-drifter overhaul — the hood, cloak folds, and
+trailing scarf need the extra texels to read. The render world size stays
+64×64, so the bump is detail density only, not a gameplay/footprint change.
+Boomerang stays 12×12 source @ 40×40 world so gameplay feel is untouched.
+HLD-ness comes from the silhouette discipline (hood hides the face) +
+animation acting + composition.
 
 ## Animation Table (v2)
 
@@ -112,25 +118,34 @@ Boomerang stays 40×40 world so gameplay feel is untouched.
 | CATCH | 5 | 3 | 28 | 3 | yes |
 | DEATH | 6 | 10 | 31 | 8 | yes |
 
-Total atlas strip: **41 frames** per player sheet (41×1 @ 32×32 = 1312×32 px).
+Total atlas strip: **41 frames** per player sheet (41×1 @ 48×48 = 1968×48 px).
 
 ## Duelist Design
 
-- **P0 "the Cur"**: compact, forward-hunched, two short bull horns,
-  ragged half-cloak. Body P0_BLOOD, shadow BLOOD_DARK, horn/claw
-  accents BONE, eyes SPARK (2 px, always hottest pixel on the body).
-  IDLE = weight-shifting bob, asymmetric. RUN = hunched lope, horn-leading,
-  directional smear with afterimage pixels in body color at 40% (use the
-  darker body shade, not alpha). THROW = wind-up, cock, release, fly-out,
-  recovery, settle. DASH = full horizontal blur. HIT = full HIT_WHITE
-  silhouette flash 1 frame, then recoil. CATCH = arm snap up, 1-frame
-  SPARK flash at the hand. DEATH = stagger, knee buckle, gore burst
-  (P0_BLOOD/BLOOD_DARK chunks), collapse to a corpse pile that matches
-  the stain corpse-mark.
+The duelists are **hooded drifters** (Hyper Light Drifter overhaul, locked
+2026-06-22), not faces: a hood + high collar hides the face entirely and the
+only feature is a glowing eye-slit. This sidesteps the unsolved problem of a
+charming 48 px face and buys a dramatic, readable silhouette for free. Gore
+lives in the arena floor (kill stains), never on the cloak — see
+`docs/STYLE_BIBLE.md`.
 
-- **P1 "the Revenant"**: tall, narrow shoulders, single swept-back horn,
-  hanging sash/tail. Body P1_CYAN, shadow DEEP_TEAL. Same animation
-  timing, distinctly different silhouette.
+- **P0 "the Cur"**: a **broad round-hooded brute**. Body P0_BLOOD, shadow
+  BLOOD_DARK/BRUISE, lit rim EMBER, eye-slit EMBER + SPARK core (always the
+  hottest pixel on the body). A bone pauldron caps the left shoulder
+  (asymmetry + status). IDLE = slow hooded breath. RUN = forward lean,
+  cloak streams, boots cycle; directional smear in the darker body shade,
+  not alpha. THROW = wind-up, sleeve cock, release smear, follow-through.
+  DASH = hard lunge + horizontal afterimage. HIT = full HIT_WHITE
+  silhouette flash 1 frame, then recoil. CATCH = sleeve snap up, 1-frame
+  SPARK flash at the hand. DEATH = stagger, fold, gore burst, collapse to a
+  cloak heap that matches the floor stain.
+
+- **P1 "the Stag"**: a **tall peaked-hooded herald** with a forward-flopping
+  cloth tip and a long trailing scarf (the asymmetric tell, opposite the
+  Cur's pauldron). Body P1_CYAN, shadow DEEP_TEAL, eye-slit RECALL-style cool
+  glow + HIT_WHITE core. Same animation timing, distinctly different
+  silhouette — a narrow upright column vs. the Cur's broad wedge (see the
+  `Build` profiles in `scripts/generate_polished_assets.py`).
 
 ## Pixel Craft Standards
 
@@ -160,28 +175,43 @@ until every item passes.
 
 ## Asset Table
 
-| Asset | Path | Source Cell | Layout | Sheet px | Render Size |
-|-------|------|------------|--------|----------|-------------|
-| P0 duelist | sprites/players/duelist_a_sheet.png | 32×32 | 41×1 | 1312×32 | 64×64 |
-| P1 duelist | sprites/players/duelist_b_sheet.png | 32×32 | 41×1 | 1312×32 | 64×64 |
-| Bone fang | sprites/projectiles/bone_fang.png | 20×20 | 1×1 | 20×20 | 40×40 |
-| Fang spin | sprites/projectiles/bone_fang_spin_sheet.png | 20×20 | 4×1 | 80×20 | 40×40 |
-| Fang trail | sprites/projectiles/bone_fang_trail_sheet.png | 20×20 | 6×1 | 120×20 | 40×40 |
-| Fang marked | sprites/projectiles/bone_fang_marked_sheet.png | 20×20 | 4×1 | 80×20 | 40×40 |
-| Hit burst | sprites/particles/hit_burst_sheet.png | 32×32 | 6×1 | 192×32 | 80×80 |
-| Death burst | sprites/particles/death_burst_sheet.png | 48×48 | 10×1 | 480×48 | 112×112 |
-| Recall pulse | sprites/particles/recall_pulse_sheet.png | 24×24 | 6×1 | 144×24 | 48×48 |
-| Shatter burst | sprites/particles/shatter_burst_sheet.png | 32×32 | 6×1 | 192×32 | 80×80 |
-| Stains P0 | sprites/stains/p0_stain_sheet.png | 24×24 | 4×1 | 96×24 | 48×48 |
-| Stains P1 | sprites/stains/p1_stain_sheet.png | 24×24 | 4×1 | 96×24 | 48×48 |
+Sheet dims below are the measured PNGs / generator `Canvas` sizes / code
+`from_grid` args (the single source of truth); render-world sizes are the
+in-code `custom_size`.
+
+| Asset | Path | Source Cell | Layout | Sheet px | Render (world) |
+|-------|------|------------|--------|----------|----------------|
+| P0 duelist (Cur) | sprites/players/duelist_a_sheet.png | 48×48 | 41×1 | 1968×48 | 64×64 |
+| P1 duelist (Stag) | sprites/players/duelist_b_sheet.png | 48×48 | 41×1 | 1968×48 | 64×64 |
+| Bone fang | sprites/projectiles/bone_fang.png | 12×12 | 1×1 | 12×12 | 40×40 |
+| Fang trail † | sprites/projectiles/bone_fang_trail_sheet.png | 12×12 | 6×1 | 72×12 | — |
+| Fang marked † | sprites/projectiles/bone_fang_marked_sheet.png | 12×12 | 4×1 | 48×12 | — |
+| Hit burst | sprites/particles/hit_burst_sheet.png | 24×24 | 4×1 | 96×24 | 64×64 |
+| Death burst | sprites/particles/death_burst_sheet.png | 24×24 | 6×1 | 144×24 | 80×80 |
+| Recall pulse | sprites/particles/recall_pulse_sheet.png | 16×16 | 4×1 | 64×16 | 48×48 |
+| Ambient ember | sprites/particles/ambient_ember_sheet.png | 8×8 | 4×1 | 32×8 | 8×8 |
+| Stains P0/P1 | sprites/stains/p{0,1}_stain_sheet.png | 16×16 | 4×1 | 64×16 | 32×32 |
 | Bone pyre | sprites/arena/bone_pyre_sheet.png | 32×32 | 3×1 | 96×32 | 64×64 |
 | Altar sigil | sprites/arena/altar_sigil_sheet.png | 32×32 | 2×1 | 64×32 | 64×64 |
 | Sigil door | sprites/arena/sigil_door_sheet.png | 32×32 | 2×1 | 64×32 | 64×64 |
-| Pickups | sprites/pickups/pickup_sheet.png | 24×24 | 6×1 | 144×24 | 48×48 |
-| Tiles | arenas/tile_sheet.png | 32×32 | 6×1 | 192×32 | 64×64 |
-| Arena floors | arenas/{anchor,crossing,reliquary}_floor.png | — | composed | 320×480 | covers 1000×1500 cm |
-| Embers | sprites/particles/ember_sheet.png | 8×8 | 4×1 | 32×8 | 8×8 |
-| HUD set | hud/*.png | 2× v1 | same layouts | 2× v1 | unchanged world |
+| Bone bridge tile | sprites/arena/bone_bridge_tile.png | 32×64 | 1×1 | 32×64 | per-arena |
+| Chasm strip | sprites/arena/chasm_strip.png | 32×64 | 1×1 | 32×64 | per-arena |
+| Pickups | sprites/pickups/pickup_sheet.png | 24×24 | 6×1 | 144×24 | 1.4× hitbox |
+| Tiles ‡ | arenas/tile_sheet.png | 16×16 | 4×3 | 64×48 | composed |
+| Arena floors | arenas/{anchor,crossing,reliquary}_floor.png | — | composed | 320×480 | covers ~1100×1600 cm |
+| HUD set § | hud/*.png | per file | per file | per file | overlay |
+
+† Generated but **not loaded** by the game — on-fang blood-marks were cut
+and the flight trail reimplemented as render ghost-stamps; see
+`docs/DESIGN_DIRECTION.md` § Boomerang. ‡ Source tiles for the composed
+`training_floor.png`; not loaded directly at runtime. § `score_pips`,
+`timer_digits`, `countdown_digits`, `match_over_badge`, `touch_controls`
+— the in-match HUD (`app/src/hud.rs`) uses `score_pips.png` (now a 3-cell
+atlas) + `countdown_digits.png` + a code-drawn timer bar; `match_over_badge`
+/ `touch_controls` / `timer_digits` remain unused. `scrub_bar_*` /
+`frame_step_buttons` are loaded by `replay_viewer`. Each arena now loads its
+own retinted floor (`{anchor,crossing,reliquary}_floor.png`); `training_floor.png`
+is kept as the Anchor-identical base.
 
 ## Visual Rules
 

@@ -6,6 +6,14 @@ grounded in `ARCHITECTURE.md`, `CONVENTIONS.md`, and `ART_DIRECTION.md`:
 competitive readability first, occult pixel-art identity second,
 ornament last.
 
+> **Superseded sizing.** This is the prep-era aesthetic target; its
+> *aesthetic* direction (two-mode rule, blood-marked, palette balance)
+> still holds, but its concrete sizes are superseded by `ART_DIRECTION.md`
+> v2 and the shipped generator: players are **32×32 source / 64-world**
+> (not 24×24 / 48-world), and P1 "the Stag" is **taller and narrower**
+> than P0 "the Cur" (not wider). `ART_DIRECTION.md` is authoritative on
+> sizes; `docs/DESIGN_DIRECTION.md` on the open art decisions.
+
 ## Direction
 
 **Bone Cathedral, blood-marked.** Hyper Light Drifter discipline
@@ -39,8 +47,8 @@ Final pixel art is still upstream.
   play lane between exchanges.
 - Bone, blood-red, and cyan give strong player/projectile separation on
   a dark field.
-- The silhouette language works at 24×24 px: P0 is horned and compact;
-  P1 is antlered and wider.
+- The silhouette language works at the player source size: P0 is horned
+  and compact; P1 is antlered, taller, and narrower.
 - The palette supports future arenas without turning the whole game
   into one hue family.
 - The two-mode rule keeps the game from feeling either constantly-loud
@@ -132,8 +140,9 @@ stain reads above the boomerang in any frame, darken the stain.
 
 ### Players
 
-Player source frames stay 24×24 px. Render scale stays 2x for a
-48-world-unit body unless playtesting proves it needs adjustment.
+Player source frames are 32×32 px (superseded from the 24×24 prep
+target — see the banner above). Render scale is 2x for a 64-world-unit
+body.
 
 P0:
 
@@ -145,7 +154,8 @@ P0:
 
 P1:
 
-- Wider antlered silhouette.
+- Taller, narrower antlered silhouette (upright column vs. the Cur's
+  broad forward wedge).
 - Cyan body, deep-teal shadow.
 - Throw/dash smear can use recall blue.
 - Antlers must differ from P0 horns even in monochrome.
