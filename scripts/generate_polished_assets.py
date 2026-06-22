@@ -162,6 +162,9 @@ BASE_KEYS = {
     # Side-neutral fallbacks (overridden by keys_for).
     "M": "p0_blood",
     "m": "blood_dark",
+    "L": "ember",          # body LIGHT step (hue-shift warm); p1 -> p1_cyan
+    "G": "ember",          # top-left corner GLEAM; p1 -> hit_white (crisp pop)
+    "D": "bruise_shadow",  # body DEEP shadow (hue-shift cool), both sides
     "e": "ember",
     "C": "p1_cyan",
     "c": "deep_teal",
@@ -177,6 +180,11 @@ def keys_for(side: str) -> dict[str, tuple[int, int, int, int]]:
     if side == "p1":
         keys["M"] = PALETTE["p1_cyan"]
         keys["m"] = PALETTE["deep_teal"]
+        # The Stag is a cool character: the bright cyan IS its light, so the
+        # LIGHT step holds at p1_cyan and the hue-shift lives in the cooling
+        # shadows (deep_teal -> bruise_shadow) rather than a warm highlight.
+        keys["L"] = PALETTE["p1_cyan"]
+        keys["G"] = PALETTE["hit_white"]  # sparse cool gleam — the Stag's pop
         keys["e"] = PALETTE["recall_blue"]
     return keys
 
@@ -194,9 +202,12 @@ def paint(canvas: Canvas, ox: int, oy: int, art: str, side: str = "p0") -> None:
 # ===========================================================================
 # Player sprites (32x32 source) — ART_DIRECTION.md v2.
 #
-# "The Cur" (P0) / "The Stag" (P1) share an animation skeleton; P1's distinct
-# antlered silhouette lands in a later cycle (for now P1 = P0 recolored via
-# keys_for("p1")).
+# "The Cur" (P0) / "The Stag" (P1) share the 41-frame animation skeleton but
+# diverge in BODY build (see the Build profiles below): the Cur is a broad,
+# low, forward brute; the Stag is a tall, narrow, upright herald. They read
+# apart as solid-black silhouettes — body shape, not just crown/color — per
+# audit finding D-VQ-01 and the v2 design panel. keys_for("p1") then recolors
+# red -> cyan on top of the already-distinct Stag shape.
 #
 # The duelist is a broad, hunched demon-brute drawn procedurally from a
 # parametric skeleton so the 41-frame set stays anatomically consistent and
@@ -211,8 +222,8 @@ def paint(canvas: Canvas, ox: int, oy: int, art: str, side: str = "p0") -> None:
 #   o bruise(ground)   e accent(ember/recall-blue)
 # ===========================================================================
 
-PLAYER_PX = 32
-_CX = 15  # silhouette centre column
+PLAYER_PX = 48
+_CX = 24  # silhouette centre column
 
 
 def _blank() -> list[list[str]]:
@@ -235,27 +246,48 @@ def _grid_to_str(g: list[list[str]]) -> str:
     return "\n".join("".join(row) for row in g)
 
 
-_BODY = {"M", "m", "h"}
+_BODY = {"M", "m", "D", "L", "G", "h"}
 _BONE = {"b", "B", "w"}
 _SOLID = _BODY | _BONE | {"l", "y", "e", "o"}
 
+# Style presets (Pillar 4 — divergent-select). `_shade`/`_outline` read the
+# module-global STYLE so the same geometry renders in different treatments; the
+# operator picks one and it becomes the default. Knobs:
+#   light:   flat | rim | gleam   (no body light / L lit rim / + G corner gleam)
+#   shadow:  soft | deep          (m shadow rim / + D deep-shadow corners)
+#   outline: void | shade         (k black outline / D bruise selout)
+#   dither:  bool                 (ordered dither on interior faces)
+_DEFAULT_STYLE = {"light": "gleam", "shadow": "deep", "outline": "void", "dither": False}
+STYLE = dict(_DEFAULT_STYLE)
+
 
 def _shade(g: list[list[str]]) -> None:
-    """Thin rim-light commit (light from top-left): the rightmost pixel of each
-    body run drops to shadow, and bone gets a hot gleam top-left / warm shade
-    bottom-right. Body *form* is placed explicitly by the part functions."""
+    """Directional 4-tone body shading + bone gleam, light committed top-left.
+    Each mid-body (`M`) pixel on the lit (top/left) silhouette edge takes the
+    LIGHT ramp step `L`; the shadowed (bottom/right) edge takes shadow `m`, and
+    convex bottom-right corners the DEEP shadow `D`; the interior keeps `M`.
+    keys_for() makes that a hue-shifted ramp (P0: bruise->blood-dark->blood->
+    ember; P1: cool-shadow shift). This is committed-light-direction shading,
+    not pillow shading. Hand-placed `m` form (pecs/abs/flank) is preserved
+    because only `M` pixels are touched; eyes stay `y` (spark), the hottest
+    pixel. Edges are detected against empty ('.'), so promotions never cascade."""
+
+    def empty(x: int, y: int) -> bool:
+        return not (0 <= x < PLAYER_PX and 0 <= y < PLAYER_PX) or g[y][x] == "."
+
+    light, shadow, dither = STYLE["light"], STYLE["shadow"], STYLE["dither"]
     for y in range(PLAYER_PX):
-        x = 0
-        while x < PLAYER_PX:
-            if g[y][x] == "M":
-                x0 = x
-                while x < PLAYER_PX and g[y][x] == "M":
-                    x += 1
-                x1 = x - 1
-                if x1 - x0 >= 3:
-                    g[y][x1] = "m"  # 1px right rim
-            else:
-                x += 1
+        for x in range(PLAYER_PX):
+            if g[y][x] != "M":
+                continue
+            top, left = empty(x, y - 1), empty(x - 1, y)
+            bot, right = empty(x, y + 1), empty(x + 1, y)
+            if light != "flat" and (top or left):
+                g[y][x] = "G" if (light == "gleam" and top and left) else "L"
+            elif bot or right:
+                g[y][x] = "D" if (shadow == "deep" and bot and right) else "m"
+            elif dither and (x + y) % 2 == 0:
+                g[y][x] = "m"          # ordered dither on interior faces
     for y in range(PLAYER_PX):
         for x in range(PLAYER_PX):
             if g[y][x] == "b":
@@ -285,237 +317,188 @@ def _outline(g: list[list[str]]) -> None:
                 if 0 <= nx < PLAYER_PX and 0 <= ny < PLAYER_PX and g[ny][nx] in _SOLID:
                     adds.append((x, y))
                     break
+    oc = "k" if STYLE["outline"] == "void" else "D"
     for x, y in adds:
-        g[y][x] = "k"
+        g[y][x] = oc
+
+
+# --- cloaked-drifter rig ---------------------------------------------------
+#
+# Hyper Light Drifter move (locked 2026-06-22): the duelists are HOODED
+# DRIFTERS, not faces. A hood + high collar hides the face entirely; the only
+# feature is a single glowing eye-slit. This sidesteps the unsolved problem of
+# a charming 48px face and buys a dramatic, readable silhouette for free. The
+# flat `M` cloak + the existing `_shade` (committed top-left light -> L/G, deep
+# bottom-right shadow -> m/D) reproduce HLD's bold blocking + bloom rim. Gore
+# lives in the FLOOR (kill stains), never on the cloak — Duke crust without
+# fighting HLD's elegance (docs/STYLE_BIBLE.md).
+#
+# The Cur (P0) is a BROAD round-hooded brute, warm ember eye-glow, bone
+# pauldron (asymmetry). The Stag (P1) is a TALL pointed-hooded herald, cool
+# cyan/white eye-glow, a long trailing scarf (asymmetry). They read apart as
+# solid-black shapes before color registers (audit D-VQ-01).
+
+
+@dataclass(frozen=True)
+class Build:
+    """Per-duelist cloak profile. One swap re-proportions all 41 frames and the
+    two read apart as solid-black silhouettes (audit D-VQ-01 + v2 panel)."""
+
+    hood: str       # "round" (broad dome, Cur) | "peak" (tall point, Stag)
+    sh: int         # shoulder/mantle half-width (Cur broad, Stag narrow)
+    body: int       # cloak half-width below the shoulders
+    flare: int      # hem widening per 4 rows (Cur drapes out, Stag stays a column)
+    cape: str       # "none" (Cur) | "scarf" (Stag's long trailing tail)
+    pauldron: bool  # bone shoulder plate (the Cur's status + asymmetry)
+    hot: str        # hottest eye pixel: "y" spark (Cur warm) | "h" hit-white (Stag cool)
+
+
+CUR = Build(hood="round", sh=12, body=9, flare=1, cape="none", pauldron=True, hot="y")
+STAG = Build(hood="peak", sh=6, body=6, flare=0, cape="scarf", pauldron=False, hot="h")
 
 
 # --- body parts ------------------------------------------------------------
 
-def _horns(g: list[list[str]], dx: int, dy: int) -> None:
-    """Massive ram horns sweeping up and out to hot-bone tips near the top
-    corners — the dominant menace cue at thumbnail size."""
-    cx = _CX + dx
-    # left horn — thick curve, root on the skull out to the corner
-    for (x, y, c) in [
-        (cx - 4, 5, "b"), (cx - 5, 5, "b"),
-        (cx - 5, 4, "b"), (cx - 6, 4, "b"),
-        (cx - 6, 3, "b"), (cx - 7, 3, "b"),
-        (cx - 7, 2, "b"), (cx - 8, 2, "B"),
-        (cx - 8, 1, "B"), (cx - 7, 1, "B"),
-    ]:
-        _put(g, x, y + dy, c)
-    # right horn — mirror
-    for (x, y, c) in [
-        (cx + 4, 5, "b"), (cx + 5, 5, "b"),
-        (cx + 5, 4, "b"), (cx + 6, 4, "b"),
-        (cx + 6, 3, "b"), (cx + 7, 3, "b"),
-        (cx + 7, 2, "b"), (cx + 8, 2, "B"),
-        (cx + 8, 1, "B"), (cx + 7, 1, "B"),
-    ]:
-        _put(g, x, y + dy, c)
+def _rect(g: list[list[str]], x: int, y: int, w: int, h: int, ch: str) -> None:
+    for yy in range(y, y + h):
+        _span(g, yy, x, x + w - 1, ch)
 
 
-def _antlers(g: list[list[str]], dx: int, dy: int) -> None:
-    """The Stag's crown — twin antlers branching up and out, taller and forked
-    where the Cur's horns are stubby and curled, so P1 reads as a different
-    creature by silhouette alone (priority over color)."""
-    cx = _CX + dx
-    left = [
-        (cx - 3, 4), (cx - 3, 3), (cx - 4, 2), (cx - 5, 1),  # main beam
-        (cx - 6, 0), (cx - 2, 1), (cx - 2, 0), (cx - 4, 0),  # tines
-    ]
-    right = [(cx + (cx - x), y) for (x, y) in left]
-    for (x, y) in left + right:
-        _put(g, x, y + dy, "b")
-    for (x, y) in [(cx - 6, 0), (cx - 4, 0), (cx - 2, 0),
-                   (cx + 6, 0), (cx + 4, 0), (cx + 2, 0)]:
-        _put(g, x, y + dy, "B")  # hot tine tips
+def _hood(g: list[list[str]], cx: int, dy: int, b: Build) -> None:
+    """The hood: a solid cloak shape with a dark face cavity carved into it.
+    `round` = broad dome (Cur); `peak` = tall forward-leaning point (Stag)."""
+    if b.hood == "round":
+        rows = [(6, 5), (7, 7), (8, 8), (9, 9), (10, 10), (11, 10),
+                (12, 10), (13, 10), (14, 9), (15, 9), (16, 8)]
+        for y, half in rows:
+            _span(g, y + dy, cx - half, cx + half, "M")
+        # carved face cavity (brim row 11 overhangs the top)
+        for y, half in [(12, 5), (13, 6), (14, 6), (15, 5)]:
+            _span(g, y + dy, cx - half, cx + half, "k")
+    else:  # peak — tall narrow hood with a forward-flopping cloth tip
+        rows = [(5, 3), (6, 4), (7, 4), (8, 5), (9, 5), (10, 5),
+                (11, 6), (12, 6), (13, 6), (14, 6), (15, 5), (16, 5)]
+        for y, half in rows:
+            _span(g, y + dy, cx - half, cx + half, "M")
+        # the tip flops forward-left — reads as heavy cloth, not a rigid cone
+        for (x, y) in [(cx - 3, 4), (cx - 4, 4), (cx - 4, 3), (cx - 5, 3), (cx - 5, 2)]:
+            _put(g, x, y + dy, "M")
+        # carved face cavity (brim row 11 overhangs the top)
+        for y, half in [(12, 3), (13, 4), (14, 4), (15, 3)]:
+            _span(g, y + dy, cx - half, cx + half, "k")
 
 
-def _head(g: list[list[str]], dx: int, dy: int) -> None:
-    """Heavy skull sunk between the traps: angled angry brow, burning ember
-    eyes, a snarling fanged maw."""
-    cx = _CX + dx
-    # symmetric skull
-    _span(g, 4 + dy, cx - 3, cx + 3, "M")
-    _span(g, 5 + dy, cx - 4, cx + 4, "M")
-    _span(g, 6 + dy, cx - 4, cx + 4, "M")
-    _span(g, 7 + dy, cx - 4, cx + 4, "M")
-    _span(g, 8 + dy, cx - 4, cx + 4, "M")
-    _span(g, 9 + dy, cx - 3, cx + 3, "M")
-    _span(g, 10 + dy, cx - 2, cx + 2, "M")  # jaw
-    # angry brow: two strokes angling down toward the centre (\\ /)
-    _put(g, cx - 4, 6 + dy, "l")
-    _put(g, cx - 3, 7 + dy, "l")
-    _put(g, cx + 4, 6 + dy, "l")
-    _put(g, cx + 3, 7 + dy, "l")
-    # burning eyes under the brow: spark core + ember glow below
-    _put(g, cx - 3, 8 + dy, "y")
-    _put(g, cx + 3, 8 + dy, "y")
-    _put(g, cx - 2, 8 + dy, "e")
-    _put(g, cx + 2, 8 + dy, "e")
-    # snarling fanged maw
-    _span(g, 9 + dy, cx - 2, cx + 2, "k")
-    _put(g, cx - 2, 9 + dy, "B")
-    _put(g, cx + 2, 9 + dy, "B")
-    _put(g, cx, 10 + dy, "l")
+def _eyes(g: list[list[str]], cx: int, dy: int, b: Build) -> None:
+    """The single tell under the hood: a glowing eye-slit. Outer `e` (ember on
+    the Cur, recall-blue on the Stag via keys_for) + a hot core (`y` spark /
+    `h` hit-white). Always the hottest pixels on the body."""
+    ox = 0
+    _span(g, 14 + dy, cx + ox - 4, cx + ox - 2, "e")
+    _span(g, 14 + dy, cx + ox + 2, cx + ox + 4, "e")
+    _put(g, cx + ox - 3, 14 + dy, b.hot)
+    _put(g, cx + ox + 3, 14 + dy, b.hot)
 
 
-def _spaulder(g: list[list[str]], dx: int, dy: int) -> None:
-    """A bone pauldron strapped over the left shoulder — asymmetry + status."""
-    cx = _CX + dx
-    sy = 11 + dy
-    for (x, y, c) in [
-        (cx - 9, sy + 1, "b"), (cx - 8, sy, "b"), (cx - 7, sy, "b"),
-        (cx - 9, sy + 2, "b"), (cx - 8, sy + 1, "B"), (cx - 7, sy + 1, "b"),
-        (cx - 9, sy + 3, "w"), (cx - 8, sy + 2, "b"),
-    ]:
-        _put(g, x, y, c)
+def _mantle(g: list[list[str]], cx: int, dy: int, b: Build,
+            hunch: int, stride: str) -> None:
+    """Shoulders flaring to the mantle, then the cloak draping to a torn hem,
+    then boots peeking under it. Width per build; hem is planted (not bobbed)
+    so breath/lean move the upper body over fixed feet."""
+    sy = 17 + dy + hunch
+    # shoulder mantle: widen to the full shoulder, then start the body
+    _span(g, sy, cx - (b.sh - 4), cx + (b.sh - 4), "M")
+    _span(g, sy + 1, cx - (b.sh - 1), cx + (b.sh - 1), "M")
+    _span(g, sy + 2, cx - b.sh, cx + b.sh, "M")        # widest point
+    _span(g, sy + 3, cx - (b.sh - 1), cx + (b.sh - 1), "M")
+    # cloak body from below the shoulders down to a planted hem
+    hem = 41
+    top = sy + 4
+    half_max = b.body
+    for i, y in enumerate(range(top, hem + 1)):
+        half = min(b.sh + 1, b.body + (i * b.flare) // 4)
+        half_max = max(half_max, half)
+        _span(g, y, cx - half, cx + half, "M")
+    # central fold seam (vertical read) + a couple of fold shadows
+    for y in range(top, hem):
+        _put(g, cx, y, "m")
+    _put(g, cx - min(4, b.body - 1), top + 4, "m")
+    _put(g, cx + min(3, b.body - 2), top + 6, "m")
+    # jagged torn hem (Duke crust)
+    for x in range(cx - half_max, cx + half_max + 1):
+        d = x - cx
+        if d % 3 == 0:
+            _put(g, x, hem + 1, "M")
+        if d % 5 == 0:
+            _put(g, x, hem + 2, "m")
+    # boots peeking under the hem; stride shifts the weight foot
+    sh_l = -1 if stride in ("strideL", "splay") else (1 if stride == "strideR" else 0)
+    if stride != "air":
+        _rect(g, cx - 6 + sh_l, hem + 1, 4, 3, "l")
+        _rect(g, cx + 3 + sh_l, hem + 1, 4, 3, "l")
 
 
-def _torso(g: list[list[str]], dx: int, dy: int, hunch: int = 0) -> None:
-    """Broad hunched brute: traps, pecs with an under-shadow, an ab column, a
-    flank shadow, then a tattered cloak that always reaches the legs."""
-    cx = _CX + dx
-    sy = 11 + dy + hunch
-    # traps / massive shoulders
-    _span(g, sy, cx - 7, cx + 7, "M")
-    _span(g, sy + 1, cx - 8, cx + 8, "M")
-    _span(g, sy + 2, cx - 8, cx + 8, "M")
-    # pecs
-    _span(g, sy + 3, cx - 7, cx + 7, "M")
-    _span(g, sy + 4, cx - 6, cx + 6, "M")
-    _put(g, cx, sy + 3, "m")       # sternum line
-    _put(g, cx, sy + 4, "m")
-    _span(g, sy + 5, cx - 6, cx - 2, "m")  # under-pec shadow L
-    _span(g, sy + 5, cx + 2, cx + 6, "m")  # under-pec shadow R
-    _span(g, sy + 5, cx - 1, cx + 1, "M")
-    # bone gorget at the throat
-    _put(g, cx, sy, "b")
-    _put(g, cx - 1, sy, "b")
-    # abs / midsection, tapering
-    for i, y in enumerate(range(sy + 6, 20)):
-        w = max(3, 6 - i)
-        _span(g, y, cx - w, cx + w, "M")
-    # ab divisions + flank shadow (right side, light from top-left)
-    _put(g, cx, sy + 6, "m")
-    _put(g, cx, sy + 8, "m")
-    _put(g, cx + 4, sy + 6, "m")
-    _put(g, cx + 4, sy + 7, "m")
-    # tattered cloak from the waist down to the legs (fixed hem rows)
-    for y in range(20, 23):
-        _span(g, y, cx - 6, cx + 6, "M")
-    # jagged hem tongues
-    for x in range(cx - 6, cx + 7):
-        n = (x - cx) % 3
-        _put(g, x, 23, "M" if n != 1 else "m")
-        if n == 0:
-            _put(g, x, 24, "m")
-    # a couple of cloak fold shadows
-    _put(g, cx - 3, 21, "m")
-    _put(g, cx + 2, 21, "m")
+def _scarf(g: list[list[str]], cx: int, dy: int, sway: int) -> None:
+    """The Stag's long trailing scarf, streaming off the left shoulder past the
+    hem — an asymmetric silhouette tell that reads opposite the Cur's pauldron.
+    `sway` streams it further out under motion (run/dash)."""
+    sx = cx - 7
+    for i, y in enumerate(range(18 + dy, 44)):
+        off = i // 3 + sway
+        _put(g, sx - off, y, "M")
+        _put(g, sx - off - 1, y, "m")
+        if i % 2 == 0:
+            _put(g, sx - off + 1, y, "L")    # lit inner edge
+    _put(g, sx - (8 + sway), 43, "m")
+    _put(g, sx - (8 + sway), 44, "m")
 
 
-def _claw(g: list[list[str]], x: int, y: int) -> None:
-    """A three-prong bone claw/hand."""
-    _put(g, x, y, "b")
-    _put(g, x - 1, y + 1, "b")
-    _put(g, x + 1, y + 1, "b")
-    _put(g, x, y + 1, "w")
+def _pauldron(g: list[list[str]], cx: int, dy: int) -> None:
+    """A clean angular bone plate over the left shoulder — asymmetry + status,
+    not a blob. Gleam top-left, warm shade bottom-right (the _shade bone pass
+    refines it further)."""
+    sy = 18 + dy
+    # a flatter plate capping the shoulder slope (wider than tall = armor, not a horn)
+    _span(g, sy, cx - 12, cx - 9, "b")
+    _span(g, sy + 1, cx - 13, cx - 9, "b")
+    _span(g, sy + 2, cx - 12, cx - 10, "b")
+    _put(g, cx - 12, sy, "B")        # gleam
+    _put(g, cx - 13, sy + 1, "w")    # shade edge
+    _put(g, cx - 10, sy + 2, "w")
 
 
-def _arm(g: list[list[str]], side: int, dx: int, dy: int, pose: str) -> None:
-    """side -1 left / +1 right. pose: rest|back|fwd|up|reach. Thick muscled
-    limb (bicep bulge) ending in a bone claw."""
-    cx = _CX + dx
-    sy = 12 + dy
-    sx = cx + side * 8  # hangs off the broad shoulder
-    if pose == "rest":
-        for i in range(7):
-            _put(g, sx, sy + i, "M")
-            _put(g, sx - side, sy + i, "M")
-        _put(g, sx, sy + 1, "M")  # bicep bulge already 2px
-        _claw(g, sx, sy + 7)
-    elif pose == "back":
-        # cocked back over the shoulder, fang ready (throw anticipation)
-        for (ox, oy) in [(0, 0), (-1, -1), (-1, 0), (-2, -2), (-2, -1), (-3, -3)]:
-            _put(g, sx + side * ox, sy + oy, "M")
-        _claw(g, sx - side * 3, sy - 4)
-    elif pose == "fwd":
-        # thrust forward, thick
-        for i in range(6):
-            _put(g, sx + side * i, sy + 1, "M")
-            _put(g, sx + side * i, sy + 2, "M")
-        _put(g, sx, sy, "M")
-        _claw(g, sx + side * 6, sy + 1)
-    elif pose == "up":
-        for i in range(7):
+def _sleeve(g: list[list[str]], cx: int, dy: int, b: Build, arm: str) -> None:
+    """A cloaked sleeve emerging from the right of the body for the throw/catch
+    gestures (the cloak hides the arm otherwise). pose: back|fwd|up|reach. Ends
+    in a small pale hand."""
+    sx = cx + (b.sh - 3)
+    sy = 20 + dy
+    if arm == "back":      # cocked up-and-back (throw anticipation)
+        for i in range(5):
+            _put(g, sx + i // 2, sy - i, "M")
+            _put(g, sx + i // 2 + 1, sy - i, "M")
+        _put(g, sx + 3, sy - 5, "h")
+    elif arm == "fwd":     # thrust forward (release / follow-through)
+        for i in range(8):
+            _put(g, sx + i, sy + 1, "M")
+            _put(g, sx + i, sy + 2, "M")
+        _put(g, sx + 8, sy + 1, "h")
+        _put(g, sx + 8, sy + 2, "L")
+    elif arm == "up":      # raised to catch
+        for i in range(8):
             _put(g, sx, sy - i, "M")
-            _put(g, sx - side, sy - i, "M")
-        _claw(g, sx, sy - 7)
-    elif pose == "reach":
+            _put(g, sx + 1, sy - i, "M")
+        _put(g, sx, sy - 8, "h")
+    elif arm == "reach":   # lowering after the catch
         for i in range(5):
-            _put(g, sx + side * i, sy - i, "M")
-            _put(g, sx + side * i, sy - i + 1, "M")
-        _claw(g, sx + side * 5, sy - 5)
-
-
-def _talon(g: list[list[str]], x: int, y: int) -> None:
-    _span(g, y, x - 1, x + 2, "b")
-    _put(g, x - 1, y + 1, "w")
-    _put(g, x + 2, y + 1, "w")
-
-
-def _legs(g: list[list[str]], dx: int, dy: int, phase: str) -> None:
-    """phase: stand|strideR|strideL|air|kneel|splay. Thick legs (4px) in a
-    wide power stance with bone talons."""
-    cx = _CX + dx
-    ty = 24 + dy
-    if phase == "stand":
-        for i in range(5):
-            _span(g, ty + i, cx - 6, cx - 3, "M")
-            _span(g, ty + i, cx + 3, cx + 6, "M")
-        _put(g, cx - 4, ty + 2, "m")
-        _put(g, cx + 5, ty + 2, "m")
-        _talon(g, cx - 5, ty + 5)
-        _talon(g, cx + 4, ty + 5)
-    elif phase == "strideR":
-        for i in range(5):
-            _span(g, ty + i, cx + 2 + i // 2, cx + 5 + i // 2, "M")
-            _span(g, ty + i, cx - 6 + (4 - i) // 2, cx - 3 + (4 - i) // 2, "M")
-        _talon(g, cx + 5, ty + 5)
-        _talon(g, cx - 6, ty + 5)
-    elif phase == "strideL":
-        for i in range(5):
-            _span(g, ty + i, cx - 5 - i // 2, cx - 2 - i // 2, "M")
-            _span(g, ty + i, cx + 2 - (4 - i) // 2, cx + 5 - (4 - i) // 2, "M")
-        _talon(g, cx - 6, ty + 5)
-        _talon(g, cx + 5, ty + 5)
-    elif phase == "air":
-        for i in range(3):
-            _span(g, ty + i, cx - 5, cx - 2, "M")
-            _span(g, ty + i, cx + 2, cx + 5, "M")
-        _talon(g, cx - 5, ty + 3)
-        _talon(g, cx + 3, ty + 3)
-    elif phase == "kneel":
-        for i in range(4):
-            _span(g, ty + i, cx + 2, cx + 5, "M")
-        _talon(g, cx + 3, ty + 4)
-        _span(g, ty + 1, cx - 6, cx - 2, "M")
-        _span(g, ty + 2, cx - 7, cx - 3, "M")
-        _talon(g, cx - 7, ty + 3)
-    elif phase == "splay":
-        for i in range(5):
-            _span(g, ty + i, cx - 8 + i // 2, cx - 5 + i // 2, "M")
-            _span(g, ty + i, cx + 5 - i // 2, cx + 8 - i // 2, "M")
-        _talon(g, cx - 9, ty + 5)
-        _talon(g, cx + 6, ty + 5)
+            _put(g, sx + i, sy - i, "M")
+            _put(g, sx + i, sy - i + 1, "M")
+        _put(g, sx + 5, sy - 5, "h")
 
 
 def _ground(g: list[list[str]], dx: int) -> None:
     cx = _CX + dx
-    _span(g, 30, cx - 6, cx + 6, "o")
-    _span(g, 31, cx - 4, cx + 4, "o")
+    _span(g, 45, cx - 8, cx + 8, "o")
+    _span(g, 46, cx - 5, cx + 5, "o")
 
 
 def _draw_duelist(
@@ -523,27 +506,31 @@ def _draw_duelist(
     lean: int = 0,
     bob: int = 0,
     hunch: int = 0,
-    arm_l: str = "rest",
-    arm_r: str = "rest",
+    arm_l: str = "rest",       # accepted for signature-compat; unused (cloak)
+    arm_r: str = "none",
     leg: str = "stand",
     ground: bool = True,
     spaulder: bool = True,
     headgear: str = "horns",
 ) -> list[list[str]]:
+    """Compose one cloaked-drifter frame. `headgear` selects the build
+    ('antlers' -> Stag, else Cur) so _frames_for / the 41-frame contract are
+    unchanged. `arm_r` drives the throwing sleeve; `leg` drives boot stride."""
+    b = STAG if headgear == "antlers" else CUR
+    cx = _CX + lean
+    sway = 1 if leg in ("strideR", "strideL", "air", "splay") else 0
     g = _blank()
     if ground:
         _ground(g, lean)
-    _legs(g, lean, 0, leg)
-    _arm(g, -1, lean, bob, arm_l)
-    _arm(g, +1, lean, bob, arm_r)
-    _torso(g, lean, bob, hunch)
-    if spaulder:
-        _spaulder(g, lean, bob + hunch)
-    _head(g, lean, bob)
-    if headgear == "antlers":
-        _antlers(g, lean, bob)
-    else:
-        _horns(g, lean, bob)
+    if b.cape == "scarf":
+        _scarf(g, cx, bob, sway)
+    _mantle(g, cx, bob, b, hunch, leg)
+    if arm_r not in ("rest", "none"):
+        _sleeve(g, cx, bob, b, arm_r)
+    _hood(g, cx, bob, b)
+    _eyes(g, cx, bob, b)
+    if spaulder and b.pauldron:
+        _pauldron(g, cx, bob)
     _shade(g)
     _outline(g)
     return g
@@ -569,10 +556,13 @@ def _spark_burst(g: list[list[str]], x: int, y: int) -> None:
 
 
 def _gore_chunks(g: list[list[str]], stage: int) -> None:
+    """Comedic-gore burst on death — flung cloak scraps + ember sparks. Lands in
+    stages so the death anim escalates. (The persistent kill stain lives in the
+    arena floor, not here.)"""
     chunks = [
-        (-8, 12, "M"), (8, 11, "m"), (-10, 16, "m"), (10, 15, "M"),
-        (-5, 8, "M"), (6, 7, "m"), (-11, 20, "m"), (11, 19, "M"),
-        (-3, 6, "y"), (4, 5, "e"), (-9, 23, "m"), (9, 22, "M"),
+        (-9, 18, "M"), (9, 16, "m"), (-12, 24, "m"), (12, 22, "M"),
+        (-6, 14, "M"), (7, 12, "m"), (-13, 30, "m"), (13, 28, "M"),
+        (-4, 12, "y"), (5, 10, "e"), (-10, 32, "m"), (10, 31, "M"),
     ]
     cx = _CX
     for i in range(min(len(chunks), stage * 3)):
@@ -581,19 +571,22 @@ def _gore_chunks(g: list[list[str]], stage: int) -> None:
         _put(g, cx + dx + (1 if dx > 0 else -1) * spread, dy, ch)
 
 
-def _corpse_heap(lean: int = 0) -> list[list[str]]:
+def _cloak_heap(lean: int = 0) -> list[list[str]]:
+    """The corpse: a crumpled cloak mound with the hood fallen forward and a
+    last dim eye-glow guttering out."""
     g = _blank()
     cx = _CX + lean
     _ground(g, lean)
-    _span(g, 26, cx - 6, cx + 6, "M")
-    _span(g, 27, cx - 7, cx + 7, "M")
-    _span(g, 28, cx - 8, cx + 8, "M")
-    _span(g, 29, cx - 8, cx + 8, "m")
-    # a horn + claw jutting from the pile
-    _put(g, cx - 6, 25, "b")
-    _put(g, cx - 7, 24, "B")
-    _put(g, cx + 6, 26, "b")
-    _put(g, cx + 2, 25, "b")
+    _span(g, 38, cx - 6, cx + 6, "M")
+    _span(g, 39, cx - 9, cx + 9, "M")
+    _span(g, 40, cx - 11, cx + 11, "M")
+    _span(g, 41, cx - 11, cx + 11, "M")
+    _span(g, 42, cx - 10, cx + 10, "m")
+    # fallen hood lump slumped forward-left
+    _span(g, 36, cx - 5, cx + 1, "M")
+    _span(g, 37, cx - 7, cx + 3, "M")
+    _put(g, cx - 3, 38, "e")    # guttering eye-glow
+    _put(g, cx - 2, 38, "e")
     _shade(g)
     _outline(g)
     return g
@@ -601,46 +594,46 @@ def _corpse_heap(lean: int = 0) -> list[list[str]]:
 
 def _player_frames(headgear: str = "horns") -> list[list[list[str]]]:
     """The 41-frame v2 sequence: IDLE6 RUN6 THROW8 DASH4 HIT4 CATCH3 DEATH10.
-    `headgear` ('horns' for the Cur / 'antlers' for the Stag) changes the
-    silhouette so P0 and P1 read apart before color registers."""
+    `headgear` ('horns' -> Cur / 'antlers' -> Stag) selects the cloak build so
+    P0 and P1 read apart before color registers."""
     def D(**kw):
         return _draw_duelist(headgear=headgear, **kw)
 
     frames: list[list[list[str]]] = []
 
-    # IDLE (6): heavy breath; shoulders rise/settle.
+    # IDLE (6): slow hooded breath; the upper cloak rises and settles.
     for bob in (0, 0, -1, -1, 0, 1):
         frames.append(D(bob=bob))
 
-    # RUN (6): forward lean, leg cycle, body lifts on the passing/air beats.
+    # RUN (6): forward lean, the scarf/cloak streams back, boots cycle.
     run_cycle = [
         ("strideR", 0), ("air", -1), ("strideL", 0),
         ("strideR", -1), ("air", -1), ("strideL", 0),
     ]
     for leg, bob in run_cycle:
-        frames.append(D(lean=1, bob=bob, leg=leg, arm_l="back", arm_r="fwd"))
+        frames.append(D(lean=1, bob=bob, leg=leg))
 
-    # THROW (8): 3 anticipation, 1 release smear, 4 follow-through.
+    # THROW (8): 3 wind-up (lean back, sleeve cocked), 1 release smear, 4 follow.
     frames.append(D(lean=-1, arm_r="back"))
     frames.append(D(lean=-1, arm_r="back", hunch=-1))
     frames.append(D(lean=-2, arm_r="back", hunch=-1))
     rel = D(lean=1, arm_r="fwd")
-    for i in range(7):
-        _put(rel, min(31, _CX + 9 + i), 13, "e")
+    for i in range(9):                       # ember release smear off the hand
+        _put(rel, min(PLAYER_PX - 1, _CX + 13 + i), 21, "e")
     frames.append(rel)
     frames.append(D(lean=1, arm_r="fwd"))
     frames.append(D(lean=0, arm_r="fwd"))
-    frames.append(D(lean=0, arm_r="rest"))
+    frames.append(D(lean=0, arm_r="reach"))
     frames.append(D(lean=0))
 
-    # DASH (4): hard lunge, splayed legs, motion afterimage trailing back.
+    # DASH (4): hard lunge, scarf/cloak stretched back, motion afterimage.
     for k in range(4):
-        d = D(lean=2 + (k % 2), leg="splay", arm_l="back", arm_r="fwd", ground=False)
-        for t in (3, 5, 7):
-            for y in range(12, 24):
-                xx = max(0, _CX - 4)
+        d = D(lean=2 + (k % 2), leg="splay", arm_r="fwd", ground=False)
+        for t in (3, 6, 9):
+            for y in range(18, 36):
+                xx = max(0, _CX - 6)
                 if d[y][xx] in _BODY:
-                    _put(d, max(0, _CX - 3 - t), y, "e" if t == 3 else "m")
+                    _put(d, max(0, _CX - 5 - t), y, "e" if t == 3 else "m")
         frames.append(d)
 
     # HIT (4): white flash, then a recoiling stagger.
@@ -649,32 +642,32 @@ def _player_frames(headgear: str = "horns") -> list[list[list[str]]]:
     frames.append(D(lean=-1))
     frames.append(D(lean=0))
 
-    # CATCH (3): claw snaps up, spark pops, lowers.
+    # CATCH (3): sleeve snaps up, spark pops, lowers.
     frames.append(D(arm_r="up"))
     c1 = D(arm_r="up")
-    _spark_burst(c1, _CX + 8, 5)
+    _spark_burst(c1, _CX + (CUR.sh - 3) if headgear != "antlers" else _CX + (STAG.sh - 3), 11)
     frames.append(c1)
     frames.append(D(arm_r="reach"))
 
-    # DEATH (10): stagger -> fold -> buckle -> gore burst -> heap.
+    # DEATH (10): stagger -> fold -> buckle -> gore burst -> cloak heap.
     frames.append(D(lean=-1, hunch=-1))
     frames.append(D(lean=-2))
     frames.append(D(lean=-1, hunch=1))
-    frames.append(D(lean=0, hunch=2, leg="kneel"))
-    buckle = D(lean=0, hunch=3, leg="kneel")
+    frames.append(D(lean=0, hunch=2))
+    buckle = D(lean=0, hunch=3)
     _gore_chunks(buckle, 1)
     frames.append(buckle)
-    burst = D(lean=0, hunch=3, leg="kneel")
+    burst = D(lean=0, hunch=4)
     _gore_chunks(burst, 2)
     frames.append(burst)
-    burst2 = D(lean=0, hunch=4, leg="kneel")
+    burst2 = _cloak_heap()
     _gore_chunks(burst2, 3)
     frames.append(burst2)
-    disperse = _corpse_heap()
+    disperse = _cloak_heap()
     _gore_chunks(disperse, 4)
     frames.append(disperse)
-    frames.append(_corpse_heap())
-    frames.append(_corpse_heap())
+    frames.append(_cloak_heap())
+    frames.append(_cloak_heap())
 
     assert len(frames) == 41, f"expected 41 frames, got {len(frames)}"
     return frames
@@ -691,9 +684,9 @@ def _frames_for(side: str) -> list[list[list[str]]]:
 
 
 def player_sheet(side: str) -> Canvas:
-    """41-frame strip (32x32 cells): IDLE6 RUN6 THROW8 DASH4 HIT4 CATCH3 DEATH10.
-    Per ART_DIRECTION.md v2. P0 'the Cur' (horns) / P1 'the Stag' (antlers);
-    keys_for(side) recolors red->cyan."""
+    """41-frame strip (48x48 cells): IDLE6 RUN6 THROW8 DASH4 HIT4 CATCH3 DEATH10.
+    P0 'the Cur' (round hood) / P1 'the Stag' (peak hood + scarf); keys_for(side)
+    recolors red->cyan on top of the already-distinct silhouette."""
     frames = _frames_for(side)
     canvas = Canvas(PLAYER_PX * 41, PLAYER_PX)
     for i, art in enumerate(frames):
@@ -713,9 +706,9 @@ _ANIM_ROWS = [
 
 
 def duelist_contact_sheet(side: str) -> Canvas:
-    """Review sheet: each animation on its own row, scaled 6x on a void bg."""
+    """Review sheet: each animation on its own row, scaled 5x on a void bg."""
     frames = _frames_for(side)
-    scale = 6
+    scale = 5
     cell = PLAYER_PX * scale
     cols = max(n for _, _, n in _ANIM_ROWS)
     rows = len(_ANIM_ROWS)
@@ -726,6 +719,7 @@ def duelist_contact_sheet(side: str) -> Canvas:
             paint(tile, 0, 0, _grid_to_str(frames[start + i]), side=side)
             c.blit(tile, i * cell, r * cell, scale)
     return c
+
 
 
 # ===========================================================================
@@ -1758,6 +1752,78 @@ def arena_tile_sheet() -> Canvas:
     return c
 
 
+_PALETTE_RGB: "list[tuple[int, int, int]] | None" = None
+
+
+def _nearest_palette(rgba: tuple[int, int, int, int]) -> tuple[int, int, int, int]:
+    """Snap an RGBA tuple to the nearest of the 16 locked colors (alpha kept).
+    Keeps procedural blends (e.g. the floor vignette) inside the palette lock —
+    a smooth gradient isn't pixel art anyway; stepping to palette reads cleaner.
+    Enforced by scripts/check_palette.py."""
+    global _PALETTE_RGB
+    if _PALETTE_RGB is None:
+        _PALETTE_RGB = [v[:3] for v in PALETTE.values() if v[3] > 0]
+    r, g, b, a = rgba
+    nr, ng, nb = min(
+        _PALETTE_RGB, key=lambda c: (c[0] - r) ** 2 + (c[1] - g) ** 2 + (c[2] - b) ** 2
+    )
+    return (nr, ng, nb, a)
+
+
+# Hue-shifted ramps within the locked 16 (dark -> light). `_ramp_shade()` reads
+# a finished sprite, finds each material's rim, and steps the lit (top/left) rim
+# one toward LIGHT and the shadow (bottom/right) rim one toward DARK — the same
+# committed-light hue-shift the duelists get, applied to any flat asset so the
+# whole set reads as one hand. Thin/isolated pixels (<=1 solid neighbor) are
+# left alone so 1px linework isn't smeared. Colors not in a ramp are untouched.
+_RAMPS_NAMED = [
+    ["blood_dark", "p0_blood", "ember", "spark"],   # heat / red
+    ["deep_teal", "p1_cyan", "hit_white"],          # cool / cyan
+    ["warm_bone_shade", "bone", "hot_bone"],        # bone
+    ["deep_ash", "charcoal_line", "cold_stone"],    # stone
+]
+_RAMP_INDEX: "dict[tuple[int, int, int], tuple[int, int]] | None" = None
+
+
+def _ramp_shade(c: Canvas) -> None:
+    global _RAMP_INDEX
+    if _RAMP_INDEX is None:
+        _RAMP_INDEX = {}
+        for ri, names in enumerate(_RAMPS_NAMED):
+            for i, n in enumerate(names):
+                _RAMP_INDEX[PALETTE[n][:3]] = (ri, i)
+    W, H, px = c.width, c.height, c.pixels
+    nbr = ((1, 0), (-1, 0), (0, 1), (0, -1))
+
+    def solid(x: int, y: int) -> bool:
+        return 0 <= x < W and 0 <= y < H and px[y * W + x][3] > 0
+
+    out = px[:]
+    for y in range(H):
+        for x in range(W):
+            r, g, b, a = px[y * W + x]
+            if a == 0 or (r, g, b) not in _RAMP_INDEX:
+                continue
+            if sum(solid(x + dx, y + dy) for dx, dy in nbr) <= 1:
+                continue  # thin/isolated — leave it
+            ri, i = _RAMP_INDEX[(r, g, b)]
+            ramp = _RAMPS_NAMED[ri]
+            top = not solid(x, y - 1)
+            left = not solid(x - 1, y)
+            bot = not solid(x, y + 1)
+            right = not solid(x + 1, y)
+            if top or left:
+                ni = min(i + 1, len(ramp) - 1)
+            elif bot or right:
+                ni = max(i - 1, 0)
+            else:
+                continue
+            if ni != i:
+                nc = PALETTE[ramp[ni]]
+                out[y * W + x] = (nc[0], nc[1], nc[2], a)
+    c.pixels = out
+
+
 def training_floor() -> Canvas:
     """Moody Bone Cathedral floor — the 1000x1500 cm Anchor arena at 320x480
     source (rendered at fixed world size, so higher res is free detail).
@@ -1852,7 +1918,33 @@ def training_floor() -> Canvas:
             if edge < 26:
                 px = c.pixels[y * W + x]
                 f = (26 - edge) / 26 * 0.7
-                c.pixels[y * W + x] = tuple(round(px[i] * (1 - f) + void[i] * f) for i in range(4))
+                blended = tuple(round(px[i] * (1 - f) + void[i] * f) for i in range(4))
+                c.pixels[y * W + x] = _nearest_palette(blended)
+    return c
+
+
+# Per-arena floor tints. One shared composition (DESIGN_DIRECTION § 4): the
+# floor stays tier-6 quiet and the props carry identity, so each arena only
+# gets a restrained palette swap into a distinct dark hue register. Anchor is
+# the base `training_floor`, unchanged.
+_ARENA_FLOOR_SWAPS = {
+    "anchor": {},
+    # Crossing — colder: warm-bone accents + wall band shift to cold stone.
+    "crossing": {"warm_bone_shade": "cold_stone"},
+    # Reliquary — warm-dead: deep-ash field shifts to bruise shadow, warm-bone
+    # accents glow deep teal (sealed-temple light).
+    "reliquary": {"deep_ash": "bruise_shadow", "warm_bone_shade": "deep_teal"},
+}
+
+
+def arena_floor(arena: str = "anchor") -> Canvas:
+    """`training_floor` retinted per arena via a quiet palette swap — distinct
+    dark hue register, identical composition (DESIGN_DIRECTION § 4). Anchor is
+    byte-identical to `training_floor`."""
+    c = training_floor()
+    swap = {PALETTE[k]: PALETTE[v] for k, v in _ARENA_FLOOR_SWAPS[arena].items()}
+    if swap:
+        c.pixels = [swap.get(px, px) for px in c.pixels]
     return c
 
 
@@ -1903,6 +1995,7 @@ def _pyre_cell(stage: int) -> Canvas:
         c.set(cx - 2, 23, void)
         c.set(cx + 1, 23, void)
         c.line(cx - 3, 22, cx + 2, 26, char)
+    _ramp_shade(c)  # directional bone form (kept muted — bone ramp tops at hot-bone only on rims)
     return c
 
 
@@ -2035,7 +2128,7 @@ def bone_bridge_tile() -> Canvas:
 
 PIP_FILLED = """
 kkkkkkk.
-kMMMMMk.
+kBMMMMk.
 kMmMmMk.
 kMMMMMk.
 kMmMmMk.
@@ -2146,17 +2239,18 @@ def pickup_sheet() -> Canvas:
     c.set(ox + 10, 11, hw)
     c.set(ox + 14, 11, hw)
 
+    _ramp_shade(c)  # directional hue-shift form, palette-locked
     return c
 
 
 def score_pips() -> Canvas:
-    """Two rows: P0 (top) + P1 (bottom). 5 pips per row, 8x8 each.
-    Renders as filled-or-empty per round score; this sheet shows the
-    template strip with all-filled and all-empty side by side."""
-    c = Canvas(80, 16)
-    for i in range(5):
-        paint(c, i * 8, 0, PIP_FILLED, side="p0")
-        paint(c, i * 8, 8, PIP_FILLED, side="p1")
+    """3-cell 8x8 atlas: [empty, filled-P0, filled-P1]. The in-match HUD draws
+    five pips per player and indexes filled/empty by `MatchScore` (a filled pip
+    carries a 1px hot-bone inner highlight so it reads even in the team hue)."""
+    c = Canvas(24, 8)
+    paint(c, 0, 0, PIP_EMPTY, side="p0")   # 0: empty (void outline, cold-stone core)
+    paint(c, 8, 0, PIP_FILLED, side="p0")  # 1: filled P0 (blood)
+    paint(c, 16, 0, PIP_FILLED, side="p1")  # 2: filled P1 (cyan)
     return c
 
 
@@ -2624,6 +2718,9 @@ def main() -> None:
         ("assets/sprites/stains/p0_stain_sheet.png", stain_sheet("p0")),
         ("assets/sprites/stains/p1_stain_sheet.png", stain_sheet("p1")),
         ("assets/arenas/training_floor.png", training_floor()),
+        ("assets/arenas/anchor_floor.png", arena_floor("anchor")),
+        ("assets/arenas/crossing_floor.png", arena_floor("crossing")),
+        ("assets/arenas/reliquary_floor.png", arena_floor("reliquary")),
         ("assets/arenas/tile_sheet.png", arena_tile_sheet()),
         ("assets/sprites/arena/bone_pyre_sheet.png", bone_pyre_sheet()),
         ("assets/sprites/arena/chasm_strip.png", chasm_strip()),

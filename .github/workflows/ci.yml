@@ -29,3 +29,18 @@ jobs:
       - run: cargo check --workspace --locked
       - run: cargo nextest run --workspace --locked
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
+
+  art:
+    name: art gates (palette + silhouette)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install pillow
+      # The consistency backbone of the pixel atelier (docs/STYLE_BIBLE.md):
+      # every shipped sprite stays locked to the 16-color palette, and the two
+      # duelists must read apart by silhouette, not color (audit D-VQ-01).
+      - run: python3 scripts/check_palette.py
+      - run: python3 scripts/check_silhouettes.py
