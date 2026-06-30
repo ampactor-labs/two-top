@@ -1,8 +1,11 @@
 //! Phase 12 / M4: live Matchbox WebRTC netplay driver.
 //!
 //! Online play is opt-in: pass `--room <url>` on the desktop binary (or
-//! set `MATCHBOX_ROOM`). Absent ⇒ the local `SyncTestSession` couch-versus
-//! build is unchanged. When a room URL is present this module:
+//! set `MATCHBOX_ROOM`). The Android APK, launched from a tapped icon with
+//! no argv and no settable process env, instead reads a **compile-time**
+//! `TWOTOP_ROOM` baked at build time (`TWOTOP_ROOM=<url> cargo apk run ...`).
+//! Absent all three ⇒ the local `SyncTestSession` couch-versus build is
+//! unchanged. When a room URL is present this module:
 //!
 //!   1. builds a `WebRtcSocket` with a single **unreliable** channel and
 //!      drives its `MessageLoopFuture` on Bevy's `IoTaskPool` (ggrs has
@@ -69,9 +72,24 @@ pub struct NetplayConfig {
 pub struct LocalPlayerHandle(pub Option<usize>);
 
 impl NetplayConfig {
-    /// Read the room URL from `--room <url>` (first match) or, failing
-    /// that, the `MATCHBOX_ROOM` env var. Returns an all-`None` config for
-    /// the default local build.
+    /// Read the room URL, in precedence order: the `--room <url>` CLI flag,
+    /// then the `MATCHBOX_ROOM` runtime env var, then a `TWOTOP_ROOM` value
+    /// baked in at **compile time**. Returns an all-`None` config (local
+    /// couch-versus) when none are set.
+    ///
+    /// The compile-time fallback exists for Android: an APK is launched from
+    /// a tapped launcher icon, so it has no argv and no way to set a process
+    /// env var. Baking the room URL into the build is the only way the phone
+    /// can learn it without an in-app lobby text field (a tracked follow-up).
+    /// Build the APK pointed at a room with:
+    ///
+    /// ```text
+    /// TWOTOP_ROOM=ws://<host>:3536/two-top?next=2 cargo apk run -p app \
+    ///   --target aarch64-linux-android
+    /// ```
+    ///
+    /// Desktop builds left without `TWOTOP_ROOM` at compile time and without
+    /// `--room`/`MATCHBOX_ROOM` at runtime behave exactly as before.
     pub fn from_env_and_args() -> Self {
         let mut args = std::env::args().skip(1);
         while let Some(arg) = args.next() {
@@ -86,9 +104,18 @@ impl NetplayConfig {
                 };
             }
         }
-        Self {
-            room_url: std::env::var("MATCHBOX_ROOM").ok(),
-        }
+        // Runtime env var first, then the compile-time bake. Empty strings
+        // are treated as unset so a stray `TWOTOP_ROOM=` can't force a
+        // bogus online boot with a blank URL.
+        let room_url = std::env::var("MATCHBOX_ROOM")
+            .ok()
+            .filter(|s| !s.is_empty())
+            .or_else(|| {
+                option_env!("TWOTOP_ROOM")
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_string)
+            });
+        Self { room_url }
     }
 }
 

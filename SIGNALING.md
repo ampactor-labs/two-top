@@ -97,10 +97,14 @@ input UI yet.
 
 ## Configuring the build
 
-The room URL is a **runtime argument**, not a build-time constant —
-the live matchbox driver landed in `crates/app/src/netplay.rs` (M4).
-Online play is opt-in; the default build is unchanged (local SyncTest
-couch-versus).
+On desktop the room URL is a **runtime argument**, not a build-time
+constant — the live matchbox driver landed in `crates/app/src/netplay.rs`
+(M4). On **Android** there is no argv and no settable process env on a
+tapped-icon launch, so the APK additionally reads a **compile-time**
+`TWOTOP_ROOM` value baked at build time (precedence:
+`--room` > `MATCHBOX_ROOM` > compiled `TWOTOP_ROOM`). Online play is
+opt-in; the default build (none of the three set) is unchanged (local
+SyncTest couch-versus).
 
 The online build **skips the Title/lobby menu** (that's an M5,
 couch-only screen) and boots straight into `InMatch` — when a room URL
@@ -115,13 +119,20 @@ never shows).
 2. Launch the game pointed at a room:
 
    ```bash
+   # Desktop:
    cargo run -p app -- --room ws://<host>:3536/two-top?next=2
    # or, equivalently:
    MATCHBOX_ROOM=ws://<host>:3536/two-top?next=2 cargo run -p app
+
+   # Android (room URL baked in at build time):
+   TWOTOP_ROOM=ws://<host>:3536/two-top?next=2 \
+     cargo apk run -p app --target aarch64-linux-android
    ```
 
-   `--room <url>` takes precedence over `MATCHBOX_ROOM`. Absent both,
-   the build runs the local SyncTest session (no network).
+   `--room <url>` takes precedence over `MATCHBOX_ROOM`, which takes
+   precedence over the compiled-in `TWOTOP_ROOM`. Absent all three,
+   the build runs the local SyncTest session (no network). For a full
+   device-by-device test walkthrough see [`PLAYBOOK.md`](./PLAYBOOK.md).
 3. The lobby overlay (top-right, yellow text) cycles
    `idle → connecting → waiting peer → connected`. The online build
    installs **no** session up front — the sim idles session-less at
