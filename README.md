@@ -1,5 +1,9 @@
 # 2-Top
 
+[![CI](https://github.com/ampactor-labs/two-top/actions/workflows/ci.yml/badge.svg)](https://github.com/ampactor-labs/two-top/actions/workflows/ci.yml)
+[![Determinism](https://github.com/ampactor-labs/two-top/actions/workflows/determinism.yml/badge.svg)](https://github.com/ampactor-labs/two-top/actions/workflows/determinism.yml)
+[![Fuzz Soak](https://github.com/ampactor-labs/two-top/actions/workflows/fuzz_soak.yml/badge.svg)](https://github.com/ampactor-labs/two-top/actions/workflows/fuzz_soak.yml)
+
 A 1v1 rollback brawler written in Rust on Bevy, `bevy_ggrs`, and Matchbox WebRTC, targeting iOS, Android, and web (PWA) in portrait orientation. The gameplay borrows from Boomerang Fu: throw-and-recall, a dash with invincibility frames, one-hit kills, 30-second rounds, best-of-N. The interesting part is underneath. Every simulation has to run bit-identically on every platform, because two phones on opposite ends of a connection must agree on the exact game state or the match desyncs. That one constraint shapes the whole codebase.
 
 > **Naming.** The displayed name is **2-Top**. Code identifiers stay textual as `two-top` (directory), `two_top` (Rust crate), and `twotop` (Android bundle suffix), because Java package segments and Rust crate names can't start with a digit.
@@ -13,7 +17,7 @@ A determinism-first systems project that happens to be a game.
 - Determinism is verified in CI, not assumed. A SyncTest session catches single-machine nondeterminism on every job. A cross-platform replay matrix runs the same recorded match on linux-x64, linux-aarch64 under qemu, macOS on native ARM, and Android, then diffs per-frame, per-component checksums for byte-for-byte identity. Per-component logs make a desync diagnosable when one surfaces.
 - Eleven crates, 371 tests, clippy-clean under `-D warnings`, a pinned toolchain, and a committed `Cargo.lock` enforced with `--locked`. Replays are strictly version-matched with no migration path, so any change that touches the simulation bumps `sim_version`.
 
-The same concerns show up in any verifiable, competitive online system: reproducible state, agreement on shared state across a network, and fairness as a hard requirement rather than a feature.
+The same problems turn up in any competitive online system that has to stay honest: reproducing state exactly, and getting two machines to agree on it across a network. The whole architecture exists to guarantee that, because fairness can't be retrofitted.
 
 ## Design docs
 
@@ -26,7 +30,7 @@ The four documents at the repository root are the source of truth:
 
 ## Status
 
-Phases 0 through 18 are complete, plus the M6 version bump, which puts the project at release-candidate. What's in the build:
+Phases 0 through 18 are complete, plus the M6 version bump, which puts the project at release-candidate stage. What's in the build:
 
 - **Gameplay**: movement, dash with i-frames, the full boomerang loop (throw, ricochet, recall, catch), hits, death, respawn, first-to-5 rounds, and a deterministic input-driven rematch.
 - **Modes and input**: local couch-versus on desktop keyboard, touch input on mobile, and live WebRTC netplay with P2P session swap, desync detection, and forfeit. Online is opt-in via `--room` / `MATCHBOX_ROOM`.
