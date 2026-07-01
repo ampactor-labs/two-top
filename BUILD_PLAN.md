@@ -160,13 +160,13 @@ This is not a numbered phase — it's the smallest viable cross-platform-build u
 - `crates/sim/Cargo.toml` target-gated `android-activity` dep with `native-activity` feature, so `bevy_android`'s downstream `compile_error!` stops firing for android cross-compiles
 - `.github/workflows/determinism.yml` android matrix entry expanded from `-p fixed_math` to `--workspace --exclude app`, with a split run step (`cargo nextest run` for non-android, `cargo build --tests` for android since the runner can't execute aarch64 binaries)
 - `crates/app/src/lib.rs` carrying the Bevy app body with a `#[bevy_main]` entry; `crates/app/src/main.rs` slimmed to call `app::run()`
-- `crates/app/Cargo.toml` `[lib] crate-type = ["cdylib", "rlib"]` plus `[package.metadata.android]` block for cargo-apk (bundle id `com.ampactorlabs.twotop`, apk_label `2-Top`, portrait, min_sdk 24, target_sdk 34, INTERNET permission, touchscreen feature)
-- `SIDELOAD.md` operator runbook (NDK setup, cargo-apk install, ADB/USB debugging, the `cargo apk run -p app --target aarch64-linux-android` loop, troubleshooting table)
+- `crates/app/Cargo.toml` `[lib] crate-type = ["cdylib", "rlib"]` plus `[package.metadata.android]` block for cargo-apk (bundle id `com.ampactorlabs.twotop`, application label `2-Top`, portrait, min_sdk 24, target_sdk 34, INTERNET permission, touchscreen feature)
+- `SIDELOAD.md` operator runbook (NDK setup, cargo-apk install, ADB/USB debugging, the `cargo apk run -p app --lib --target aarch64-linux-android` loop, troubleshooting table)
 - Display name "2-Top" introduced as the user-facing identity; codebase identifiers stay `two-top` / `two_top` / `twotop` (Java/Rust naming rules forbid leading digits)
 
 **Exit criteria:**
 - Determinism matrix's `aarch64-linux-android` job builds `--workspace --exclude app` cleanly in CI (no `compile_error!`, no missing-feature panics)
-- Local `cargo apk run -p app --target aarch64-linux-android` produces an APK that installs on a tethered Android device and shows the Phase 7 visual smoke test
+- Local `cargo apk run -p app --lib --target aarch64-linux-android` produces an APK that installs on a tethered Android device and shows the Phase 7 visual smoke test
 - `cargo nextest run --workspace --locked` and `cargo clippy --workspace --locked -- -D warnings` stay green on host
 
 **Deliberately deferred:**
