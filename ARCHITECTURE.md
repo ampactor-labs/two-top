@@ -301,7 +301,7 @@ pub enum AppScreen { #[default] Title, InMatch }
 - **`Title`** — session-less. With no ggrs `Session` inserted, bevy_ggrs idles `GgrsSchedule` and the sim sits at frame 0. The title overlay carries the arena picker (1/2/3 keys, or a tap in the upper-half cycles arenas) and the settings keys (see § Settings). Pressing start (Space/Enter, or a tap in the lower half) transitions to `InMatch`.
 - **`InMatch`** — `OnEnter(InMatch)` spawns the two players, arena walls, and the selected arena's props; in couch (local SyncTest) mode it then inserts a *fresh* `SyncTestSession` via `build_synctest_session`, so the rollback frame count restarts at 0 every match. `OnExit(InMatch)` despawns every match/arena/play-spawned entity and removes the `Session<GgrsCfg>` so bevy_ggrs idles the sim back at frame 0.
 
-Online skips `Title` entirely — it boots straight into `InMatch` (the netplay lobby FSM is its lifecycle, not this menu) and `perform_swap` / the matchbox driver inserts the P2P session once the peer connects.
+Online also boots to `Title`. With a room URL configured, the title copy becomes "TAP TO FIND OPPONENT"; pressing start enters `InMatch`, starts the matchbox connection, and `perform_swap` inserts the P2P session once the peer connects. Arena selection still happens on the Title screen before the online connection starts.
 
 ## Settings
 

@@ -4,9 +4,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Repository status
 
-Phases 0–18 substantially complete. The workspace has 11 crates (`fixed_math`, `sim`, `render`, `input_touch`, `input_desktop`, `net`, `replay`, `replay_sync`, `sync_test`, `replay_viewer`, `app`) with 370 passing tests, clippy-clean, and cross-platform determinism matrix green. Full gameplay is implemented: movement, dash + i-frames, boomerang throw/ricochet/recall/catch, hits/death/respawn, round flow (first-to-5), replay codec + viewer with scrub, touch input, **desktop keyboard input (PC local couch versus)**, **live Matchbox WebRTC netplay (Phase 12 / M4: P2P session swap, desync detection, forfeit — loopback-verified)**, sprite animation + particles + 16-color palette, the **art 2.0 overhaul**, **three arenas (Phase 16: Anchor/Crossing/Reliquary)**, **pickups + perfect catch (Phase 17: all six modifier behaviors — Fire/Heavy/Bouncy/Curve/Multishot/Phantom)**, and the **Phase 18 game-feel layer**: screen shake + kill flash + kill-cam (one unified camera rig), synthesized audio (12 cues; lives in `app`, not `render`, so `cpal`/`alsa-sys` stay out of the determinism matrix), Android haptics (JNI `Vibrator`, Settings-gated), deterministic input-driven rematch (a THROW edge during `MatchOver` restarts the match), a Title/lobby screen with arena picker, persisted JSON settings (deadzone/haptics/sfx/music), and an `EFFECT_SPRITE_CAP = 500` particle cull. The release `sim::SIM_VERSION` is `1` (bumped from the `u32::MAX` dev sentinel in M6), and the committed canonical demo `tests/demos/canonical/match_v1.bmrg` is stamped version 1. Online play is opt-in via `--room`/`MATCHBOX_ROOM` (see `SIGNALING.md`); the couch (default) build boots into a Title/lobby screen with no ggrs session and installs a fresh SyncTest session on match start. Remaining work is tracked in `docs/plans/COMPLETION_PLAN.md`: desktop packaging (P.3b), web/WASM (P.5–P.6), and the release tail (git tag + operator checklist, M6 Tasks 6.1–6.2).
+Phases 0–18 substantially complete. The workspace has 11 crates (`fixed_math`, `sim`, `render`, `input_touch`, `input_desktop`, `net`, `replay`, `replay_sync`, `sync_test`, `replay_viewer`, `app`) with 393 passing tests, clippy-clean, and cross-platform determinism matrix green. Full gameplay is implemented: movement, dash + i-frames, boomerang throw/ricochet/recall/catch, hits/death/respawn, round flow (first-to-5), replay codec + viewer with scrub, touch input, **desktop keyboard input (dev/testing only)**, **live Matchbox WebRTC netplay (P2P session swap, desync detection, forfeit — loopback-verified)**, sprite animation + particles + 16-color palette, the **art 2.0 overhaul** (3-direction sprite atlas: side/back/front), **three arenas (Anchor/Crossing/Reliquary)**, **pickups + perfect catch (all six modifier behaviors)**, the **game-feel layer** (screen shake, kill flash, kill-cam, synthesized audio, Android haptics, deterministic rematch), the **depth-duel camera** (WORLD_TILT_Y=0.75 tabletop perspective, Y-axis spawns, per-client PerspectiveFlip for online), a Title/lobby screen with arena picker, and persisted JSON settings. `sim::SIM_VERSION` is `5`. The product is a **phone-vs-phone online fighter** — each player runs the APK on their Android device, taps Play, and the signaling server pairs them for a P2P match. The desktop build (`cargo run -p app`) is a dev/testing tool (local couch-versus with split keyboard). See `PLAYBOOK.md` for the end-to-end phone setup.
 
-The displayed name is **2-Top**. Identifiers stay textual because Java package segments and Rust crate names can't start with a digit: the repo directory is `two-top` (hyphen), Rust crate names use `two_top` (underscore), and the Android bundle suffix is `twotop`. Treat "2-Top" as the user-facing name (READMEs, apk_label, marketing) and `two-top`/`two_top`/`twotop` as identifiers (paths, imports, manifests).
+The displayed name is **2-Top**. Identifiers stay textual because Java package segments and Rust crate names can't start with a digit: the repo directory is `two-top` (hyphen), Rust crate names use `two_top` (underscore), and the Android bundle suffix is `twotop`. Treat "2-Top" as the user-facing name (READMEs, Android app label, marketing) and `two-top`/`two_top`/`twotop` as identifiers (paths, imports, manifests).
 
 ## Canonical docs — read order
 
@@ -77,14 +77,9 @@ cargo run -p replay_sync -- --fuzz <seed>
 
 ## Operator runbooks
 
-CI cannot verify everything — some Phase exit criteria are inherently
-operator-tested (real device or real network required):
-
-- **`SIDELOAD.md`** — Phase 7.5 Android sideloading (`cargo apk run`).
-- **`SIGNALING.md`** — Phase 12 netplay signaling server setup, the
-  three test gates (full match across networks, brief blip
-  reconnection, long-disconnect forfeit), and the matchbox lobby
-  configuration recipe.
+- **`PLAYBOOK.md`** — the primary hands-on reference. Covers the full ladder from laptop couch-versus to phone-vs-phone cross-network play, including signaling server setup, APK build, sideloading, and verification gates.
+- **`SIDELOAD.md`** — detailed Android toolchain setup (NDK, SDK, cargo-apk prerequisites).
+- **`SIGNALING.md`** — deep dive on the matchbox signaling protocol, server options, and debug helpers.
 
 ## Tooling conventions
 

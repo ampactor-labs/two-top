@@ -31,7 +31,7 @@ vibrator/speaker is a device), so the phone is the *only* place to confirm them.
 ### A.1 Prerequisites
 - [ ] `rustup target list --installed | grep aarch64-linux-android` lists the target;
       `$ANDROID_NDK_ROOT` (or `$ANDROID_NDK_HOME`) points at an NDK (r26+);
-      `cargo apk --version`, `adb version` both report; `adb devices` lists **one**
+      `cargo apk version`, `adb version` both report; `adb devices` lists **one**
       device with status `device` (not `unauthorized`/`offline`).
 - [ ] **Assets present + deterministic:** `python3 scripts/generate_audio.py`
       prints `Generating 12 cues → assets/audio/` (exit 0) and `git status --porcelain
@@ -39,7 +39,7 @@ vibrator/speaker is a device), so the phone is the *only* place to confirm them.
       | wc -l` == 12.
 
 ### A.2 Build, install, launch
-- [ ] `cargo apk run -p app --target aarch64-linux-android` cross-compiles,
+- [ ] `cargo apk run -p app --lib --target aarch64-linux-android` cross-compiles,
       packages (bundling `assets/` via the `assets = "../../assets"` manifest key),
       installs, and launches. A launcher icon **2-Top** appears; the app opens to the
       portrait **Title** screen and does not immediately exit.
@@ -60,8 +60,9 @@ vibrator/speaker is a device), so the phone is the *only* place to confirm them.
       desktop-only).
 - [ ] **Start + play:** tapping the **lower half** starts the match; duelists
       spawn, the 3-2-1-GO countdown runs, a fresh SyncTest session drives the sim.
-      Lower-left drag = move; right-side touch held/dragged = aim → release throws.
-      (**Note:** DASH/TAUNT have no touch affordance — not testable on touch.)
+      Lower-left drag = move; lower-right touch held/dragged = aim → release
+      throws; upper-right tap = dash. (**Note:** TAUNT has no touch affordance —
+      not testable on touch.)
 - [ ] **Couch-on-one-device is lockstep, not 1v1:** both duelists move identically
       from one touch (Android SyncTest = both players local). A true 1v1 needs two
       devices over netplay (§B). Confirm the mirror behavior is what's seen.
@@ -95,9 +96,10 @@ vibrator/speaker is a device), so the phone is the *only* place to confirm them.
 
 ## B. Netplay — real-network gates
 
-Per `SIGNALING.md`. The online build skips the Title menu and boots straight into
-`InMatch`; its lobby lifecycle is the netplay FSM (top-right yellow overlay).
-Arena selection online is the `TWOTOP_ARENA=anchor|crossing|reliquary` env var.
+Per `SIGNALING.md`. The online build boots to the Title screen, shows
+`TAP TO FIND OPPONENT`, and starts the signaling connection only after Play
+(tap lower half / Start). The top-right yellow overlay shows the netplay FSM.
+Arena selection works on the Title screen before connecting.
 
 > **Two peers, not two phones.** These gates need two *peers* on different
 > networks — pair your one Android phone (on cellular) with a **desktop** build
@@ -107,15 +109,18 @@ Arena selection online is the `TWOTOP_ARENA=anchor|crossing|reliquary` env var.
 ### B.0 Loopback pre-flight (one box)
 - [ ] **Single-box sanity:** `cargo install matchbox_server && matchbox_server`,
       then two `cargo run -p app -- --room ws://127.0.0.1:3536/two-top?next=2`
-      instances. Both reach `lobby: connected`, swap to P2P with agreed handles,
-      run a live match with **zero `DESYNC` events**; killing one forfeits the
-      survivor within ~2.5 s. Confirms the room/build plumbing before real networks.
+      instances. Both boot to Title; press Start in both. Both reach
+      `lobby: connected`, swap to P2P with agreed handles, run a live match with
+      **zero `DESYNC` events**; killing one forfeits the survivor within ~2.5 s.
+      Confirms the room/build plumbing before real networks.
 
 ### B.1 Gate 1 — connect + full match across networks
 - [ ] **Two devices on DIFFERENT networks** (e.g. one on cellular, one on wifi),
-      both launched at the same `ws://<host>:3536/two-top?next=2`. Within **~2 s**
-      both overlays reach `lobby: connected (<peer8>)` and the countdown begins.
-      (Handles: lower PeerId = handle 0, both peers compute the same assignment.)
+      both launched from builds pointed at the same
+      `ws://<host>:3536/two-top?next=2`. Both boot to Title; both press Play.
+      Within **~2 s** both overlays reach `lobby: connected (<peer8>)` and the
+      countdown begins. (Handles: lower PeerId = handle 0, both peers compute
+      the same assignment.)
 - [ ] **Full match, zero desync:** play every round to first-to-5. Both screens
       stay bit-identical; **no `DESYNC DETECTED` error** on target `two_top::net`
       (ggrs checksums every 30 frames). Match ends naturally at MatchOver.

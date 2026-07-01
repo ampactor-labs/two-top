@@ -95,7 +95,7 @@ You should see one device listed with status `device` (not `unauthorized` and no
 ## Day-to-day: build + install + run
 
 ```sh
-cargo apk run -p app --target aarch64-linux-android
+cargo apk run -p app --lib --target aarch64-linux-android
 ```
 
 That single command:
@@ -119,10 +119,17 @@ Synthesized SFX (`bevy_audio` + `wav`, 12 cues) and Android haptics (the JNI `Vi
 ### Build only (no install)
 
 ```sh
-cargo apk build -p app --target aarch64-linux-android --release
+CARGO_APK_RELEASE_KEYSTORE="$HOME/.android/debug.keystore" \
+CARGO_APK_RELEASE_KEYSTORE_PASSWORD=android \
+cargo apk build -p app --lib --target aarch64-linux-android --release
 ```
 
-The APK lands under `target/aarch64-linux-android/release/apk/`. Copy it off the dev box and sideload manually if you don't have the phone tethered.
+The signed release APK lands at `target/release/apk/app.apk`. Copy it off the
+dev box and sideload manually if you don't have the phone tethered. This signs
+with the local debug key for playtesting; use a real release/upload key for
+distribution. If the debug keystore does not exist yet, run the non-release
+`cargo apk build -p app --lib --target aarch64-linux-android` once to generate
+it.
 
 ### Tail logs
 

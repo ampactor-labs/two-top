@@ -15,7 +15,7 @@ A determinism-first systems project that happens to be a game.
 - A custom Q16.16 fixed-point math crate (`fixed_math`) carries all simulation math. `f32`, `f64`, and `glam` are banned from the `sim` crate so results never depend on a platform's floating-point behavior. State lives in `BTreeMap` / `BTreeSet`, hashing uses a portable hasher, and gameplay randomness comes from one rolled-back RNG.
 - Rollback netcode over peer-to-peer WebRTC, built on `bevy_ggrs` and Matchbox: input prediction, resimulation, desync detection, and forfeit on disconnect. Only level-signal inputs travel on the wire; edges are re-derived from rolled-back state so resimulation can't drop them.
 - Determinism is verified in CI, not assumed. A SyncTest session catches single-machine nondeterminism on every job. A cross-platform replay matrix runs the same recorded match on linux-x64, linux-aarch64 under qemu, macOS on native ARM, and Android, then diffs per-frame, per-component checksums for byte-for-byte identity. Per-component logs make a desync diagnosable when one surfaces.
-- Eleven crates, 371 tests, clippy-clean under `-D warnings`, a pinned toolchain, and a committed `Cargo.lock` enforced with `--locked`. Replays are strictly version-matched with no migration path, so any change that touches the simulation bumps `sim_version`.
+- Eleven crates, 393 tests, clippy-clean under `-D warnings`, a pinned toolchain, and a committed `Cargo.lock` enforced with `--locked`. Replays are strictly version-matched with no migration path, so any change that touches the simulation bumps `sim_version`.
 
 The same problems turn up in any competitive online system that has to stay honest: reproducing state exactly, and getting two machines to agree on it across a network. The whole architecture exists to guarantee that, because fairness can't be retrofitted.
 
@@ -33,12 +33,12 @@ The four documents at the repository root are the source of truth:
 Phases 0 through 18 are complete, plus the M6 version bump, which puts the project at release-candidate stage. What's in the build:
 
 - **Gameplay**: movement, dash with i-frames, the full boomerang loop (throw, ricochet, recall, catch), hits, death, respawn, first-to-5 rounds, and a deterministic input-driven rematch.
-- **Modes and input**: local couch-versus on desktop keyboard, touch input on mobile, and live WebRTC netplay with P2P session swap, desync detection, and forfeit. Online is opt-in via `--room` / `MATCHBOX_ROOM`.
+- **Modes and input**: local couch-versus on desktop keyboard, touch input on mobile, and live WebRTC netplay with P2P session swap, desync detection, and forfeit. Online is opt-in via `--room` / `MATCHBOX_ROOM` on desktop or compile-time `TWOTOP_ROOM` on Android.
 - **Content**: three arenas (Anchor, Crossing, Reliquary), pickups with a perfect-catch window, and six boomerang modifiers (Fire, Heavy, Bouncy, Curve, Multishot, Phantom). Sprite animation, particles, and a locked 16-color palette.
 - **Feel and polish**: screen shake and a kill-cam, synthesized audio (12 cues), Android haptics, a title and lobby screen with an arena picker, and persisted settings.
 - **Tooling**: a replay codec and a viewer with frame scrubbing.
 
-371 tests pass and the cross-platform determinism matrix is green. Remaining work is tracked in [`docs/plans/COMPLETION_PLAN.md`](./docs/plans/COMPLETION_PLAN.md): desktop packaging (P.3b), the web/WASM PWA build (P.5 and P.6), and the release tag.
+393 tests pass and the cross-platform determinism matrix is green. Remaining work is tracked in [`docs/plans/COMPLETION_PLAN.md`](./docs/plans/COMPLETION_PLAN.md): desktop packaging (P.3b), the web/WASM PWA build (P.5 and P.6), and the release tag.
 
 ## Build
 

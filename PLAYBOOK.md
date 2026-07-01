@@ -9,9 +9,9 @@ This doc is self-contained for the common flows. The deeper "why" lives in
 [`SIGNALING.md`](./SIGNALING.md) (netplay transport); you only need them if a
 step here misbehaves.
 
-> **Your kit.** One Linux laptop (Fedora) that doubles as the dev box and
-> Player 1, and one old Samsung Android phone as Player 2. Commands prefixed
-> with nothing run on the **laptop**; phone actions are called out explicitly.
+> **Your kit.** One Linux laptop (Fedora) as the dev box/signaling broker, and
+> two Android phones as the players. Commands prefixed with nothing run on the
+> **laptop**; phone actions are called out explicitly.
 
 ---
 
@@ -23,8 +23,8 @@ step here misbehaves.
 | 1 | The build is healthy (tests + lint + determinism) | no | no |
 | 2 | The netplay stack works (loopback, two processes) | no | local only |
 | 3 | The game runs **on the phone** (sideload, solo touch) | yes | no |
-| 4 | **Laptop vs phone, same Wi-Fi** | yes | LAN |
-| 5 | **Phone on cellular vs laptop on Wi-Fi** | yes | public internet |
+| 4 | **Phone vs phone, same Wi-Fi** | yes | LAN |
+| 5 | **Two devices on different networks** | yes | public internet |
 
 Rungs 0–3 work today with no caveats. Rung 4 is the first real cross-device
 match and the recommended milestone. Rung 5 is the hard one; do it last.
@@ -103,17 +103,17 @@ cargo run -p app -- --room ws://127.0.0.1:3536/two-top?next=2
 The `?next=2` pairs peers two at a time. The room name (`two-top`) namespaces
 your traffic.
 
-**What changes online:** an online build **skips the Title screen** and boots
-straight into the match. Arena selection online is via an env var, since the
-picker lives on the Title screen the online build never shows:
+**What changes online:** an online build boots to the **Title screen** like
+local — tap Play to connect. The connection to the signaling server starts
+when you tap Play, not at app launch. Arena selection works on the Title
+screen for both modes:
 
 ```sh
-TWOTOP_ARENA=crossing cargo run -p app -- --room ws://127.0.0.1:3536/two-top?next=2
-# values: anchor (default) | crossing | reliquary
+cargo run -p app -- --room ws://127.0.0.1:3536/two-top?next=2
 ```
 
-**Check (top-right yellow lobby overlay):** both windows cycle
-`idle → connecting → waiting peer → connected`, then play in lockstep with
+**Check (top-right yellow lobby overlay):** after tapping Play, both windows
+cycle `connecting → waiting peer → connected`, then play in lockstep with
 **zero desync**. Kill one process: the survivor forfeits (lobby shows
 `FORFEIT`, match ends) within a few seconds.
 
@@ -184,7 +184,7 @@ adb devices
 ### 3d. Build, install, run (solo)
 
 ```sh
-cargo apk run -p app --target aarch64-linux-android
+cargo apk run -p app --lib --target aarch64-linux-android
 ```
 
 This cross-compiles, packages, installs, and launches. A launcher icon
@@ -204,12 +204,12 @@ adb logcat --pid=$(adb shell pidof com.ampactorlabs.twotop)
 
 ---
 
-## Rung 4 — laptop vs phone, same Wi-Fi (the milestone)
+## Rung 4 — two phones, same Wi-Fi (the milestone)
 
-Both devices on the same home Wi-Fi. The laptop runs the signaling server;
-the phone and the laptop both join the same room by the laptop's LAN address.
-On one subnet, WebRTC usually connects directly on host candidates, so no
-STUN/TURN is needed.
+Both phones are on the same home Wi-Fi. The laptop only runs the signaling
+server; it is not a player. Both phones join the same room by the laptop's LAN
+address, then the WebRTC datachannel goes phone-to-phone. On one subnet, this
+usually connects directly on host candidates, so no STUN/TURN is needed.
 
 ### 4a. Find the laptop's LAN IP
 
@@ -223,21 +223,26 @@ Call this `<LAPTOP_IP>` below (e.g. `192.168.1.42`).
 
 ### 4b. Open the signaling port through the firewall
 
-Fedora's firewalld blocks inbound by default, so the phone can't reach the
-server until you open it. For a test session:
+Fedora's firewalld blocks inbound by default, so the phones can't reach the
+signaling server until you open it. For a test session:
 
 ```sh
-# Open the signaling WebSocket port
 sudo firewall-cmd --add-port=3536/tcp
+```
 
-# The WebRTC datachannel negotiates ephemeral UDP ports. The simplest thing
-# for a trusted home LAN test is to mark your Wi-Fi interface trusted for the
-# session (replace wlan0 with your interface from `ip -4 addr show`):
+This is **not** persistent (no `--permanent`), so a reboot or
+`firewall-cmd --reload` reverts it. That's deliberate for a test box.
+
+Only add the broader trusted-interface rule if the **laptop itself** is one of
+the peers in a laptop-vs-phone test, because then WebRTC UDP also has to reach
+the laptop:
+
+```sh
+# Optional laptop-peer rule; replace wlan0 with your Wi-Fi interface.
 sudo firewall-cmd --zone=trusted --add-interface=wlan0
 ```
 
-These are **not** persistent (no `--permanent`), so a reboot or
-`firewall-cmd --reload` reverts them. That's deliberate for a test box.
+That rule is unnecessary for the normal two-phone setup.
 
 ### 4c. Start the signaling server (laptop)
 
@@ -245,27 +250,50 @@ These are **not** persistent (no `--permanent`), so a reboot or
 matchbox_server --host 0.0.0.0 --port 3536
 ```
 
-### 4d. Bake the room URL into the phone build, install, launch
+### 4d. Bake the room URL into one APK
 
-The phone has no command line and no settable env var, so the room URL is
-baked in at **build time** via `TWOTOP_ROOM`:
+Phones launched from the Android icon have no command line and no settable env
+var, so the room URL is baked in at **build time** via `TWOTOP_ROOM`. For a
+small, optimized playtest APK, sign the release build with your local Android
+debug keystore:
 
 ```sh
+CARGO_APK_RELEASE_KEYSTORE="$HOME/.android/debug.keystore" \
+CARGO_APK_RELEASE_KEYSTORE_PASSWORD=android \
 TWOTOP_ROOM=ws://<LAPTOP_IP>:3536/two-top?next=2 \
-  cargo apk run -p app --target aarch64-linux-android
+  cargo apk build -p app --lib --target aarch64-linux-android --release
 ```
 
-(To pick the arena for the phone, also prefix `TWOTOP_ARENA=crossing`.)
+If `~/.android/debug.keystore` does not exist yet, run
+`cargo apk build -p app --lib --target aarch64-linux-android` once; cargo-apk
+will generate it. That debug APK is huge, so use the release APK below for
+sharing.
 
-### 4e. Join from the laptop
+The APK is:
 
 ```sh
-cargo run -p app -- --room ws://<LAPTOP_IP>:3536/two-top?next=2
+target/release/apk/app.apk
 ```
+
+Install it on each phone. With USB debugging, plug in one phone at a time and
+run:
+
+```sh
+adb install -r target/release/apk/app.apk
+```
+
+For the second phone, either repeat the ADB install or send that same
+`app.apk` via Drive/Bluetooth/email/USB transfer and tap it on the phone.
+
+### 4e. Launch both phones
+
+Both phones boot to the Title screen with **"TAP TO FIND OPPONENT"**. Pick the
+arena first if you want (tap the top area to cycle arenas), then both players
+tap the bottom half to connect.
 
 ### 4f. What to verify (Phase 12, Gate 1)
 
-- Both lobby overlays reach `connected` within ~2 seconds.
+- Both phone lobby overlays reach `connected` within ~2 seconds.
 - A 3-2-1 countdown starts on **both** screens together.
 - Move, throw, recall, kill, respawn — all in lockstep on both screens.
 - Score and match state stay identical on both devices for the full round
@@ -288,7 +316,7 @@ run `scripts/diagnose_desync.sh` on the per-frame checksum logs.
 
 ---
 
-## Rung 5 — phone on cellular vs laptop on Wi-Fi (the hard one)
+## Rung 5 — two devices on different networks (the hard one)
 
 This is real internet netplay, and it is materially harder than Rung 4 for
 two reasons. Do it only after Rung 4 is solid.
@@ -307,8 +335,9 @@ two reasons. Do it only after Rung 4 is solid.
 Once the server is public at, say, `wss://signal.example.com`, the device
 config is the same shape as Rung 4: laptop joins with
 `--room wss://signal.example.com/two-top?next=2`, and the phone APK is built
-with `TWOTOP_ROOM=wss://signal.example.com/two-top?next=2`. Verification is
-the same Gate 1–3 checklist as Rung 4.
+with `TWOTOP_ROOM=wss://signal.example.com/two-top?next=2`. Use the same
+debug-keystore-signed release flow as Rung 4 for local sideload playtests.
+Verification is the same Gate 1–3 checklist as Rung 4.
 
 > TURN/STUN wiring for the WebRTC layer is not yet a configurable build knob
 > in `crates/net`. Expect this rung to need a code change before it works; it
@@ -347,21 +376,29 @@ cargo run -p sync_test -- --frames 600 --check-distance 7
 # Signaling server
 matchbox_server --host 0.0.0.0 --port 3536
 
-# Laptop joins a room
+# Laptop joins a room (optional laptop peer / loopback testing)
 cargo run -p app -- --room ws://<HOST>:3536/two-top?next=2
 
 # Phone: install solo
-cargo apk run -p app --target aarch64-linux-android
+cargo apk run -p app --lib --target aarch64-linux-android
 
 # Phone: install pointed at a room (room URL baked at build time)
 TWOTOP_ROOM=ws://<HOST>:3536/two-top?next=2 \
-  cargo apk run -p app --target aarch64-linux-android
+  cargo apk run -p app --lib --target aarch64-linux-android
+
+# Phone APK to share/install on two phones
+CARGO_APK_RELEASE_KEYSTORE="$HOME/.android/debug.keystore" \
+CARGO_APK_RELEASE_KEYSTORE_PASSWORD=android \
+TWOTOP_ROOM=ws://<HOST>:3536/two-top?next=2 \
+  cargo apk build -p app --lib --target aarch64-linux-android --release
 
 # Laptop LAN IP
 hostname -I | awk '{print $1}'
 
-# Open firewall for a LAN test (non-persistent)
+# Open firewall for the laptop-hosted signaling server (non-persistent)
 sudo firewall-cmd --add-port=3536/tcp
+
+# Optional only when the laptop is also a WebRTC peer
 sudo firewall-cmd --zone=trusted --add-interface=wlan0
 
 # Phone logs
@@ -376,16 +413,41 @@ adb shell pm list features | grep vulkan
 
 ---
 
+## Passing the APK to a friend
+
+Build a signed release APK with the signaling URL baked in:
+
+```sh
+CARGO_APK_RELEASE_KEYSTORE="$HOME/.android/debug.keystore" \
+CARGO_APK_RELEASE_KEYSTORE_PASSWORD=android \
+TWOTOP_ROOM=ws://<HOST>:3536/two-top?next=2 \
+  cargo apk build -p app --lib --target aarch64-linux-android --release
+```
+
+The APK is at `target/release/apk/app.apk`. Send it via Google Drive,
+Bluetooth, email, USB transfer — whatever's easiest. Your friend enables
+"Install unknown apps" for the source app in their Android settings, taps the
+APK to install, and launches. Both players tap Play on the Title screen → the
+signaling server pairs you → you fight.
+
+This uses your local debug keystore to sign a release build for sideload
+playtesting. For store distribution, use a real upload/release key instead.
+
+For same-wifi: the signaling server runs on your machine (Rung 4 setup).
+For cross-network: deploy `matchbox_server` to a public host (see Rung 5).
+
 ## Known gaps (so you don't chase non-bugs)
 
 - **No in-app way to enter a room URL.** The lobby overlay is read-only.
   Desktop uses `--room`/`MATCHBOX_ROOM`; the phone uses the compile-time
-  `TWOTOP_ROOM` bake (Rung 4d). An in-app lobby text field is tracked future
-  work.
+  `TWOTOP_ROOM` bake (Rung 4d). An in-app lobby text field is future work.
 - **First-pair queue only.** The first two peers in a room get matched, in
-  arrival order. There are no room codes / private match codes yet, so don't
-  share a room name with anyone else mid-test.
-- **STUN/TURN isn't a build knob yet** (blocks Rung 5 cross-network play).
+  arrival order. No room codes / private match codes yet, so don't share a
+  room name with anyone else mid-test.
+- **STUN/TURN isn't a build knob yet** (blocks Rung 5 cross-network play
+  through restrictive carrier NATs).
 - **Cross-platform determinism is CI-only.** You verify single-machine
   determinism locally (SyncTest); the four-platform byte-identical matrix
   runs in CI.
+- **No touch taunt yet.** Touch controls cover move, throw/aim, and dash; taunt
+  remains desktop-only/debug-only.

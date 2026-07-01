@@ -87,11 +87,10 @@ join blocks until one of the first two leaves, then pairs with the
 fourth, and so on.
 
 Room codes (manual pairing) are not yet implemented in `crates/net` —
-add by parameterizing the room URL with a per-match code. Room codes
-and a Find-Match button are future work (noted in the
-`crates/app/src/lobby_overlay.rs` module doc); today that module is
-just a read-only `Text2d` `LobbyState` status label — there is no
-input UI yet.
+add by parameterizing the room URL with a per-match code. The Title
+screen already has a Play gesture that starts the connection; room-code
+entry and richer matchmaking UI are future work. The top-right
+`lobby_overlay` remains a read-only `Text2d` `LobbyState` status label.
 
 ---
 
@@ -106,12 +105,13 @@ tapped-icon launch, so the APK additionally reads a **compile-time**
 opt-in; the default build (none of the three set) is unchanged (local
 SyncTest couch-versus).
 
-The online build **skips the Title/lobby menu** (that's an M5,
-couch-only screen) and boots straight into `InMatch` — when a room URL
-is present, `lib.rs` inserts `AppScreen::InMatch` directly. Arena
-selection online is therefore via the `TWOTOP_ARENA=anchor|crossing|reliquary`
-env var (the couch arena picker lives on the Title screen, which online
-never shows).
+Online builds still boot to the Title screen. When a room URL is present,
+the title copy changes to `TAP TO FIND OPPONENT`; tapping the lower half
+or pressing Start enters `InMatch`, and `MatchboxPlugin` opens the
+signaling connection from `OnEnter(InMatch)`. Arena selection works on
+that Title screen before connecting. `TWOTOP_ARENA=anchor|crossing|reliquary`
+is still a useful startup default for desktop automation, but it is no
+longer the only online arena selector.
 
 1. Start a signaling server (local dev): `matchbox_server` (defaults to
    `0.0.0.0:3536`). For a real deployment see "Choosing a signaling
@@ -126,19 +126,19 @@ never shows).
 
    # Android (room URL baked in at build time):
    TWOTOP_ROOM=ws://<host>:3536/two-top?next=2 \
-     cargo apk run -p app --target aarch64-linux-android
+     cargo apk run -p app --lib --target aarch64-linux-android
    ```
 
    `--room <url>` takes precedence over `MATCHBOX_ROOM`, which takes
    precedence over the compiled-in `TWOTOP_ROOM`. Absent all three,
    the build runs the local SyncTest session (no network). For a full
    device-by-device test walkthrough see [`PLAYBOOK.md`](./PLAYBOOK.md).
-3. The lobby overlay (top-right, yellow text) cycles
-   `idle → connecting → waiting peer → connected`. The online build
-   installs **no** session up front — the sim idles session-less at
-   frame 0 until the peer connects, at which point `perform_swap`
-   *inserts* a live `P2PSession`. (Only the local/couch build runs a
-   SyncTest session, and that one is created on match-start in
+3. On the Title screen, tap the lower half or press Start. The lobby overlay
+   (top-right, yellow text) then cycles `connecting → waiting peer →
+   connected`. The online build installs **no** session up front — the sim
+   idles session-less at frame 0 until the peer connects, at which point
+   `perform_swap` *inserts* a live `P2PSession`. (Only the local/couch build
+   runs a SyncTest session, and that one is created on match-start in
    `screen::spawn_match`, not here.)
 
 ### Handle assignment (deterministic, peer-agreed)
