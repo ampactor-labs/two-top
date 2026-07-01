@@ -13,7 +13,7 @@ use core::time::Duration;
 use fixed_math::{Fix, RectF, Vec2F};
 use sim::{
     ARENA_HALF_WIDTH_CM, DefaultInputsPlugin, GgrsCfg, PLAYER_HALF_EXTENT_CM, Player, PlayerInput,
-    PositionF, PreviousPositionF, SimPlugin, SynthesizedInputs, VelocityF, arena_walls,
+    PositionF, PreviousPositionF, SimPlugin, SynthesizedInputs, VelocityF, WallKind, arena_walls,
     resolve_collision,
 };
 
@@ -82,6 +82,60 @@ fn resolve_minimum_translation_picks_smaller_axis() {
     assert_eq!(push.x.abs(), Fix::const_from_int(5));
 }
 
+// ---- Tie-break: fully-embedded projectile in a long-thin wall ----
+//
+// Regression for the boomerang "flies straight out the top/bottom"
+// tunnel. When a 20 cm boomerang is fully embedded in a 50 cm-thick
+// boundary wall, overlap_x == overlap_y (both = the boomerang's full
+// footprint). The tie must reflect along the WALL's thin axis, not a
+// hardcoded X — otherwise the wall-normal velocity survives and the
+// projectile passes through.
+
+#[test]
+fn resolve_tie_reflects_on_north_wall_thin_axis_y() {
+    // North wall: x[-500,500] (1000 wide), y[750,800] (50 thin) → thin in Y.
+    let north = rect(-500, 750, 500, 800);
+    // Boomerang fully embedded at center (0, 760): rect x[-10,10] y[750,770].
+    let boom = rect(-10, 750, 10, 770);
+    let push = resolve_collision(boom, north).expect("overlap");
+    // Must push along Y (out the near face), NOT X (the old tunnel bug).
+    assert_eq!(push.x, Fix::ZERO, "north-wall tie must not push along X");
+    assert!(
+        push.y < Fix::ZERO,
+        "should push down/out of the wall, got {push:?}"
+    );
+    assert_eq!(push.y, Fix::const_from_int(-20));
+}
+
+#[test]
+fn resolve_tie_reflects_on_south_wall_thin_axis_y() {
+    // South wall: x[-500,500], y[-800,-750] → thin in Y.
+    let south = rect(-500, -800, 500, -750);
+    // Boomerang fully embedded at center (0, -760): rect y[-770,-750].
+    let boom = rect(-10, -770, 10, -750);
+    let push = resolve_collision(boom, south).expect("overlap");
+    assert_eq!(push.x, Fix::ZERO, "south-wall tie must not push along X");
+    assert!(
+        push.y > Fix::ZERO,
+        "should push up/out of the wall, got {push:?}"
+    );
+}
+
+#[test]
+fn resolve_tie_reflects_on_east_wall_thin_axis_x() {
+    // East wall: x[500,550] (50 thin), y[-800,800] (1600 tall) → thin in X.
+    let east = rect(500, -800, 550, 800);
+    // Boomerang fully embedded at center (510, 0): rect x[500,520] y[-10,10].
+    let boom = rect(500, -10, 520, 10);
+    let push = resolve_collision(boom, east).expect("overlap");
+    // E/W walls are thin in X — the tie must still push along X.
+    assert_eq!(push.y, Fix::ZERO, "east-wall tie must push along X");
+    assert!(
+        push.x < Fix::ZERO,
+        "should push left/out of the wall, got {push:?}"
+    );
+}
+
 // ---- integration test ----
 
 fn build_app() -> App {
@@ -121,8 +175,13 @@ fn build_app() -> App {
         VelocityF(Vec2F::ZERO),
     ));
 
-    // Spawn the arena walls in their canonical order.
-    for w in arena_walls() {
+    // Spawn the arena ring as OBSTACLE walls so it still contains players for
+    // these resolution tests — the real Boundary ring is now permeable to
+    // players (they run off into the OOB death zone), but the player-vs-wall
+    // push/slide/rest logic these tests exercise is identical and now lives on
+    // Obstacle cover.
+    for mut w in arena_walls() {
+        w.kind = WallKind::Obstacle;
         app.world_mut().spawn(w);
     }
     app
@@ -214,6 +273,9 @@ fn player_can_slide_along_wall() {
         app.update();
     }
     let after = player_pos(&mut app, 0);
-    assert_eq!(after.x, resting.x, "x drifted while sliding north along wall");
+    assert_eq!(
+        after.x, resting.x,
+        "x drifted while sliding north along wall"
+    );
     assert!(after.y > resting.y, "y didn't increase while sliding");
 }

@@ -7,7 +7,7 @@
 //! immediately at any alpha.
 
 use fixed_math::Vec2F;
-use sim::{snap_position, PositionF, PreviousPositionF};
+use sim::{PositionF, PreviousPositionF, snap_position};
 
 #[test]
 fn snap_position_collapses_prev_and_current_to_new() {

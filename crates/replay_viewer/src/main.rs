@@ -34,7 +34,7 @@ use bevy::prelude::*;
 use bevy_ggrs::GgrsPlugin;
 use bevy_ggrs::prelude::*;
 use fixed_math::Vec2F;
-use render::{EffectsPlugin, RenderSyncPlugin, player_atlas_layout, PLAYER_RENDER_SIZE};
+use render::{EffectsPlugin, PLAYER_RENDER_SIZE, RenderSyncPlugin, player_atlas_layout};
 use replay::{ReplayPlayback, ReplayPlaybackPlugin, decode_for_sim_version};
 use sim::{
     AnimState, BOOMERANG_HALF_EXTENT_CM, Boomerang, GgrsCfg, PLAYER_HALF_EXTENT_CM, Player,
@@ -158,7 +158,11 @@ fn main() -> ExitCode {
         .insert_resource(TotalFrames(total_frames))
         .insert_resource(SnapshotBuffer::default())
         .insert_resource(ViewerControls::default())
-        .add_systems(Startup, (setup, spawn_scrub_bar, spawn_frame_step_and_speed))
+        .init_resource::<render::PerspectiveFlip>()
+        .add_systems(
+            Startup,
+            (setup, spawn_scrub_bar, spawn_frame_step_and_speed),
+        )
         .add_systems(
             Update,
             (
@@ -351,10 +355,7 @@ fn setup(
         VelocityF(Vec2F::ZERO),
         Sprite {
             image: p1_image,
-            texture_atlas: Some(TextureAtlas {
-                layout,
-                index: 0,
-            }),
+            texture_atlas: Some(TextureAtlas { layout, index: 0 }),
             custom_size: Some(Vec2::splat(PLAYER_RENDER_SIZE)),
             ..default()
         },
@@ -378,7 +379,7 @@ fn setup(
 
     // Phase 16: spawn the selected arena's bone-pyre cover (same shared
     // helper as the app crate, so the viewer renders arenas identically).
-    render::spawn_arena_props(&mut commands, &asset_server, &mut atlases, &selected);
+    render::spawn_arena_props(&mut commands, &asset_server, &mut atlases, &selected, 1.0);
 
     // Frame counter HUD pinned to the upper-left, world-space (matches
     // the existing debug overlay convention in the app crate).
@@ -456,10 +457,7 @@ fn spawn_scrub_bar(mut commands: Commands, asset_server: Res<AssetServer>) {
 /// are sliced from a single 32x16 strip via the Sprite::rect crop:
 /// cell 0 (left half) = back, cell 1 (right half) = forward. Speed
 /// pips render as five colored squares in code (no asset).
-fn spawn_frame_step_and_speed(
-    mut commands: Commands,
-    asset_server: Res<AssetServer>,
-) {
+fn spawn_frame_step_and_speed(mut commands: Commands, asset_server: Res<AssetServer>) {
     let buttons_image = asset_server.load("hud/frame_step_buttons.png");
 
     // Both buttons share the same source texture; rect crops select
@@ -538,15 +536,45 @@ fn ensure_boomerang_visuals(
     }
 }
 
-/// Phase 15 cycle 1 — sync per-player atlas index from AnimState.
-/// Mirrors `app::sync_sprite_atlas_from_anim`. Lives here because
-/// the viewer is a separate binary that owns its own setup; a future
-/// refactor could lift this into a render-side helper crate.
-fn sync_sprite_atlas_from_anim(mut q: Query<(&AnimState, &mut Sprite), With<Player>>) {
-    for (anim, mut sprite) in &mut q {
-        if let Some(atlas) = sprite.texture_atlas.as_mut() {
-            atlas.index = anim.display_index() as usize;
+fn sync_sprite_atlas_from_anim(
+    mut q: Query<(&Player, &AnimState, &VelocityF, &mut Sprite)>,
+    mut facing: Local<std::collections::HashMap<usize, (bool, u16)>>,
+) {
+    let deadzone = fixed_math::Fix::const_from_int(3);
+    let frames_per_row = AnimState::TOTAL_ATLAS_FRAMES as usize;
+    for (player, anim, vel, mut sprite) in &mut q {
+        let (flip, dir) = facing.entry(player.handle).or_insert_with(|| {
+            if player.handle == 0 {
+                (false, render::FACING_BACK)
+            } else {
+                (false, render::FACING_FRONT)
+            }
+        });
+
+        let ax = vel.0.x.abs();
+        let ay = vel.0.y.abs();
+        if ax > deadzone || ay > deadzone {
+            if ay > ax {
+                if vel.0.y > fixed_math::Fix::ZERO {
+                    *dir = render::FACING_BACK;
+                } else {
+                    *dir = render::FACING_FRONT;
+                }
+                *flip = false;
+            } else {
+                *dir = render::FACING_SIDE;
+                if vel.0.x > deadzone {
+                    *flip = false;
+                } else if vel.0.x < -deadzone {
+                    *flip = true;
+                }
+            }
         }
+
+        if let Some(atlas) = sprite.texture_atlas.as_mut() {
+            atlas.index = (*dir as usize) * frames_per_row + anim.display_index() as usize;
+        }
+        sprite.flip_x = *flip;
     }
 }
 
@@ -855,14 +883,9 @@ fn handle_frame_step_click(
         return;
     };
     for (xform, button, sprite) in &step_buttons {
-        let half = sprite
-            .custom_size
-            .unwrap_or(Vec2::splat(48.0))
-            / 2.0;
+        let half = sprite.custom_size.unwrap_or(Vec2::splat(48.0)) / 2.0;
         let center = xform.translation.truncate();
-        if (world_pos.x - center.x).abs() <= half.x
-            && (world_pos.y - center.y).abs() <= half.y
-        {
+        if (world_pos.x - center.x).abs() <= half.x && (world_pos.y - center.y).abs() <= half.y {
             let next = (frame.0 as i64 + button.delta as i64)
                 .clamp(0, total.0.saturating_sub(1) as i64) as u32;
             controls.paused = true;
@@ -889,14 +912,9 @@ fn handle_speed_pip_click(
         return;
     };
     for (xform, pip, sprite) in &pips {
-        let half = sprite
-            .custom_size
-            .unwrap_or(Vec2::splat(14.0))
-            / 2.0;
+        let half = sprite.custom_size.unwrap_or(Vec2::splat(14.0)) / 2.0;
         let center = xform.translation.truncate();
-        if (world_pos.x - center.x).abs() <= half.x
-            && (world_pos.y - center.y).abs() <= half.y
-        {
+        if (world_pos.x - center.x).abs() <= half.x && (world_pos.y - center.y).abs() <= half.y {
             controls.speed_idx = pip.idx;
             return;
         }
@@ -970,8 +988,7 @@ fn handle_scrub_bar_click(
         return;
     };
 
-    let in_bar_x = world_pos.x >= -SCRUB_BAR_WIDTH / 2.0
-        && world_pos.x <= SCRUB_BAR_WIDTH / 2.0;
+    let in_bar_x = world_pos.x >= -SCRUB_BAR_WIDTH / 2.0 && world_pos.x <= SCRUB_BAR_WIDTH / 2.0;
     let in_bar_y = (world_pos.y - SCRUB_BAR_Y).abs() <= SCRUB_BAR_HEIGHT / 2.0;
     if !(in_bar_x && in_bar_y) {
         return;

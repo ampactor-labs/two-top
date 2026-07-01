@@ -176,8 +176,10 @@ fn pickups_rng_and_held_survive_snapshot_round_trip() {
             VelocityF(Vec2F::ZERO),
         ))
         .id();
-    *app.world_mut().entity_mut(p).get_mut::<HeldModifier>().unwrap() =
-        HeldModifier(Some(PickupKind::Curve));
+    *app.world_mut()
+        .entity_mut(p)
+        .get_mut::<HeldModifier>()
+        .unwrap() = HeldModifier(Some(PickupKind::Curve));
     app.world_mut().spawn((
         Pickup {
             kind: PickupKind::Multishot,
@@ -193,7 +195,10 @@ fn pickups_rng_and_held_survive_snapshot_round_trip() {
     let snap = SimSnapshot::capture(app.world_mut());
 
     // Clobber everything, then restore.
-    *app.world_mut().entity_mut(p).get_mut::<HeldModifier>().unwrap() = HeldModifier(None);
+    *app.world_mut()
+        .entity_mut(p)
+        .get_mut::<HeldModifier>()
+        .unwrap() = HeldModifier(None);
     {
         let e = {
             let mut q = app.world_mut().query::<(Entity, &Pickup)>();

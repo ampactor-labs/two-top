@@ -40,7 +40,11 @@ fn button_bits_are_unique() {
     }
     // No bit overlaps
     let combined: u8 = bits.iter().copied().fold(0u8, |a, b| a | b);
-    assert_eq!(combined.count_ones() as usize, bits.len(), "button bits overlap");
+    assert_eq!(
+        combined.count_ones() as usize,
+        bits.len(),
+        "button bits overlap"
+    );
 }
 
 #[test]
@@ -50,7 +54,11 @@ fn button_bits_in_low_nibble_only() {
         | PlayerInput::AIM_ACTIVE
         | PlayerInput::DASH_DOWN
         | PlayerInput::TAUNT_DOWN;
-    assert_eq!(combined & 0xF0, 0, "named button bits leak into reserved nibble");
+    assert_eq!(
+        combined & 0xF0,
+        0,
+        "named button bits leak into reserved nibble"
+    );
 }
 
 #[test]

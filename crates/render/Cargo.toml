@@ -20,6 +20,27 @@ bevy = { version = "=0.18.1", default-features = false, features = [
     "bevy_render",
     "bevy_core_pipeline",
     "bevy_sprite",
+    # The sprite + text DRAW pipeline. Bevy 0.18 split every renderable crate
+    # into a data half and a render half: `bevy_sprite` alone gives only the
+    # `Sprite`/`TextureAtlas` *components*, and `bevy_text` only the text data —
+    # the systems that actually rasterize them live behind `bevy_sprite_render`
+    # (and `bevy_text` routes its glyph draw through it). Without this, every
+    # sprite and every `Text2d` spawns, passes visibility/frustum culling, and
+    # then silently never draws (no error — the draw machinery simply isn't
+    # installed), so the whole window is just the camera clear color. Carried
+    # over from a pre-0.18 feature list where `bevy_sprite` still bundled its
+    # renderer; the determinism matrix is headless so CI never caught it. On
+    # `render` (the rendering crate) so unification covers every rendering
+    # binary — app, replay_viewer — from one place.
+    "bevy_sprite_render",
+    # The PNG codec. `bevy_image`'s default features do NOT include any image
+    # format, so with `default-features = false` Bevy can neither decode nor
+    # encode PNG. EVERY runtime texture (sprites, arena floors, HUD atlases) is
+    # a `.png`, so without this the AssetServer loads the bytes but produces no
+    # texture and the whole scene renders blank. Lives on `render` — the crate
+    # that draws the sprites — so feature-unification covers every rendering
+    # binary (app, replay_viewer) from one place.
+    "png",
 ] }
 fixed_math = { path = "../fixed_math" }
 sim = { path = "../sim" }

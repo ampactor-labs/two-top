@@ -53,14 +53,19 @@ pub type GgrsCfg = GgrsConfig<PlayerInput, NetAddr>;
 pub const TICK_HZ: usize = 60;
 pub const TICK_DT: Fix = Fix::lit("0.01666666666");
 
-/// Strict-match version stamped on `.bmrg` replays. Bumped to `1` for the
+/// Strict-match version stamped on `.bmrg` replays. `1` was the
 /// `v1.0.0-rc1` release (Milestone 6); pre-release `main` carried the
-/// `u32::MAX` dev sentinel. Any future sim-affecting change must bump this so
-/// old replays are routed back to their tagged binary rather than silently
-/// loaded into a binary with different sim semantics — and the committed
-/// canonical demo (which stamps this value, see `replay_sync::canonical_replay`)
-/// must be regenerated. See `replay::decode_for_sim_version` for the gate.
-pub const SIM_VERSION: u32 = 1;
+/// `u32::MAX` dev sentinel. Bumped to `2` for the boomerang-feel pass:
+/// the wall-ricochet tie-break/swept fix, the throw-distance auto-recall
+/// cap, two-thumb aim (throw direction + power from the aim), and the
+/// aim-gated animation read all change sim semantics. Any future
+/// sim-affecting change must bump this so old replays are routed back to
+/// their tagged binary rather than silently loaded into a binary with
+/// different sim semantics — and the committed canonical demo (which
+/// stamps this value, see `replay_sync::canonical_replay`) must be
+/// regenerated (`gen_canonical --write`). See
+/// `replay::decode_for_sim_version` for the gate.
+pub const SIM_VERSION: u32 = 5;
 
 // ---- Components ----
 
@@ -82,7 +87,18 @@ pub struct PreviousPositionF(pub Vec2F);
 pub struct VelocityF(pub Vec2F);
 
 #[derive(Component, Clone, Copy, PartialEq, Eq, Hash, Debug)]
-#[require(Rollback, DashState, StunFrames, Dead, AnimState, Empowered, HeldModifier)]
+#[require(
+    Rollback,
+    DashState,
+    StunFrames,
+    Dead,
+    AnimState,
+    Empowered,
+    HeldModifier,
+    OobTimer,
+    ThrowCapacity,
+    ThrowCharge
+)]
 pub struct Player {
     pub handle: usize,
 }
@@ -101,9 +117,10 @@ pub struct Empowered(pub bool);
 /// enough to land with practice.
 pub const PERFECT_CATCH_WINDOW_FRAMES: u32 = 10;
 
-/// Throw speed of an empowered (perfect-catch) throw. 65 vs the base 50:
-/// a clearly faster, harder-to-react-to fang.
-pub const EMPOWERED_THROW_SPEED_CM_PER_TICK: i32 = 65;
+/// Full-charge throw speed of an empowered (perfect-catch) throw. 31 vs the
+/// base 24 (~1.3×): a clearly faster, harder-to-react-to fang. Charge scales
+/// this down for a partial draw just like the base (see [`aimed_throw_speed`]).
+pub const EMPOWERED_THROW_SPEED_CM_PER_TICK: i32 = 31;
 
 /// Throw speed (cm/tick) for a throw, empowered or not. The single place
 /// the perfect-catch speed bonus is applied.
@@ -125,7 +142,9 @@ pub fn modified_throw_speed(empowered: bool, modifier: Option<PickupKind>) -> Fi
         THROW_SPEED_CM_PER_TICK
     };
     let cm = match modifier {
-        Some(PickupKind::Fire) => base + 15,
+        // +8 (halved with the boomerang-speed cut, 2026-06-30) keeps Fire ~1.3×
+        // the base; Heavy's ×4/5 is relative and auto-scales.
+        Some(PickupKind::Fire) => base + 8,
         Some(PickupKind::Heavy) => base * 4 / 5,
         _ => base,
     };
@@ -217,9 +236,14 @@ pub enum BoomerangState {
     /// Homing back to the owner. `since` is the frame the recall began —
     /// `catch_boomerangs` compares it to the catch frame for the
     /// perfect-catch window (the data only exists while it's meaningful).
-    Returning {
-        since: u32,
-    },
+    Returning { since: u32 },
+    /// Knocked LOOSE by inner cover: the fang ricocheted off an Obstacle and is
+    /// now decelerating to rest on the ground (Boomerang-Fu drop). It PERSISTS
+    /// there until claimed (no lifetime timer) — the owner can hold-recall it
+    /// (→ Returning) or walk over to re-arm, and an OPPONENT who walks over it
+    /// (while it isn't being recalled) STEALS it as an extra boomerang
+    /// (+1 `ThrowCapacity`). Cleared on round reset. Still ricochets off cover.
+    Loose,
 }
 
 #[derive(Component, Clone, Copy, PartialEq, Eq, Hash, Debug)]
@@ -248,10 +272,116 @@ pub struct BoomerangMods {
     pub despawn_at_frame: Option<u32>,
 }
 
-/// Throw speed in cm/tick. ~3.8× walk speed: noticeably faster than
-/// the player can move, so the throw reads as an attack rather than a
-/// projectile drift. 50 × 60 = 3000 cm/sec.
-pub const THROW_SPEED_CM_PER_TICK: i32 = 50;
+/// Throw origin of a recallable primary boomerang — the thrower's
+/// position at launch. A primary auto-recalls once it has travelled
+/// [`BOOMERANG_MAX_THROW_DISTANCE_CM`] straight-line from here, so a
+/// throw can't sail more than ~2/3 of the arena's long axis before
+/// turning back. Only primaries carry it (Multishot side-fangs are
+/// throw-and-forget); bare-spawned test boomerangs omit it and are
+/// simply uncapped. Straight-line-from-origin is the right "reach"
+/// metric: it bounds how far the fang can get from the thrower
+/// regardless of speed or ricochets.
+#[derive(Component, Clone, Copy, PartialEq, Eq, Hash, Debug)]
+#[require(Rollback)]
+pub struct ThrowOrigin(pub Vec2F);
+
+/// Per-throw reach (straight-line distance from [`ThrowOrigin`]) at which a
+/// primary auto-recalls. Scales with the throw's CHARGE — a soft tap barely
+/// reaches, a full charge threatens most of the board (see [`charged_reach`]).
+/// Only charged primaries carry it; bare-spawned test fangs omit it and fall
+/// back to the uncapped default.
+#[derive(Component, Clone, Copy, PartialEq, Eq, Hash, Debug)]
+#[require(Rollback)]
+pub struct ThrowReach(pub Fix);
+
+/// How long (frames) the owner has held THROW without a fang out — the throw
+/// CHARGE. Longer hold → faster, farther, more vicious fang ([`charge_power`]).
+/// Rolled back + checksummed; accumulated and consumed in `throw_boomerangs`.
+#[derive(Component, Clone, Copy, PartialEq, Eq, Hash, Debug, Default)]
+#[require(Rollback)]
+pub struct ThrowCharge(pub u32);
+
+/// How many boomerangs a player may have live at once. Starts at 1; stealing an
+/// opponent's loose fang (walking over it) grants +1 — you now duel with a
+/// "second boomerang" (the Boomerang-Fu pickup). Reset to 1 on respawn. Rolled
+/// back + checksummed.
+#[derive(Component, Clone, Copy, PartialEq, Eq, Hash, Debug)]
+#[require(Rollback)]
+pub struct ThrowCapacity(pub u32);
+
+impl Default for ThrowCapacity {
+    fn default() -> Self {
+        Self(1)
+    }
+}
+
+/// Frames of THROW-hold to reach full charge (max speed + reach). 45 ≈ 0.75 s:
+/// chargeable under pressure without feeling sluggish. A release before this
+/// throws proportionally weaker (never a dud — even an instant tap lobs).
+pub const CHARGE_MAX_FRAMES: u32 = 45;
+
+/// Per-tick velocity retention for a loose (tumbling-to-rest) fang. 0.86 bleeds
+/// ~half the speed every ~4-5 ticks, so a bounced fang slows and settles in
+/// well under a second instead of pinballing at constant velocity.
+pub const LOOSE_DRAG: Fix = Fix::lit("0.86");
+
+/// At or below this speed (cm/tick) a loose fang snaps to rest (velocity zero),
+/// so it actually stops instead of asymptotically creeping.
+pub const LOOSE_REST_SPEED_CM: i32 = 4;
+
+/// Maximum straight-line distance (cm) a primary boomerang travels from
+/// its throw origin before it auto-recalls. ~2/3 of the arena's 1500 cm
+/// long axis: a full-power throw threatens most of the board but always
+/// turns back, so the opponent keeps a "safe distance" to play around —
+/// the cat-and-mouse spacing that makes a 1v1 boomerang duel tick.
+/// Tunable; 750 (= 1/2 longways) is the tighter alternative.
+pub const BOOMERANG_MAX_THROW_DISTANCE_CM: i32 = 1000;
+
+/// Full-charge throw speed in cm/tick — the fastest a fang launches (at max
+/// [`ThrowCharge`]). Lowered to 24 (2026-06-30 charge pass) so the whole game
+/// runs slower/floatier and the DASH gains value by contrast. A partial charge
+/// scales this down toward `THROW_SPEED × MIN_THROW_POWER_FRAC` (see
+/// [`aimed_throw_speed`]). 24 × 60 = 1440 cm/sec at full draw.
+pub const THROW_SPEED_CM_PER_TICK: i32 = 24;
+
+/// Floor of the charge→speed ramp: a zero-charge (instant tap) throw launches
+/// at `base × MIN_THROW_POWER_FRAC`, a full charge at `base × 1.0`. 0.35 makes a
+/// tap a weak lob and a full charge ~3× as fast — the charge is worth holding.
+/// Direction comes from the aim/stick; charge scales only magnitude.
+pub const MIN_THROW_POWER_FRAC: Fix = Fix::lit("0.35");
+
+/// Charge-scaled launch speed (cm/tick) for a unit direction: scales `base`
+/// (the full-charge speed, incl. empowered/modifier) by `power` (clamped [0,1])
+/// across `[MIN_THROW_POWER_FRAC, 1.0]`. Pure so it's matrix-deterministic.
+/// Historically named for the two-thumb aim drag; `power` is now the throw
+/// CHARGE ([`charge_power`]).
+pub fn aimed_throw_speed(base: Fix, power: Fix) -> Fix {
+    let p = power.clamp(Fix::ZERO, Fix::const_from_int(1));
+    let frac = MIN_THROW_POWER_FRAC + (Fix::const_from_int(1) - MIN_THROW_POWER_FRAC) * p;
+    base * frac
+}
+
+/// Charge fraction [0,1] from held frames: `frames / CHARGE_MAX_FRAMES`, capped.
+pub fn charge_power(frames: u32) -> Fix {
+    Fix::const_from_int(frames.min(CHARGE_MAX_FRAMES) as i32)
+        / Fix::const_from_int(CHARGE_MAX_FRAMES as i32)
+}
+
+/// Charge→reach endpoints (cm). Min: a tap lands close. Max: ~2/3 of the
+/// 1500 cm long axis, so even a full charge always turns back — the cat-and-
+/// mouse spacing that makes a 1v1 boomerang duel tick.
+pub const REACH_MIN_CM: i32 = 300;
+pub const REACH_MAX_CM: i32 = 1100;
+
+/// Per-throw auto-recall reach (cm) from the charge: interpolates
+/// `[REACH_MIN_CM, REACH_MAX_CM]` by `power`. Straight-line from the throw
+/// origin (see [`ThrowReach`]). Pure for matrix determinism.
+pub fn charged_reach(power: Fix) -> Fix {
+    let p = power.clamp(Fix::ZERO, Fix::const_from_int(1));
+    let min = Fix::const_from_int(REACH_MIN_CM);
+    let max = Fix::const_from_int(REACH_MAX_CM);
+    min + (max - min) * p
+}
 
 /// Boomerang collision half-extent in cm. Smaller than the player's
 /// 16 cm: ~10 cm gives a 20 cm catch/hit footprint that reads as a
@@ -261,7 +391,8 @@ pub const BOOMERANG_HALF_EXTENT_CM: i32 = 10;
 /// Recall speed in cm/tick. A touch faster than `THROW_SPEED` so the
 /// boomerang catches up to a player who's moved forward since the
 /// throw — recall reads as "reeling in" rather than "drifting back".
-pub const RECALL_SPEED_CM_PER_TICK: i32 = 55;
+/// A touch above the full-charge throw speed (26 vs 24) so recall still reels in.
+pub const RECALL_SPEED_CM_PER_TICK: i32 = 26;
 
 /// Distance from the world origin at which a boomerang is despawned.
 /// Generously outside the arena (1000 cm half-extent of the visible
@@ -296,22 +427,20 @@ pub const THROW_FORGIVENESS_FRAMES: usize = 6;
 pub fn try_throw_direction(
     history_ring: &[PlayerInput; INPUT_HISTORY_LEN],
     current_input: PlayerInput,
-    has_existing_boomerang: bool,
+    cannot_throw: bool,
 ) -> Option<Vec2F> {
-    if has_existing_boomerang {
+    if cannot_throw {
         return None;
     }
-    let just_released_this_tick = just_released(
+    // Fire ONLY on the exact release tick. The charge model makes the release
+    // deliberate (you hold to charge, then let go), so the old forgiveness-
+    // window scan is dropped — with `ThrowCapacity > 1` it would re-fire the
+    // same release across the window and throw several fangs from one press.
+    if !just_released(
         current_input,
         previous_input(history_ring),
         PlayerInput::THROW_DOWN,
-    );
-    let released_recently = released_within(
-        history_ring,
-        THROW_FORGIVENESS_FRAMES,
-        PlayerInput::THROW_DOWN,
-    );
-    if !just_released_this_tick && !released_recently {
+    ) {
         return None;
     }
     let stick = decode_stick(current_input);
@@ -350,7 +479,15 @@ pub fn player_rect(pos: Vec2F) -> RectF {
 /// this enum.
 #[derive(Component, Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum WallKind {
-    Solid,
+    /// The outer arena ring. Blocks PLAYERS (containment) but is PERMEABLE to
+    /// boomerangs — a thrown fang flies out over the edge and auto-returns to
+    /// the thrower (the Boomerang-Fu open-field model) instead of pinballing off
+    /// a hard border forever. (Out-of-bounds death for players is a later pass.)
+    Boundary,
+    /// Inner-layout cover (paintball-style crates/pads/hedges). Blocks players
+    /// AND ricochets boomerangs — and a fang that clips one then loses momentum
+    /// and settles to rest on the ground (see [`BoomerangState::Loose`]).
+    Obstacle,
 }
 
 /// Static arena geometry. Not a `Rollback` requirement — walls don't
@@ -371,6 +508,18 @@ pub const ARENA_HALF_WIDTH_CM: i32 = 500;
 pub const ARENA_HALF_HEIGHT_CM: i32 = 750;
 pub const WALL_THICKNESS_CM: i32 = 50;
 
+/// Frames a player must be continuously OUT OF BOUNDS (past the floor edge)
+/// before the void claims them — ~3 s at 60 Hz (the Boomerang-Fu "outside the
+/// map bites you" grace). Resets the instant they're back inside.
+pub const OOB_GRACE_FRAMES: u32 = 180;
+
+/// Per-player out-of-bounds frame counter (rolled back). 0 while inside the
+/// play area; at [`OOB_GRACE_FRAMES`] the player dies and the opponent scores.
+/// `#[require]`d by `Player` so every duelist carries it without touching spawns.
+#[derive(Component, Clone, Copy, PartialEq, Eq, Hash, Debug, Default)]
+#[require(Rollback)]
+pub struct OobTimer(pub u32);
+
 /// The four boundary walls in fixed spawn order. Returned as a
 /// const-friendly array so the app spawns them in the same order on
 /// every host. Determinism depends on this ordering (entity ids end
@@ -382,7 +531,7 @@ pub fn arena_walls() -> [Wall; 4] {
     [
         // North (top): full inner width, thickness above the arena.
         Wall {
-            kind: WallKind::Solid,
+            kind: WallKind::Boundary,
             rect: RectF::from_min_max(
                 Vec2F::from_cm(-inner_x, inner_y),
                 Vec2F::from_cm(inner_x, inner_y + t),
@@ -390,7 +539,7 @@ pub fn arena_walls() -> [Wall; 4] {
         },
         // South (bottom): full inner width, thickness below the arena.
         Wall {
-            kind: WallKind::Solid,
+            kind: WallKind::Boundary,
             rect: RectF::from_min_max(
                 Vec2F::from_cm(-inner_x, -inner_y - t),
                 Vec2F::from_cm(inner_x, -inner_y),
@@ -399,7 +548,7 @@ pub fn arena_walls() -> [Wall; 4] {
         // West (left): full corner-to-corner height (covers top-left
         // and bottom-left corners), thickness to the left.
         Wall {
-            kind: WallKind::Solid,
+            kind: WallKind::Boundary,
             rect: RectF::from_min_max(
                 Vec2F::from_cm(-inner_x - t, -inner_y - t),
                 Vec2F::from_cm(-inner_x, inner_y + t),
@@ -407,13 +556,48 @@ pub fn arena_walls() -> [Wall; 4] {
         },
         // East (right): mirror of west.
         Wall {
-            kind: WallKind::Solid,
+            kind: WallKind::Boundary,
             rect: RectF::from_min_max(
                 Vec2F::from_cm(inner_x, -inner_y - t),
                 Vec2F::from_cm(inner_x + t, inner_y + t),
             ),
         },
     ]
+}
+
+/// Inner `Obstacle` cover per arena — paintball-style crates/pillars that block
+/// players AND ricochet boomerangs (a fang that clips one is knocked Loose).
+/// Symmetric about both axes, clear of the player spawns (±100, 0/±60) and the
+/// per-arena props. Spawned in a fixed order so rollback entity ids stay
+/// bit-identical across hosts (same discipline as `arena_walls`).
+pub fn arena_obstacles_for(arena: ArenaId) -> [Wall; 4] {
+    let block = |cx: i32, cy: i32, hw: i32, hh: i32| Wall {
+        kind: WallKind::Obstacle,
+        rect: RectF::from_center_half_extents(Vec2F::from_cm(cx, cy), Vec2F::from_cm(hw, hh)),
+    };
+    match arena {
+        // Anchor: four crates boxing the central pyre — cover to juke around.
+        ArenaId::Anchor => [
+            block(-280, 300, 38, 38),
+            block(280, 300, 38, 38),
+            block(-280, -300, 38, 38),
+            block(280, -300, 38, 38),
+        ],
+        // Crossing: tall pillars flanking the central chasm.
+        ArenaId::Crossing => [
+            block(-300, 210, 30, 72),
+            block(300, 210, 30, 72),
+            block(-300, -210, 30, 72),
+            block(300, -210, 30, 72),
+        ],
+        // Reliquary: bars guarding the chain pyres + sigil doors.
+        ArenaId::Reliquary => [
+            block(0, 330, 64, 30),
+            block(0, -330, 64, 30),
+            block(-330, 0, 30, 64),
+            block(330, 0, 30, 64),
+        ],
+    }
 }
 
 /// Marker: render-side `sync_transforms_from_sim` skips interpolation for
@@ -466,6 +650,9 @@ impl AnimState {
     pub const CATCH: u8 = 5;
     /// One-shot death: stagger → bow → buckle → disperse → corpse mark.
     pub const DEATH: u8 = 6;
+    /// Looping throw CHARGE: crouched wind-up that tightens as the throw builds
+    /// (held while `ThrowCharge > 0`). Reads as coiled potential energy.
+    pub const CHARGE: u8 = 7;
 
     /// Per ART_DIRECTION.md v2 animation table. 41-frame atlas strip
     /// (32×32 source cells). `frame_count` returns the source-frame
@@ -481,6 +668,7 @@ impl AnimState {
             Self::HIT => 4,
             Self::CATCH => 3,
             Self::DEATH => 10,
+            Self::CHARGE => 4,
             _ => 6,
         }
     }
@@ -494,6 +682,7 @@ impl AnimState {
             Self::HIT => 24,
             Self::CATCH => 28,
             Self::DEATH => 31,
+            Self::CHARGE => 41,
             _ => 0,
         }
     }
@@ -512,6 +701,7 @@ impl AnimState {
             Self::HIT => 3,
             Self::CATCH => 3,
             Self::DEATH => 8,
+            Self::CHARGE => 6,
             _ => 9,
         }
     }
@@ -523,8 +713,8 @@ impl AnimState {
         matches!(anim_id, Self::THROW | Self::HIT | Self::CATCH | Self::DEATH)
     }
 
-    /// Total frames in the 41-frame player atlas strip.
-    pub const TOTAL_ATLAS_FRAMES: u16 = 41;
+    /// Total frames in the player atlas strip (IDLE..DEATH = 41, + CHARGE = 4).
+    pub const TOTAL_ATLAS_FRAMES: u16 = 45;
 
     /// Atlas index into the 41-frame player sheet for the current
     /// tick. Render layer reads this directly to pick a TextureAtlas
@@ -762,10 +952,10 @@ pub fn read_local_inputs(
 /// (2 * ARENA_HALF_HEIGHT_CM = 1500 cm) crosses in about 2 seconds at
 /// 60 Hz: 1500 cm / (13 cm/tick * 60 tick/s) ~= 1.92 s.
 ///
-/// Phase 9 exit criterion was "cross arena in ~2 seconds"; 13 cm/tick
-/// hits 1.92 s with integer-friendly arithmetic. Tuning this further is
-/// a Phase 9 verify-time decision once the value is felt on a phone.
-pub const WALK_SPEED_CM_PER_TICK: i32 = 13;
+/// Walk speed in cm/tick. Brought down to 8 (2026-06-30 charge pass) so the
+/// DASH (30 cm/tick, unchanged) reads as a big, valuable burst by contrast —
+/// ~3.75× walk. Slower, more deliberate spacing pairs with the charged fang.
+pub const WALK_SPEED_CM_PER_TICK: i32 = 8;
 
 /// Decode the wire-format stick into a Fix-space vector with
 /// magnitude clamped to ≤ 1. Independent-axis i8 quantization means a
@@ -957,6 +1147,12 @@ pub fn hit_boomerang_player(
     mut players: Query<(Entity, &Player, &PositionF, &mut Dead, &StunFrames)>,
 ) {
     for (boom_entity, boom, boom_pos) in &boomerangs {
+        // A Loose (dropped) fang is a harmless pickup — you walk over it to
+        // steal/reclaim it (catch_boomerangs), it does NOT kill. Only Flying
+        // and Returning fangs are lethal.
+        if matches!(boom.state, BoomerangState::Loose) {
+            continue;
+        }
         let bb = boomerang_rect(boom_pos.0);
         // First pass: locate the kill target via an immutable iter.
         // Reading `&Dead` and `&StunFrames` lets us check liveness +
@@ -1037,6 +1233,80 @@ fn award_kill(victim: &mut Dead, killer_handle: usize, frame: u32, score: &mut M
     }
 }
 
+/// `GgrsSchedule` system: the DASH is a melee strike. A player mid-`Dashing`
+/// that overlaps a live opponent kills them on contact — no throw needed. The
+/// dasher is invincible during the dash (its own `StunFrames` i-frames), so a
+/// dash-into-a-dashing-opponent CLASHES (both protected, neither dies), while a
+/// dash into a non-dashing, non-i-frame opponent is a clean kill. Runs after
+/// `player_movement` + `wall_collision` so positions are settled; mirrors
+/// `hit_boomerang_player`'s two-pass deferred-`Dead` pattern (immutable scan →
+/// mutate) so coincident kills stay commutative and can't double-count.
+pub fn dash_melee_kill(
+    frame: Res<FrameCount>,
+    match_state: Res<MatchState>,
+    mut score: ResMut<MatchScore>,
+    mut players: Query<(
+        Entity,
+        &Player,
+        &PositionF,
+        &DashState,
+        &mut Dead,
+        &StunFrames,
+    )>,
+) {
+    if !match_state.is_in_round() {
+        return;
+    }
+    // Scan (victim_entity, killer_handle) with the query held immutably.
+    let mut kills: Vec<(Entity, usize)> = Vec::new();
+    for (_, dasher, dpos, dash, ddead, _) in &players {
+        if ddead.is_dying() || !matches!(dash, DashState::Dashing { .. }) {
+            continue;
+        }
+        let drect = player_rect(dpos.0);
+        for (ventity, victim, vpos, _, vdead, vstun) in &players {
+            if victim.handle == dasher.handle || vdead.is_dying() || vstun.0 > 0 {
+                // Same player, already dying, or invincible (incl. its own dash).
+                continue;
+            }
+            if drect.overlaps(player_rect(vpos.0)) {
+                kills.push((ventity, dasher.handle));
+            }
+        }
+    }
+    for (ventity, killer) in kills {
+        if let Ok((_, _, _, _, mut dead, _)) = players.get_mut(ventity)
+            && !dead.is_dying()
+        {
+            award_kill(&mut dead, killer, frame.0, &mut score);
+        }
+    }
+}
+
+/// `GgrsSchedule` system: wipe the round's boomerang litter and reset each
+/// player's arsenal at the top of every round. While `Countdown` is active
+/// (no throws happen — gameplay is gated on `is_in_round`) every fang is
+/// despawned and `ThrowCapacity`/`ThrowCharge` reset to their defaults, so a
+/// new round always starts clean — no leftover Loose fangs on the ground and no
+/// carried-over stolen "second boomerang". Idempotent across the countdown.
+pub fn reset_round_state(
+    match_state: Res<MatchState>,
+    mut commands: Commands,
+    boomerangs: Query<Entity, With<Boomerang>>,
+    mut players: Query<(&mut ThrowCapacity, &mut ThrowCharge)>,
+) {
+    if !matches!(*match_state, MatchState::Countdown { .. }) {
+        return;
+    }
+    for entity in &boomerangs {
+        commands.entity(entity).despawn();
+    }
+    for (mut cap, mut charge) in &mut players {
+        cap.0 = 1;
+        charge.0 = 0;
+    }
+}
+
 /// `GgrsSchedule` system: catch a Returning boomerang the moment its
 /// AABB overlaps the owner's. Despawns the boomerang — no health/score
 /// effect yet (Phase 11 will read this). Runs after `boomerang_physics`
@@ -1053,30 +1323,64 @@ fn award_kill(victim: &mut Dead, killer_handle: usize, frame: u32, score: &mut M
 pub fn catch_boomerangs(
     frame: Res<FrameCount>,
     mut commands: Commands,
-    mut players: Query<(&Player, &PositionF, &mut AnimState, &mut Empowered)>,
+    mut players: Query<(
+        &Player,
+        &PositionF,
+        &mut AnimState,
+        &mut Empowered,
+        &mut ThrowCapacity,
+    )>,
     boomerangs: Query<(Entity, &Boomerang, &PositionF)>,
 ) {
     for (entity, boom, boom_pos) in &boomerangs {
-        let BoomerangState::Returning { since } = boom.state else {
-            continue;
-        };
-        let Some((_, owner_pos, mut anim, mut empowered)) =
-            players.iter_mut().find(|(p, _, _, _)| p.handle == boom.owner_handle)
-        else {
-            continue;
-        };
-        if player_rect(owner_pos.0).overlaps(boomerang_rect(boom_pos.0)) {
-            commands.entity(entity).despawn();
-            // Perfect catch: caught within the window of recall starting.
-            // `frame >= since` always (recall began in the past), so this
-            // can't underflow.
-            if frame.0 - since <= PERFECT_CATCH_WINDOW_FRAMES {
-                empowered.0 = true;
+        let bb = boomerang_rect(boom_pos.0);
+        match boom.state {
+            // Flying fangs aren't catchable, else a throw whose spawn overlaps
+            // the owner would self-catch on tick 1.
+            BoomerangState::Flying => continue,
+            // A Returning fang is caught only by its OWNER; a catch inside the
+            // recall window empowers the next throw (perfect catch).
+            BoomerangState::Returning { since } => {
+                let Some((_, owner_pos, mut anim, mut empowered, _)) = players
+                    .iter_mut()
+                    .find(|(p, _, _, _, _)| p.handle == boom.owner_handle)
+                else {
+                    continue;
+                };
+                if player_rect(owner_pos.0).overlaps(bb) {
+                    commands.entity(entity).despawn();
+                    // `frame >= since` always (recall began in the past).
+                    if frame.0 - since <= PERFECT_CATCH_WINDOW_FRAMES {
+                        empowered.0 = true;
+                    }
+                    anim.anim_id = AnimState::CATCH;
+                    anim.ticks = 0;
+                }
             }
-            // Kick the CATCH animation — same pattern as throw_boomerangs
-            // setting THROW.
-            anim.anim_id = AnimState::CATCH;
-            anim.ticks = 0;
+            // A dropped (Loose) fang is picked up by ANYONE who walks over it.
+            // The owner reclaims it (re-arm, its slot frees on despawn); an
+            // OPPONENT steals it as a second boomerang (+1 ThrowCapacity). First
+            // overlap in handle order wins (deterministic).
+            BoomerangState::Loose => {
+                let picker = players
+                    .iter()
+                    .find(|(_, pos, _, _, _)| player_rect(pos.0).overlaps(bb))
+                    .map(|(p, _, _, _, _)| p.handle);
+                let Some(handle) = picker else {
+                    continue;
+                };
+                commands.entity(entity).despawn();
+                if let Some((_, _, mut anim, _, mut cap)) = players
+                    .iter_mut()
+                    .find(|(p, _, _, _, _)| p.handle == handle)
+                {
+                    if handle != boom.owner_handle {
+                        cap.0 = cap.0.saturating_add(1); // stolen → a 2nd boomerang
+                    }
+                    anim.anim_id = AnimState::CATCH;
+                    anim.ticks = 0;
+                }
+            }
         }
     }
 }
@@ -1086,41 +1390,75 @@ pub fn catch_boomerangs(
 /// resolution player position, and after `boomerang_physics` so the
 /// freshly-spawned boomerang doesn't take a phantom physics step on
 /// its spawn frame.
+/// The thrower query for [`throw_boomerangs`] — aliased to keep clippy's
+/// type-complexity lint happy (the charge pass grew it to eight members).
+type ThrowerQuery<'w, 's> = Query<
+    'w,
+    's,
+    (
+        &'static Player,
+        &'static Dead,
+        &'static PositionF,
+        &'static ThrowCapacity,
+        &'static mut AnimState,
+        &'static mut Empowered,
+        &'static mut HeldModifier,
+        &'static mut ThrowCharge,
+    ),
+>;
+
 pub fn throw_boomerangs(
     frame: Res<FrameCount>,
     match_state: Res<MatchState>,
     mut commands: Commands,
     inputs: Res<PlayerInputs<GgrsCfg>>,
     history: Res<InputHistory>,
-    mut players: Query<(
-        &Player,
-        &Dead,
-        &PositionF,
-        &mut AnimState,
-        &mut Empowered,
-        &mut HeldModifier,
-    )>,
-    boomerangs: Query<&Boomerang>,
+    mut players: ThrowerQuery,
+    boomerangs: Query<(&Boomerang, &BoomerangMods)>,
 ) {
     if !match_state.is_in_round() {
         return;
     }
-    for (player, dead, pos, mut anim, mut empowered, mut held) in &mut players {
+    for (player, dead, pos, capacity, mut anim, mut empowered, mut held, mut charge) in &mut players
+    {
         if dead.is_dying() {
+            charge.0 = 0;
             continue;
         }
-        let has_existing = boomerangs.iter().any(|b| b.owner_handle == player.handle);
+        // Each primary (non-secondary) fang the player owns occupies one of its
+        // `ThrowCapacity` slots. A free slot means it can throw a new fang;
+        // when every slot is out, a THROW press is a recall (recall_boomerangs).
+        let owned = boomerangs
+            .iter()
+            .filter(|(b, m)| b.owner_handle == player.handle && !m.is_secondary)
+            .count();
+        let can_throw = owned < capacity.0 as usize;
         let Some(ring) = history.0.get(&player.handle) else {
             continue;
         };
         let (curr, _) = inputs[player.handle];
-        let Some(unit_dir) = try_throw_direction(ring, curr, has_existing) else {
+        // Throw fires on the THROW RELEASE edge iff a slot is free. Otherwise
+        // the hold is either building charge (slot free) or, with every slot
+        // out, a recall press consumed by recall_boomerangs.
+        let Some(unit_dir) = try_throw_direction(ring, curr, !can_throw) else {
+            let throw_held = curr.buttons & PlayerInput::THROW_DOWN != 0;
+            charge.0 = if throw_held && can_throw {
+                (charge.0 + 1).min(CHARGE_MAX_FRAMES)
+            } else {
+                0
+            };
             continue;
         };
+        // Release: the accumulated CHARGE sets the fang's speed AND reach — a
+        // quick tap lobs a slow short fang, a full hold hurls a fast far one.
+        let power = charge_power(charge.0);
+        charge.0 = 0;
         // A held pickup rides this throw; consumed here. Perfect-catch
         // empowerment is also consumed.
         let modifier = held.0.take();
-        let velocity = unit_dir * modified_throw_speed(empowered.0, modifier);
+        let base_speed = modified_throw_speed(empowered.0, modifier);
+        let velocity = unit_dir * aimed_throw_speed(base_speed, power);
+        let reach = charged_reach(power);
         empowered.0 = false;
         // The primary (recallable, catchable) fang flies straight.
         commands.spawn((
@@ -1133,6 +1471,8 @@ pub fn throw_boomerangs(
                 is_secondary: false,
                 despawn_at_frame: None,
             },
+            ThrowOrigin(pos.0),
+            ThrowReach(reach),
             PositionF(pos.0),
             PreviousPositionF(pos.0),
             VelocityF(velocity),
@@ -1184,13 +1524,14 @@ pub fn boomerang_wall_collision(
     walls: Query<&Wall>,
     mut boomerangs: Query<(
         Entity,
-        &Boomerang,
+        &mut Boomerang,
         &BoomerangMods,
+        &PreviousPositionF,
         &mut PositionF,
         &mut VelocityF,
     )>,
 ) {
-    for (entity, boom, mods, mut pos, mut vel) in &mut boomerangs {
+    for (entity, mut boom, mods, prev, mut pos, mut vel) in &mut boomerangs {
         if matches!(boom.state, BoomerangState::Returning { .. }) {
             continue;
         }
@@ -1200,23 +1541,98 @@ pub fn boomerang_wall_collision(
         }
         let bouncy = matches!(mods.modifier, Some(PickupKind::Bouncy));
         for wall in &walls {
-            let bb = boomerang_rect(pos.0);
-            if let Some(push) = resolve_collision(bb, wall.rect) {
-                // Multishot side-fangs die on the first wall they touch
-                // rather than ricocheting — the fan is a one-way burst.
-                if mods.is_secondary {
-                    commands.entity(entity).despawn();
-                    break;
-                }
-                pos.0 = pos.0 + push;
-                vel.0 = reflect_velocity_for_push(vel.0, push);
-                // Bouncy gains speed with every ricochet, capped.
-                if bouncy {
-                    vel.0 = bouncy_accelerate(vel.0);
+            // Swept contact: resolves the common in-wall overlap exactly as
+            // before, and additionally catches a fast fang (Bouncy /
+            // Fire+empowered at up to 80 cm/tick) that would step entirely
+            // over a 50 cm wall in one tick without ever overlapping it.
+            let Some((contact, push)) = swept_wall_contact(prev.0, pos.0, wall.rect) else {
+                continue;
+            };
+            // Multishot side-fangs die on the first wall they touch rather than
+            // ricocheting — the fan is a one-way burst.
+            if mods.is_secondary {
+                commands.entity(entity).despawn();
+                break;
+            }
+            match wall.kind {
+                // The outer ring is PERMEABLE: a fang that reaches the edge
+                // turns around and homes back to the thrower (recall_boomerangs
+                // drives the homing) instead of pinballing off a hard border
+                // forever. Players are still contained by the boundary in
+                // wall_collision; only boomerangs pass.
+                // The outer ring is PERMEABLE to boomerangs: a primary fang
+                // flies straight OUT past the boundary (open-field model — the
+                // same way a player can now leave the field) and comes back via
+                // recall_boomerangs' distance cap (BOOMERANG_MAX_THROW_DISTANCE_CM),
+                // with the 4000cm despawn radius as the hard backstop. Players
+                // stay contained by the boundary in wall_collision. `continue`
+                // (not `break`) keeps checking the remaining obstacle walls so
+                // inner-cover ricochet on the same tick is unaffected.
+                WallKind::Boundary => continue,
+                // Inner cover ricochets the fang — and knocks a Flying fang
+                // LOOSE, so after the bounce it loses momentum and settles to
+                // rest instead of pinballing forever (Boomerang-Fu drop). A
+                // fang that's already Loose keeps ricocheting + decelerating.
+                WallKind::Obstacle => {
+                    pos.0 = contact + push;
+                    vel.0 = reflect_velocity_for_push(vel.0, push);
+                    if bouncy {
+                        vel.0 = bouncy_accelerate(vel.0);
+                    }
+                    if matches!(boom.state, BoomerangState::Flying) {
+                        boom.state = BoomerangState::Loose;
+                    }
                 }
             }
         }
     }
+}
+
+/// Maximum sub-segment length (cm) when sweeping a fast boomerang against
+/// a wall. A boomerang overlaps a 50 cm-thick wall across a ~70 cm band
+/// of center positions; sampling no farther apart than this guarantees at
+/// least one sample lands inside that band, so a fang travelling up to
+/// 80 cm/tick can't tunnel fully through between two ticks. Held well
+/// under the band for margin.
+pub const WALL_SWEEP_STEP_CM: i32 = 20;
+
+/// Swept boomerang-vs-wall contact. Returns `(sample_position, push)`:
+///
+/// - **Common case** — the boomerang's current AABB overlaps the wall:
+///   resolve in place, byte-identical to the old point check (no snap-back).
+/// - **Tunnel case** — the current AABB is clear but the prev→cur segment
+///   crossed the wall (a fast fang stepped over it in one tick): sub-sample
+///   the segment and reflect at the FIRST crossing, so the fang bounces at
+///   its entry face instead of escaping to the despawn radius.
+///
+/// Pure (no `f32`, no RNG) so it stays deterministic across the matrix.
+pub fn swept_wall_contact(prev: Vec2F, cur: Vec2F, wall: RectF) -> Option<(Vec2F, Vec2F)> {
+    // Common case: current position overlaps — resolve there directly.
+    if let Some(push) = resolve_collision(boomerang_rect(cur), wall) {
+        return Some((cur, push));
+    }
+    // Tunnel case: cur is clear; sub-sample prev->cur for a crossing.
+    // Chebyshev span avoids a sqrt and bounds the longest axis travel.
+    let dx = (cur.x - prev.x).abs();
+    let dy = (cur.y - prev.y).abs();
+    let span = if dx > dy { dx } else { dy };
+    let span_cm: i32 = span.to_num();
+    if span_cm <= WALL_SWEEP_STEP_CM {
+        // Step too short to tunnel a wall thicker than the sweep step.
+        return None;
+    }
+    let n = span_cm / WALL_SWEEP_STEP_CM + 1;
+    let delta = cur - prev;
+    let n_fix = Fix::const_from_int(n);
+    // i in 1..n — skip n (== cur, already checked clear above).
+    for i in 1..n {
+        let t = Fix::const_from_int(i) / n_fix;
+        let sample = prev + delta * t;
+        if let Some(push) = resolve_collision(boomerang_rect(sample), wall) {
+            return Some((sample, push));
+        }
+    }
+    None
 }
 
 /// Speed of a Bouncy boomerang after a ricochet: ×1.1, capped at
@@ -1228,8 +1644,9 @@ fn bouncy_accelerate(vel: Vec2F) -> Vec2F {
 }
 
 /// Bouncy speed ceiling — fast enough to be scary, bounded so it can't run
-/// away past the despawn radius in a single tick.
-pub const BOUNCY_MAX_SPEED_CM_PER_TICK: i32 = 80;
+/// away past the despawn radius in a single tick. Halved with the rest of the
+/// boomerang speeds (still 1.6× the base throw, as before).
+pub const BOUNCY_MAX_SPEED_CM_PER_TICK: i32 = 40;
 
 /// Curve's turn rate while flying: 1.5° per tick (≈90°/sec) in radians.
 pub const CURVE_RAD_PER_TICK: Fix = Fix::lit("0.0261799");
@@ -1390,41 +1807,84 @@ pub fn recall_velocity(boom_pos: Vec2F, owner_pos: Vec2F, speed: Fix) -> Vec2F {
 /// Steering: in `Returning` state, velocity is recomputed every tick
 /// to home toward the owner's current position — this is what lets
 /// the boomerang track a player who's still moving during recall.
+/// The boomerang query for [`recall_boomerangs`] — aliased for the
+/// type-complexity lint (per-throw `ThrowReach` grew it to six members).
+type RecallQuery<'w, 's> = Query<
+    'w,
+    's,
+    (
+        &'static mut Boomerang,
+        &'static BoomerangMods,
+        Option<&'static ThrowOrigin>,
+        Option<&'static ThrowReach>,
+        &'static PositionF,
+        &'static mut VelocityF,
+    ),
+>;
+
 pub fn recall_boomerangs(
     frame: Res<FrameCount>,
     match_state: Res<MatchState>,
     inputs: Res<PlayerInputs<GgrsCfg>>,
     history: Res<InputHistory>,
-    players: Query<(&Player, &PositionF)>,
-    mut boomerangs: Query<(&mut Boomerang, &BoomerangMods, &PositionF, &mut VelocityF)>,
+    players: Query<(&Player, &PositionF, &ThrowCapacity)>,
+    mut boomerangs: RecallQuery,
 ) {
     if !match_state.is_in_round() {
         return;
     }
     let recall_speed = Fix::const_from_int(RECALL_SPEED_CM_PER_TICK);
-    for (mut boom, mods, boom_pos, mut vel) in &mut boomerangs {
+    // Owned primary fangs per handle: a manual (THROW-press) recall only fires
+    // when the owner has NO free throw slot (every fang out). With a slot free
+    // a THROW press is a new charged throw (throw_boomerangs), not a recall.
+    let mut owned: std::collections::BTreeMap<usize, u32> = std::collections::BTreeMap::new();
+    for (boom, mods, _, _, _, _) in boomerangs.iter() {
+        if !mods.is_secondary {
+            *owned.entry(boom.owner_handle).or_default() += 1;
+        }
+    }
+    for (mut boom, mods, origin, reach, boom_pos, mut vel) in &mut boomerangs {
         // Multishot side-fangs never return — they're throw-and-forget.
         if mods.is_secondary {
             continue;
         }
-        let Some((_, owner_pos)) = players.iter().find(|(p, _)| p.handle == boom.owner_handle)
+        let Some((_, owner_pos, capacity)) = players
+            .iter()
+            .find(|(p, _, _)| p.handle == boom.owner_handle)
         else {
             continue;
         };
+        let no_free_slot = owned.get(&boom.owner_handle).copied().unwrap_or(0) >= capacity.0;
+        // Manual recall: owner pressed THROW_DOWN this tick AND has no slot to
+        // throw into (else the press is a fresh charged throw).
+        let manual = no_free_slot
+            && history.0.get(&boom.owner_handle).is_some_and(|ring| {
+                let (curr, _) = inputs[boom.owner_handle];
+                just_pressed(curr, previous_input(ring), PlayerInput::THROW_DOWN)
+            });
+        let max_dist = reach
+            .map(|r| r.0)
+            .unwrap_or_else(|| Fix::const_from_int(BOOMERANG_MAX_THROW_DISTANCE_CM));
         match boom.state {
             BoomerangState::Flying => {
-                let Some(ring) = history.0.get(&boom.owner_handle) else {
-                    continue;
-                };
-                let (curr, _) = inputs[boom.owner_handle];
-                let prev = previous_input(ring);
-                if just_pressed(curr, prev, PlayerInput::THROW_DOWN) {
+                // Auto recall: the fang reached its charge-scaled reach from the
+                // origin, so it turns back instead of sailing on / out.
+                let reached_max = origin.is_some_and(|o| (boom_pos.0 - o.0).length() >= max_dist);
+                if manual || reached_max {
                     boom.state = BoomerangState::Returning { since: frame.0 };
                     vel.0 = recall_velocity(boom_pos.0, owner_pos.0, recall_speed);
                 }
             }
             BoomerangState::Returning { .. } => {
                 vel.0 = recall_velocity(boom_pos.0, owner_pos.0, recall_speed);
+            }
+            BoomerangState::Loose => {
+                // A dropped fang lies still; a THROW_DOWN edge hold-recalls it
+                // back to the owner (you're disarmed until you retrieve it).
+                if manual {
+                    boom.state = BoomerangState::Returning { since: frame.0 };
+                    vel.0 = recall_velocity(boom_pos.0, owner_pos.0, recall_speed);
+                }
             }
         }
     }
@@ -1442,10 +1902,20 @@ pub fn recall_boomerangs(
 /// on integer overflow — saturate to MAX, then despawn next pass.
 pub fn boomerang_physics(
     mut commands: Commands,
-    mut q: Query<(Entity, &mut PositionF, &VelocityF), With<Boomerang>>,
+    mut q: Query<(Entity, &Boomerang, &mut PositionF, &mut VelocityF)>,
 ) {
     let max_r = Fix::const_from_int(BOOMERANG_DESPAWN_RADIUS_CM);
-    for (entity, mut pos, vel) in &mut q {
+    let rest_speed = Fix::const_from_int(LOOSE_REST_SPEED_CM);
+    for (entity, boom, mut pos, mut vel) in &mut q {
+        // A loose fang bleeds momentum to rest and then PERSISTS on the ground
+        // (no lifetime timer) until it's recalled, caught, stolen, or the round
+        // resets — a permanent second boomerang for whoever picks it up.
+        if matches!(boom.state, BoomerangState::Loose) {
+            vel.0 = vel.0 * LOOSE_DRAG;
+            if vel.0.length() <= rest_speed {
+                vel.0 = Vec2F::ZERO;
+            }
+        }
         let new_x = pos.0.x.saturating_add(vel.0.x);
         let new_y = pos.0.y.saturating_add(vel.0.y);
         pos.0 = Vec2F::new(new_x, new_y);
@@ -1460,21 +1930,27 @@ pub fn boomerang_physics(
 /// axis with the smaller overlap. `None` when there is no overlap.
 ///
 /// Axis selection uses 2×centers so we don't pay a fixed-point division.
-/// Tie-breaking (when both axes have equal overlap) picks the x axis.
-/// Rationale: a thin boomerang flying horizontally into a thick wall
-/// can produce equal overlaps on its first contact tick (overlap_x =
-/// penetration depth, overlap_y = full boomerang height); reflecting
-/// on x is the right answer there. For player vs walls, the smaller-
-/// overlap axis is unambiguous (players are square and walls are
-/// long), so the tie-break never bites.
+/// For strictly-unequal overlaps the smaller-overlap axis is the
+/// minimum-translation vector and is unambiguously correct.
+///
+/// **Tie-break (equal overlaps):** equal overlaps happen when a small
+/// projectile is *fully embedded* in a long wall — both axes' overlaps
+/// equal the projectile's full footprint. The MTV is then ambiguous, so
+/// we reflect along the **wall's thin axis** (its short dimension),
+/// which is always the correct ricochet normal for the long-thin
+/// boundary walls (North/South are thin in Y, East/West thin in X). The
+/// previous code hardcoded the X axis on a tie; that silently tunnelled
+/// fast vertical boomerangs straight through the North/South walls (the
+/// X-flip left their upward Y velocity intact, so they flew out the top
+/// or bottom of the arena and despawned, never returning).
 pub fn resolve_collision(player: RectF, wall: RectF) -> Option<Vec2F> {
     if !player.overlaps(wall) {
         return None;
     }
-    let overlap_x = core::cmp::min(player.max.x, wall.max.x)
-        - core::cmp::max(player.min.x, wall.min.x);
-    let overlap_y = core::cmp::min(player.max.y, wall.max.y)
-        - core::cmp::max(player.min.y, wall.min.y);
+    let overlap_x =
+        core::cmp::min(player.max.x, wall.max.x) - core::cmp::max(player.min.x, wall.min.x);
+    let overlap_y =
+        core::cmp::min(player.max.y, wall.max.y) - core::cmp::max(player.min.y, wall.min.y);
 
     // 2× center comparisons — sign of (player_2cx - wall_2cx) tells us
     // which side of the wall the player center sits on.
@@ -1483,7 +1959,16 @@ pub fn resolve_collision(player: RectF, wall: RectF) -> Option<Vec2F> {
     let player_2cy = player.min.y + player.max.y;
     let wall_2cy = wall.min.y + wall.max.y;
 
-    if overlap_x <= overlap_y {
+    // Smaller-overlap axis is the MTV; on a tie, fall back to the wall's
+    // thin axis — the correct ricochet normal for a fully-embedded
+    // projectile in a long-thin wall.
+    let push_along_x = if overlap_x != overlap_y {
+        overlap_x < overlap_y
+    } else {
+        wall.width() <= wall.height()
+    };
+
+    if push_along_x {
         let push = if player_2cx < wall_2cx {
             -overlap_x
         } else {
@@ -1511,10 +1996,24 @@ pub fn resolve_collision(player: RectF, wall: RectF) -> Option<Vec2F> {
 /// energy-bleeding bounce. If players want the boomerang to slow
 /// down, they recall it.
 pub fn reflect_velocity_for_push(vel: Vec2F, push: Vec2F) -> Vec2F {
+    // Reflect ONLY the velocity component still moving INTO the wall — i.e. with
+    // a sign opposite the outward `push`. A fang already moving away is left
+    // alone. Without this guard a fang in deep contact (e.g. a hard throw that
+    // penetrates a wall thicker than itself) gets its wall-normal velocity
+    // flipped EVERY tick, so it jitters in and out across the boundary forever
+    // and machine-guns the bounce cue (the "deafening" oscillation).
     if push.x != Fix::ZERO {
-        Vec2F::new(-vel.x, vel.y)
+        if (vel.x > Fix::ZERO) != (push.x > Fix::ZERO) {
+            Vec2F::new(-vel.x, vel.y)
+        } else {
+            vel
+        }
     } else if push.y != Fix::ZERO {
-        Vec2F::new(vel.x, -vel.y)
+        if (vel.y > Fix::ZERO) != (push.y > Fix::ZERO) {
+            Vec2F::new(vel.x, -vel.y)
+        } else {
+            vel
+        }
     } else {
         vel
     }
@@ -1527,16 +2026,66 @@ pub fn reflect_velocity_for_push(vel: Vec2F, push: Vec2F) -> Vec2F {
 /// over-correcting. Order-stability comes from Bevy's deterministic
 /// query iteration over the wall entities (spawned in fixed order in
 /// `app::setup`).
-pub fn wall_collision(
-    walls: Query<&Wall>,
-    mut players: Query<&mut PositionF, With<Player>>,
-) {
+pub fn wall_collision(walls: Query<&Wall>, mut players: Query<&mut PositionF, With<Player>>) {
     for mut pos in &mut players {
         for wall in &walls {
+            // The outer ring no longer contains players — they can run off the
+            // field into the out-of-bounds death zone (see `oob_death`), the
+            // Boomerang-Fu open-field model. Only inner Obstacle cover blocks.
+            if matches!(wall.kind, WallKind::Boundary) {
+                continue;
+            }
             let player = player_rect(pos.0);
             if let Some(push) = resolve_collision(player, wall.rect) {
                 pos.0 = pos.0 + push;
             }
+        }
+    }
+}
+
+/// `GgrsSchedule` system: the out-of-bounds death zone. A player past the floor
+/// edge accrues OOB frames; once continuously out for [`OOB_GRACE_FRAMES`] the
+/// void claims them and the opponent scores (Boomerang-Fu environmental kill).
+/// The counter resets the instant they're back inside; the already-dying are
+/// skipped (tick_respawn drops them back inside on respawn).
+pub fn oob_death(
+    frame: Res<FrameCount>,
+    match_state: Res<MatchState>,
+    mut score: ResMut<MatchScore>,
+    mut q: Query<(
+        &Player,
+        &mut PositionF,
+        &mut PreviousPositionF,
+        &mut Dead,
+        &mut OobTimer,
+    )>,
+) {
+    if !match_state.is_in_round() {
+        return;
+    }
+    let half_w = Fix::const_from_int(ARENA_HALF_WIDTH_CM);
+    let half_h = Fix::const_from_int(ARENA_HALF_HEIGHT_CM);
+    for (player, mut pos, mut prev, mut dead, mut oob) in &mut q {
+        if dead.is_dying() {
+            oob.0 = 0;
+            continue;
+        }
+        let out_of_bounds = pos.0.x.abs() > half_w || pos.0.y.abs() > half_h;
+        if out_of_bounds {
+            oob.0 += 1;
+            if oob.0 >= OOB_GRACE_FRAMES {
+                // Credit the opponent (2-player) so running out isn't free.
+                award_kill(&mut dead, 1 - player.handle, frame.0, &mut score);
+                // The void spits the corpse back to the spawn point immediately,
+                // so the dying body doesn't lie out of bounds for the whole
+                // death window (tick_respawn would otherwise only snap it on
+                // respawn). snap collapses pos+prev so the render lerp doesn't
+                // streak across the arena.
+                snap_position(&mut pos, &mut prev, respawn_position(player.handle));
+                oob.0 = 0;
+            }
+        } else {
+            oob.0 = 0;
         }
     }
 }
@@ -1562,14 +2111,13 @@ pub fn snap_position(pos: &mut PositionF, prev: &mut PreviousPositionF, new: Vec
     prev.0 = new;
 }
 
-/// Per-handle respawn point. Symmetric on the x axis so both players
-/// re-enter the round on equal footing rather than spawning on top of
-/// where they last died. Phase 16 will swap this for arena-specific
-/// respawn slots.
+/// Per-handle respawn point. Symmetric on the Y axis: P0 near/bottom,
+/// P1 far/top — the depth-duel axis. Both players re-enter the round
+/// on equal footing rather than spawning on top of where they last died.
 pub fn respawn_position(handle: usize) -> Vec2F {
     match handle {
-        0 => Vec2F::from_cm(-100, 0),
-        _ => Vec2F::from_cm(100, 0),
+        0 => Vec2F::from_cm(0, -300),
+        _ => Vec2F::from_cm(0, 300),
     }
 }
 
@@ -1592,11 +2140,15 @@ type PlayerStateQuery<'w, 's> = Query<
         &'static mut VelocityF,
         &'static mut DashState,
         &'static mut StunFrames,
+        &'static mut ThrowCapacity,
+        &'static mut ThrowCharge,
     ),
 >;
 
 pub fn tick_respawn(frame: Res<FrameCount>, mut q: PlayerStateQuery) {
-    for (player, mut dead, mut pos, mut prev, mut vel, mut dash, mut stun) in &mut q {
+    for (player, mut dead, mut pos, mut prev, mut vel, mut dash, mut stun, mut cap, mut charge) in
+        &mut q
+    {
         let Some(at) = dead.respawn_at_frame else {
             continue;
         };
@@ -1607,6 +2159,9 @@ pub fn tick_respawn(frame: Res<FrameCount>, mut q: PlayerStateQuery) {
         vel.0 = Vec2F::ZERO;
         *dash = DashState::default();
         *stun = StunFrames(0);
+        // Death forfeits any stolen "second boomerang" and pending charge.
+        cap.0 = 1;
+        charge.0 = 0;
         dead.respawn_at_frame = None;
     }
 }
@@ -1751,8 +2306,18 @@ pub fn apply_rematch(
     }
 
     // Players: symmetric clean reset — the same fields `tick_respawn` clears.
-    for (player, mut pos, mut prev, mut vel, mut dead, mut dash, mut stun, mut emp, mut held, mut anim) in
-        &mut players
+    for (
+        player,
+        mut pos,
+        mut prev,
+        mut vel,
+        mut dead,
+        mut dash,
+        mut stun,
+        mut emp,
+        mut held,
+        mut anim,
+    ) in &mut players
     {
         snap_position(&mut pos, &mut prev, respawn_position(player.handle));
         vel.0 = Vec2F::ZERO;
@@ -1819,6 +2384,7 @@ pub fn next_anim_state(
     stun: StunFrames,
     current: AnimState,
     is_moving: bool,
+    charging: bool,
 ) -> AnimState {
     let target_id = if dead.is_dying() {
         Some(AnimState::DEATH)
@@ -1832,6 +2398,9 @@ pub fn next_anim_state(
         };
     } else if matches!(dash, DashState::Dashing { .. }) {
         Some(AnimState::DASH)
+    } else if charging {
+        // Winding up a throw reads over run/idle — the coiled-charge pose.
+        Some(AnimState::CHARGE)
     } else if is_moving {
         Some(AnimState::RUN)
     } else {
@@ -1839,7 +2408,10 @@ pub fn next_anim_state(
     };
     let id = target_id.expect("priority above always assigns an anim_id");
     if id != current.anim_id {
-        AnimState { anim_id: id, ticks: 0 }
+        AnimState {
+            anim_id: id,
+            ticks: 0,
+        }
     } else {
         AnimState {
             anim_id: id,
@@ -1857,13 +2429,24 @@ pub fn next_anim_state(
 /// snaps to a single atlas frame per tick.
 pub fn advance_animation(
     inputs: Res<PlayerInputs<GgrsCfg>>,
-    mut q: Query<(&Player, &Dead, &DashState, &StunFrames, &mut AnimState)>,
+    mut q: Query<(
+        &Player,
+        &Dead,
+        &DashState,
+        &StunFrames,
+        &ThrowCharge,
+        &mut AnimState,
+    )>,
 ) {
-    for (player, dead, dash, stun, mut anim) in &mut q {
+    for (player, dead, dash, stun, charge, mut anim) in &mut q {
         let (curr, _) = inputs[player.handle];
-        let stick = decode_stick(curr);
-        let is_moving = stick.length() > DASH_MIN_STICK_MAG;
-        *anim = next_anim_state(*dead, *dash, *stun, *anim, is_moving);
+        // While AIM_ACTIVE the wire stick carries the aim, not movement, and
+        // the player is anchored (player_movement zeroes velocity) — so it
+        // must not read as "moving" or it'd play the run cycle while planted.
+        let aiming = curr.buttons & PlayerInput::AIM_ACTIVE != 0;
+        let is_moving = !aiming && decode_stick(curr).length() > DASH_MIN_STICK_MAG;
+        let charging = charge.0 > 0;
+        *anim = next_anim_state(*dead, *dash, *stun, *anim, is_moving, charging);
     }
 }
 
@@ -1922,9 +2505,14 @@ impl Plugin for SimPlugin {
             .rollback_component_with_copy::<NoInterpolate>()
             .rollback_component_with_copy::<DashState>()
             .rollback_component_with_copy::<StunFrames>()
+            .rollback_component_with_copy::<OobTimer>()
             .rollback_component_with_copy::<Dead>()
             .rollback_component_with_copy::<Boomerang>()
             .rollback_component_with_copy::<BoomerangState>()
+            .rollback_component_with_copy::<ThrowOrigin>()
+            .rollback_component_with_copy::<ThrowReach>()
+            .rollback_component_with_copy::<ThrowCharge>()
+            .rollback_component_with_copy::<ThrowCapacity>()
             .rollback_component_with_copy::<AnimState>()
             .rollback_component_with_copy::<Empowered>()
             .rollback_component_with_copy::<HeldModifier>()
@@ -1950,8 +2538,13 @@ impl Plugin for SimPlugin {
             .checksum_component_with_hash::<VelocityF>()
             .checksum_component_with_hash::<DashState>()
             .checksum_component_with_hash::<StunFrames>()
+            .checksum_component_with_hash::<OobTimer>()
             .checksum_component_with_hash::<Dead>()
             .checksum_component_with_hash::<Boomerang>()
+            .checksum_component_with_hash::<ThrowOrigin>()
+            .checksum_component_with_hash::<ThrowReach>()
+            .checksum_component_with_hash::<ThrowCharge>()
+            .checksum_component_with_hash::<ThrowCapacity>()
             .checksum_component_with_hash::<AnimState>()
             .checksum_component_with_hash::<Empowered>()
             .checksum_component_with_hash::<HeldModifier>()
@@ -1987,9 +2580,12 @@ impl Plugin for SimPlugin {
                 tick_respawn,
                 apply_rematch,
                 tick_match_state,
+                reset_round_state,
                 start_dash,
                 player_movement,
                 wall_collision,
+                oob_death,
+                dash_melee_kill,
                 (
                     recall_boomerangs,
                     curve_boomerangs,
@@ -3057,7 +3653,10 @@ impl SimSnapshot {
             world.despawn(e);
         }
         for snap in &self.pyres {
-            let key = (snap.pyre.rect.min.x.to_bits(), snap.pyre.rect.min.y.to_bits());
+            let key = (
+                snap.pyre.rect.min.x.to_bits(),
+                snap.pyre.rect.min.y.to_bits(),
+            );
             let target_entity = world
                 .query::<(Entity, &BonePyre)>()
                 .iter(world)

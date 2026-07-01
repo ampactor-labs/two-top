@@ -28,8 +28,13 @@ impl Plugin for DebugInputOverlayPlugin {
         // Audit D-HUD-02: this is raw wire-byte input telemetry — a dev tool.
         // Gate it behind `debug_assertions` so it never renders over live
         // gameplay in a release build (the systems compile but never run).
+        // It now spawns HIDDEN and toggles with F3, so a normal `cargo run`
+        // shows a clean stage — the telemetry is one keypress away when wanted.
         app.add_systems(Startup, spawn_overlay.run_if(|| cfg!(debug_assertions)))
-            .add_systems(Update, update_overlay.run_if(|| cfg!(debug_assertions)));
+            .add_systems(
+                Update,
+                (toggle_overlay, update_overlay).run_if(|| cfg!(debug_assertions)),
+            );
     }
 }
 
@@ -43,8 +48,25 @@ fn spawn_overlay(mut commands: Commands) {
         TextColor(render::palette::HIT_WHITE),
         // Initial transform — re-positioned each frame from WindowSize.
         Transform::from_xyz(0.0, 0.0, 100.0),
+        // Off by default; F3 reveals it. Keeps the live stage uncluttered.
+        Visibility::Hidden,
         DebugOverlayText,
     ));
+}
+
+/// F3 toggles the input-telemetry overlay's visibility (debug builds only).
+fn toggle_overlay(
+    keys: Res<ButtonInput<KeyCode>>,
+    mut q: Query<&mut Visibility, With<DebugOverlayText>>,
+) {
+    if keys.just_pressed(KeyCode::F3) {
+        for mut vis in &mut q {
+            *vis = match *vis {
+                Visibility::Hidden => Visibility::Visible,
+                _ => Visibility::Hidden,
+            };
+        }
+    }
 }
 
 fn update_overlay(
@@ -84,9 +106,15 @@ fn update_overlay(
 
     let s = format!(
         "TouchState\n  stick=({:+.2}, {:+.2}) aim_rad={:+.2}\n  aim_active={} throw_held={}\nWire (P0)\n  x={:>+4} y={:>+4} aim={:>3} btn=0x{:02x}\nHistory[P0] btns:\n  {history_str}",
-        stick.x, stick.y, touch.aim_angle_rad,
-        touch.aim_active, touch.throw_held,
-        p.stick_x, p.stick_y, p.aim_angle, p.buttons,
+        stick.x,
+        stick.y,
+        touch.aim_angle_rad,
+        touch.aim_active,
+        touch.throw_held,
+        p.stick_x,
+        p.stick_y,
+        p.aim_angle,
+        p.buttons,
     );
     *text = Text2d::new(s);
 }

@@ -9,8 +9,13 @@
 
 use bevy::prelude::*;
 use rand::Rng as _;
-use render::{CosmeticRng, LastKillPos, SHAKE_DECAY_PER_SEC, SHAKE_MAX_OFFSET, ScreenShake, shake_offset};
-use sim::{MatchState, Player, PositionF};
+use render::{
+    CosmeticRng, LastKillPos, SHAKE_DECAY_PER_SEC, SHAKE_MAX_OFFSET, ScreenShake, shake_offset,
+};
+use sim::{
+    ARENA_HALF_HEIGHT_CM, ARENA_HALF_WIDTH_CM, Boomerang, BoomerangState, MatchState, Player,
+    PositionF, TICK_HZ, VelocityF,
+};
 
 /// Marker for the camera that should track the players. The mobile build
 /// adds it (a zoomed follow cam for a phone); the desktop build omits it
@@ -22,6 +27,16 @@ pub struct FollowCam;
 /// Damping rate in 1/sec. Higher = camera snaps to target faster.
 /// 4.0 means ~250 ms time constant — responsive but not jarring.
 pub const CAMERA_FOLLOW_RATE: f32 = 4.0;
+
+/// How much a live (Flying) boomerang pulls the follow centroid relative to a
+/// player (weight 1.0). The camera leans toward the in-flight threat so the
+/// thrown fang stays framed — the Boomerang-Fu "track the action" feel.
+pub const BOOMERANG_CAMERA_WEIGHT: f32 = 0.5;
+
+/// Seconds of player-velocity lookahead. The camera leads the duelists' motion
+/// so what they're moving toward is already on screen. Kept short so a dash
+/// burst doesn't fling the frame.
+pub const CAMERA_LOOKAHEAD_SEC: f32 = 0.15;
 
 /// Pure helper for frame-rate-independent exponential damping.
 /// `(current → target)` advances toward `target` by a fraction
@@ -98,38 +113,67 @@ impl Plugin for CameraFollowPlugin {
             .init_resource::<KillCam>()
             .add_systems(
                 Update,
-                (
-                    (update_camera_base, update_kill_cam),
-                    compose_camera,
-                )
-                    .chain(),
+                ((update_camera_base, update_kill_cam), compose_camera).chain(),
             );
     }
 }
 
-/// Layer 1: update the follow/static base. Mobile (a `FollowCam` exists)
-/// damps toward the player centroid; desktop has no `FollowCam`, so the base
-/// stays at the origin for static whole-arena framing.
+/// Layer 1: update the follow/static base. Mobile (a `FollowCam` exists) damps
+/// toward a weighted centroid of the duelists PLUS any in-flight boomerangs, led
+/// by player velocity (lookahead) and clamped to the playfield — so the camera
+/// tracks the action without ever wandering off the arena. Desktop has no
+/// `FollowCam`, so the base stays at the origin for static whole-arena framing.
+///
+/// Pure render-side: reads sim `PositionF`/`VelocityF`/`Boomerang`, writes only
+/// the non-rollback `CameraBase`. Never feeds back into sim.
 fn update_camera_base(
     time: Res<Time<Real>>,
-    players: Query<&PositionF, With<Player>>,
+    players: Query<(&PositionF, &VelocityF), With<Player>>,
+    boomerangs: Query<(&PositionF, &Boomerang)>,
     follow: Query<(), With<FollowCam>>,
+    persp: Res<render::PerspectiveFlip>,
     mut base: ResMut<CameraBase>,
 ) {
     if follow.is_empty() {
         return; // desktop: static origin framing
     }
     let mut sum = Vec2::ZERO;
+    let mut vel_sum = Vec2::ZERO;
     let mut count = 0u32;
-    for p in &players {
+    for (p, v) in &players {
         let (x, y) = p.0.to_f32();
         sum += Vec2::new(x, y);
+        let (vx, vy) = v.0.to_f32();
+        vel_sum += Vec2::new(vx, vy);
         count += 1;
     }
     if count == 0 {
         return;
     }
-    let target = sum / count as f32;
+    // Lean the centroid toward live (Flying) boomerangs so the thrown fang —
+    // the thing both players are tracking — stays in frame.
+    let mut weighted = sum;
+    let mut weight = count as f32;
+    for (p, b) in &boomerangs {
+        if matches!(b.state, BoomerangState::Flying) {
+            let (x, y) = p.0.to_f32();
+            weighted += Vec2::new(x, y) * BOOMERANG_CAMERA_WEIGHT;
+            weight += BOOMERANG_CAMERA_WEIGHT;
+        }
+    }
+    // Velocity is cm/tick; ×TICK_HZ → cm/sec; ×lookahead seconds → a cm lead.
+    let lead = (vel_sum / count as f32) * (TICK_HZ as f32 * CAMERA_LOOKAHEAD_SEC);
+    let mut target = weighted / weight + lead;
+    // The world renders Y-foreshortened into the tabletop tilt, so the camera —
+    // which lives in that rendered space — must foreshorten its target Y (and
+    // its playfield clamp) to stay centred on the action.
+    target.y *= render::WORLD_TILT_Y * persp.0;
+    // Soft clamp: never center past the playfield edge.
+    let half_w = ARENA_HALF_WIDTH_CM as f32;
+    let half_h = ARENA_HALF_HEIGHT_CM as f32 * render::WORLD_TILT_Y;
+    target.x = target.x.clamp(-half_w, half_w);
+    target.y = target.y.clamp(-half_h, half_h);
+
     let dt = time.delta_secs();
     base.0.x = damped_step(base.0.x, target.x, CAMERA_FOLLOW_RATE, dt);
     base.0.y = damped_step(base.0.y, target.y, CAMERA_FOLLOW_RATE, dt);
@@ -148,12 +192,12 @@ fn update_kill_cam(
     mut prev: Local<Option<MatchState>>,
 ) {
     let now = *state;
-    let in_beat = |s: &MatchState| matches!(s, MatchState::RoundOver { .. } | MatchState::MatchOver);
+    let in_beat =
+        |s: &MatchState| matches!(s, MatchState::RoundOver { .. } | MatchState::MatchOver);
     let in_countdown = |s: &MatchState| matches!(s, MatchState::Countdown { .. });
 
     let entering_beat = in_beat(&now) && !prev.map(|p| in_beat(&p)).unwrap_or(false);
-    let entering_countdown =
-        in_countdown(&now) && !prev.map(|p| in_countdown(&p)).unwrap_or(false);
+    let entering_countdown = in_countdown(&now) && !prev.map(|p| in_countdown(&p)).unwrap_or(false);
 
     if entering_beat {
         kc.target = last_kill.0;

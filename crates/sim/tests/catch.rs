@@ -15,9 +15,9 @@ use bevy_ggrs::GgrsPlugin;
 use bevy_ggrs::prelude::*;
 use fixed_math::{Fix, Vec2F};
 use sim::{
-    Boomerang, BoomerangState, EMPOWERED_THROW_SPEED_CM_PER_TICK, Empowered, FrameCount,
-    GgrsCfg, PERFECT_CATCH_WINDOW_FRAMES, Player, PositionF, PreviousPositionF, SimPlugin,
-    SimSnapshot, THROW_SPEED_CM_PER_TICK, VelocityF, catch_boomerangs, throw_speed_for,
+    Boomerang, BoomerangState, EMPOWERED_THROW_SPEED_CM_PER_TICK, Empowered, FrameCount, GgrsCfg,
+    PERFECT_CATCH_WINDOW_FRAMES, Player, PositionF, PreviousPositionF, SimPlugin, SimSnapshot,
+    THROW_SPEED_CM_PER_TICK, VelocityF, catch_boomerangs, throw_speed_for,
 };
 
 fn bare_app() -> App {
@@ -85,7 +85,11 @@ fn catch_one_frame_late_does_not_empower() {
         "one frame past the window is an ordinary catch"
     );
     let mut q = app.world_mut().query::<&Boomerang>();
-    assert_eq!(q.iter(app.world()).count(), 0, "still caught, just not perfect");
+    assert_eq!(
+        q.iter(app.world()).count(),
+        0,
+        "still caught, just not perfect"
+    );
 }
 
 #[test]
@@ -116,10 +120,16 @@ fn empowered_flag_survives_snapshot_round_trip() {
             VelocityF(Vec2F::ZERO),
         ))
         .id();
-    *app.world_mut().entity_mut(p0).get_mut::<Empowered>().unwrap() = Empowered(true);
+    *app.world_mut()
+        .entity_mut(p0)
+        .get_mut::<Empowered>()
+        .unwrap() = Empowered(true);
 
     let snap = SimSnapshot::capture(app.world_mut());
-    *app.world_mut().entity_mut(p0).get_mut::<Empowered>().unwrap() = Empowered(false);
+    *app.world_mut()
+        .entity_mut(p0)
+        .get_mut::<Empowered>()
+        .unwrap() = Empowered(false);
     snap.restore(app.world_mut());
 
     assert!(

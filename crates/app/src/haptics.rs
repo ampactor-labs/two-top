@@ -23,8 +23,8 @@
 //! design — the full `bevy_winit`/`wgpu`/`cpal` Android build is the APK
 //! packaging story (SIDELOAD.md), not a CI gate.
 
-use bevy::prelude::*;
 use bevy::platform::collections::HashMap;
+use bevy::prelude::*;
 
 use sim::{Boomerang, BoomerangMods, Dead, Empowered, Player};
 
@@ -52,8 +52,8 @@ fn is_local(local: &LocalPlayerHandle, handle: usize) -> bool {
 /// permission-denied vibrator must never take down the game loop.
 #[cfg(target_os = "android")]
 fn vibrate(ms: i64) {
-    use jni::objects::{JObject, JValue};
     use jni::JavaVM;
+    use jni::objects::{JObject, JValue};
 
     let ctx = ndk_context::android_context();
     let vm = match unsafe { JavaVM::from_raw(ctx.vm().cast()) } {

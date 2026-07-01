@@ -16,9 +16,9 @@ use bevy_ggrs::prelude::*;
 use core::time::Duration;
 use fixed_math::Vec2F;
 use sim::{
-    Boomerang, BoomerangState, Dead, DefaultInputsPlugin, FrameCount, GgrsCfg, HIT_STOP_FRAMES,
-    MatchScore, Player, PositionF, PreviousPositionF, RESPAWN_FRAMES, SimPlugin, StunFrames,
-    VelocityF,
+    Boomerang, BoomerangState, DashState, Dead, DefaultInputsPlugin, FrameCount, GgrsCfg,
+    HIT_STOP_FRAMES, MatchScore, Player, PositionF, PreviousPositionF, RESPAWN_FRAMES, SimPlugin,
+    StunFrames, ThrowCapacity, VelocityF,
 };
 
 fn build_two_player_app() -> App {
@@ -101,7 +101,11 @@ fn flying_boomerang_does_not_kill_owner() {
 
     app.update();
 
-    assert_eq!(count_boomerangs(&mut app), 1, "owner-immune boomerang despawned");
+    assert_eq!(
+        count_boomerangs(&mut app),
+        1,
+        "owner-immune boomerang despawned"
+    );
     assert!(
         dead_handles(&mut app).is_empty(),
         "owner should not die from own boomerang",
@@ -128,7 +132,11 @@ fn flying_boomerang_kills_non_owner_on_overlap() {
 
     app.update();
 
-    assert_eq!(count_boomerangs(&mut app), 0, "boomerang should despawn on kill");
+    assert_eq!(
+        count_boomerangs(&mut app),
+        0,
+        "boomerang should despawn on kill"
+    );
     assert_eq!(dead_handles(&mut app), vec![1], "p1 should be Dead");
 }
 
@@ -140,16 +148,16 @@ fn returning_boomerang_also_kills_on_overlap() {
     // Place the Returning boomerang east of p1 so that this tick's
     // recall_boomerangs (homing toward p0 at origin) + boomerang_physics
     // step lands the boom *on* p1's rect rather than overshooting past
-    // it. Recall speed is 55 cm/tick and p0/p1 are 100 cm apart on the
-    // x axis, so starting at (155, 0) puts the post-physics position at
+    // it. Recall speed is 28 cm/tick and p0/p1 are 100 cm apart on the
+    // x axis, so starting at (128, 0) puts the post-physics position at
     // (100, 0) — center of p1.
     app.world_mut().spawn((
         Boomerang {
             owner_handle: 0,
             state: BoomerangState::Returning { since: 0 },
         },
-        PositionF(Vec2F::from_cm(155, 0)),
-        PreviousPositionF(Vec2F::from_cm(155, 0)),
+        PositionF(Vec2F::from_cm(128, 0)),
+        PreviousPositionF(Vec2F::from_cm(128, 0)),
         VelocityF(Vec2F::ZERO),
     ));
 
@@ -496,4 +504,140 @@ fn dead_player_does_not_move_with_stick_input() {
         .expect("p1 pos");
 
     assert_eq!(pos_before, pos_after, "Dead player must not move");
+}
+
+// ---- Dash-as-melee (2026-06-30 charge pass) ----
+
+/// Query helper: the entity of a given player handle.
+fn player_entity(app: &mut App, handle: usize) -> Entity {
+    let mut q = app.world_mut().query::<(Entity, &Player)>();
+    q.iter(app.world())
+        .find(|(_, p)| p.handle == handle)
+        .map(|(e, _)| e)
+        .expect("player entity")
+}
+
+#[test]
+fn dash_into_opponent_is_a_melee_kill() {
+    let mut app = build_two_player_app();
+    app.update();
+    let p0e = player_entity(&mut app, 0);
+    let p1e = player_entity(&mut app, 1);
+    // p0 is mid-dash east, positioned so the dash step lands it on p1 (at 100).
+    app.world_mut().entity_mut(p0e).insert((
+        PositionF(Vec2F::from_cm(90, 0)),
+        DashState::Dashing {
+            frames_remaining: 5,
+            dir: Vec2F::from_cm(1, 0),
+        },
+        StunFrames(5), // the dasher's own i-frames
+    ));
+    app.world_mut()
+        .entity_mut(p1e)
+        .insert((PositionF(Vec2F::from_cm(100, 0)), StunFrames(0)));
+    app.update();
+    assert_eq!(
+        dead_handles(&mut app),
+        vec![1],
+        "a dash into a non-i-frame opponent is a melee kill",
+    );
+}
+
+#[test]
+fn dash_versus_dash_clashes_no_kill() {
+    let mut app = build_two_player_app();
+    app.update();
+    let p0e = player_entity(&mut app, 0);
+    let p1e = player_entity(&mut app, 1);
+    // Both dashing toward each other, overlapping — both carry dash i-frames, so
+    // the melee clashes and neither dies.
+    app.world_mut().entity_mut(p0e).insert((
+        PositionF(Vec2F::from_cm(95, 0)),
+        DashState::Dashing {
+            frames_remaining: 5,
+            dir: Vec2F::from_cm(1, 0),
+        },
+        StunFrames(5),
+    ));
+    app.world_mut().entity_mut(p1e).insert((
+        PositionF(Vec2F::from_cm(105, 0)),
+        DashState::Dashing {
+            frames_remaining: 5,
+            dir: Vec2F::from_cm(-1, 0),
+        },
+        StunFrames(5),
+    ));
+    app.update();
+    assert!(
+        dead_handles(&mut app).is_empty(),
+        "two dashers clash — both are invincible, neither dies",
+    );
+}
+
+// ---- Loose-fang persistence + opponent steal ----
+
+fn capacity_of(app: &mut App, handle: usize) -> u32 {
+    let e = player_entity(app, handle);
+    app.world().entity(e).get::<ThrowCapacity>().unwrap().0
+}
+
+#[test]
+fn opponent_steals_a_loose_fang_as_a_second_boomerang() {
+    let mut app = build_two_player_app();
+    app.update();
+    let p1e = player_entity(&mut app, 1);
+    // Park p1 on top of a loose fang owned by p0, far from p0 (origin).
+    app.world_mut()
+        .entity_mut(p1e)
+        .insert(PositionF(Vec2F::from_cm(300, 0)));
+    app.world_mut().spawn((
+        Boomerang {
+            owner_handle: 0,
+            state: BoomerangState::Loose,
+        },
+        PositionF(Vec2F::from_cm(300, 0)),
+        PreviousPositionF(Vec2F::from_cm(300, 0)),
+        VelocityF(Vec2F::ZERO),
+    ));
+    assert_eq!(capacity_of(&mut app, 1), 1, "p1 starts with one boomerang");
+    app.update();
+    assert_eq!(
+        count_boomerangs(&mut app),
+        0,
+        "the loose fang is picked up (stolen) on walk-over",
+    );
+    assert_eq!(
+        capacity_of(&mut app, 1),
+        2,
+        "the opponent gains it as a SECOND boomerang (+1 capacity)",
+    );
+    assert!(
+        dead_handles(&mut app).is_empty(),
+        "walking over a loose fang steals it — it does NOT kill",
+    );
+}
+
+#[test]
+fn loose_fang_persists_until_claimed() {
+    let mut app = build_two_player_app();
+    app.update();
+    // A loose fang lying in an empty corner, owned by p0, nobody near it.
+    app.world_mut().spawn((
+        Boomerang {
+            owner_handle: 0,
+            state: BoomerangState::Loose,
+        },
+        PositionF(Vec2F::from_cm(400, 400)),
+        PreviousPositionF(Vec2F::from_cm(400, 400)),
+        VelocityF(Vec2F::ZERO),
+    ));
+    // The old model despawned a loose fang after 180 frames; now it must stay.
+    for _ in 0..300 {
+        app.update();
+    }
+    assert_eq!(
+        count_boomerangs(&mut app),
+        1,
+        "a loose fang lies on the ground indefinitely until recalled/caught/stolen",
+    );
 }

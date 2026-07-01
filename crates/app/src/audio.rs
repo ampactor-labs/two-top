@@ -365,10 +365,8 @@ fn play_match_state_sfx(
         return;
     }
     // Digit ticking down inside the countdown (3→2→1) → a toll per beat.
-    if let (
-        MatchState::Countdown { digit: pd, .. },
-        MatchState::Countdown { digit: nd, .. },
-    ) = (prev_state, now)
+    if let (MatchState::Countdown { digit: pd, .. }, MatchState::Countdown { digit: nd, .. }) =
+        (prev_state, now)
     {
         if nd != pd {
             play(&mut commands, &assets.countdown_toll, settings.sfx_volume);
@@ -377,7 +375,12 @@ fn play_match_state_sfx(
     }
     // Countdown → InRound: the GO toll, pitched up.
     if is_countdown(prev_state) && matches!(now, MatchState::InRound { .. }) {
-        play_pitched(&mut commands, &assets.countdown_toll, settings.sfx_volume, GO_TOLL_SPEED);
+        play_pitched(
+            &mut commands,
+            &assets.countdown_toll,
+            settings.sfx_volume,
+            GO_TOLL_SPEED,
+        );
         return;
     }
     // Entering RoundOver or MatchOver → the descending sting.
@@ -461,7 +464,10 @@ mod tests {
         let a = unit(1.0, 0.0);
         let just_under = 44.0_f32.to_radians();
         let just_over = 46.0_f32.to_radians();
-        assert!(!is_ricochet_turn(a, unit(just_under.cos(), just_under.sin())));
+        assert!(!is_ricochet_turn(
+            a,
+            unit(just_under.cos(), just_under.sin())
+        ));
         assert!(is_ricochet_turn(a, unit(just_over.cos(), just_over.sin())));
     }
 }

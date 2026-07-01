@@ -144,7 +144,10 @@ fn snapshot_captures_boomerangs_and_resources() {
     assert_eq!(snap.boomerangs.len(), 1);
     let b = &snap.boomerangs[0];
     assert_eq!(b.boomerang.owner_handle, 0);
-    assert!(matches!(b.boomerang.state, BoomerangState::Returning { .. }));
+    assert!(matches!(
+        b.boomerang.state,
+        BoomerangState::Returning { .. }
+    ));
     assert_eq!(b.pos.0, Vec2F::from_cm(50, 30));
 
     assert_eq!(snap.frame, 412);
@@ -204,7 +207,10 @@ fn restore_round_trips_to_byte_identical_capture() {
     assert_eq!(after.boomerangs.len(), original.boomerangs.len());
     let orig_b = &original.boomerangs[0];
     let after_b = &after.boomerangs[0];
-    assert_eq!(after_b.boomerang.owner_handle, orig_b.boomerang.owner_handle);
+    assert_eq!(
+        after_b.boomerang.owner_handle,
+        orig_b.boomerang.owner_handle
+    );
     assert_eq!(after_b.boomerang.state, orig_b.boomerang.state);
     assert_eq!(after_b.pos.0, orig_b.pos.0);
 }

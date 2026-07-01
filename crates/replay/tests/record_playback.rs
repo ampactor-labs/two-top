@@ -3,13 +3,13 @@
 
 use bevy::prelude::*;
 use bevy::time::TimeUpdateStrategy;
-use bevy_ggrs::prelude::*;
 use bevy_ggrs::GgrsPlugin;
+use bevy_ggrs::prelude::*;
 use core::time::Duration;
 use fixed_math::Vec2F;
 use replay::{
-    decode, encode, RecordPlugin, RecordedInputs, Replay, ReplayHeader, ReplayPlayback,
-    ReplayPlaybackPlugin, DEV_SIM_VERSION, FORMAT_VERSION, MAGIC,
+    DEV_SIM_VERSION, FORMAT_VERSION, MAGIC, RecordPlugin, RecordedInputs, Replay, ReplayHeader,
+    ReplayPlayback, ReplayPlaybackPlugin, decode, encode,
 };
 use sim::{
     DefaultInputsPlugin, GgrsCfg, Player, PlayerInput, PositionF, SimPlugin, SynthesizedInputs,
@@ -86,10 +86,7 @@ fn record_then_playback_reproduces_end_state() {
         .resource::<RecordedInputs>()
         .frames
         .clone();
-    assert!(
-        !recorded_frames.is_empty(),
-        "recording captured no frames"
-    );
+    assert!(!recorded_frames.is_empty(), "recording captured no frames");
 
     let replay = Replay {
         header: ReplayHeader {

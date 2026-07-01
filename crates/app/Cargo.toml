@@ -44,6 +44,9 @@ bevy = { version = "=0.18.1", default-features = false, features = [
     "bevy_winit",
     "bevy_render",
     "bevy_core_pipeline",
+    # Phase 19 — HDR + thresholded bloom for the HLD glow (eye-slits, boomerang,
+    # hit/kill flashes). Pulls in `bevy::post_process::bloom`.
+    "bevy_post_process",
     "bevy_sprite",
     "bevy_state",
     "bevy_text",
@@ -120,9 +123,6 @@ ndk-context = "0.1"
 # display name is "2-Top".
 [package.metadata.android]
 package = "com.ampactorlabs.twotop"
-apk_label = "2-Top"
-target_sdk_version = 34
-min_sdk_version = 24
 build_targets = ["aarch64-linux-android"]
 strip = "default"
 # Bundle the runtime assets into the APK. The app loads sprites
@@ -134,6 +134,10 @@ strip = "default"
 # asset root, so the in-code load paths ("audio/throw.wav", "sprites/...") line
 # up unchanged. (Verify on first sideload — SIDELOAD.md.)
 assets = "../../assets"
+
+[package.metadata.android.sdk]
+min_sdk_version = 24
+target_sdk_version = 34
 
 [[package.metadata.android.uses_permission]]
 name = "android.permission.INTERNET"
@@ -149,9 +153,12 @@ name = "android.hardware.touchscreen"
 required = true
 
 [package.metadata.android.application]
+label = "2-Top"
 debuggable = true
 theme = "@android:style/Theme.Black.NoTitleBar.Fullscreen"
 extract_native_libs = true
+# Local same-Wi-Fi play uses a ws:// signaling URL hosted on the laptop.
+uses_cleartext_traffic = true
 
 [package.metadata.android.application.activity]
 orientation = "portrait"

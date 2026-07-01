@@ -38,7 +38,7 @@ use bevy_ggrs::ggrs::{DesyncDetection, GgrsEvent, PlayerType, SessionBuilder};
 // app needs no direct matchbox/uuid dependency.
 use net::{
     ChannelConfig, LastPeerMessageFrame, LobbyState, MatchboxBridge, MatchboxPeerId as PeerId,
-    PendingP2PSwap, PeerState, WebRtcSocket, WebRtcSocketBuilder, addr_to_peer, peer_to_addr,
+    PeerState, PendingP2PSwap, WebRtcSocket, WebRtcSocketBuilder, addr_to_peer, peer_to_addr,
 };
 use sim::GgrsCfg;
 
@@ -130,15 +130,16 @@ struct MatchboxDriver {
     channel_taken: bool,
 }
 
-/// Phase 12 driver plugin. Added only when a room URL is present. Wires the
-/// startup socket build + the per-frame lobby/swap/event-drain driver. The
-/// lobby-state resources themselves come from `net::NetPlugin` (always
-/// added), so this plugin only owns the matchbox-specific half.
+/// Phase 12 driver plugin. Added only when a room URL is present. The matchbox
+/// socket opens when the player enters the match (OnEnter InMatch), NOT at app
+/// boot — so the Title screen is a clean staging area and the signaling server
+/// connection only starts on "Play." The per-frame lobby/swap/event-drain driver
+/// runs in Update once connected.
 pub struct MatchboxPlugin;
 
 impl Plugin for MatchboxPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(Startup, start_matchbox)
+        app.add_systems(OnEnter(crate::screen::AppScreen::InMatch), start_matchbox)
             .add_systems(Update, drive_netplay);
     }
 }
@@ -274,6 +275,7 @@ fn perform_swap(world: &mut World, peer_id: PeerId) {
     // Record which player is us, so "your-action" feedback (haptics, summary
     // banner) can distinguish local from remote.
     world.resource_mut::<LocalPlayerHandle>().0 = Some(local_handle);
+    world.resource_mut::<render::PerspectiveFlip>().0 = if local_handle == 1 { -1.0 } else { 1.0 };
 
     // Pin the silence timer to "now" so net's grace timer never spuriously
     // forfeits a healthy session — real disconnects come via ggrs events.
@@ -309,7 +311,10 @@ fn drain_session_events(world: &mut World) {
                     GgrsEvent::Synchronized { addr } => {
                         tracing::info!(target: "two_top::net", ?addr, "peer synchronized");
                     }
-                    GgrsEvent::NetworkInterrupted { addr, disconnect_timeout } => {
+                    GgrsEvent::NetworkInterrupted {
+                        addr,
+                        disconnect_timeout,
+                    } => {
                         tracing::warn!(target: "two_top::net", ?addr, disconnect_timeout, "network interrupted");
                     }
                     GgrsEvent::NetworkResumed { addr } => {

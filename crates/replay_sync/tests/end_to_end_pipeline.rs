@@ -51,7 +51,10 @@ fn perturbed_replay_diagnose_pipeline() {
 
     let tsv_a = compute_checksum_tsv(&baseline);
     let tsv_b = compute_checksum_tsv(&perturbed);
-    assert_ne!(tsv_a, tsv_b, "checksum TSV did not pick up the perturbation");
+    assert_ne!(
+        tsv_a, tsv_b,
+        "checksum TSV did not pick up the perturbation"
+    );
 
     let dir = tempdir();
     let path_a = dir.join("baseline.tsv");

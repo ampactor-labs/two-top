@@ -19,7 +19,8 @@ fn committed_canonical_matches_generator() {
         )
     });
     assert_eq!(
-        committed, bytes,
+        committed,
+        bytes,
         "canonical demo at {} drifted from generator. \
          Re-run: cargo run -p replay_sync --bin gen_canonical -- --write",
         path.display()

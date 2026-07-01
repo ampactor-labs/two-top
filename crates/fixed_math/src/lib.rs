@@ -14,21 +14,30 @@ pub struct Vec2F {
 impl Add for Vec2F {
     type Output = Vec2F;
     fn add(self, rhs: Vec2F) -> Vec2F {
-        Vec2F { x: self.x + rhs.x, y: self.y + rhs.y }
+        Vec2F {
+            x: self.x + rhs.x,
+            y: self.y + rhs.y,
+        }
     }
 }
 
 impl Sub for Vec2F {
     type Output = Vec2F;
     fn sub(self, rhs: Vec2F) -> Vec2F {
-        Vec2F { x: self.x - rhs.x, y: self.y - rhs.y }
+        Vec2F {
+            x: self.x - rhs.x,
+            y: self.y - rhs.y,
+        }
     }
 }
 
 impl Mul<Fix> for Vec2F {
     type Output = Vec2F;
     fn mul(self, rhs: Fix) -> Vec2F {
-        Vec2F { x: self.x * rhs, y: self.y * rhs }
+        Vec2F {
+            x: self.x * rhs,
+            y: self.y * rhs,
+        }
     }
 }
 
@@ -78,7 +87,10 @@ impl Vec2F {
         if len == Fix::ZERO {
             Vec2F::ZERO
         } else {
-            Vec2F { x: self.x / len, y: self.y / len }
+            Vec2F {
+                x: self.x / len,
+                y: self.y / len,
+            }
         }
     }
 

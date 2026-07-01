@@ -159,8 +159,7 @@ fn read_bindings(keys: &ButtonInput<KeyCode>, b: KeyBindings) -> PlayerInput {
 /// moves; South or RightTrigger throws; East or LeftTrigger dashes.
 fn read_gamepad(gp: &Gamepad) -> Option<PlayerInput> {
     let stick = apply_deadzone(gp.left_stick(), GAMEPAD_DEADZONE);
-    let throw =
-        gp.pressed(GamepadButton::South) || gp.pressed(GamepadButton::RightTrigger);
+    let throw = gp.pressed(GamepadButton::South) || gp.pressed(GamepadButton::RightTrigger);
     let dash = gp.pressed(GamepadButton::East) || gp.pressed(GamepadButton::LeftTrigger);
     let active = stick != Vec2::ZERO || throw || dash;
     active.then(|| wire_input(stick.x, stick.y, throw, dash))
@@ -224,10 +223,22 @@ mod tests {
     #[test]
     fn cardinal_directions_are_game_space() {
         // +y is up, +x is right.
-        assert_eq!(input_from_dpad(true, false, false, false, false, false).stick_y, 127);
-        assert_eq!(input_from_dpad(false, true, false, false, false, false).stick_y, -127);
-        assert_eq!(input_from_dpad(false, false, true, false, false, false).stick_x, -127);
-        assert_eq!(input_from_dpad(false, false, false, true, false, false).stick_x, 127);
+        assert_eq!(
+            input_from_dpad(true, false, false, false, false, false).stick_y,
+            127
+        );
+        assert_eq!(
+            input_from_dpad(false, true, false, false, false, false).stick_y,
+            -127
+        );
+        assert_eq!(
+            input_from_dpad(false, false, true, false, false, false).stick_x,
+            -127
+        );
+        assert_eq!(
+            input_from_dpad(false, false, false, true, false, false).stick_x,
+            127
+        );
     }
 
     #[test]

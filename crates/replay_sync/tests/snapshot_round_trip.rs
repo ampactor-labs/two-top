@@ -76,11 +76,11 @@ fn restore_then_run_to(seed: u64, snap: &SimSnapshot, final_frame: u32) -> u64 {
 /// replay multiple times per case (slow); a fixed table gives us
 /// deterministic CI runtime + repeatable bug surfaces.
 const CASES: &[(u64, u32, u32)] = &[
-    (0,            30,  90),  // early-mid -> late
-    (0xdead_beef, 100, 200),  // mid -> later
-    (1,            60, 180),
-    (42,           45, 240),
-    (1234,        120, 300),
+    (0, 30, 90),             // early-mid -> late
+    (0xdead_beef, 100, 200), // mid -> later
+    (1, 60, 180),
+    (42, 45, 240),
+    (1234, 120, 300),
 ];
 
 #[test]

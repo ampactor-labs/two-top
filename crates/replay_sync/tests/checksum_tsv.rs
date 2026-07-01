@@ -7,9 +7,7 @@
 //! Invariant #7 in CONVENTIONS: bevy_ggrs::checksum_hasher only — never
 //! std::hash::DefaultHasher (random, non-portable).
 
-use replay::{
-    DEV_SIM_VERSION, FORMAT_VERSION, FrameInputs, MAGIC, Replay, ReplayHeader,
-};
+use replay::{DEV_SIM_VERSION, FORMAT_VERSION, FrameInputs, MAGIC, Replay, ReplayHeader};
 use replay_sync::{compute_checksum_tsv, dump_state_at};
 use sim::PlayerInput;
 
@@ -62,7 +60,12 @@ fn tsv_header_and_row_count() {
     );
     for (i, line) in lines.iter().skip(1).enumerate() {
         let cols: Vec<&str> = line.split('\t').collect();
-        assert_eq!(cols.len(), 9, "row {i} has {} columns: {line:?}", cols.len());
+        assert_eq!(
+            cols.len(),
+            9,
+            "row {i} has {} columns: {line:?}",
+            cols.len()
+        );
         assert_eq!(cols[0].parse::<u32>().unwrap(), i as u32, "frame col");
     }
 }

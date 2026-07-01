@@ -53,8 +53,8 @@ pub struct LogGuard {
 /// re-invoking it would panic on subscriber re-registration. The app
 /// crate enforces single-call by making this private to `run()`.
 pub fn init_logging() -> LogGuard {
-    let filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| EnvFilter::new(DEFAULT_FILTER));
+    let filter =
+        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(DEFAULT_FILTER));
     // Compile-time sanity check: in release builds, the
     // `release_max_level_info` cargo feature on the `tracing` crate
     // must be enabled so `debug!` / `trace!` calls compile to no-ops.
