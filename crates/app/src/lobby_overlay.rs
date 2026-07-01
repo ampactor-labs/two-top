@@ -7,9 +7,8 @@
 //! waiting, in-match, on the disconnection countdown, or forfeit.
 //!
 //! This is the minimal viable lobby UI — Phase 12 cycle 5's contract
-//! is "operator can observe the netplay lifecycle." A polished
-//! Find-Match button + room-code entry lands later, after the
-//! signaling driver is operator-tested per SIGNALING.md (cycle 6).
+//! is "operator can observe the netplay lifecycle." The Title screen owns the
+//! Play gesture; polished room-code entry/matchmaking controls land later.
 //! For dev sessions running the existing `Session::SyncTest`, the
 //! overlay shows `Idle` since `NetPlugin` doesn't drive any state
 //! transitions on its own — exactly the right "no networking active"

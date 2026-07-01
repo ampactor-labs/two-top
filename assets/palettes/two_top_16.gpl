@@ -2,19 +2,19 @@ GIMP Palette
 Name: Two Top 16
 Columns: 8
 #
- 11  13  18 Void
- 23  25  34 Deep Ash
- 43  37  51 Bruise Shadow
- 57  52  66 Charcoal Line
- 87  90 100 Cold Stone
-122 101  88 Warm Bone Shade
-203 190 148 Bone
-255 241 194 Hot Bone
-110  22  50 Blood Dark
-210  47  69 P0 Blood
-240 106  58 Ember
-255 216 102 Spark
- 13 101 114 Deep Teal
- 39 199 216 P1 Cyan
- 71 108 255 Recall Blue
-248 247 232 Hit White
+ 16  14  34 Void
+ 32  28  66 Deep Ash
+ 66  36  92 Bruise Shadow
+ 94  64 132 Charcoal Line
+104 126 168 Cold Stone
+130  96 102 Warm Bone Shade
+210 196 156 Bone
+255 243 202 Hot Bone
+122  28  66 Blood Dark
+226  52  84 P0 Blood
+245 112  60 Ember
+255 220 112 Spark
+ 16 118 132 Deep Teal
+ 52 212 226 P1 Cyan
+ 86 120 255 Recall Blue
+250 248 240 Hit White

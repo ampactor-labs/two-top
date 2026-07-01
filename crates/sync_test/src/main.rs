@@ -1,7 +1,7 @@
 use bevy::prelude::*;
 use bevy::time::TimeUpdateStrategy;
-use bevy_ggrs::prelude::*;
 use bevy_ggrs::GgrsPlugin;
+use bevy_ggrs::prelude::*;
 use core::time::Duration;
 use fixed_math::Vec2F;
 use sim::{
@@ -26,9 +26,7 @@ fn main() {
             .add_player(PlayerType::Local, i)
             .expect("add_player accepted");
     }
-    let session = sb
-        .start_synctest_session()
-        .expect("start_synctest_session");
+    let session = sb.start_synctest_session().expect("start_synctest_session");
 
     let mut app = App::new();
     app.add_plugins(MinimalPlugins);
@@ -78,9 +76,7 @@ fn main() {
         .collect();
     positions.sort_by_key(|(h, _, _)| *h);
     for (handle, xb, yb) in &positions {
-        println!(
-            "sync_test: handle={handle} pos.x.bits={xb:#010x} pos.y.bits={yb:#010x}"
-        );
+        println!("sync_test: handle={handle} pos.x.bits={xb:#010x} pos.y.bits={yb:#010x}");
     }
 
     println!("sync_test: completed {frames} frames without panic");

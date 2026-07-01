@@ -119,11 +119,28 @@ pub struct TouchState {
     pub throw_held: bool,
     /// Sticky once set: stays true for the lifetime of the throw touch
     /// once the user has either held long enough or dragged far enough.
-    /// Resets when the throw touch ends.
+    /// Resets when the throw touch ends (after the one sticky-release frame).
     pub aim_active: bool,
     /// Game-space (y-up) drag angle in radians, when `aim_active`. Held
     /// at 0.0 when no throw touch is active.
     pub aim_angle_rad: f32,
+    /// Right-thumb aim as a deadzone-curved vector in bevy y-down space
+    /// (direction = drag heading, magnitude in [0,1] = throw power), when
+    /// `aim_active`. `quantize_inputs` writes this into the wire stick so
+    /// sim throws along the aim instead of the movement stick. `None` when
+    /// not aiming. Mirrors the `stick` field's convention so the same
+    /// y-negation at quantization applies.
+    pub aim_vec: Option<Vec2>,
+    /// One-frame latch: when an *aimed* throw touch releases, the aim is
+    /// held for exactly one more frame (with `throw_held` cleared, so the
+    /// THROW_DOWN release edge fires) so sim sees the aim direction/power
+    /// on the frame it spawns the boomerang. This is the "sticky-on-release
+    /// frame" the input model promises.
+    pub aim_release_sticky: bool,
+    /// Id of the active dash touch, if any. Sticky like `stick_touch`.
+    pub dash_touch: Option<u64>,
+    /// True iff a dash-zone touch is currently held.
+    pub dash_held: bool,
 }
 
 impl TouchState {
@@ -174,12 +191,17 @@ pub fn is_lower_left(pos: Vec2, window: Vec2) -> bool {
     pos.x < window.x * 0.5 && pos.y > window.y * 0.5
 }
 
-/// Right half of the screen (x >= w/2). Disjoint from the lower-left
-/// stick zone by construction, so the same touch cannot be both stick
-/// and throw. Guarded against a zero-sized window so the throw button
-/// doesn't activate phantomly before `WindowSize` is populated.
+/// Lower-right quadrant (x >= w/2, y > h/2). The throw/aim zone.
+/// Disjoint from both the movement stick (lower-left) and the dash
+/// button (upper-right).
 pub fn is_right_side(pos: Vec2, window: Vec2) -> bool {
-    window.x > 0.0 && pos.x >= window.x * 0.5
+    window.x > 0.0 && pos.x >= window.x * 0.5 && pos.y > window.y * 0.5
+}
+
+/// Upper-right quadrant (x >= w/2, y <= h/2). The dash button zone.
+/// Right thumb flicks up from the throw area to tap dash.
+pub fn is_dash_zone(pos: Vec2, window: Vec2) -> bool {
+    window.x > 0.0 && pos.x >= window.x * 0.5 && pos.y <= window.y * 0.5
 }
 
 /// Pick the touch driving the virtual stick. Sticky: if the
@@ -218,6 +240,23 @@ pub fn select_throw_touch(
     touches
         .iter()
         .find(|t| is_right_side(t.start_pos, window))
+        .map(|t| t.id)
+}
+
+/// Pick the touch driving dash. Same sticky pattern as stick/throw.
+pub fn select_dash_touch(
+    current: Option<u64>,
+    touches: &[TrackedTouch],
+    window: Vec2,
+) -> Option<u64> {
+    if let Some(id) = current
+        && touches.iter().any(|t| t.id == id)
+    {
+        return Some(id);
+    }
+    touches
+        .iter()
+        .find(|t| is_dash_zone(t.start_pos, window))
         .map(|t| t.id)
 }
 
@@ -364,13 +403,22 @@ pub fn update_virtual_stick(
 /// or a new right-side touch takes over). `aim_angle_rad` is reported
 /// in game-space (y-up) radians so it composes naturally with sim's
 /// trig conventions.
-pub fn update_throw_state(mut state: ResMut<TouchState>, window: Res<WindowSize>) {
+pub fn update_throw_state(
+    mut state: ResMut<TouchState>,
+    window: Res<WindowSize>,
+    deadzone: Res<StickDeadzone>,
+) {
     let window_size = window.0;
-    let new_throw = select_throw_touch(state.right_touch, &state.touches, window_size);
+    let inner = deadzone.0;
 
-    let identity_changed = new_throw != state.right_touch;
+    state.dash_touch = select_dash_touch(state.dash_touch, &state.touches, window_size);
+    state.dash_held = state.dash_touch.is_some();
+
+    let prev_throw = state.right_touch;
+    let new_throw = select_throw_touch(prev_throw, &state.touches, window_size);
+
+    let identity_changed = new_throw != prev_throw;
     state.right_touch = new_throw;
-    state.throw_held = new_throw.is_some();
 
     if identity_changed {
         state.aim_active = false;
@@ -379,6 +427,9 @@ pub fn update_throw_state(mut state: ResMut<TouchState>, window: Res<WindowSize>
 
     match new_throw.and_then(|id| state.find(id).copied()) {
         Some(t) => {
+            // Active throw touch: track hold/drag and resolve the aim vector.
+            state.throw_held = true;
+            state.aim_release_sticky = false;
             let frames_held = state.frame.saturating_sub(t.start_frame);
             let drag_px = (t.current_pos - t.start_pos).length();
             state.aim_active = should_aim_be_active(
@@ -389,10 +440,31 @@ pub fn update_throw_state(mut state: ResMut<TouchState>, window: Res<WindowSize>
                 AIM_DRAG_PX,
             );
             state.aim_angle_rad = compute_aim_angle(t.start_pos, t.current_pos);
+            state.aim_vec = state.aim_active.then(|| {
+                compute_stick(
+                    t.start_pos,
+                    t.current_pos,
+                    STICK_MAX_RADIUS_PX,
+                    inner,
+                    STICK_DEADZONE_SATURATION,
+                )
+            });
+        }
+        None if prev_throw.is_some() && state.aim_active && !state.aim_release_sticky => {
+            // First frame after an *aimed* throw touch released: hold the aim
+            // for exactly one frame with THROW_DOWN cleared, so sim sees the
+            // release edge AND the aim direction/power on the spawn frame.
+            state.throw_held = false;
+            state.aim_release_sticky = true;
+            // aim_active / aim_angle_rad / aim_vec retain last frame's values.
         }
         None => {
+            // No throw touch (and no pending sticky-release): fully clear.
+            state.throw_held = false;
             state.aim_active = false;
             state.aim_angle_rad = 0.0;
+            state.aim_vec = None;
+            state.aim_release_sticky = false;
         }
     }
 }
@@ -415,7 +487,16 @@ pub fn quantize_angle(rad: f32) -> u8 {
 /// the wire format follows game-space (y-up) convention so sim's
 /// movement code can use stick_y as a velocity multiplier directly.
 pub fn quantize_inputs(state: &TouchState) -> PlayerInput {
-    let stick = state.stick.unwrap_or(Vec2::ZERO);
+    // While aiming (incl. the one sticky-release frame), the right-thumb aim
+    // vector occupies the wire stick — direction is the throw heading and
+    // magnitude is throw power. Movement is locked in sim during AIM_ACTIVE,
+    // so the move stick is free to be repurposed. Otherwise the wire stick is
+    // the left-thumb move stick as usual.
+    let stick = if state.aim_active {
+        state.aim_vec.unwrap_or(Vec2::ZERO)
+    } else {
+        state.stick.unwrap_or(Vec2::ZERO)
+    };
     let stick_x = (stick.x * 127.0).round().clamp(-127.0, 127.0) as i8;
     let stick_y = (-stick.y * 127.0).round().clamp(-127.0, 127.0) as i8;
 
@@ -432,7 +513,9 @@ pub fn quantize_inputs(state: &TouchState) -> PlayerInput {
     if state.aim_active {
         buttons |= PlayerInput::AIM_ACTIVE;
     }
-    // DASH_DOWN, TAUNT_DOWN: deferred — no UI affordance yet.
+    if state.dash_held {
+        buttons |= PlayerInput::DASH_DOWN;
+    }
 
     PlayerInput {
         stick_x,
@@ -706,7 +789,13 @@ mod tests {
     fn compute_stick_zero_delta_is_zero() {
         let p = Vec2::new(123.0, 456.0);
         assert_eq!(
-            compute_stick(p, p, STICK_MAX_RADIUS_PX, STICK_DEADZONE_INNER, STICK_DEADZONE_SATURATION),
+            compute_stick(
+                p,
+                p,
+                STICK_MAX_RADIUS_PX,
+                STICK_DEADZONE_INNER,
+                STICK_DEADZONE_SATURATION
+            ),
             Vec2::ZERO
         );
     }
@@ -808,7 +897,7 @@ mod tests {
     fn select_stick_picks_first_lower_left_touch() {
         let win = Vec2::new(1080.0, 2400.0);
         let touches = vec![
-            t(1, Vec2::new(900.0, 100.0)), // top-right (no)
+            t(1, Vec2::new(900.0, 100.0)),  // top-right (no)
             t(2, Vec2::new(200.0, 2000.0)), // lower-left (yes)
             t(3, Vec2::new(100.0, 2200.0)), // also lower-left (would tie but order wins)
         ];
@@ -855,18 +944,34 @@ mod tests {
     // ---- Cycle 3: right-side gate ----
 
     #[test]
-    fn right_side_recognizes_right_half() {
+    fn right_side_recognizes_lower_right() {
         let win = Vec2::new(1080.0, 2400.0);
-        assert!(is_right_side(Vec2::new(540.0, 100.0), win)); // exact midpoint
-        assert!(is_right_side(Vec2::new(900.0, 1200.0), win));
+        assert!(is_right_side(Vec2::new(540.0, 1201.0), win));
+        assert!(is_right_side(Vec2::new(900.0, 1800.0), win));
         assert!(is_right_side(Vec2::new(1079.0, 2300.0), win));
     }
 
     #[test]
-    fn right_side_rejects_left_half() {
+    fn right_side_rejects_upper_right_and_left() {
         let win = Vec2::new(1080.0, 2400.0);
-        assert!(!is_right_side(Vec2::new(539.0, 1200.0), win));
+        assert!(!is_right_side(Vec2::new(900.0, 100.0), win)); // upper-right = dash
+        assert!(!is_right_side(Vec2::new(539.0, 1800.0), win)); // left side
         assert!(!is_right_side(Vec2::new(0.0, 0.0), win));
+    }
+
+    #[test]
+    fn dash_zone_recognizes_upper_right() {
+        let win = Vec2::new(1080.0, 2400.0);
+        assert!(is_dash_zone(Vec2::new(540.0, 100.0), win));
+        assert!(is_dash_zone(Vec2::new(900.0, 1200.0), win)); // y=midpoint
+        assert!(is_dash_zone(Vec2::new(1079.0, 0.0), win));
+    }
+
+    #[test]
+    fn dash_zone_rejects_left_and_lower_right() {
+        let win = Vec2::new(1080.0, 2400.0);
+        assert!(!is_dash_zone(Vec2::new(100.0, 100.0), win)); // left
+        assert!(!is_dash_zone(Vec2::new(900.0, 1800.0), win)); // lower-right = throw
     }
 
     #[test]
@@ -879,12 +984,12 @@ mod tests {
     // ---- Cycle 3: throw selection ----
 
     #[test]
-    fn select_throw_picks_first_right_side_touch() {
+    fn select_throw_picks_first_lower_right_touch() {
         let win = Vec2::new(1080.0, 2400.0);
         let touches = vec![
             t(1, Vec2::new(100.0, 2000.0)), // lower-left (no)
-            t(2, Vec2::new(900.0, 200.0)),  // right side (yes)
-            t(3, Vec2::new(800.0, 1900.0)), // right side too, but order wins
+            t(2, Vec2::new(900.0, 1800.0)), // lower-right (yes)
+            t(3, Vec2::new(800.0, 1900.0)), // lower-right too, but order wins
         ];
         assert_eq!(select_throw_touch(None, &touches, win), Some(2));
     }
@@ -893,8 +998,8 @@ mod tests {
     fn select_throw_keeps_current_if_still_active() {
         let win = Vec2::new(1080.0, 2400.0);
         let touches = vec![
-            t(2, Vec2::new(100.0, 100.0)), // dragged into the left half
-            t(3, Vec2::new(900.0, 200.0)),
+            t(2, Vec2::new(100.0, 1800.0)), // dragged into the left half
+            t(3, Vec2::new(900.0, 1800.0)),
         ];
         assert_eq!(select_throw_touch(Some(2), &touches, win), Some(2));
     }
@@ -902,7 +1007,7 @@ mod tests {
     #[test]
     fn select_throw_replaces_when_current_ended() {
         let win = Vec2::new(1080.0, 2400.0);
-        let touches = vec![t(3, Vec2::new(900.0, 200.0))];
+        let touches = vec![t(3, Vec2::new(900.0, 1800.0))];
         assert_eq!(select_throw_touch(Some(2), &touches, win), Some(3));
     }
 
@@ -967,7 +1072,13 @@ mod tests {
 
     #[test]
     fn aim_active_false_below_both_thresholds() {
-        assert!(!should_aim_be_active(false, 0, 0.0, AIM_HOLD_FRAMES, AIM_DRAG_PX));
+        assert!(!should_aim_be_active(
+            false,
+            0,
+            0.0,
+            AIM_HOLD_FRAMES,
+            AIM_DRAG_PX
+        ));
         assert!(!should_aim_be_active(
             false,
             AIM_HOLD_FRAMES - 1,
@@ -1002,7 +1113,13 @@ mod tests {
     #[test]
     fn aim_active_is_sticky_once_set() {
         // Was active last frame; thresholds slipped back below — still active.
-        assert!(should_aim_be_active(true, 0, 0.0, AIM_HOLD_FRAMES, AIM_DRAG_PX));
+        assert!(should_aim_be_active(
+            true,
+            0,
+            0.0,
+            AIM_HOLD_FRAMES,
+            AIM_DRAG_PX
+        ));
     }
 
     // ---- Cycle 4: mouse-drag fallback ----
@@ -1224,6 +1341,36 @@ mod tests {
         assert!(p.buttons & PlayerInput::THROW_DOWN != 0);
         assert!(p.buttons & PlayerInput::AIM_ACTIVE != 0);
         assert_eq!(p.aim_angle, 128);
+    }
+
+    #[test]
+    fn quantize_inputs_aim_active_writes_aim_vec_into_stick() {
+        // When aiming, the wire stick carries the aim vector (here +x at full
+        // magnitude), NOT the move stick (which is pulled the other way).
+        let s = TouchState {
+            stick: Some(Vec2::new(-1.0, 0.0)), // move stick: full left
+            aim_active: true,
+            aim_vec: Some(Vec2::new(1.0, 0.0)), // aim: full right
+            aim_angle_rad: 0.0,
+            throw_held: true,
+            ..Default::default()
+        };
+        let p = quantize_inputs(&s);
+        assert_eq!(p.stick_x, 127, "aim (+x) should win over move stick (-x)");
+        assert_eq!(p.stick_y, 0);
+        assert!(p.buttons & PlayerInput::AIM_ACTIVE != 0);
+    }
+
+    #[test]
+    fn quantize_inputs_aim_vec_negates_y_for_game_space() {
+        // bevy y-down aim_vec.y = +1 (drag down) → game-space -127.
+        let s = TouchState {
+            aim_active: true,
+            aim_vec: Some(Vec2::new(0.0, 1.0)),
+            ..Default::default()
+        };
+        let p = quantize_inputs(&s);
+        assert_eq!(p.stick_y, -127);
     }
 
     #[test]

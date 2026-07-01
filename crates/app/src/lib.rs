@@ -14,12 +14,14 @@
 
 use bevy::prelude::*;
 use bevy_ggrs::GgrsPlugin;
+use fixed_math::Fix;
 use input_touch::{CursorPosition, InputTouchPlugin, WindowSize, update_touch_state};
 use render::{EffectsPlugin, RenderSyncPlugin};
 use sim::{
     AnimState, BOOMERANG_HALF_EXTENT_CM, Boomerang, GgrsCfg, Player, PositionF, SelectedArena,
-    SimLifecycleLogPlugin, SimPlugin,
+    SimLifecycleLogPlugin, SimPlugin, VelocityF,
 };
+use std::collections::HashMap;
 
 mod audio;
 mod camera;
@@ -33,9 +35,9 @@ mod screen;
 mod settings;
 use audio::GameAudioPlugin;
 use camera::CameraFollowPlugin;
+use debug_overlay::DebugInputOverlayPlugin;
 use haptics::HapticsPlugin;
 use hud::HudPlugin;
-use debug_overlay::DebugInputOverlayPlugin;
 use lobby_overlay::LobbyOverlayPlugin;
 use netplay::{MatchboxPlugin, NetplayConfig};
 use screen::{AppScreen, ScreenPlugin};
@@ -64,21 +66,8 @@ pub fn run() {
         "two-top starting",
     );
 
-    // Netplay is opt-in via `--room <url>` / `MATCHBOX_ROOM`. Online: the
-    // P2P session is built by the matchbox driver once a peer connects, so
-    // NO session is inserted up front (the sim idles at frame 0 until the
-    // swap). Local (the default — PC couch versus + the touch dev build):
-    // a SyncTest session with both players LOCAL, fed DISTINCT per-handle
-    // inputs (keyboard P0/P1 on desktop) — a real versus that also
-    // self-verifies determinism every frame. Input delay 0: no network
-    // latency to hide locally, so inputs apply at once for a snappy feel.
     let netplay = NetplayConfig::from_env_and_args();
     let online = netplay.room_url.is_some();
-    // The local SyncTest session is now built on match start (Phase 18 Task
-    // 5.5b — `screen::spawn_match`), not up front: couch boots into the Title
-    // screen with no session (sim idle at frame 0), then installs a fresh
-    // session when the player begins a match. Online still installs nothing
-    // here — the matchbox driver swaps in the P2P session on connect.
 
     let mut app = App::new();
     app
@@ -90,8 +79,8 @@ pub fn run() {
         // window opens portrait (2:3, matching the 1000×1500 cm arena) so
         // the desktop build frames the playfield with no letterboxing;
         // android ignores the resolution and fills the device screen.
-        .add_plugins(
-            DefaultPlugins
+        .add_plugins({
+            let plugins = DefaultPlugins
                 .set(WindowPlugin {
                     primary_window: Some(Window {
                         title: "2-Top".to_string(),
@@ -100,13 +89,30 @@ pub fn run() {
                     }),
                     ..default()
                 })
-                .disable::<bevy::log::LogPlugin>(),
-        )
+                .disable::<bevy::log::LogPlugin>();
+            // Desktop asset root. Bevy's file asset reader resolves its base
+            // from CARGO_MANIFEST_DIR under `cargo run`, which points at
+            // `crates/app/assets` — a dir that does not exist. The runtime
+            // assets (sprites, arena floors, HUD atlases, the 12 audio cues)
+            // live at the workspace root (`assets/`, two levels up), so aim
+            // the reader there; the build-time path makes it cwd-independent.
+            // Android deliberately keeps the default ("assets"): cargo-apk
+            // bundles `../../assets` (Cargo.toml `[package.metadata.android]
+            // assets`) as the APK asset root, so the in-code load paths
+            // ("audio/throw.wav", "sprites/...") already line up there.
+            #[cfg(not(target_os = "android"))]
+            let plugins = plugins.set(bevy::asset::AssetPlugin {
+                file_path: concat!(env!("CARGO_MANIFEST_DIR"), "/../../assets").to_string(),
+                ..default()
+            });
+            plugins
+        })
         .add_plugins(GgrsPlugin::<GgrsCfg>::default())
         .add_plugins(SimPlugin)
-        // Phase 16: arena selection. Until the lobby arena-picker UI lands
-        // (polish), choose via TWOTOP_ARENA=anchor|crossing|reliquary. Must
-        // be inserted AFTER SimPlugin (which defaults it to Anchor).
+        // Arena selection. TWOTOP_ARENA=anchor|crossing|reliquary can seed
+        // desktop automation; the Title picker may overwrite it before
+        // `screen::spawn_match` reads the resource. Must be inserted AFTER
+        // SimPlugin (which defaults it to Anchor).
         .insert_resource(arena_from_env())
         // Phase 13: edge-detect MatchState/MatchScore transitions in
         // Update so the diagnostic log captures round flow without
@@ -132,6 +138,7 @@ pub fn run() {
         .add_plugins(ScreenPlugin)
         .add_plugins(SettingsPlugin)
         .init_resource::<netplay::LocalPlayerHandle>()
+        .init_resource::<render::PerspectiveFlip>()
         .insert_resource(netplay.clone())
         .add_systems(Startup, setup)
         .add_systems(PreUpdate, update_window_metrics.before(update_touch_state))
@@ -146,15 +153,9 @@ pub fn run() {
             ),
         );
 
-    // Screen state. Couch boots into the Title menu (no session → sim idle);
-    // `screen::spawn_match` installs a fresh SyncTest session when a match
-    // begins. Online boots straight into InMatch — its lobby lifecycle is the
-    // netplay FSM, and the matchbox driver inserts the P2P session on connect.
+    app.insert_state(AppScreen::Title);
     if online {
-        app.insert_state(AppScreen::InMatch);
         app.add_plugins(MatchboxPlugin);
-    } else {
-        app.insert_state(AppScreen::Title);
     }
 
     // Platform input source (level signals only; exactly one source).
@@ -169,6 +170,11 @@ pub fn run() {
     {
         app.add_plugins(input_desktop::DesktopInputsPlugin);
         app.add_systems(Update, toggle_fullscreen);
+    }
+
+    // Verification capture (opt-in via TWOTOP_CAPTURE): screenshot then exit.
+    if let Some(cap) = capture_config_from_env() {
+        app.insert_resource(cap).add_systems(Last, capture_frame);
     }
 
     app.run();
@@ -299,26 +305,93 @@ fn update_arena_floor(
     }
 }
 
-fn setup(
+/// Verification capture mode. With `TWOTOP_CAPTURE=<path.png>` set, the app
+/// renders for a settle window (so assets/atlases/visibility resolve), grabs a
+/// PNG of the primary window's framebuffer, then exits — letting a render
+/// change be *seen* (or screenshot-diffed) without a human watching the window.
+/// Unset → the resource is never inserted and the system never registered, so a
+/// normal `cargo run -p app` pays nothing. `TWOTOP_CAPTURE_FRAMES` overrides the
+/// settle window (default 90 ≈ 1.5 s at 60 Hz).
+#[derive(Resource)]
+struct CaptureConfig {
+    path: String,
+    settle_frames: u32,
+}
+
+fn capture_config_from_env() -> Option<CaptureConfig> {
+    let path = std::env::var("TWOTOP_CAPTURE")
+        .ok()
+        .filter(|p| !p.is_empty())?;
+    let settle_frames = std::env::var("TWOTOP_CAPTURE_FRAMES")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(90);
+    Some(CaptureConfig {
+        path,
+        settle_frames,
+    })
+}
+
+/// `Last`-schedule capture driver: count frames, fire one screenshot at the
+/// settle mark, then quit a few frames later so the async GPU readback + file
+/// write have flushed. The `save_to_disk` observer owns the actual encode.
+fn capture_frame(
     mut commands: Commands,
-    asset_server: Res<AssetServer>,
-    selected: Res<SelectedArena>,
+    cfg: Res<CaptureConfig>,
+    mut frame: Local<u32>,
+    mut fired: Local<bool>,
+    mut exit: MessageWriter<AppExit>,
 ) {
+    use bevy::render::view::screenshot::{Screenshot, save_to_disk};
+    *frame += 1;
+    if !*fired {
+        if *frame >= cfg.settle_frames {
+            let path = cfg.path.clone();
+            tracing::warn!(target: "two_top::capture", path = %path, frame = *frame, "capturing frame");
+            commands
+                .spawn(Screenshot::primary_window())
+                .observe(save_to_disk(path));
+            *fired = true;
+        }
+        return;
+    }
+    if *frame >= cfg.settle_frames + 20 {
+        exit.write(AppExit::Success);
+    }
+}
+
+fn setup(mut commands: Commands, asset_server: Res<AssetServer>, selected: Res<SelectedArena>) {
     // Camera. Mobile: a bare Camera2d (1:1 pixels) with the follow cam in
     // `CameraFollowPlugin` keeps it zoomed in for a phone. Desktop: frame
     // the WHOLE arena at once (couch versus — both players always visible)
     // via AutoMin scaling, centered at the arena origin, no follow. AutoMin
     // guarantees the full arena is shown on any window aspect, pillarboxing
     // a wide monitor rather than cropping the portrait playfield.
+    // HDR + thresholded bloom give the dark stage its HLD glow: only the
+    // brightest accents (eye-slits, boomerang highlights, hit/kill flashes,
+    // pickup auras) bloom, while `Tonemapping::None` keeps every other pixel
+    // exactly on the locked 16-color palette. `Bloom::OLD_SCHOOL` carries a
+    // high threshold so the matte cloaks and floor never wash out.
     #[cfg(target_os = "android")]
-    commands.spawn((Camera2d, camera::FollowCam));
+    commands.spawn((
+        Camera2d,
+        bevy::render::view::Hdr,
+        bevy::core_pipeline::tonemapping::Tonemapping::None,
+        bevy::post_process::bloom::Bloom::OLD_SCHOOL,
+        camera::FollowCam,
+    ));
     #[cfg(not(target_os = "android"))]
     {
         const VIEW_MARGIN_CM: f32 = 80.0;
         let min_width = (2 * sim::ARENA_HALF_WIDTH_CM) as f32 + 2.0 * VIEW_MARGIN_CM;
-        let min_height = (2 * sim::ARENA_HALF_HEIGHT_CM) as f32 + 2.0 * VIEW_MARGIN_CM;
+        // The arena renders Y-foreshortened, so frame the foreshortened height.
+        let min_height =
+            (2 * sim::ARENA_HALF_HEIGHT_CM) as f32 * render::WORLD_TILT_Y + 2.0 * VIEW_MARGIN_CM;
         commands.spawn((
             Camera2d,
+            bevy::render::view::Hdr,
+            bevy::core_pipeline::tonemapping::Tonemapping::None,
+            bevy::post_process::bloom::Bloom::OLD_SCHOOL,
             Projection::from(OrthographicProjection {
                 scaling_mode: bevy::camera::ScalingMode::AutoMin {
                     min_width,
@@ -326,6 +399,23 @@ fn setup(
                 },
                 ..OrthographicProjection::default_2d()
             }),
+        ));
+        // Screen vignette (desktop only — the static whole-arena cam sits at the
+        // origin, so a sprite sized to the AutoMin min view lands its dithered
+        // dark frame at the screen edges). Frames the couch view + unifies the
+        // palette (HLD cohesion). Above gameplay, below the HUD legend + kill
+        // flash. On mobile the follow-cam moves, so the floor's own edge
+        // vignette carries the framing there instead.
+        let mut vig_color = Color::WHITE;
+        vig_color.set_alpha(0.7);
+        commands.spawn((
+            Sprite {
+                image: asset_server.load("sprites/fx/vignette.png"),
+                color: vig_color,
+                custom_size: Some(Vec2::new(min_width, min_height)),
+                ..default()
+            },
+            Transform::from_xyz(0.0, 0.0, 45.0),
         ));
         // Couch-play control legend (desktop only — touch needs none).
         // World-space Text2d (the app has no bevy_ui); the static
@@ -347,15 +437,22 @@ fn setup(
     }
 
     // Arena backdrop: the composed moody Bone-Cathedral floor (320x480 px
-    // source) for the selected arena, scaled to cover the playable area +
-    // walls (1100x1600 cm). Z below players, stains, and effect sprites so the
-    // composition reads as "everything sits ON the cathedral floor". Tagged
+    // source) for the selected arena, sized to EXACTLY the safe playfield
+    // (2×ARENA_HALF = 1000×1500 cm) so the floor's lit ledge lip lands on the
+    // out-of-bounds death line — step off the lit island and you're over the
+    // void (the Boomerang-Fu open-field read). On the static desktop cam the
+    // void rings the island; the mobile follow-cam stays inside it. Z below
+    // players, stains, and effects so everything sits ON the floor. Tagged
     // `ArenaFloor` so the lobby arena picker can retexture it live.
     commands.spawn((
         ArenaFloor,
         Sprite {
             image: asset_server.load(arena_floor_asset(selected.0)),
-            custom_size: Some(Vec2::new(1100.0, 1600.0)),
+            custom_size: Some(Vec2::new(
+                (sim::ARENA_HALF_WIDTH_CM * 2) as f32,
+                // Y foreshortened into the tabletop tilt (matches every world Y).
+                (sim::ARENA_HALF_HEIGHT_CM * 2) as f32 * render::WORLD_TILT_Y,
+            )),
             ..default()
         },
         Transform::from_xyz(0.0, 0.0, -1.0),
@@ -383,36 +480,99 @@ type NewBoomerangs<'w, 's> =
 fn ensure_boomerang_visuals(
     mut commands: Commands,
     asset_server: Res<AssetServer>,
+    flip: Res<render::PerspectiveFlip>,
     q: NewBoomerangs,
 ) {
     // Phase 15: render the bone fang as the polished 12x12 sprite,
     // upscaled 2x to match the placeholder's original 20-px footprint
     // (BOOMERANG_HALF_EXTENT_CM * 2 = 20). Marked variants will land
     // when per-round blood accumulation is wired in cycle 3.
-    let size_px = ((BOOMERANG_HALF_EXTENT_CM * 2) as f32) * 2.0;
+    // Larger weapon sprite (2.6× the 20 cm fang) — the fang reads as a bigger,
+    // more present threat per the portrait-fighter scale-up.
+    let size_px = ((BOOMERANG_HALF_EXTENT_CM * 2) as f32) * 2.6;
     let image = asset_server.load("sprites/projectiles/bone_fang.png");
+    let shadow_img = asset_server.load("sprites/fx/shadow_blob.png");
     for (entity, pos) in &q {
         let (x, y) = pos.0.to_f32();
+        let ty = render::tilt_y(y * flip.0);
         commands.entity(entity).insert((
             Sprite {
                 image: image.clone(),
                 custom_size: Some(Vec2::new(size_px, size_px)),
                 ..default()
             },
-            Transform::from_xyz(x, y, 0.5),
+            Transform::from_xyz(x, ty, 0.5),
         ));
+        // A ground shadow so the fang reads as flying *over* the floor; it
+        // self-cleans when the boomerang despawns (render::sync_ground_shadows).
+        render::spawn_ground_shadow(
+            &mut commands,
+            shadow_img.clone(),
+            entity,
+            0.0,
+            size_px * 0.7,
+            Vec2::new(x, ty),
+        );
     }
 }
 
 /// Phase 15 cycle 1: drive each player's TextureAtlas index from the
-/// rolled-back AnimState. Runs in `Update` after sim has advanced;
-/// `display_index()` snaps to a single atlas frame per tick (no
-/// interpolation per CONVENTIONS § Render Layer Rules).
-fn sync_sprite_atlas_from_anim(mut q: Query<(&AnimState, &mut Sprite), With<Player>>) {
-    for (anim, mut sprite) in &mut q {
-        if let Some(atlas) = sprite.texture_atlas.as_mut() {
-            atlas.index = anim.display_index() as usize;
+/// Selects the atlas frame from the rolled-back AnimState AND the facing
+/// direction (side/back/front row) from the player's velocity. The 3-row
+/// atlas layout: row 0 = side, row 1 = back (away), row 2 = front (toward).
+///
+/// Direction logic: if |vy| > |vx| the character is moving vertically —
+/// positive Y = back (walking away from camera), negative Y = front (toward).
+/// Otherwise side-facing with flip_x for left/right. Idle defaults: P0
+/// (near/bottom) shows back (facing away toward the opponent), P1 (far/top)
+/// shows front (facing toward the camera/opponent).
+fn sync_sprite_atlas_from_anim(
+    mut q: Query<(&Player, &AnimState, &VelocityF, &mut Sprite)>,
+    persp: Res<render::PerspectiveFlip>,
+    mut facing: Local<HashMap<usize, (bool, u16)>>,
+) {
+    let deadzone = Fix::const_from_int(3);
+    let frames_per_row = AnimState::TOTAL_ATLAS_FRAMES as usize;
+    let flipped = persp.0 < 0.0;
+    let (away, toward) = if flipped {
+        (render::FACING_FRONT, render::FACING_BACK)
+    } else {
+        (render::FACING_BACK, render::FACING_FRONT)
+    };
+    for (player, anim, vel, mut sprite) in &mut q {
+        let (flip, dir) = facing.entry(player.handle).or_insert_with(|| {
+            let default_dir = if (player.handle == 0) ^ flipped {
+                render::FACING_BACK
+            } else {
+                render::FACING_FRONT
+            };
+            (false, default_dir)
+        });
+
+        let ax = vel.0.x.abs();
+        let ay = vel.0.y.abs();
+        if ax > deadzone || ay > deadzone {
+            if ay > ax {
+                if vel.0.y > Fix::ZERO {
+                    *dir = away;
+                } else {
+                    *dir = toward;
+                }
+                *flip = false;
+            } else {
+                *dir = render::FACING_SIDE;
+                if vel.0.x > deadzone {
+                    *flip = false;
+                } else if vel.0.x < -deadzone {
+                    *flip = true;
+                }
+            }
         }
+
+        if let Some(atlas) = sprite.texture_atlas.as_mut() {
+            atlas.index = (*dir as usize) * frames_per_row + anim.display_index() as usize;
+        }
+        sprite.flip_x = *flip;
     }
 }
 

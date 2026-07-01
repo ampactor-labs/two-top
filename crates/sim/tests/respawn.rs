@@ -165,7 +165,9 @@ fn revive_resets_velocity_dash_and_stun() {
     {
         let mut e = app.world_mut().entity_mut(p1_entity);
         e.insert(VelocityF(Vec2F::from_cm(13, 13)));
-        e.insert(DashState::Cooldown { frames_remaining: 5 });
+        e.insert(DashState::Cooldown {
+            frames_remaining: 5,
+        });
         e.insert(StunFrames(7));
     }
 
@@ -182,14 +184,17 @@ fn revive_resets_velocity_dash_and_stun() {
         .expect("p1 entity");
 
     assert_eq!(vel.0, Vec2F::ZERO, "velocity reset on revive");
-    assert!(matches!(dash, DashState::Idle), "dash reset to Idle: {dash:?}");
+    assert!(
+        matches!(dash, DashState::Idle),
+        "dash reset to Idle: {dash:?}"
+    );
     assert_eq!(stun.0, 0, "stun reset to 0");
 }
 
 #[test]
-fn respawn_position_is_symmetric_on_x_axis() {
+fn respawn_position_is_symmetric_on_y_axis() {
     let p0 = respawn_position(0);
     let p1 = respawn_position(1);
-    assert_eq!(p0.x, -p1.x, "respawn points should mirror on x");
-    assert_eq!(p0.y, p1.y, "respawn points share y");
+    assert_eq!(p0.x, p1.x, "respawn points share x");
+    assert_eq!(p0.y, -p1.y, "respawn points should mirror on y");
 }

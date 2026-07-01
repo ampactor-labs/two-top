@@ -58,7 +58,10 @@ fn build_app() -> App {
 fn read_pos(app: &mut App) -> (i32, i32) {
     let world = app.world_mut();
     let mut q = world.query::<(&Player, &PositionF)>();
-    let (_, pos) = q.iter(world).find(|(p, _)| p.handle == 0).expect("player 0");
+    let (_, pos) = q
+        .iter(world)
+        .find(|(p, _)| p.handle == 0)
+        .expect("player 0");
     (pos.0.x.to_bits(), pos.0.y.to_bits())
 }
 

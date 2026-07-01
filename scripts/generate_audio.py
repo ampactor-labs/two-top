@@ -312,19 +312,44 @@ def cue_pickup_collect(_rng: random.Random) -> list[float]:
     return _chime(660.0, 440.0)
 
 
+def _supersaw(base: float, dur: float,
+              detunes: tuple[float, ...] = (-0.5, -0.25, 0.0, 0.25, 0.5)) -> list[float]:
+    """A detuned saw cluster — the 'fat analog' width. Detune offsets are
+    multiples of 0.125 Hz so every voice still completes a whole number of
+    cycles in an 8 s loop and the seam stays phase-continuous (no click)."""
+    g = 1.0 / len(detunes)
+    return mix(*[gain(saw(base + d, dur), g) for d in detunes])
+
+
+def _saturate(sig: list[float], drive: float) -> list[float]:
+    """Soft analog saturation (tanh) — fattens and warms, rounds the saw edges
+    the way an overdriven analog VCA/filter does."""
+    return [math.tanh(s * drive) for s in sig]
+
+
 def cue_ambient_loop(rng: random.Random) -> list[float]:
-    """8 s seamless bed. Two detuned saw drones at 55 / 55.5 Hz (both complete a
-    whole number of cycles in 8 s, so the loop point is phase-continuous) plus a
-    slow filtered-noise swell gated by a raised cosine that is zero at both
-    ends (so the non-periodic noise can't click at the seam). -18 dBFS bed."""
+    """8 s seamless bed — a FAT, warm, detuned analog synth (Regular-Show
+    title-card register), not the old thin sub-drone. A detuned supersaw chord
+    (root A1 + fifth E2 + octave A2), tanh-saturated for analog grit and run
+    through a warm-but-open filter, over a sine sub for weight, plus a subtle
+    raised-cosine air swell. Every oscillator completes whole cycles in 8 s
+    (freqs on a 0.125 Hz grid) so the loop point is phase-continuous. -18 dBFS."""
     dur = 8.0
     n = n_samples(dur)
-    drone = mix(saw(55.0, dur), gain(saw(55.5, dur), 0.8))
-    drone = one_pole_lp(drone, 700.0)
-    # Raised-cosine swell envelope: 0 at t=0 and t=dur, peak mid-loop.
+    # Detuned analog chord — power-chord voicing for fatness.
+    chord = mix(
+        _supersaw(55.0, dur),                  # A1 root
+        gain(_supersaw(82.5, dur), 0.7),       # E2 fifth
+        gain(_supersaw(110.0, dur), 0.5),      # A2 octave
+    )
+    chord = one_pole_lp(chord, 1500.0)         # warm, but open (was a muffled 700)
+    chord = _saturate(chord, 1.7)              # analog fatten/warm
+    chord = one_pole_lp(chord, 2400.0)         # tame the saturation fizz
+    sub = gain(sine(27.5, dur), 0.55)          # A0 sub — weight under the chord
+    # Subtle airy swell for movement; raised cosine is 0 at both ends (no seam click).
     swell_env = [0.5 - 0.5 * math.cos(2.0 * math.pi * (i / n)) for i in range(n)]
-    swell = mul(one_pole_lp(noise(dur, rng), 900.0), swell_env)
-    bed = mix(gain(drone, 0.7), gain(swell, 0.5))
+    swell = mul(one_pole_lp(noise(dur, rng), 1100.0), swell_env)
+    bed = mix(gain(chord, 0.62), sub, gain(swell, 0.22))
     return bed
 
 

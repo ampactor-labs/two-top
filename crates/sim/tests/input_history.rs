@@ -122,7 +122,11 @@ fn released_within_finds_recent_falling_edge() {
 fn pressed_within_returns_false_when_no_edge() {
     // Steady-low ring: no rising edges anywhere.
     let ring = [PlayerInput::default(); INPUT_HISTORY_LEN];
-    assert!(!pressed_within(&ring, INPUT_HISTORY_LEN, PlayerInput::THROW_DOWN));
+    assert!(!pressed_within(
+        &ring,
+        INPUT_HISTORY_LEN,
+        PlayerInput::THROW_DOWN
+    ));
 }
 
 // ---- Integration: ring is populated through SimPlugin ----
@@ -191,7 +195,8 @@ fn input_history_records_ticks_in_order() {
     let ring = history.0.get(&0).expect("handle 0 ring");
     for (i, expected) in pattern.iter().enumerate() {
         assert_eq!(
-            ring[i].stick_x, *expected,
+            ring[i].stick_x,
+            *expected,
             "tick {i}: ring slot stick_x mismatch (full ring: {:?})",
             ring.map(|p| p.stick_x)
         );
@@ -216,7 +221,10 @@ fn input_history_drops_oldest_when_ring_overflows() {
     let ring = history.0.get(&0).expect("handle 0 ring");
     // First tick (stick_x=1) was pushed out; ring now holds 2..=(N+1).
     assert_eq!(ring[0].stick_x, 2);
-    assert_eq!(ring[INPUT_HISTORY_LEN - 1].stick_x, INPUT_HISTORY_LEN as i8 + 1);
+    assert_eq!(
+        ring[INPUT_HISTORY_LEN - 1].stick_x,
+        INPUT_HISTORY_LEN as i8 + 1
+    );
 }
 
 #[test]

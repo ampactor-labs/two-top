@@ -17,29 +17,61 @@ use bevy::prelude::*;
 use fixed_math::Vec2F;
 use sim::{AnimState, LastSimTickTime, NoInterpolate, PositionF, PreviousPositionF, TICK_HZ};
 
-/// Shared player atlas layout matching ART_DIRECTION.md v2:
-/// 41 frames × 48×48 px cells in a single-row strip (1968×48 px sheet). The
-/// cloaked-drifter rig (the HLD overhaul) is authored at 48 px for the extra
-/// hood/cloak detail; the world footprint is unchanged (see PLAYER_RENDER_SIZE).
-/// Called from both `app` and `replay_viewer` setup to avoid duplicating
-/// the atlas contract.
-pub fn player_atlas_layout(
-    atlases: &mut Assets<TextureAtlasLayout>,
-) -> Handle<TextureAtlasLayout> {
+/// 3-row × 45-column atlas (48×48 cells, 2160×144 px sheet):
+/// row 0 = side-facing, row 1 = back (walking away), row 2 = front (walking toward).
+/// Each row: IDLE6 RUN6 THROW8 DASH4 HIT4 CATCH3 DEATH10 CHARGE4.
+/// The engine selects the row from the character's movement direction.
+pub fn player_atlas_layout(atlases: &mut Assets<TextureAtlasLayout>) -> Handle<TextureAtlasLayout> {
     atlases.add(TextureAtlasLayout::from_grid(
         UVec2::splat(48),
         AnimState::TOTAL_ATLAS_FRAMES as u32,
-        1,
+        FACING_DIR_COUNT as u32,
         None,
         None,
     ))
 }
 
+/// Facing direction rows in the player atlas.
+pub const FACING_SIDE: u16 = 0;
+pub const FACING_BACK: u16 = 1;
+pub const FACING_FRONT: u16 = 2;
+pub const FACING_DIR_COUNT: u16 = 3;
+
 /// Onscreen render size for player sprites: 64 world units. Unchanged by the
 /// 48 px source bump — the drifter occupies the same gameplay footprint and
 /// just renders at finer texel density (≈1.33 world units/texel) than the old
 /// 32 px rig, per ART_DIRECTION.md v2 rationale.
-pub const PLAYER_RENDER_SIZE: f32 = 64.0;
+pub const PLAYER_RENDER_SIZE: f32 = 80.0;
+
+/// Vertical foreshorten of the world on screen — the "camera tilt" that turns
+/// the flat top-down floor into a Boomerang-Fu/HLD tabletop you look *into*.
+/// 1.0 = dead-flat top-down; lower = more tilt. 0.75 sits between HLD's subtle
+/// tilt and BFu's stronger one. Applied to every world-space Y at render time
+/// (positions foreshorten; sprite HEIGHTS stay full so actors stand upright).
+/// Render-only — sim stays in true coordinates, so determinism is untouched.
+pub const WORLD_TILT_Y: f32 = 0.75;
+
+/// Foreshorten a world-space Y for rendering (the single tilt hook).
+/// For SIZE foreshortening (tile heights, view extents), pass raw Y.
+/// For POSITION foreshortening, multiply `y` by `PerspectiveFlip.0` first
+/// so P1's client sees the world Y-mirrored (their character at the bottom).
+#[inline]
+pub fn tilt_y(y: f32) -> f32 {
+    y * WORLD_TILT_Y
+}
+
+/// Per-client Y-sign for the depth-duel perspective. `1.0` on P0's device
+/// (or couch/observer), `-1.0` on P1's device — makes each player see
+/// themselves at the bottom of their phone, opponent at the top.
+/// Render-only; sim stays in true coordinates.
+#[derive(Resource, Clone, Copy)]
+pub struct PerspectiveFlip(pub f32);
+
+impl Default for PerspectiveFlip {
+    fn default() -> Self {
+        Self(1.0)
+    }
+}
 
 // ===========================================================================
 // Phase 15 cycle 3c — locked 16-color palette.
@@ -56,22 +88,22 @@ pub mod palette {
         Color::srgb(r as f32 / 255.0, g as f32 / 255.0, b as f32 / 255.0)
     }
 
-    pub const VOID: Color = p(11, 13, 18);
-    pub const DEEP_ASH: Color = p(23, 25, 34);
-    pub const BRUISE_SHADOW: Color = p(43, 37, 51);
-    pub const CHARCOAL_LINE: Color = p(57, 52, 66);
-    pub const COLD_STONE: Color = p(87, 90, 100);
-    pub const WARM_BONE_SHADE: Color = p(122, 101, 88);
-    pub const BONE: Color = p(203, 190, 148);
-    pub const HOT_BONE: Color = p(255, 241, 194);
-    pub const BLOOD_DARK: Color = p(110, 22, 50);
-    pub const P0_BLOOD: Color = p(210, 47, 69);
-    pub const EMBER: Color = p(240, 106, 58);
-    pub const SPARK: Color = p(255, 216, 102);
-    pub const DEEP_TEAL: Color = p(13, 101, 114);
-    pub const P1_CYAN: Color = p(39, 199, 216);
-    pub const RECALL_BLUE: Color = p(71, 108, 255);
-    pub const HIT_WHITE: Color = p(248, 247, 232);
+    pub const VOID: Color = p(16, 14, 34);
+    pub const DEEP_ASH: Color = p(32, 28, 66);
+    pub const BRUISE_SHADOW: Color = p(66, 36, 92);
+    pub const CHARCOAL_LINE: Color = p(94, 64, 132);
+    pub const COLD_STONE: Color = p(104, 126, 168);
+    pub const WARM_BONE_SHADE: Color = p(130, 96, 102);
+    pub const BONE: Color = p(210, 196, 156);
+    pub const HOT_BONE: Color = p(255, 243, 202);
+    pub const BLOOD_DARK: Color = p(122, 28, 66);
+    pub const P0_BLOOD: Color = p(226, 52, 84);
+    pub const EMBER: Color = p(245, 112, 60);
+    pub const SPARK: Color = p(255, 220, 112);
+    pub const DEEP_TEAL: Color = p(16, 118, 132);
+    pub const P1_CYAN: Color = p(52, 212, 226);
+    pub const RECALL_BLUE: Color = p(86, 120, 255);
+    pub const HIT_WHITE: Color = p(250, 248, 240);
 }
 
 /// Lerp between two sim positions, returning a `Vec2` ready to drop into
@@ -100,6 +132,7 @@ pub fn interpolation_alpha(now_secs: f32, last_tick_secs: f32, tick_hz: usize) -
 pub fn sync_transforms_from_sim(
     time: Res<Time<Real>>,
     last_tick: Res<LastSimTickTime>,
+    flip: Res<PerspectiveFlip>,
     mut q: Query<(
         &PositionF,
         &PreviousPositionF,
@@ -107,11 +140,8 @@ pub fn sync_transforms_from_sim(
         &mut Transform,
     )>,
 ) {
-    let alpha = interpolation_alpha(
-        time.elapsed_secs_f64() as f32,
-        last_tick.0 as f32,
-        TICK_HZ,
-    );
+    let alpha = interpolation_alpha(time.elapsed_secs_f64() as f32, last_tick.0 as f32, TICK_HZ);
+    let f = flip.0;
     for (pos, prev, no_interp, mut xform) in &mut q {
         let v = if no_interp.is_some() {
             let (x, y) = pos.0.to_f32();
@@ -120,8 +150,125 @@ pub fn sync_transforms_from_sim(
             lerp_position(prev.0, pos.0, alpha)
         };
         xform.translation.x = v.x;
-        xform.translation.y = v.y;
+        xform.translation.y = tilt_y(v.y * f);
     }
+}
+
+// =========================================================================
+// 2.5D depth (render-only). Hyper Light Drifter sells "3D" inside a 2D engine
+// with three cues: actors stand ON the ground (drop shadows), nearer actors
+// draw OVER farther ones (y-sort), and cover has HEIGHT (the app's raised
+// obstacle composite). This module owns the first two. All of it is render-
+// only — it reads the render-derived `Transform` and writes only
+// `Transform.z` + cosmetic shadow entities, never sim state (CONVENTIONS
+// § Render Layer Rules), so the determinism matrix never sees it.
+// =========================================================================
+
+/// Ground actors (the duelists) and raised cover sort within this z band:
+/// lower-on-screen (smaller world-y — nearer the camera in the 3/4 tilt) →
+/// higher z → drawn in front. Held strictly *below* the boomerang (z=0.5) and
+/// its trail (z=0.45) so the priority-#1 fang read always sits cleanest on top
+/// (DESIGN_DIRECTION § 3); floor stains / pickups / arena props sit below the
+/// band (z ≤ -0.45).
+pub const GROUND_Z_BACK: f32 = 0.0;
+pub const GROUND_Z_FRONT: f32 = 0.4;
+/// World-y mapped to the front/back edges of the band — roughly the arena half-
+/// height, so the whole field uses the band. Past it the z clamps (an out-of-
+/// bounds actor just pins to the nearest/farthest layer rather than inverting).
+const GROUND_Z_HALF_SPAN_CM: f32 = 800.0;
+
+/// Map a ground-contact world-y to a draw z: smaller y (nearer) → larger z.
+/// The single source of the painter's order shared by the y-sort system, the
+/// drop shadows, and the app's static obstacle blocks.
+pub fn ground_z(foot_y: f32) -> f32 {
+    let mid = (GROUND_Z_BACK + GROUND_Z_FRONT) * 0.5;
+    let half = (GROUND_Z_FRONT - GROUND_Z_BACK) * 0.5;
+    let t = (foot_y / GROUND_Z_HALF_SPAN_CM).clamp(-1.0, 1.0);
+    mid - t * half
+}
+
+/// Marker: a *moving* ground actor (the duelists) whose z must track its foot
+/// line every frame. `foot_offset` is how far below the centre-anchored
+/// sprite's origin the ground-contact point sits (≈ the feet).
+#[derive(Component, Clone, Copy, Debug)]
+pub struct YSorted {
+    pub foot_offset: f32,
+}
+
+/// Render-side: write each [`YSorted`] entity's draw z from its foot line.
+/// Ordered after `sync_transforms_from_sim` so it reads the interpolated y.
+pub fn apply_ground_ysort(mut q: Query<(&YSorted, &mut Transform)>) {
+    for (ys, mut xform) in &mut q {
+        xform.translation.z = ground_z(xform.translation.y - ys.foot_offset);
+    }
+}
+
+/// A cosmetic drop shadow that tracks `target`'s foot point each frame —
+/// the single cheapest "actors stand on the ground" cue. Render-only; it
+/// despawns itself the frame its target is gone, so a boomerang's shadow is
+/// cleaned when the fang despawns with zero lifecycle plumbing at the spawn
+/// site.
+#[derive(Component, Clone, Copy, Debug)]
+pub struct GroundShadow {
+    pub target: Entity,
+    pub foot_offset: f32,
+}
+
+/// Render-side: park each [`GroundShadow`] under its target's foot point and
+/// just below it in z so the actor always reads on top. Orphaned shadows
+/// (target despawned) remove themselves. Disjoint from its target query via
+/// `Without<GroundShadow>`.
+pub fn sync_ground_shadows(
+    mut commands: Commands,
+    targets: Query<&Transform, Without<GroundShadow>>,
+    mut shadows: Query<(Entity, &GroundShadow, &mut Transform)>,
+) {
+    for (entity, shadow, mut xform) in &mut shadows {
+        let Ok(target) = targets.get(shadow.target) else {
+            commands.entity(entity).despawn();
+            continue;
+        };
+        let foot_y = target.translation.y - shadow.foot_offset;
+        xform.translation.x = target.translation.x;
+        xform.translation.y = foot_y;
+        xform.translation.z = ground_z(foot_y) - 0.01;
+    }
+}
+
+/// Soft alpha the void shadow texture is tinted to when it lands on the floor.
+pub const GROUND_SHADOW_ALPHA: f32 = 0.5;
+
+/// Spawn a cosmetic drop shadow that tracks `target`. `width` is the world-unit
+/// shadow diameter (height is half — the 3/4-tilt foreshortening); `foot_offset`
+/// is how far below the target's origin its ground point sits. Returns the
+/// shadow entity. Render-only; cleaned by [`sync_ground_shadows`] when the
+/// target dies (and torn down with the match by the app's despawn filter).
+pub fn spawn_ground_shadow(
+    commands: &mut Commands,
+    image: Handle<Image>,
+    target: Entity,
+    foot_offset: f32,
+    width: f32,
+    at: Vec2,
+) -> Entity {
+    let mut color = Color::WHITE; // multiplies the opaque void texture
+    color.set_alpha(GROUND_SHADOW_ALPHA);
+    let foot_y = at.y - foot_offset;
+    commands
+        .spawn((
+            Sprite {
+                image,
+                color,
+                custom_size: Some(Vec2::new(width, width * 0.5)),
+                ..default()
+            },
+            Transform::from_xyz(at.x, foot_y, ground_z(foot_y) - 0.01),
+            GroundShadow {
+                target,
+                foot_offset,
+            },
+        ))
+        .id()
 }
 
 pub struct RenderSyncPlugin;
@@ -137,6 +284,10 @@ impl Plugin for RenderSyncPlugin {
                 sync_reliquary_visuals,
                 ensure_pickup_visuals,
                 tint_boomerangs_by_modifier,
+                // Depth pass: z from the foot line + shadows, after x/y is set.
+                apply_ground_ysort.after(sync_transforms_from_sim),
+                sync_ground_shadows.after(sync_transforms_from_sim),
+                sync_charge_auras.after(sync_transforms_from_sim),
             ),
         );
     }
@@ -158,14 +309,113 @@ fn boomerang_tint(modifier: Option<sim::PickupKind>) -> Color {
     }
 }
 
-/// `Update` system: tint every boomerang sprite by its active modifier.
-/// Runs each frame over the handful of live boomerangs (cheap) so the tint
-/// is correct regardless of when the sprite was attached.
+/// Scale a color's linear RGB by `f` (alpha preserved). `f > 1.0` overdrives
+/// past white for HDR bloom; `f < 1.0` dims. The single knob the FX use to push
+/// an accent into (or pull it out of) the bloom threshold.
+pub fn scale_color(c: Color, f: f32) -> Color {
+    let l = c.to_linear();
+    Color::linear_rgba(l.red * f, l.green * f, l.blue * f, l.alpha)
+}
+
+/// Mild HDR overdrive on an in-flight fang so it reads as a glowing weapon.
+const FANG_GLOW: f32 = 1.3;
+
+/// `Update` system: tint every boomerang sprite by its active modifier, and
+/// distinguish a dropped (Loose) fang — dimmed with a slow "grab me" pulse so
+/// it reads as an item on the ground, not an in-flight threat. In-flight fangs
+/// get a mild overdrive so they glow. Cheap (a handful of live fangs).
 pub fn tint_boomerangs_by_modifier(
-    mut q: Query<(&sim::BoomerangMods, &mut Sprite), With<sim::Boomerang>>,
+    time: Res<Time<Real>>,
+    mut q: Query<(&sim::Boomerang, &sim::BoomerangMods, &mut Sprite)>,
 ) {
-    for (mods, mut sprite) in &mut q {
-        sprite.color = boomerang_tint(mods.modifier);
+    for (boom, mods, mut sprite) in &mut q {
+        let base = boomerang_tint(mods.modifier);
+        sprite.color = match boom.state {
+            sim::BoomerangState::Loose => {
+                let pulse = 0.55 + 0.18 * (time.elapsed_secs() * 4.5).sin();
+                scale_color(base, pulse)
+            }
+            _ => scale_color(base, FANG_GLOW),
+        };
+    }
+}
+
+// =========================================================================
+// Throw-charge aura (render-only). A bright energy ring gathers under a
+// charging duelist and tightens + brightens toward full charge (overdriven
+// past white so it blooms harder as the throw peaks). Reads the rolled-back
+// `sim::ThrowCharge` (read-only) and drives a tracked cosmetic ring — never
+// writes sim (CONVENTIONS § Render Layer Rules).
+// =========================================================================
+
+/// A charge ring that tracks `target`'s feet, sized/brightened by the target's
+/// `sim::ThrowCharge`. Hidden while not charging. Render-only.
+#[derive(Component, Clone, Copy, Debug)]
+pub struct ChargeAura {
+    pub target: Entity,
+    pub foot_offset: f32,
+}
+
+/// Ring diameter (world units) at zero vs full charge — it TIGHTENS inward as
+/// the throw builds (energy gathering).
+pub const CHARGE_AURA_MAX_SIZE: f32 = 84.0;
+pub const CHARGE_AURA_MIN_SIZE: f32 = 46.0;
+/// Ring spin rate (rad/s) — a slow rotation for the "gathering energy" read.
+pub const CHARGE_AURA_SPIN: f32 = 2.2;
+
+/// Spawn a hidden charge ring tracking `target`. Returns the entity.
+pub fn spawn_charge_aura(
+    commands: &mut Commands,
+    image: Handle<Image>,
+    target: Entity,
+    foot_offset: f32,
+) -> Entity {
+    commands
+        .spawn((
+            Sprite {
+                image,
+                custom_size: Some(Vec2::splat(CHARGE_AURA_MAX_SIZE)),
+                ..default()
+            },
+            Transform::default(),
+            Visibility::Hidden,
+            ChargeAura {
+                target,
+                foot_offset,
+            },
+        ))
+        .id()
+}
+
+/// `Update` system: drive each [`ChargeAura`] from its target's `ThrowCharge` —
+/// size tightens and brightness overdrives toward full charge; hidden at zero.
+pub fn sync_charge_auras(
+    time: Res<Time<Real>>,
+    targets: Query<(&Transform, &sim::ThrowCharge), Without<ChargeAura>>,
+    mut auras: Query<(&ChargeAura, &mut Transform, &mut Sprite, &mut Visibility)>,
+) {
+    for (aura, mut xf, mut sprite, mut vis) in &mut auras {
+        let Ok((target, charge)) = targets.get(aura.target) else {
+            *vis = Visibility::Hidden;
+            continue;
+        };
+        if charge.0 == 0 {
+            *vis = Visibility::Hidden;
+            continue;
+        }
+        *vis = Visibility::Visible;
+        let power = (charge.0 as f32 / sim::CHARGE_MAX_FRAMES as f32).clamp(0.0, 1.0);
+        let size = CHARGE_AURA_MAX_SIZE + (CHARGE_AURA_MIN_SIZE - CHARGE_AURA_MAX_SIZE) * power;
+        sprite.custom_size = Some(Vec2::splat(size));
+        // Overdrive past white toward full charge → the ring blooms harder.
+        let bright = 1.0 + power * 1.1;
+        sprite.color = Color::linear_rgb(bright, bright, bright);
+        let foot_y = target.translation.y - aura.foot_offset;
+        xf.translation.x = target.translation.x;
+        xf.translation.y = foot_y;
+        // Just under the actor, above its ground shadow.
+        xf.translation.z = ground_z(foot_y) - 0.005;
+        xf.rotation = Quat::from_rotation_z(time.elapsed_secs() * CHARGE_AURA_SPIN);
     }
 }
 
@@ -177,6 +427,7 @@ pub fn tint_boomerangs_by_modifier(
 pub fn ensure_pickup_visuals(
     mut commands: Commands,
     asset_server: Res<AssetServer>,
+    flip: Res<PerspectiveFlip>,
     mut atlases: ResMut<Assets<TextureAtlasLayout>>,
     mut layout: Local<Option<Handle<TextureAtlasLayout>>>,
     q: Query<(Entity, &sim::Pickup, &sim::PositionF), Without<Sprite>>,
@@ -186,12 +437,18 @@ pub fn ensure_pickup_visuals(
     }
     let layout = layout
         .get_or_insert_with(|| {
-            atlases.add(TextureAtlasLayout::from_grid(UVec2::splat(24), 6, 1, None, None))
+            atlases.add(TextureAtlasLayout::from_grid(
+                UVec2::splat(24),
+                6,
+                1,
+                None,
+                None,
+            ))
         })
         .clone();
     let image = asset_server.load("sprites/pickups/pickup_sheet.png");
     // Render a touch larger than the 32 cm hitbox so it pops on the floor.
-    let size = (sim::PICKUP_HALF_EXTENT_CM * 2) as f32 * 1.4;
+    let size = (sim::PICKUP_HALF_EXTENT_CM * 2) as f32 * 1.8;
     for (entity, pickup, pos) in &q {
         let (x, y) = pos.0.to_f32();
         commands.entity(entity).insert((
@@ -204,8 +461,9 @@ pub fn ensure_pickup_visuals(
                 custom_size: Some(Vec2::splat(size)),
                 ..default()
             },
-            // Above the floor + arena props, below players/boomerangs.
-            Transform::from_xyz(x, y, 0.2),
+            // On the floor (below the ground-actor y-sort band) so a duelist
+            // always steps cleanly *over* a pickup, above stains/props.
+            Transform::from_xyz(x, tilt_y(y * flip.0), -0.45),
         ));
     }
 }
@@ -236,21 +494,22 @@ pub fn spawn_arena_props(
     asset_server: &AssetServer,
     atlases: &mut Assets<TextureAtlasLayout>,
     selected: &sim::SelectedArena,
+    flip: f32,
 ) {
-    spawn_pyres(commands, asset_server, atlases, selected);
+    spawn_pyres(commands, asset_server, atlases, selected, flip);
     match selected.0 {
-        sim::ArenaId::Crossing => spawn_crossing(commands, asset_server, atlases),
-        sim::ArenaId::Reliquary => spawn_reliquary(commands, asset_server, atlases),
+        sim::ArenaId::Crossing => spawn_crossing(commands, asset_server, atlases, flip),
+        sim::ArenaId::Reliquary => spawn_reliquary(commands, asset_server, atlases, flip),
         sim::ArenaId::Anchor => {}
     }
 }
 
-fn rect_center_size(rect: fixed_math::RectF) -> (Vec2, Vec2) {
+fn rect_center_size(rect: fixed_math::RectF, flip: f32) -> (Vec2, Vec2) {
     let (min_x, min_y) = rect.min.to_f32();
     let (max_x, max_y) = rect.max.to_f32();
     (
-        Vec2::new((min_x + max_x) * 0.5, (min_y + max_y) * 0.5),
-        Vec2::new(max_x - min_x, max_y - min_y),
+        Vec2::new((min_x + max_x) * 0.5, tilt_y((min_y + max_y) * 0.5 * flip)),
+        Vec2::new(max_x - min_x, (max_y - min_y) * WORLD_TILT_Y),
     )
 }
 
@@ -259,12 +518,18 @@ fn spawn_pyres(
     asset_server: &AssetServer,
     atlases: &mut Assets<TextureAtlasLayout>,
     selected: &sim::SelectedArena,
+    flip: f32,
 ) {
-    // 3-cell bone-pyre sheet: 0 intact / 1 cracked / 2 shattered-rubble.
-    let layout = atlases.add(TextureAtlasLayout::from_grid(UVec2::splat(32), 3, 1, None, None));
+    let layout = atlases.add(TextureAtlasLayout::from_grid(
+        UVec2::splat(32),
+        3,
+        1,
+        None,
+        None,
+    ));
     let image = asset_server.load("sprites/arena/bone_pyre_sheet.png");
     for pyre in sim::arena_pyres_for(selected.0) {
-        let (center, size) = rect_center_size(pyre.rect);
+        let (center, size) = rect_center_size(pyre.rect, flip);
         commands.spawn((
             ArenaProp,
             pyre,
@@ -287,9 +552,10 @@ fn spawn_crossing(
     commands: &mut Commands,
     asset_server: &AssetServer,
     atlases: &mut Assets<TextureAtlasLayout>,
+    flip: f32,
 ) {
-    let (chasm_c, chasm_sz) = rect_center_size(sim::crossing_chasm());
-    let tile_h = chasm_sz.x * 2.0; // chasm/bridge tiles are 1:2 (32x64 source)
+    let (chasm_c, chasm_sz) = rect_center_size(sim::crossing_chasm(), flip);
+    let tile_h = chasm_sz.x * 2.0 * WORLD_TILT_Y; // 1:2 tiles, Y foreshortened to the tabletop
     let n = (chasm_sz.y / tile_h).ceil() as i32 + 1;
     let chasm_img = asset_server.load("sprites/arena/chasm_strip.png");
     let bridge_img = asset_server.load("sprites/arena/bone_bridge_tile.png");
@@ -320,10 +586,16 @@ fn spawn_crossing(
         ));
     }
     // Altar sigils (2-cell sheet: 0 idle / 1 lit) on each side.
-    let sigil_layout = atlases.add(TextureAtlasLayout::from_grid(UVec2::splat(32), 2, 1, None, None));
+    let sigil_layout = atlases.add(TextureAtlasLayout::from_grid(
+        UVec2::splat(32),
+        2,
+        1,
+        None,
+        None,
+    ));
     let sigil_img = asset_server.load("sprites/arena/altar_sigil_sheet.png");
     for sigil in sim::crossing_sigils() {
-        let (center, size) = rect_center_size(sigil);
+        let (center, size) = rect_center_size(sigil, flip);
         commands.spawn((
             ArenaProp,
             SigilVisual,
@@ -345,12 +617,18 @@ fn spawn_reliquary(
     commands: &mut Commands,
     asset_server: &AssetServer,
     atlases: &mut Assets<TextureAtlasLayout>,
+    flip: f32,
 ) {
-    // 2-cell door sheet: 0 active / 1 cooldown.
-    let layout = atlases.add(TextureAtlasLayout::from_grid(UVec2::splat(32), 2, 1, None, None));
+    let layout = atlases.add(TextureAtlasLayout::from_grid(
+        UVec2::splat(32),
+        2,
+        1,
+        None,
+        None,
+    ));
     let image = asset_server.load("sprites/arena/sigil_door_sheet.png");
     for (footprint, _exit) in sim::reliquary_doors() {
-        let (center, size) = rect_center_size(footprint);
+        let (center, size) = rect_center_size(footprint, flip);
         commands.spawn((
             ArenaProp,
             DoorVisual,
@@ -394,7 +672,11 @@ pub fn sync_crossing_visuals(
 ) {
     let active = bridge.is_active(frame.0);
     for mut vis in &mut bridges {
-        *vis = if active { Visibility::Visible } else { Visibility::Hidden };
+        *vis = if active {
+            Visibility::Visible
+        } else {
+            Visibility::Hidden
+        };
     }
     for mut sprite in &mut sigils {
         if let Some(atlas) = sprite.texture_atlas.as_mut() {
@@ -573,6 +855,8 @@ pub struct EffectAssets {
     /// cycles can vary the cell selection for visual variety.
     pub p0_stain: (Handle<Image>, Handle<TextureAtlasLayout>),
     pub p1_stain: (Handle<Image>, Handle<TextureAtlasLayout>),
+    /// 4-cell ground-dust burst (14×14) kicked up on a dash.
+    pub dust_puff: (Handle<Image>, Handle<TextureAtlasLayout>),
 }
 
 fn load_effect_assets(
@@ -621,6 +905,14 @@ fn load_effect_assets(
         None,
         None,
     ));
+    // Dash dust: 4 cells x 14x14.
+    let dust_layout = atlases.add(TextureAtlasLayout::from_grid(
+        UVec2::splat(14),
+        4,
+        1,
+        None,
+        None,
+    ));
     commands.insert_resource(EffectAssets {
         hit_burst: (
             asset_server.load("sprites/particles/hit_burst_sheet.png"),
@@ -646,7 +938,49 @@ fn load_effect_assets(
             asset_server.load("sprites/stains/p1_stain_sheet.png"),
             stain_layout,
         ),
+        dust_puff: (
+            asset_server.load("sprites/fx/dust_puff_sheet.png"),
+            dust_layout,
+        ),
     });
+}
+
+/// Approx. world units below a duelist's centre-anchored origin to its feet —
+/// where dash dust kicks up + effects ground (mirrors the app's foot offset).
+const RENDER_FOOT_OFFSET: f32 = 26.0;
+
+/// Tracks each player's last-seen `Dashing` state so [`spawn_dash_dust`] fires
+/// dust once, on the tick a dash begins.
+#[derive(Default)]
+pub struct PrevDashing(pub bevy::platform::collections::HashMap<usize, bool>);
+
+/// Render-side: kick up a ground-dust puff at a duelist's feet the tick it
+/// enters a dash. Reads the rolled-back `DashState` edge (render-only; the dust
+/// is a cosmetic `EffectSprite`, never rolled back).
+pub fn spawn_dash_dust(
+    mut commands: Commands,
+    assets: Res<EffectAssets>,
+    players: Query<(&Player, &sim::DashState, &Transform)>,
+    mut prev: Local<PrevDashing>,
+) {
+    for (player, dash, xform) in &players {
+        let now = matches!(dash, sim::DashState::Dashing { .. });
+        let was = prev.0.get(&player.handle).copied().unwrap_or(false);
+        if now && !was {
+            let feet = xform.translation.truncate() - Vec2::new(0.0, RENDER_FOOT_OFFSET);
+            spawn_effect(
+                &mut commands,
+                assets.dust_puff.0.clone(),
+                assets.dust_puff.1.clone(),
+                4,
+                0.045,
+                feet,
+                44.0,
+                -0.4, // on the floor, above stains
+            );
+        }
+        prev.0.insert(player.handle, now);
+    }
 }
 
 /// Tracks each Player handle's last-observed `Dead.is_dying()` so
@@ -813,7 +1147,8 @@ pub fn spawn_recall_pulses(
             .get(&entity)
             .copied()
             .unwrap_or(BoomerangState::Flying);
-        if matches!(was, BoomerangState::Flying) && matches!(curr, BoomerangState::Returning { .. }) {
+        if matches!(was, BoomerangState::Flying) && matches!(curr, BoomerangState::Returning { .. })
+        {
             spawn_effect(
                 &mut commands,
                 assets.recall_pulse.0.clone(),
@@ -864,7 +1199,11 @@ pub const TRAIL_GHOST_ALPHA: f32 = 0.5;
 /// State→color for a trail stamp. Returning overrides everything (the return
 /// read is the one players most need); else the active modifier's color; else
 /// a quiet owner channel that doubles as a who-threw-it cue.
-pub fn trail_tint(returning: bool, owner_handle: usize, modifier: Option<sim::PickupKind>) -> Color {
+pub fn trail_tint(
+    returning: bool,
+    owner_handle: usize,
+    modifier: Option<sim::PickupKind>,
+) -> Color {
     if returning {
         palette::RECALL_BLUE
     } else if modifier.is_some() {
@@ -962,6 +1301,7 @@ pub fn spawn_ambient_embers(
     time: Res<Time<Real>>,
     mut commands: Commands,
     assets: Res<EffectAssets>,
+    flip: Res<PerspectiveFlip>,
     mut rng: ResMut<CosmeticRng>,
     mut acc: ResMut<EmberAccumulator>,
 ) {
@@ -977,7 +1317,7 @@ pub fn spawn_ambient_embers(
             assets.ambient_ember.1.clone(),
             4,
             0.080,
-            Vec2::new(x, y),
+            Vec2::new(x, tilt_y(y * flip.0)),
             16.0,
             -0.5,
         );
@@ -1079,10 +1419,7 @@ fn spawn_kill_flash(commands: &mut Commands) {
 /// Render-side: tick every [`KillFlash`] down one render frame and despawn
 /// when spent. Constant alpha (no fade) per the plan — a hard 2-frame
 /// strobe reads as impact, not a dissolve.
-pub fn advance_kill_flash(
-    mut commands: Commands,
-    mut q: Query<(Entity, &mut KillFlash)>,
-) {
+pub fn advance_kill_flash(mut commands: Commands, mut q: Query<(Entity, &mut KillFlash)>) {
     for (entity, mut flash) in &mut q {
         if flash.frames_left <= 1 {
             commands.entity(entity).despawn();
@@ -1164,6 +1501,7 @@ impl Plugin for EffectsPlugin {
                     advance_kill_flash,
                     shake_on_perfect_catch,
                     shake_on_pyre_shatter,
+                    spawn_dash_dust,
                 ),
             );
     }
@@ -1220,7 +1558,11 @@ mod tests {
         let items: Vec<(u32, f32)> = (0..6).map(|i| (i, i as f32 / 6.0)).collect();
         let mut culled = select_effect_culls(items, 4);
         culled.sort_unstable();
-        assert_eq!(culled, vec![4, 5], "the two nearest-done sprites are culled");
+        assert_eq!(
+            culled,
+            vec![4, 5],
+            "the two nearest-done sprites are culled"
+        );
     }
 
     #[test]
@@ -1231,6 +1573,26 @@ mod tests {
     }
 
     #[test]
+    fn ground_z_orders_nearer_actors_in_front() {
+        // Nearer the camera (smaller world-y) draws in front (higher z).
+        let near = ground_z(-500.0);
+        let far = ground_z(500.0);
+        assert!(near > far, "lower-on-screen actor must sort in front");
+        // The whole band stays under the boomerang/trail layer (0.45–0.5).
+        for &y in &[-2000.0, -750.0, 0.0, 750.0, 2000.0] {
+            let z = ground_z(y);
+            assert!(
+                (GROUND_Z_BACK..=GROUND_Z_FRONT).contains(&z),
+                "z {z} for y {y} escaped the ground band",
+            );
+        }
+        // Symmetric about the midline, and clamps past the half-span.
+        assert!((ground_z(0.0) - (GROUND_Z_BACK + GROUND_Z_FRONT) * 0.5).abs() < 1e-6);
+        assert_eq!(ground_z(-5000.0), GROUND_Z_FRONT, "clamps to nearest layer");
+        assert_eq!(ground_z(5000.0), GROUND_Z_BACK, "clamps to farthest layer");
+    }
+
+    #[test]
     fn trail_tint_encodes_state() {
         // Returning overrides everything — the load-bearing "coming back" read.
         assert_eq!(
@@ -1238,7 +1600,10 @@ mod tests {
             palette::RECALL_BLUE
         );
         // Outbound with a modifier shows that modifier's color.
-        assert_eq!(trail_tint(false, 0, Some(sim::PickupKind::Fire)), palette::EMBER);
+        assert_eq!(
+            trail_tint(false, 0, Some(sim::PickupKind::Fire)),
+            palette::EMBER
+        );
         // Outbound, no modifier → a quiet per-owner channel (who threw it).
         assert_eq!(trail_tint(false, 0, None), palette::BLOOD_DARK);
         assert_eq!(trail_tint(false, 1, None), palette::DEEP_TEAL);

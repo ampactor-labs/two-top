@@ -13,8 +13,8 @@
 
 use bevy::prelude::*;
 use bevy::time::TimeUpdateStrategy;
-use bevy_ggrs::prelude::*;
 use bevy_ggrs::GgrsPlugin;
+use bevy_ggrs::prelude::*;
 use core::time::Duration;
 use fixed_math::Vec2F;
 use sim::{
@@ -87,9 +87,11 @@ fn determinism_locked_600_frame_synctest() {
     //   * 0x0003efdf — original Phase 3, walk speed 5 cm/tick
     //   * 0x000a3c77 — Phase 9 cycle 3, walk speed bumped to 13 cm/tick
     //     (+ stick magnitude clamp, but this 1-axis test doesn't exercise it)
+    //   * 0x0007dfbe — 2026-06-30 operator tune, walk speed 13 → 10 cm/tick
+    //   * 0x00064c98 — 2026-06-30 charge pass, walk speed 10 → 8 cm/tick
     assert_eq!(
         positions,
-        vec![(0, 0x000a3c77, 0x00000000), (1, 0x000a3c77, 0x00000000)],
+        vec![(0, 0x00064c98, 0x00000000), (1, 0x00064c98, 0x00000000)],
         "matrix target produced non-baseline bits"
     );
 }

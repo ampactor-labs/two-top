@@ -51,7 +51,8 @@ impl Settings {
     /// corrupt settings file feeding NaN / out-of-range values into audio and
     /// input).
     pub fn clamped(mut self) -> Self {
-        self.stick_deadzone = clamp_finite(self.stick_deadzone, 0.0, DEADZONE_MAX, DEADZONE_DEFAULT);
+        self.stick_deadzone =
+            clamp_finite(self.stick_deadzone, 0.0, DEADZONE_MAX, DEADZONE_DEFAULT);
         self.sfx_volume = clamp_finite(self.sfx_volume, 0.0, 1.0, SFX_VOLUME_DEFAULT);
         self.music_volume = clamp_finite(self.music_volume, 0.0, 1.0, MUSIC_VOLUME_DEFAULT);
         self
@@ -103,10 +104,7 @@ impl Plugin for SettingsPlugin {
     fn build(&self, app: &mut App) {
         app.insert_resource(load_settings())
             .add_systems(Startup, push_deadzone)
-            .add_systems(
-                Update,
-                adjust_settings.run_if(in_state(AppScreen::Title)),
-            );
+            .add_systems(Update, adjust_settings.run_if(in_state(AppScreen::Title)));
     }
 }
 
@@ -181,7 +179,10 @@ mod tests {
         .clamped();
         assert_eq!(wild.stick_deadzone, DEADZONE_MAX);
         assert_eq!(wild.sfx_volume, 0.0);
-        assert_eq!(wild.music_volume, MUSIC_VOLUME_DEFAULT, "NaN falls back to default");
+        assert_eq!(
+            wild.music_volume, MUSIC_VOLUME_DEFAULT,
+            "NaN falls back to default"
+        );
         assert!(!wild.haptics);
     }
 

@@ -15,32 +15,42 @@
 //! Match entities (players, walls, arena props) are spawned on entering
 //! InMatch and despawned on leaving, so a fresh match always starts from a
 //! clean slate — and (Task 5.5b-ii) the chosen arena can change between
-//! matches. Couch (local SyncTest) drives the session here; online keeps its
-//! existing `perform_swap` path untouched (it boots straight into InMatch and
-//! the matchbox driver inserts the P2P session on connect).
+//! matches. Couch (local SyncTest) drives the session here; online starts the
+//! matchbox connection from `OnEnter(InMatch)` and inserts the P2P session on
+//! connect.
 
 use bevy::prelude::*;
+use bevy::text::TextBounds;
 use bevy_ggrs::prelude::*;
 use fixed_math::Vec2F;
-use render::{player_atlas_layout, PLAYER_RENDER_SIZE};
+use render::{PLAYER_RENDER_SIZE, player_atlas_layout};
 use sim::{
-    arena_walls, Boomerang, GgrsCfg, MatchScore, MatchState, Pickup, Player, PositionF,
-    PreviousPositionF, SelectedArena, VelocityF, MATCH_WIN_THRESHOLD,
+    Boomerang, GgrsCfg, MATCH_WIN_THRESHOLD, MatchScore, MatchState, Pickup, Player, PositionF,
+    PreviousPositionF, SelectedArena, VelocityF, arena_obstacles_for, arena_walls,
 };
 
 use crate::netplay::NetplayConfig;
 use crate::settings::Settings;
 use input_touch::WindowSize;
 
-/// Which screen the app is showing. Couch boots into [`Title`](Self::Title);
-/// online boots straight into [`InMatch`](Self::InMatch) (its lobby lifecycle
-/// is the netplay FSM, not this menu).
+/// Which screen the app is showing. Both local and online builds boot into
+/// [`Title`](Self::Title); online starts the netplay lifecycle only after the
+/// player enters [`InMatch`](Self::InMatch).
 #[derive(States, Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum AppScreen {
     #[default]
     Title,
     InMatch,
 }
+
+/// World units below a duelist's (centre-anchored) origin where its feet meet
+/// the floor — the ground-contact point used for y-sorting and the drop shadow.
+/// The 64-unit sprite carries the figure low in the cell, so the feet sit ~26
+/// below centre.
+const PLAYER_FOOT_OFFSET: f32 = 26.0;
+
+/// World-unit height a cover block rises off the floor in the 3/4 view.
+const OBSTACLE_RISE: f32 = 52.0;
 
 /// Marker on app-spawned match entities (players, walls) so the whole match
 /// can be torn down in one query on `OnExit(InMatch)`. Arena props carry
@@ -49,7 +59,13 @@ pub enum AppScreen {
 #[derive(Component)]
 struct MatchEntity;
 
-/// Marker for the title-screen overlay text.
+/// Marker for the big static "2-TOP" banner (its own entity so the title can
+/// stay bold while the dynamic body below shrinks to fit the portrait window).
+#[derive(Component)]
+struct TitleBanner;
+
+/// Marker for the title-screen overlay text (the dynamic body: arena picker,
+/// prompts, settings legend).
 #[derive(Component)]
 struct TitleOverlay;
 
@@ -103,30 +119,67 @@ fn spawn_match(
     mut atlases: ResMut<Assets<TextureAtlasLayout>>,
     selected: Res<SelectedArena>,
     netplay: Res<NetplayConfig>,
+    flip: Res<render::PerspectiveFlip>,
 ) {
     let layout = player_atlas_layout(&mut atlases);
     let sheets = [
-        (0usize, "sprites/players/duelist_a_sheet.png", Vec2F::from_cm(-100, 60)),
-        (1usize, "sprites/players/duelist_b_sheet.png", Vec2F::from_cm(100, -60)),
+        (
+            0usize,
+            "sprites/players/duelist_a_sheet.png",
+            Vec2F::from_cm(0, -300),
+        ),
+        (
+            1usize,
+            "sprites/players/duelist_b_sheet.png",
+            Vec2F::from_cm(0, 300),
+        ),
     ];
+    let shadow_img = asset_server.load("sprites/fx/shadow_blob.png");
+    let charge_ring_img = asset_server.load("sprites/fx/charge_ring.png");
     for (handle, sheet, spawn) in sheets {
-        commands.spawn((
-            MatchEntity,
-            Player { handle },
-            PositionF(spawn),
-            PreviousPositionF(spawn),
-            VelocityF(Vec2F::ZERO),
-            Sprite {
-                image: asset_server.load(sheet),
-                texture_atlas: Some(TextureAtlas {
-                    layout: layout.clone(),
-                    index: 0,
-                }),
-                custom_size: Some(Vec2::splat(PLAYER_RENDER_SIZE)),
-                ..default()
-            },
-            Transform::default(),
-        ));
+        let (sx, sy) = spawn.to_f32();
+        let player = commands
+            .spawn((
+                MatchEntity,
+                Player { handle },
+                PositionF(spawn),
+                PreviousPositionF(spawn),
+                VelocityF(Vec2F::ZERO),
+                Sprite {
+                    image: asset_server.load(sheet),
+                    texture_atlas: Some(TextureAtlas {
+                        layout: layout.clone(),
+                        index: 0,
+                    }),
+                    custom_size: Some(Vec2::splat(PLAYER_RENDER_SIZE)),
+                    ..default()
+                },
+                Transform::default(),
+                // 2.5D: sort the duelist by its feet so a closer player draws
+                // over a farther one (and gets occluded by raised cover behind).
+                render::YSorted {
+                    foot_offset: PLAYER_FOOT_OFFSET,
+                },
+            ))
+            .id();
+        // A drop shadow under the feet — the cheapest "stands on the floor" cue.
+        render::spawn_ground_shadow(
+            &mut commands,
+            shadow_img.clone(),
+            player,
+            PLAYER_FOOT_OFFSET,
+            PLAYER_RENDER_SIZE * 0.72,
+            Vec2::new(sx, render::tilt_y(sy * flip.0)),
+        );
+        // A charge ring under the feet — hidden until they wind up a throw,
+        // then it tightens + blooms toward full charge.
+        let aura = render::spawn_charge_aura(
+            &mut commands,
+            charge_ring_img.clone(),
+            player,
+            PLAYER_FOOT_OFFSET,
+        );
+        commands.entity(aura).insert(MatchEntity);
     }
 
     // Arena boundary walls — fixed order for bit-identical entity ids.
@@ -134,14 +187,122 @@ fn spawn_match(
         commands.spawn((MatchEntity, wall));
     }
 
+    // Inner cover (paintball-style Obstacle blocks): the invisible collision
+    // body + a raised 2.5D composite so the cover has real height. Fixed order
+    // (after the boundary, before props) keeps entity ids bit-identical across
+    // hosts — the visual composite spawns no rollback components, so its
+    // entities never enter the rollback id space.
+    for wall in arena_obstacles_for(selected.0) {
+        let (min_x, min_y_raw) = wall.rect.min.to_f32();
+        let (max_x, max_y_raw) = wall.rect.max.to_f32();
+        // Foreshorten the footprint Y into the tabletop tilt (visual only — the
+        // collision `wall` keeps its true coords). The block's RISE is a screen-
+        // vertical height and stays full, so cover still stands up.
+        let y0 = render::tilt_y(min_y_raw * flip.0);
+        let y1 = render::tilt_y(max_y_raw * flip.0);
+        let (min_y, max_y) = if y0 < y1 { (y0, y1) } else { (y1, y0) };
+        commands.spawn((MatchEntity, wall));
+        spawn_obstacle_block(
+            &mut commands,
+            shadow_img.clone(),
+            min_x,
+            min_y,
+            max_x,
+            max_y,
+        );
+    }
+
     // Selected arena's props (pyres / chasm / doors) — tagged `ArenaProp`.
-    render::spawn_arena_props(&mut commands, &asset_server, &mut atlases, &selected);
+    render::spawn_arena_props(
+        &mut commands,
+        &asset_server,
+        &mut atlases,
+        &selected,
+        flip.0,
+    );
 
     // Couch: a fresh local session starts the sim from frame 0. Online: the
     // matchbox driver inserts the P2P session once the peer connects.
     if netplay.room_url.is_none() {
         commands.insert_resource(build_synctest_session());
     }
+}
+
+/// Spawn the raised-cover composite for one obstacle footprint: a cast shadow,
+/// a void silhouette, a shaded front face, a contact/AO band, and the lit top
+/// face. Flat-color quads — at this scale the dither/seams read as noise (this
+/// matches the validated depth mock); the *height* + outline + shadow are what
+/// sell the 2.5D read. Sorted by the front (nearest) base via
+/// [`render::ground_z`] so a duelist behind the block is occluded and one in
+/// front draws over it. All quads are tagged `MatchEntity` for teardown and
+/// carry no rollback components.
+fn spawn_obstacle_block(
+    commands: &mut Commands,
+    shadow_img: Handle<Image>,
+    min_x: f32,
+    min_y: f32,
+    max_x: f32,
+    max_y: f32,
+) {
+    let w = max_x - min_x;
+    let d = max_y - min_y;
+    let cx = (min_x + max_x) * 0.5;
+    let rise = OBSTACLE_RISE;
+    let total_h = rise + d;
+    let z = render::ground_z(min_y);
+
+    let mut quad = |color: Color, size: Vec2, center: Vec2, zz: f32| {
+        commands.spawn((
+            MatchEntity,
+            Sprite {
+                color,
+                custom_size: Some(size),
+                ..default()
+            },
+            Transform::from_xyz(center.x, center.y, zz),
+        ));
+    };
+    // Lit top face (drawn first so the closures above it layer cleanly is moot —
+    // explicit z does the ordering). Void silhouette → front → contact → top.
+    quad(
+        render::palette::VOID,
+        Vec2::new(w + 6.0, total_h + 6.0),
+        Vec2::new(cx, min_y + total_h * 0.5),
+        z - 0.002,
+    );
+    quad(
+        render::palette::CHARCOAL_LINE,
+        Vec2::new(w, rise),
+        Vec2::new(cx, min_y + rise * 0.5),
+        z,
+    );
+    quad(
+        render::palette::BRUISE_SHADOW,
+        Vec2::new(w, 4.0),
+        Vec2::new(cx, min_y + 2.0),
+        z + 0.001,
+    );
+    quad(
+        render::palette::COLD_STONE,
+        Vec2::new(w, d),
+        Vec2::new(cx, min_y + rise + d * 0.5),
+        z + 0.001,
+    );
+
+    // Cast shadow on the floor, nudged toward the bottom-right (light top-left),
+    // below the ground-actor band so a duelist in front steps over it.
+    let mut shadow_color = Color::WHITE;
+    shadow_color.set_alpha(render::GROUND_SHADOW_ALPHA);
+    commands.spawn((
+        MatchEntity,
+        Sprite {
+            image: shadow_img,
+            color: shadow_color,
+            custom_size: Some(Vec2::new(w * 1.15, d * 0.9)),
+            ..default()
+        },
+        Transform::from_xyz(cx + 8.0, min_y + d * 0.15, -0.45),
+    ));
 }
 
 /// `OnExit(InMatch)`: tear the whole match down — every app-spawned match
@@ -161,6 +322,7 @@ fn despawn_match(
             With<render::FloorStain>,
             With<render::EffectSprite>,
             With<render::TrailGhost>,
+            With<render::GroundShadow>,
         )>,
     >,
 ) {
@@ -170,17 +332,40 @@ fn despawn_match(
     commands.remove_resource::<Session<GgrsCfg>>();
 }
 
+/// The widest title-body line at font 30 stays under this; long lines wrap
+/// rather than clipping. Sized to the ~1160 world-units the `AutoMin` desktop
+/// camera keeps visible across the 600×900 portrait window (`setup_world`).
+const TITLE_BODY_WIDTH: f32 = 1080.0;
+
 fn spawn_overlays(mut commands: Commands) {
-    // Title overlay — centered, large, shown only in Title.
+    // Big static "2-TOP" banner — bold and unchanging, parked in the upper
+    // playfield, shown only in Title. Its own entity so the body below can
+    // shrink without dragging the title's impact down with it.
+    commands.spawn((
+        TitleBanner,
+        Text2d::new("2-TOP"),
+        TextFont {
+            font_size: 96.0,
+            ..default()
+        },
+        TextColor(render::palette::HOT_BONE),
+        TextLayout::new_with_justify(Justify::Center),
+        Transform::from_xyz(0.0, 520.0, 200.0),
+        Visibility::Hidden,
+    ));
+    // Title body — arena picker + prompts + settings legend. Sized and
+    // width-bounded so it fits the portrait window instead of bleeding off
+    // both edges. Shown only in Title.
     commands.spawn((
         TitleOverlay,
         Text2d::new(String::new()),
         TextFont {
-            font_size: 64.0,
+            font_size: 30.0,
             ..default()
         },
         TextColor(render::palette::BONE),
         TextLayout::new_with_justify(Justify::Center),
+        TextBounds::new_horizontal(TITLE_BODY_WIDTH),
         Transform::from_xyz(0.0, 0.0, 200.0),
         Visibility::Hidden,
     ));
@@ -227,7 +412,11 @@ fn pick_arena(
         selected.0 = sim::ArenaId::Reliquary;
     }
     let win = window.0;
-    if win.y > 0.0 && touches.iter_just_pressed().any(|t| t.position().y < win.y * 0.5) {
+    if win.y > 0.0
+        && touches
+            .iter_just_pressed()
+            .any(|t| t.position().y < win.y * 0.5)
+    {
         selected.0 = next_arena(selected.0);
     }
 }
@@ -246,8 +435,10 @@ fn start_match(
         || keys.just_pressed(KeyCode::Enter)
         || keys.just_pressed(KeyCode::NumpadEnter);
     let win = window.0;
-    let touch_start =
-        win.y > 0.0 && touches.iter_just_pressed().any(|t| t.position().y >= win.y * 0.5);
+    let touch_start = win.y > 0.0
+        && touches
+            .iter_just_pressed()
+            .any(|t| t.position().y >= win.y * 0.5);
     if key_start || touch_start {
         next.set(AppScreen::InMatch);
     }
@@ -274,13 +465,24 @@ fn update_title_overlay(
     screen: Res<State<AppScreen>>,
     selected: Res<SelectedArena>,
     settings: Res<Settings>,
+    netplay: Res<NetplayConfig>,
     mut q: Query<(&mut Text2d, &mut Visibility), With<TitleOverlay>>,
+    mut banner: Query<&mut Visibility, (With<TitleBanner>, Without<TitleOverlay>)>,
 ) {
+    let on_title = *screen.get() == AppScreen::Title;
+    if let Ok(mut banner_vis) = banner.single_mut() {
+        *banner_vis = if on_title {
+            Visibility::Visible
+        } else {
+            Visibility::Hidden
+        };
+    }
     let Ok((mut text, mut vis)) = q.single_mut() else {
         return;
     };
-    if *screen.get() == AppScreen::Title {
+    if on_title {
         *vis = Visibility::Visible;
+        let online = netplay.room_url.is_some();
         let options = [
             sim::ArenaId::Anchor,
             sim::ArenaId::Crossing,
@@ -296,15 +498,20 @@ fn update_title_overlay(
         })
         .collect::<Vec<_>>()
         .join("   ");
-        let haptics = if settings.haptics { "on" } else { "off" };
-        text.0 = format!(
-            "2-TOP\n\n{options}\n\n1/2/3 or tap top to choose\n\npress START  (Space / tap bottom)\
-             \n\n— settings —\n\
-             [H] haptics {haptics}   [-/=] sfx {sfx:.0}%   [ [ / ] ] music {music:.0}%   [ , / . ] deadzone {dz:.0}%",
-            sfx = settings.sfx_volume * 100.0,
-            music = settings.music_volume * 100.0,
-            dz = settings.stick_deadzone * 100.0,
-        );
+        if online {
+            text.0 = format!("{options}\n\n\nTAP TO FIND OPPONENT",);
+        } else {
+            let haptics = if settings.haptics { "on" } else { "off" };
+            text.0 = format!(
+                "{options}\n\n1/2/3 or tap top to choose\n\npress START  (Space / tap bottom)\
+                 \n\n— settings —\n\
+                 [H] haptics {haptics}    [-/=] sfx {sfx:.0}%\n\
+                 [ [ / ] ] music {music:.0}%    [ , / . ] deadzone {dz:.0}%",
+                sfx = settings.sfx_volume * 100.0,
+                music = settings.music_volume * 100.0,
+                dz = settings.stick_deadzone * 100.0,
+            );
+        }
     } else {
         *vis = Visibility::Hidden;
     }
@@ -328,7 +535,10 @@ fn update_summary_overlay(
         } else {
             ""
         };
-        text.0 = format!("{winner}\n\n{}  —  {}\n\n{again}{lobby}", score.p0, score.p1);
+        text.0 = format!(
+            "{winner}\n\n{}  —  {}\n\n{again}{lobby}",
+            score.p0, score.p1
+        );
     } else {
         *vis = Visibility::Hidden;
     }

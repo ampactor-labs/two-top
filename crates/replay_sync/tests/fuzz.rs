@@ -5,7 +5,7 @@
 //! format constraints. The actual divergence-catching property is what the
 //! nightly workflow exercises end-to-end.
 
-use replay_sync::fuzz::{fuzz_one, fuzz_replay, FUZZ_FRAMES};
+use replay_sync::fuzz::{FUZZ_FRAMES, fuzz_one, fuzz_replay};
 use sim::PlayerInput;
 
 #[test]
@@ -37,8 +37,16 @@ fn fuzz_replay_respects_wire_constraints() {
         for p in [p0, p1] {
             // i8 is naturally in -128..=127; we explicitly clamp to
             // -127..=127 per ARCHITECTURE.md § Input Model.
-            assert!(p.stick_x >= -127, "frame {i} stick_x out of range: {}", p.stick_x);
-            assert!(p.stick_y >= -127, "frame {i} stick_y out of range: {}", p.stick_y);
+            assert!(
+                p.stick_x >= -127,
+                "frame {i} stick_x out of range: {}",
+                p.stick_x
+            );
+            assert!(
+                p.stick_y >= -127,
+                "frame {i} stick_y out of range: {}",
+                p.stick_y
+            );
             // Bits 4-7 of `buttons` are reserved per ARCHITECTURE.md.
             assert_eq!(
                 p.buttons & 0xF0,
@@ -54,7 +62,10 @@ fn fuzz_replay_respects_wire_constraints() {
         .inputs
         .iter()
         .any(|[p0, p1]| p0.buttons != 0 || p1.buttons != 0);
-    assert!(any_button, "fuzzer never set any buttons across {FUZZ_FRAMES} frames");
+    assert!(
+        any_button,
+        "fuzzer never set any buttons across {FUZZ_FRAMES} frames"
+    );
 }
 
 #[test]
@@ -63,7 +74,11 @@ fn fuzz_one_known_good_seed_returns_ok() {
     // If this seed ever flakes, replace with another and document the
     // why in MORGAN_NOTES.md.
     let result = fuzz_one(0xC0DE_BEEF);
-    assert!(result.is_ok(), "fuzz_one(0xC0DE_BEEF) failed: {:?}", result.err());
+    assert!(
+        result.is_ok(),
+        "fuzz_one(0xC0DE_BEEF) failed: {:?}",
+        result.err()
+    );
 }
 
 #[test]

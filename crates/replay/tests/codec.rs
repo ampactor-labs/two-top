@@ -1,6 +1,6 @@
 use replay::{
-    decode, decode_for_sim_version, encode, Replay, ReplayError, ReplayHeader, DEV_SIM_VERSION,
-    FORMAT_VERSION, MAGIC,
+    DEV_SIM_VERSION, FORMAT_VERSION, MAGIC, Replay, ReplayError, ReplayHeader, decode,
+    decode_for_sim_version, encode,
 };
 use sim::PlayerInput;
 
@@ -16,25 +16,39 @@ fn sample_replay() -> Replay {
             frame_count: 3,
             recorded_at: 1_715_000_000,
             winner: Some(1),
-            player_handles: [
-                Some("alice".to_string()),
-                Some("bob".to_string()),
-            ],
+            player_handles: [Some("alice".to_string()), Some("bob".to_string())],
             arena_id: 0,
         },
         inputs: vec![
             [
-                PlayerInput { stick_x: 100, stick_y: 0, aim_angle: 0, buttons: 0 },
-                PlayerInput { stick_x: -100, stick_y: 0, aim_angle: 128, buttons: PlayerInput::THROW_DOWN },
+                PlayerInput {
+                    stick_x: 100,
+                    stick_y: 0,
+                    aim_angle: 0,
+                    buttons: 0,
+                },
+                PlayerInput {
+                    stick_x: -100,
+                    stick_y: 0,
+                    aim_angle: 128,
+                    buttons: PlayerInput::THROW_DOWN,
+                },
             ],
             [
-                PlayerInput { stick_x: 0, stick_y: 50, aim_angle: 64, buttons: PlayerInput::DASH_DOWN },
-                PlayerInput { stick_x: 0, stick_y: -50, aim_angle: 192, buttons: 0 },
+                PlayerInput {
+                    stick_x: 0,
+                    stick_y: 50,
+                    aim_angle: 64,
+                    buttons: PlayerInput::DASH_DOWN,
+                },
+                PlayerInput {
+                    stick_x: 0,
+                    stick_y: -50,
+                    aim_angle: 192,
+                    buttons: 0,
+                },
             ],
-            [
-                PlayerInput::default(),
-                PlayerInput::default(),
-            ],
+            [PlayerInput::default(), PlayerInput::default()],
         ],
     }
 }
@@ -74,7 +88,10 @@ fn decode_rejects_truncated_bytes() {
     let replay = sample_replay();
     let bytes = encode(&replay).unwrap();
     let truncated = &bytes[..bytes.len() / 2];
-    assert!(decode(truncated).is_err(), "truncated input should fail decode");
+    assert!(
+        decode(truncated).is_err(),
+        "truncated input should fail decode"
+    );
 }
 
 #[test]

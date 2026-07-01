@@ -12,7 +12,7 @@ use bevy_ggrs::prelude::*;
 use core::time::Duration;
 use fixed_math::{Fix, RectF, Vec2F};
 use sim::{
-    AnimState, BonePyre, Boomerang, BoomerangState, BONE_PYRE_HALF_EXTENT_CM, DefaultInputsPlugin,
+    AnimState, BONE_PYRE_HALF_EXTENT_CM, BonePyre, Boomerang, BoomerangState, DefaultInputsPlugin,
     Empowered, GgrsCfg, MatchScore, MatchState, Player, PlayerInput, PositionF, PreviousPositionF,
     SimPlugin, SynthesizedInputs, VelocityF, respawn_position,
 };
@@ -129,7 +129,11 @@ fn rematch_despawns_in_flight_boomerang() {
     force_match_over(&mut app);
     throw_edge(&mut app);
 
-    let remaining = app.world_mut().query::<&Boomerang>().iter(app.world()).count();
+    let remaining = app
+        .world_mut()
+        .query::<&Boomerang>()
+        .iter(app.world())
+        .count();
     assert_eq!(remaining, 0, "rematch wipes in-flight boomerangs");
 }
 
@@ -151,7 +155,10 @@ fn rematch_unshatters_pyre() {
     let mut q = app.world_mut().query::<&BonePyre>();
     let p = q.iter(app.world()).next().expect("pyre still present");
     assert!(!p.shattered, "rematch un-shatters pyres for a clean arena");
-    assert!(p.chain_delay.is_none(), "and clears any pending chain ignition");
+    assert!(
+        p.chain_delay.is_none(),
+        "and clears any pending chain ignition"
+    );
 }
 
 #[test]

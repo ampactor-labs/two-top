@@ -131,7 +131,11 @@ impl NonBlockingSocket<NetAddr> for MatchboxBridge {
     }
 
     fn receive_all_messages(&mut self) -> Vec<(NetAddr, Message)> {
-        self.channel.receive().into_iter().map(decode_packet).collect()
+        self.channel
+            .receive()
+            .into_iter()
+            .map(decode_packet)
+            .collect()
     }
 }
 
@@ -660,11 +664,7 @@ mod tests {
         let peer = dummy_peer();
         // Even with very long silence, a Forfeited state stays Forfeited.
         assert_eq!(
-            next_lobby_state_for_silence(
-                &LobbyState::Forfeited { peer_id: peer },
-                10_000,
-                0
-            ),
+            next_lobby_state_for_silence(&LobbyState::Forfeited { peer_id: peer }, 10_000, 0),
             None,
         );
     }
@@ -710,11 +710,13 @@ mod tests {
 
         // First tick — still Idle. No pending swap.
         app.update();
-        assert_eq!(*app.world().resource::<PendingP2PSwap>(), PendingP2PSwap(None));
+        assert_eq!(
+            *app.world().resource::<PendingP2PSwap>(),
+            PendingP2PSwap(None)
+        );
 
         // Flip to Connected; the next update should set the swap.
-        *app.world_mut().resource_mut::<LobbyState>() =
-            LobbyState::Connected { peer_id: peer };
+        *app.world_mut().resource_mut::<LobbyState>() = LobbyState::Connected { peer_id: peer };
         app.update();
         assert_eq!(
             *app.world().resource::<PendingP2PSwap>(),

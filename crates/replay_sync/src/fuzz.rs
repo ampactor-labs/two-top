@@ -13,9 +13,7 @@
 use crate::compute_checksum_tsv;
 use rand_xoshiro::Xoshiro256StarStar;
 use rand_xoshiro::rand_core::{Rng, SeedableRng};
-use replay::{
-    DEV_SIM_VERSION, FORMAT_VERSION, FrameInputs, MAGIC, Replay, ReplayHeader,
-};
+use replay::{DEV_SIM_VERSION, FORMAT_VERSION, FrameInputs, MAGIC, Replay, ReplayHeader};
 use sim::PlayerInput;
 
 /// Frames per fuzz run. 30 s @ 60 Hz, matching the canonical demo and the

@@ -77,8 +77,15 @@ fn crossing_has_no_pyres() {
 fn reliquary_has_two_chain_linked_pyres() {
     let pyres = arena_pyres_for(ArenaId::Reliquary);
     assert_eq!(pyres.len(), 2);
-    assert!(pyres.iter().all(|p| p.chain_group == 1), "both pyres share a chain group");
-    assert!(pyres.iter().all(|p| !p.shattered && p.chain_delay.is_none()));
+    assert!(
+        pyres.iter().all(|p| p.chain_group == 1),
+        "both pyres share a chain group"
+    );
+    assert!(
+        pyres
+            .iter()
+            .all(|p| !p.shattered && p.chain_delay.is_none())
+    );
     // Mirror-symmetric about x=0.
     assert_eq!(
         pyres[0].rect.min.x + pyres[1].rect.max.x,
@@ -97,8 +104,12 @@ fn flying_boomerang_ricochets_and_shatters_pyre() {
                 owner_handle: 0,
                 state: BoomerangState::Flying,
             },
-            PositionF(Vec2F::from_cm(20, 0)),
-            PreviousPositionF(Vec2F::from_cm(20, 0)),
+            // Enter the pyre from its left side moving INTO it (+x), so the
+            // ricochet flips the wall-normal velocity to -x. (Spawning it on the
+            // far side already moving outward is non-physical — a fang already
+            // leaving must NOT be reflected back in; see reflect_velocity_for_push.)
+            PositionF(Vec2F::from_cm(-20, 0)),
+            PreviousPositionF(Vec2F::from_cm(-20, 0)),
             VelocityF(Vec2F::from_cm(50, 0)),
         ))
         .id();
@@ -112,7 +123,10 @@ fn flying_boomerang_ricochets_and_shatters_pyre() {
         "pyre shatters on impact"
     );
     let vx = app.world().entity(bm).get::<VelocityF>().unwrap().0.x;
-    assert!(vx < Fix::const_from_int(0), "x velocity reflected to negative");
+    assert!(
+        vx < Fix::const_from_int(0),
+        "x velocity reflected to negative"
+    );
 }
 
 #[test]
@@ -171,7 +185,11 @@ fn returning_boomerang_phases_through_pyre() {
         "a returning boomerang phases through and does not shatter"
     );
     let vx = app.world().entity(bm).get::<VelocityF>().unwrap().0.x;
-    assert_eq!(vx, Fix::const_from_int(50), "returning boomerang not deflected");
+    assert_eq!(
+        vx,
+        Fix::const_from_int(50),
+        "returning boomerang not deflected"
+    );
 }
 
 #[test]
@@ -223,7 +241,11 @@ fn crossing_chasm_kills_player_and_scores_opponent() {
 
     app.world_mut().run_system_once(chasm_kills).unwrap();
 
-    assert_eq!(app.world().resource::<MatchScore>().p1, 1, "opponent scores");
+    assert_eq!(
+        app.world().resource::<MatchScore>().p1,
+        1,
+        "opponent scores"
+    );
     assert_eq!(app.world().resource::<MatchScore>().p0, 0);
     let mut q = app.world_mut().query::<(&Player, &Dead)>();
     let (p0_dead, p1_dead) = {
@@ -254,7 +276,11 @@ fn bridge_makes_chasm_safe() {
 
     app.world_mut().run_system_once(chasm_kills).unwrap();
 
-    assert_eq!(app.world().resource::<MatchScore>().p1, 0, "bridge prevents the kill");
+    assert_eq!(
+        app.world().resource::<MatchScore>().p1,
+        0,
+        "bridge prevents the kill"
+    );
     let mut q = app.world_mut().query::<&Dead>();
     assert!(q.iter(app.world()).all(|d| d.respawn_at_frame.is_none()));
 }
@@ -310,7 +336,10 @@ fn sigil_hit_activates_bridge_and_ricochets() {
         "sigil hit raises the bridge"
     );
     let vy = app.world().entity(bm).get::<VelocityF>().unwrap().0.y;
-    assert!(vy < fixed_math::Fix::const_from_int(0), "boomerang ricochets off the sigil");
+    assert!(
+        vy < fixed_math::Fix::const_from_int(0),
+        "boomerang ricochets off the sigil"
+    );
 }
 
 // ---- Reliquary arena: sigil-door teleports + chain-linked pyres ----
@@ -339,7 +368,9 @@ fn door_teleports_player_to_paired_exit() {
         ))
         .id();
 
-    app.world_mut().run_system_once(sigil_door_teleport).unwrap();
+    app.world_mut()
+        .run_system_once(sigil_door_teleport)
+        .unwrap();
 
     assert_eq!(
         app.world().entity(e).get::<PositionF>().unwrap().0,
@@ -373,7 +404,9 @@ fn door_cooldown_blocks_immediate_reentry() {
         ))
         .id();
 
-    app.world_mut().run_system_once(sigil_door_teleport).unwrap();
+    app.world_mut()
+        .run_system_once(sigil_door_teleport)
+        .unwrap();
 
     assert_eq!(
         app.world().entity(e).get::<PositionF>().unwrap().0,

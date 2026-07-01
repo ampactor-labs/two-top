@@ -30,8 +30,7 @@ use std::path::PathBuf;
 
 pub mod fuzz;
 
-pub const TSV_HEADER: &str =
-    "frame\ttotal_checksum\tpositionf_part\tvelocityf_part\tdashstate_part\tstunframes_part\tboomerang_part\tmatch_score_part\tmatch_state_part";
+pub const TSV_HEADER: &str = "frame\ttotal_checksum\tpositionf_part\tvelocityf_part\tdashstate_part\tstunframes_part\tboomerang_part\tmatch_score_part\tmatch_state_part";
 
 // ---- Canonical demo (Phase 5) ----
 
@@ -218,11 +217,7 @@ pub fn build_app_with_check_distance(replay: Replay, check_distance: usize) -> A
 /// play and restore-then-replay paths). Replay viewer's playback
 /// loop should also use `input_delay: 0` since playback has no
 /// network latency to mask.
-pub fn build_app_configurable(
-    replay: Replay,
-    check_distance: usize,
-    input_delay: u32,
-) -> App {
+pub fn build_app_configurable(replay: Replay, check_distance: usize, input_delay: u32) -> App {
     let mut sb = SessionBuilder::<GgrsCfg>::new()
         .with_num_players(replay.header.num_players as usize)
         .expect("with_num_players")

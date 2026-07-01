@@ -1,6 +1,6 @@
 use bevy::prelude::*;
-use bevy_ggrs::{LocalInputs, LocalPlayers};
 use bevy_ggrs::prelude::*;
+use bevy_ggrs::{LocalInputs, LocalPlayers};
 use serde::{Deserialize, Serialize};
 use sim::{GgrsCfg, PlayerInput};
 
@@ -155,8 +155,10 @@ pub struct RecordPlugin;
 
 impl Plugin for RecordPlugin {
     fn build(&self, app: &mut App) {
-        app.init_resource::<RecordedInputs>()
-            .add_systems(ReadInputs, record_inputs_system.after(sim::read_local_inputs));
+        app.init_resource::<RecordedInputs>().add_systems(
+            ReadInputs,
+            record_inputs_system.after(sim::read_local_inputs),
+        );
     }
 }
 
@@ -213,4 +215,3 @@ impl Plugin for ReplayPlaybackPlugin {
         app.add_systems(ReadInputs, playback_inputs_system);
     }
 }
-

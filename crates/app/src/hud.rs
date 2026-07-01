@@ -19,8 +19,8 @@
 
 use bevy::prelude::*;
 use sim::{
-    FrameCount, MatchScore, MatchState, ARENA_HALF_HEIGHT_CM, ARENA_HALF_WIDTH_CM,
-    MATCH_WIN_THRESHOLD, ROUND_DURATION_FRAMES,
+    ARENA_HALF_HEIGHT_CM, ARENA_HALF_WIDTH_CM, FrameCount, MATCH_WIN_THRESHOLD, MatchScore,
+    MatchState, ROUND_DURATION_FRAMES,
 };
 
 use crate::screen::AppScreen;
@@ -66,7 +66,13 @@ fn spawn_hud(
     let half_w = ARENA_HALF_WIDTH_CM as f32;
 
     // Score pips — 3-cell 8x8 atlas: [empty, filled-P0, filled-P1].
-    let pip_layout = atlases.add(TextureAtlasLayout::from_grid(UVec2::splat(8), 3, 1, None, None));
+    let pip_layout = atlases.add(TextureAtlasLayout::from_grid(
+        UVec2::splat(8),
+        3,
+        1,
+        None,
+        None,
+    ));
     let pip_img = asset_server.load("hud/score_pips.png");
     for player in 0..2u8 {
         for idx in 0..MATCH_WIN_THRESHOLD {
@@ -107,7 +113,13 @@ fn spawn_hud(
     ));
 
     // Countdown glyphs — 5-cell 16x16 atlas: [3, 2, 1, G, O].
-    let cd_layout = atlases.add(TextureAtlasLayout::from_grid(UVec2::splat(16), 5, 1, None, None));
+    let cd_layout = atlases.add(TextureAtlasLayout::from_grid(
+        UVec2::splat(16),
+        5,
+        1,
+        None,
+        None,
+    ));
     commands.spawn((
         CountdownGlyph,
         Sprite {
@@ -203,7 +215,8 @@ fn update_timer_bar(
     let Ok((mut sprite, mut vis)) = q.single_mut() else {
         return;
     };
-    if let (AppScreen::InMatch, MatchState::InRound { expires_at_frame }) = (*screen.get(), *state) {
+    if let (AppScreen::InMatch, MatchState::InRound { expires_at_frame }) = (*screen.get(), *state)
+    {
         *vis = Visibility::Visible;
         let remaining = expires_at_frame
             .saturating_sub(frame.0)

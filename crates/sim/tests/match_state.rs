@@ -18,9 +18,8 @@ use core::time::Duration;
 use fixed_math::Vec2F;
 use sim::{
     Boomerang, BoomerangState, COUNTDOWN_DIGIT_FRAMES, DefaultInputsPlugin, FrameCount, GgrsCfg,
-    MATCH_WIN_THRESHOLD, MatchScore, MatchState, Player, PlayerInput, PositionF,
-    PreviousPositionF, ROUND_DURATION_FRAMES, ROUND_OVER_FRAMES, SimPlugin, SynthesizedInputs,
-    VelocityF,
+    MATCH_WIN_THRESHOLD, MatchScore, MatchState, Player, PlayerInput, PositionF, PreviousPositionF,
+    ROUND_DURATION_FRAMES, ROUND_OVER_FRAMES, SimPlugin, SynthesizedInputs, VelocityF,
 };
 
 fn build_app() -> App {
@@ -289,8 +288,15 @@ fn player_throw_is_blocked_during_round_over() {
     };
     app.update();
 
-    let count = app.world_mut().query::<&Boomerang>().iter(app.world()).count();
-    assert_eq!(count, 0, "throw must not spawn a boomerang during RoundOver");
+    let count = app
+        .world_mut()
+        .query::<&Boomerang>()
+        .iter(app.world())
+        .count();
+    assert_eq!(
+        count, 0,
+        "throw must not spawn a boomerang during RoundOver"
+    );
 }
 
 // Suppress warnings on unused imports — Boomerang/BoomerangState are
@@ -330,11 +336,15 @@ fn match_state_variants_are_exhaustively_patternable() {
         "countdown"
     );
     assert_eq!(
-        label(MatchState::InRound { expires_at_frame: 100 }),
+        label(MatchState::InRound {
+            expires_at_frame: 100
+        }),
         "in_round"
     );
     assert_eq!(
-        label(MatchState::RoundOver { expires_at_frame: 200 }),
+        label(MatchState::RoundOver {
+            expires_at_frame: 200
+        }),
         "round_over"
     );
     assert_eq!(label(MatchState::MatchOver), "match_over");

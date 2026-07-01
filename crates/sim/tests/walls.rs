@@ -15,7 +15,7 @@ fn arena_has_four_solid_walls() {
     let walls = arena_walls();
     assert_eq!(walls.len(), 4);
     for w in walls {
-        assert_eq!(w.kind, WallKind::Solid);
+        assert_eq!(w.kind, WallKind::Boundary);
     }
 }
 
@@ -92,10 +92,8 @@ fn walls_are_disjoint() {
 
 #[test]
 fn default_player_spawn_positions_are_clear() {
-    // Match the spawn positions from app::setup. A regression here
-    // would mean spawning a player on top of a wall.
-    let p0 = Vec2F::from_cm(-100, 60);
-    let p1 = Vec2F::from_cm(100, -60);
+    let p0 = Vec2F::from_cm(0, -300);
+    let p1 = Vec2F::from_cm(0, 300);
     for pos in [p0, p1] {
         let player = player_rect(pos);
         for w in arena_walls() {

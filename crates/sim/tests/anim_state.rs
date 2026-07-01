@@ -14,9 +14,23 @@ use fixed_math::Vec2F;
 use proptest::prelude::*;
 use sim::{AnimState, DashState, Dead, StunFrames, next_anim_state};
 
+/// Test wrapper: the not-charging case (the vast majority of the state-machine
+/// tests predate the charge state). Charge behaviour is covered explicitly in
+/// [`charging_overrides_run_and_idle`] / [`dash_and_death_and_hit_override_charge`].
+fn nas(
+    dead: Dead,
+    dash: DashState,
+    stun: StunFrames,
+    current: AnimState,
+    is_moving: bool,
+) -> AnimState {
+    next_anim_state(dead, dash, stun, current, is_moving, false)
+}
+
 fn dead_strategy() -> impl Strategy<Value = Dead> {
-    proptest::option::of(any::<u32>())
-        .prop_map(|maybe_at| Dead { respawn_at_frame: maybe_at })
+    proptest::option::of(any::<u32>()).prop_map(|maybe_at| Dead {
+        respawn_at_frame: maybe_at,
+    })
 }
 
 fn dash_strategy() -> impl Strategy<Value = DashState> {
@@ -29,7 +43,9 @@ fn dash_strategy() -> impl Strategy<Value = DashState> {
             // canonical non-zero vector to keep the strategy simple.
             dir: Vec2F::from_cm(1, 0),
         }),
-        any::<u32>().prop_map(|f| DashState::Cooldown { frames_remaining: f }),
+        any::<u32>().prop_map(|f| DashState::Cooldown {
+            frames_remaining: f
+        }),
     ]
 }
 
@@ -38,10 +54,10 @@ fn stun_strategy() -> impl Strategy<Value = StunFrames> {
 }
 
 fn anim_strategy() -> impl Strategy<Value = AnimState> {
-    // Constrain anim_id to the valid range [0, 6] — outside values
-    // are programmer errors, not legitimate input the state machine
+    // Constrain anim_id to the valid range [0, 7] (IDLE..=CHARGE) — outside
+    // values are programmer errors, not legitimate input the state machine
     // needs to handle.
-    (0u8..=6, any::<u16>()).prop_map(|(anim_id, ticks)| AnimState { anim_id, ticks })
+    (0u8..=7, any::<u16>()).prop_map(|(anim_id, ticks)| AnimState { anim_id, ticks })
 }
 
 proptest! {
@@ -56,8 +72,8 @@ proptest! {
         current in anim_strategy(),
         is_moving in any::<bool>(),
     ) {
-        let a = next_anim_state(dead, dash, stun, current, is_moving);
-        let b = next_anim_state(dead, dash, stun, current, is_moving);
+        let a = nas(dead, dash, stun, current, is_moving);
+        let b = nas(dead, dash, stun, current, is_moving);
         prop_assert_eq!(a, b);
     }
 
@@ -73,7 +89,7 @@ proptest! {
         is_moving in any::<bool>(),
     ) {
         let dead = Dead { respawn_at_frame: Some(respawn_at) };
-        let next = next_anim_state(dead, dash, stun, current, is_moving);
+        let next = nas(dead, dash, stun, current, is_moving);
         prop_assert_eq!(next.anim_id, AnimState::DEATH);
     }
 
@@ -87,7 +103,7 @@ proptest! {
         is_moving in any::<bool>(),
     ) {
         let dead = Dead { respawn_at_frame: None };
-        let next = next_anim_state(dead, dash, StunFrames(stun_amount), current, is_moving);
+        let next = nas(dead, dash, StunFrames(stun_amount), current, is_moving);
         prop_assert_eq!(next.anim_id, AnimState::HIT);
     }
 
@@ -104,7 +120,7 @@ proptest! {
         current in anim_strategy(),
         is_moving in any::<bool>(),
     ) {
-        let next = next_anim_state(dead, dash, stun, current, is_moving);
+        let next = nas(dead, dash, stun, current, is_moving);
         if next.anim_id != current.anim_id {
             prop_assert_eq!(next.ticks, 0);
         }
@@ -122,7 +138,7 @@ proptest! {
         current in anim_strategy(),
         is_moving in any::<bool>(),
     ) {
-        let next = next_anim_state(dead, dash, stun, current, is_moving);
+        let next = nas(dead, dash, stun, current, is_moving);
         if next.anim_id == current.anim_id {
             prop_assert_eq!(next.ticks, current.ticks.saturating_add(1));
         }
@@ -142,20 +158,20 @@ proptest! {
     ) {
         let current = AnimState { anim_id: AnimState::THROW, ticks };
         let dead = Dead { respawn_at_frame: None };
-        let next = next_anim_state(dead, dash, StunFrames(0), current, is_moving);
+        let next = nas(dead, dash, StunFrames(0), current, is_moving);
         prop_assert_eq!(next.anim_id, AnimState::THROW);
     }
 
     /// Display index always returns a value within the player sprite
-    /// sheet's 41-frame atlas range (0..=40). A bug that produced
+    /// sheet's 45-frame atlas range (0..=44). A bug that produced
     /// out-of-range indices would crash the sprite renderer or
     /// silently clip to a wrong frame.
     #[test]
     fn display_index_in_atlas_range(anim in anim_strategy()) {
         let idx = anim.display_index();
         prop_assert!(idx < AnimState::TOTAL_ATLAS_FRAMES,
-            "display_index {} out of 41-frame atlas range for anim_id={} ticks={}",
-            idx, anim.anim_id, anim.ticks);
+            "display_index {} out of {}-frame atlas range for anim_id={} ticks={}",
+            idx, AnimState::TOTAL_ATLAS_FRAMES, anim.anim_id, anim.ticks);
     }
 }
 
@@ -163,11 +179,16 @@ proptest! {
 
 #[test]
 fn idle_alive_unstunned_not_dashing_lands_idle() {
-    let next = next_anim_state(
-        Dead { respawn_at_frame: None },
+    let next = nas(
+        Dead {
+            respawn_at_frame: None,
+        },
         DashState::Idle,
         StunFrames(0),
-        AnimState { anim_id: AnimState::IDLE, ticks: 7 },
+        AnimState {
+            anim_id: AnimState::IDLE,
+            ticks: 7,
+        },
         false, // not moving
     );
     assert_eq!(next.anim_id, AnimState::IDLE);
@@ -176,11 +197,16 @@ fn idle_alive_unstunned_not_dashing_lands_idle() {
 
 #[test]
 fn run_selected_when_moving() {
-    let next = next_anim_state(
-        Dead { respawn_at_frame: None },
+    let next = nas(
+        Dead {
+            respawn_at_frame: None,
+        },
         DashState::Idle,
         StunFrames(0),
-        AnimState { anim_id: AnimState::IDLE, ticks: 7 },
+        AnimState {
+            anim_id: AnimState::IDLE,
+            ticks: 7,
+        },
         true, // moving
     );
     assert_eq!(next.anim_id, AnimState::RUN);
@@ -189,11 +215,16 @@ fn run_selected_when_moving() {
 
 #[test]
 fn run_continues_when_moving() {
-    let next = next_anim_state(
-        Dead { respawn_at_frame: None },
+    let next = nas(
+        Dead {
+            respawn_at_frame: None,
+        },
         DashState::Idle,
         StunFrames(0),
-        AnimState { anim_id: AnimState::RUN, ticks: 5 },
+        AnimState {
+            anim_id: AnimState::RUN,
+            ticks: 5,
+        },
         true,
     );
     assert_eq!(next.anim_id, AnimState::RUN);
@@ -202,11 +233,16 @@ fn run_continues_when_moving() {
 
 #[test]
 fn run_to_idle_when_stopped() {
-    let next = next_anim_state(
-        Dead { respawn_at_frame: None },
+    let next = nas(
+        Dead {
+            respawn_at_frame: None,
+        },
         DashState::Idle,
         StunFrames(0),
-        AnimState { anim_id: AnimState::RUN, ticks: 5 },
+        AnimState {
+            anim_id: AnimState::RUN,
+            ticks: 5,
+        },
         false,
     );
     assert_eq!(next.anim_id, AnimState::IDLE);
@@ -215,9 +251,14 @@ fn run_to_idle_when_stopped() {
 
 #[test]
 fn catch_one_shot_runs_to_completion() {
-    let current = AnimState { anim_id: AnimState::CATCH, ticks: 0 };
-    let next = next_anim_state(
-        Dead { respawn_at_frame: None },
+    let current = AnimState {
+        anim_id: AnimState::CATCH,
+        ticks: 0,
+    };
+    let next = nas(
+        Dead {
+            respawn_at_frame: None,
+        },
         DashState::Idle,
         StunFrames(0),
         current,
@@ -230,10 +271,15 @@ fn catch_one_shot_runs_to_completion() {
 #[test]
 fn catch_finished_yields_to_run_when_moving() {
     // CATCH: 3 frames × 3 ticks/frame = 9 total ticks
-    let current = AnimState { anim_id: AnimState::CATCH, ticks: 9 };
+    let current = AnimState {
+        anim_id: AnimState::CATCH,
+        ticks: 9,
+    };
     assert!(current.is_finished());
-    let next = next_anim_state(
-        Dead { respawn_at_frame: None },
+    let next = nas(
+        Dead {
+            respawn_at_frame: None,
+        },
         DashState::Idle,
         StunFrames(0),
         current,
@@ -245,10 +291,15 @@ fn catch_finished_yields_to_run_when_moving() {
 
 #[test]
 fn catch_finished_yields_to_idle_when_stationary() {
-    let current = AnimState { anim_id: AnimState::CATCH, ticks: 9 };
+    let current = AnimState {
+        anim_id: AnimState::CATCH,
+        ticks: 9,
+    };
     assert!(current.is_finished());
-    let next = next_anim_state(
-        Dead { respawn_at_frame: None },
+    let next = nas(
+        Dead {
+            respawn_at_frame: None,
+        },
         DashState::Idle,
         StunFrames(0),
         current,
@@ -260,14 +311,19 @@ fn catch_finished_yields_to_idle_when_stationary() {
 
 #[test]
 fn fresh_dash_transition_resets_ticks() {
-    let next = next_anim_state(
-        Dead { respawn_at_frame: None },
+    let next = nas(
+        Dead {
+            respawn_at_frame: None,
+        },
         DashState::Dashing {
             frames_remaining: 10,
             dir: Vec2F::from_cm(1, 0),
         },
         StunFrames(0),
-        AnimState { anim_id: AnimState::IDLE, ticks: 100 },
+        AnimState {
+            anim_id: AnimState::IDLE,
+            ticks: 100,
+        },
         false,
     );
     assert_eq!(next.anim_id, AnimState::DASH);
@@ -276,15 +332,24 @@ fn fresh_dash_transition_resets_ticks() {
 
 #[test]
 fn hit_preempts_throw_one_shot() {
-    let next = next_anim_state(
-        Dead { respawn_at_frame: None },
+    let next = nas(
+        Dead {
+            respawn_at_frame: None,
+        },
         DashState::Idle,
         StunFrames(6),
         // Mid-throw — not finished
-        AnimState { anim_id: AnimState::THROW, ticks: 4 },
+        AnimState {
+            anim_id: AnimState::THROW,
+            ticks: 4,
+        },
         false,
     );
-    assert_eq!(next.anim_id, AnimState::HIT, "HIT must preempt mid-flight THROW");
+    assert_eq!(
+        next.anim_id,
+        AnimState::HIT,
+        "HIT must preempt mid-flight THROW"
+    );
     assert_eq!(next.ticks, 0);
 }
 
@@ -301,48 +366,187 @@ fn death_caps_at_last_frame_via_display_index() {
     let idx = anim.display_index();
     let last = AnimState::atlas_offset(AnimState::DEATH)
         + AnimState::frame_count(AnimState::DEATH).saturating_sub(1);
-    assert_eq!(idx, last, "DEATH display_index past completion must cap at corpse mark");
+    assert_eq!(
+        idx, last,
+        "DEATH display_index past completion must cap at corpse mark"
+    );
 }
 
 /// Priority ladder: DEATH > HIT > in-flight oneshot > DASH > RUN > IDLE
 #[test]
 fn priority_death_gt_hit_gt_oneshot_gt_dash_gt_run_gt_idle() {
-    let alive = Dead { respawn_at_frame: None };
-    let dying = Dead { respawn_at_frame: Some(100) };
+    let alive = Dead {
+        respawn_at_frame: None,
+    };
+    let dying = Dead {
+        respawn_at_frame: Some(100),
+    };
 
     // DEATH > everything
     assert_eq!(
-        next_anim_state(dying, DashState::Dashing { frames_remaining: 5, dir: Vec2F::from_cm(1, 0) }, StunFrames(3), AnimState { anim_id: AnimState::THROW, ticks: 1 }, true).anim_id,
+        nas(
+            dying,
+            DashState::Dashing {
+                frames_remaining: 5,
+                dir: Vec2F::from_cm(1, 0)
+            },
+            StunFrames(3),
+            AnimState {
+                anim_id: AnimState::THROW,
+                ticks: 1
+            },
+            true
+        )
+        .anim_id,
         AnimState::DEATH
     );
 
     // HIT > in-flight oneshot
     assert_eq!(
-        next_anim_state(alive, DashState::Idle, StunFrames(1), AnimState { anim_id: AnimState::CATCH, ticks: 1 }, true).anim_id,
+        nas(
+            alive,
+            DashState::Idle,
+            StunFrames(1),
+            AnimState {
+                anim_id: AnimState::CATCH,
+                ticks: 1
+            },
+            true
+        )
+        .anim_id,
         AnimState::HIT
     );
 
     // In-flight oneshot > DASH
     assert_eq!(
-        next_anim_state(alive, DashState::Dashing { frames_remaining: 5, dir: Vec2F::from_cm(1, 0) }, StunFrames(0), AnimState { anim_id: AnimState::THROW, ticks: 1 }, true).anim_id,
+        nas(
+            alive,
+            DashState::Dashing {
+                frames_remaining: 5,
+                dir: Vec2F::from_cm(1, 0)
+            },
+            StunFrames(0),
+            AnimState {
+                anim_id: AnimState::THROW,
+                ticks: 1
+            },
+            true
+        )
+        .anim_id,
         AnimState::THROW
     );
 
     // DASH > RUN
     assert_eq!(
-        next_anim_state(alive, DashState::Dashing { frames_remaining: 5, dir: Vec2F::from_cm(1, 0) }, StunFrames(0), AnimState { anim_id: AnimState::IDLE, ticks: 0 }, true).anim_id,
+        nas(
+            alive,
+            DashState::Dashing {
+                frames_remaining: 5,
+                dir: Vec2F::from_cm(1, 0)
+            },
+            StunFrames(0),
+            AnimState {
+                anim_id: AnimState::IDLE,
+                ticks: 0
+            },
+            true
+        )
+        .anim_id,
         AnimState::DASH
     );
 
     // RUN > IDLE (when moving)
     assert_eq!(
-        next_anim_state(alive, DashState::Idle, StunFrames(0), AnimState { anim_id: AnimState::IDLE, ticks: 0 }, true).anim_id,
+        nas(
+            alive,
+            DashState::Idle,
+            StunFrames(0),
+            AnimState {
+                anim_id: AnimState::IDLE,
+                ticks: 0
+            },
+            true
+        )
+        .anim_id,
         AnimState::RUN
     );
 
     // IDLE when not moving
     assert_eq!(
-        next_anim_state(alive, DashState::Idle, StunFrames(0), AnimState { anim_id: AnimState::RUN, ticks: 5 }, false).anim_id,
+        nas(
+            alive,
+            DashState::Idle,
+            StunFrames(0),
+            AnimState {
+                anim_id: AnimState::RUN,
+                ticks: 5
+            },
+            false
+        )
+        .anim_id,
         AnimState::IDLE
+    );
+}
+
+// ---- Charge state (charging = true) ----
+
+#[test]
+fn charging_overrides_run_and_idle() {
+    let alive = Dead {
+        respawn_at_frame: None,
+    };
+    // Charging while standing still → CHARGE (not IDLE).
+    let idle_pose = AnimState {
+        anim_id: AnimState::IDLE,
+        ticks: 3,
+    };
+    assert_eq!(
+        next_anim_state(
+            alive,
+            DashState::Idle,
+            StunFrames(0),
+            idle_pose,
+            false,
+            true
+        )
+        .anim_id,
+        AnimState::CHARGE,
+    );
+    // Charging while moving → CHARGE still wins over RUN (the wind-up reads).
+    assert_eq!(
+        next_anim_state(alive, DashState::Idle, StunFrames(0), idle_pose, true, true).anim_id,
+        AnimState::CHARGE,
+    );
+}
+
+#[test]
+fn dash_and_death_and_hit_override_charge() {
+    let alive = Dead {
+        respawn_at_frame: None,
+    };
+    let dying = Dead {
+        respawn_at_frame: Some(10),
+    };
+    let pose = AnimState {
+        anim_id: AnimState::CHARGE,
+        ticks: 2,
+    };
+    // A dash beats a charge (you committed to the dash).
+    let dashing = DashState::Dashing {
+        frames_remaining: 5,
+        dir: fixed_math::Vec2F::from_cm(1, 0),
+    };
+    assert_eq!(
+        next_anim_state(alive, dashing, StunFrames(0), pose, false, true).anim_id,
+        AnimState::DASH,
+    );
+    // Getting hit / dying still pre-empt the charge.
+    assert_eq!(
+        next_anim_state(alive, DashState::Idle, StunFrames(3), pose, false, true).anim_id,
+        AnimState::HIT,
+    );
+    assert_eq!(
+        next_anim_state(dying, DashState::Idle, StunFrames(0), pose, false, true).anim_id,
+        AnimState::DEATH,
     );
 }

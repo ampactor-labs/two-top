@@ -1,4 +1,4 @@
-use fixed_math::{atan2, cos, sin, sin_cos, sqrt, Fix, FixWide, RectF, Vec2F, HALF_PI, PI, TWO_PI};
+use fixed_math::{Fix, FixWide, HALF_PI, PI, RectF, TWO_PI, Vec2F, atan2, cos, sin, sin_cos, sqrt};
 use proptest::prelude::*;
 
 fn bounded_fix() -> impl Strategy<Value = Fix> {
@@ -68,7 +68,13 @@ fn length_of_3_4_is_5() {
     let len = v.length();
     let expected = Fix::const_from_int(5);
     let diff = (len - expected).abs();
-    assert!(diff < Fix::from_bits(10), "len={} expected={} diff={}", len, expected, diff);
+    assert!(
+        diff < Fix::from_bits(10),
+        "len={} expected={} diff={}",
+        len,
+        expected,
+        diff
+    );
 }
 
 #[test]
@@ -116,7 +122,13 @@ fn length_no_overflow_near_fix_max() {
     let len = v.length();
     let expected = Fix::const_from_int(128);
     let diff = (len - expected).abs();
-    assert!(diff < Fix::from_bits(100), "len={} expected≈{} diff={}", len, expected, diff);
+    assert!(
+        diff < Fix::from_bits(100),
+        "len={} expected≈{} diff={}",
+        len,
+        expected,
+        diff
+    );
 }
 
 #[test]
@@ -124,9 +136,17 @@ fn pi_constants_relate() {
     // Within 1 ULP of the arithmetic relationships — Fix::lit rounds each
     // constant independently, so 2*PI may differ from TWO_PI by a single bit.
     let two_pi_diff = (TWO_PI - PI * Fix::const_from_int(2)).abs();
-    assert!(two_pi_diff <= Fix::from_bits(2), "TWO_PI - 2*PI = {}", two_pi_diff);
+    assert!(
+        two_pi_diff <= Fix::from_bits(2),
+        "TWO_PI - 2*PI = {}",
+        two_pi_diff
+    );
     let half_pi_diff = (HALF_PI - PI / Fix::const_from_int(2)).abs();
-    assert!(half_pi_diff <= Fix::from_bits(2), "HALF_PI - PI/2 = {}", half_pi_diff);
+    assert!(
+        half_pi_diff <= Fix::from_bits(2),
+        "HALF_PI - PI/2 = {}",
+        half_pi_diff
+    );
 }
 
 #[test]
@@ -134,7 +154,13 @@ fn pi_value_close_to_real() {
     // Q16.16 representation of π should be within one ULP of the float value.
     let f_pi: Fix = Fix::lit("3.1415926");
     let diff = (PI - f_pi).abs();
-    assert!(diff < Fix::from_bits(2), "PI={} ref={} diff={}", PI, f_pi, diff);
+    assert!(
+        diff < Fix::from_bits(2),
+        "PI={} ref={} diff={}",
+        PI,
+        f_pi,
+        diff
+    );
 }
 
 #[test]
@@ -144,7 +170,12 @@ fn sin_cos_at_zero() {
     let one = Fix::const_from_int(1);
     let c = cos(Fix::ZERO);
     let diff = (c - one).abs();
-    assert!(diff < Fix::from_bits(10), "cos(0)={} expected 1 diff={}", c, diff);
+    assert!(
+        diff < Fix::from_bits(10),
+        "cos(0)={} expected 1 diff={}",
+        c,
+        diff
+    );
 }
 
 #[test]
@@ -152,7 +183,11 @@ fn sin_cos_at_half_pi() {
     let one = Fix::const_from_int(1);
     let s = sin(HALF_PI);
     let c = cos(HALF_PI);
-    assert!((s - one).abs() < Fix::from_bits(50), "sin(π/2)={} expected 1", s);
+    assert!(
+        (s - one).abs() < Fix::from_bits(50),
+        "sin(π/2)={} expected 1",
+        s
+    );
     assert!(c.abs() < Fix::from_bits(50), "cos(π/2)={} expected 0", c);
 }
 
@@ -169,8 +204,16 @@ fn rotate_zero_is_identity() {
     // Tolerance: cordic::sin(0) ≈ 3e-5, scaled by component magnitude (~4).
     let v = Vec2F::from_cm(3, 4);
     let r = v.rotate(Fix::ZERO);
-    assert!((r.x - v.x).abs() < Fix::from_bits(50), "dx={}", (r.x - v.x).abs());
-    assert!((r.y - v.y).abs() < Fix::from_bits(50), "dy={}", (r.y - v.y).abs());
+    assert!(
+        (r.x - v.x).abs() < Fix::from_bits(50),
+        "dx={}",
+        (r.x - v.x).abs()
+    );
+    assert!(
+        (r.y - v.y).abs() < Fix::from_bits(50),
+        "dy={}",
+        (r.y - v.y).abs()
+    );
 }
 
 #[test]
@@ -194,7 +237,11 @@ fn angle_of_unit_x_is_zero() {
 fn angle_of_unit_y_is_half_pi() {
     let v = Vec2F::new(Fix::ZERO, Fix::const_from_int(1));
     let diff = (v.angle() - HALF_PI).abs();
-    assert!(diff < Fix::from_bits(10), "angle={} expected π/2", v.angle());
+    assert!(
+        diff < Fix::from_bits(10),
+        "angle={} expected π/2",
+        v.angle()
+    );
 }
 
 /// Phase 2 cross-platform determinism gate.
@@ -213,8 +260,18 @@ fn determinism_locked_1000_rotations() {
     }
     // Locked bit values — captured from linux-x64 and frozen as the
     // canonical post-1000-step state. Any platform deviation is a bug.
-    assert_eq!(v.x.to_bits(), 0xffad8d3c_u32 as i32, "x bits diverged: {:#x}", v.x.to_bits() as u32);
-    assert_eq!(v.y.to_bits(), 0xffc95ba0_u32 as i32, "y bits diverged: {:#x}", v.y.to_bits() as u32);
+    assert_eq!(
+        v.x.to_bits(),
+        0xffad8d3c_u32 as i32,
+        "x bits diverged: {:#x}",
+        v.x.to_bits() as u32
+    );
+    assert_eq!(
+        v.y.to_bits(),
+        0xffc95ba0_u32 as i32,
+        "y bits diverged: {:#x}",
+        v.y.to_bits() as u32
+    );
 }
 
 #[test]
@@ -231,7 +288,11 @@ fn atan2_axes() {
     let zero = Fix::ZERO;
     let one = Fix::const_from_int(1);
     let half_pi_diff = (atan2(one, zero) - HALF_PI).abs();
-    assert!(half_pi_diff < Fix::from_bits(10), "atan2(1,0)={} expected π/2", atan2(one, zero));
+    assert!(
+        half_pi_diff < Fix::from_bits(10),
+        "atan2(1,0)={} expected π/2",
+        atan2(one, zero)
+    );
     assert_eq!(atan2(zero, one), Fix::ZERO);
 }
 
