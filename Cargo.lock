@@ -192,6 +192,7 @@ dependencies = [
  "net",
  "rand 0.8.6",
  "render",
+ "replay",
  "serde",
  "serde_json",
  "sim",

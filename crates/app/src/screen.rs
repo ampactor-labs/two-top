@@ -29,9 +29,18 @@ use sim::{
     PreviousPositionF, SelectedArena, VelocityF, arena_obstacles_for, arena_walls,
 };
 
+use crate::anchor::ScreenAnchor;
 use crate::netplay::NetplayConfig;
-use crate::settings::Settings;
 use input_touch::WindowSize;
+
+/// True while the player is sitting in an online room with no opponent yet
+/// (connecting or waiting for a peer). The whole "you wait alone at your
+/// table, then the challenger materializes" beat keys off this: the far
+/// seat's duelist is hidden, and the round HUD (countdown, pips, timer)
+/// stays dark until a real match is running. Couch and practice are never
+/// "awaiting" — their opponent (local or bot) exists from frame one.
+#[derive(Resource, Default)]
+pub struct AwaitingPeer(pub bool);
 
 /// Which screen the app is showing. Both local and online builds boot into
 /// [`Title`](Self::Title); online starts the netplay lifecycle only after the
@@ -77,16 +86,20 @@ pub struct ScreenPlugin;
 
 impl Plugin for ScreenPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(Startup, spawn_overlays)
+        app.init_resource::<AwaitingPeer>()
+            .add_systems(Startup, spawn_overlays)
             .add_systems(OnEnter(AppScreen::InMatch), spawn_match)
             .add_systems(OnExit(AppScreen::InMatch), despawn_match)
             .add_systems(
                 Update,
                 (
+                    update_awaiting_peer,
                     pick_arena.run_if(in_state(AppScreen::Title)),
-                    start_match.run_if(in_state(AppScreen::Title)),
+                    title_buttons_input.run_if(in_state(AppScreen::Title)),
                     back_to_lobby.run_if(in_state(AppScreen::InMatch)),
+                    hide_absent_challenger,
                     update_title_overlay,
+                    update_title_buttons,
                     update_summary_overlay,
                 )
                     .chain(),
@@ -119,6 +132,7 @@ fn spawn_match(
     mut atlases: ResMut<Assets<TextureAtlasLayout>>,
     selected: Res<SelectedArena>,
     netplay: Res<NetplayConfig>,
+    practice: Res<crate::bot::PracticeMode>,
     flip: Res<render::PerspectiveFlip>,
 ) {
     let layout = player_atlas_layout(&mut atlases);
@@ -180,6 +194,9 @@ fn spawn_match(
             PLAYER_FOOT_OFFSET,
         );
         commands.entity(aura).insert(MatchEntity);
+        // The aim telegraph — the public plant both duelists can read.
+        let beam = render::spawn_aim_telegraph(&mut commands, player, handle);
+        commands.entity(beam).insert(MatchEntity);
     }
 
     // Arena boundary walls — fixed order for bit-identical entity ids.
@@ -221,9 +238,11 @@ fn spawn_match(
         flip.0,
     );
 
-    // Couch: a fresh local session starts the sim from frame 0. Online: the
-    // matchbox driver inserts the P2P session once the peer connects.
-    if netplay.room_url.is_none() {
+    // Couch + practice: a fresh local session starts the sim from frame 0
+    // (practice forces local even on an online build — the bot supplies
+    // handle 1). Online: the matchbox driver inserts the P2P session once
+    // the peer connects.
+    if netplay.room_url.is_none() || practice.0 {
         commands.insert_resource(build_synctest_session());
     }
 }
@@ -337,48 +356,171 @@ fn despawn_match(
 /// camera keeps visible across the 600×900 portrait window (`setup_world`).
 const TITLE_BODY_WIDTH: f32 = 1080.0;
 
+// ---- Title menu layout (window-fraction, y-down for taps) ----
+// Every interactive band lives below the notch/status-bar strip and inside
+// the thumb zone. Bands never overlap (settings.rs and room_code.rs share
+// this budget): settings 0.42–0.56 · practice 0.575–0.655 · room 0.68–0.78
+// · play 0.80–0.95.
+const PRACTICE_BTN_RECT: (f32, f32) = (0.575, 0.655);
+// PLAY sits clear of the bottom nav-bar/gesture strip (~last 6% of a phone).
+const PLAY_BTN_RECT: (f32, f32) = (0.80, 0.92);
+/// Couch-only: tapping the arena-name band cycles the arena.
+const ARENA_TAP_RECT: (f32, f32) = (0.24, 0.36);
+/// Screen-anchor Y (y-up, [-1,1]) for each button's center = 1 − 2·y_down.
+const PLAY_ANCHOR_Y: f32 = 1.0 - 2.0 * 0.855;
+const PRACTICE_ANCHOR_Y: f32 = 1.0 - 2.0 * 0.615;
+
+/// Which title action a button fires.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum TitleAction {
+    Play,
+    Practice,
+}
+
+/// One piece of a title button. Border/fill are quads, label is text; all
+/// three share the button's screen anchor so they move as a unit.
+#[derive(Component)]
+struct TitleButton {
+    action: TitleAction,
+    role: BtnRole,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum BtnRole {
+    Border,
+    Fill,
+    Label,
+}
+
+/// True if a touch at window-fraction `y_down` fell in a button band.
+fn in_band(y_down: f32, band: (f32, f32)) -> bool {
+    y_down >= band.0 && y_down < band.1
+}
+
+/// Spawn a bordered button (three anchored entities) centered at `anchor_y`.
+fn spawn_title_button(
+    commands: &mut Commands,
+    action: TitleAction,
+    anchor_y: f32,
+    fill: Vec2,
+    font: f32,
+) {
+    let border = fill + Vec2::splat(22.0);
+    commands.spawn((
+        TitleButton {
+            action,
+            role: BtnRole::Border,
+        },
+        Sprite {
+            color: render::palette::HOT_BONE,
+            custom_size: Some(border),
+            ..default()
+        },
+        ScreenAnchor::new(0.0, anchor_y, 0.0, 0.0),
+        Transform::from_xyz(0.0, 0.0, 199.0),
+        Visibility::Hidden,
+    ));
+    commands.spawn((
+        TitleButton {
+            action,
+            role: BtnRole::Fill,
+        },
+        Sprite {
+            color: render::palette::DEEP_ASH,
+            custom_size: Some(fill),
+            ..default()
+        },
+        ScreenAnchor::new(0.0, anchor_y, 0.0, 0.0),
+        Transform::from_xyz(0.0, 0.0, 199.5),
+        Visibility::Hidden,
+    ));
+    commands.spawn((
+        TitleButton {
+            action,
+            role: BtnRole::Label,
+        },
+        Text2d::new(String::new()),
+        TextFont {
+            font_size: font,
+            ..default()
+        },
+        TextColor(render::palette::HOT_BONE),
+        // Never wrap a button label onto two lines — keep it on the box.
+        TextLayout {
+            justify: Justify::Center,
+            linebreak: bevy::text::LineBreak::NoWrap,
+        },
+        ScreenAnchor::new(0.0, anchor_y, 0.0, 0.0),
+        Transform::from_xyz(0.0, 0.0, 200.0),
+        Visibility::Hidden,
+    ));
+}
+
 fn spawn_overlays(mut commands: Commands) {
-    // Big static "2-TOP" banner — bold and unchanging, parked in the upper
-    // playfield, shown only in Title. Its own entity so the body below can
-    // shrink without dragging the title's impact down with it.
+    // Big static "2-TOP" banner in the upper third — clear of the notch, and
+    // high enough that the whole interactive menu lives in the bottom half
+    // where a thumb reaches. Its own entity so the tagline can move freely.
     commands.spawn((
         TitleBanner,
         Text2d::new("2-TOP"),
         TextFont {
-            font_size: 96.0,
+            font_size: 150.0,
             ..default()
         },
         TextColor(render::palette::HOT_BONE),
         TextLayout::new_with_justify(Justify::Center),
+        ScreenAnchor::new(0.0, 0.62, 0.0, 0.0),
         Transform::from_xyz(0.0, 520.0, 200.0),
         Visibility::Hidden,
     ));
-    // Title body — arena picker + prompts + settings legend. Sized and
-    // width-bounded so it fits the portrait window instead of bleeding off
-    // both edges. Shown only in Title.
+    // One short tagline (arena name for couch, room mode for online) — the
+    // menu's *actions* now live on visible buttons below, so this is a hint,
+    // not an instruction wall.
     commands.spawn((
         TitleOverlay,
         Text2d::new(String::new()),
         TextFont {
-            font_size: 30.0,
+            font_size: 40.0,
             ..default()
         },
         TextColor(render::palette::BONE),
         TextLayout::new_with_justify(Justify::Center),
         TextBounds::new_horizontal(TITLE_BODY_WIDTH),
+        ScreenAnchor::new(0.0, 0.40, 0.0, 0.0),
         Transform::from_xyz(0.0, 0.0, 200.0),
         Visibility::Hidden,
     ));
-    // Summary overlay — centered, shown only on MatchOver.
+    // The two primary buttons: FIND OPPONENT / PLAY (bottom, biggest) and
+    // PRACTICE VS BOT (above it). Each is a border quad + fill quad + label,
+    // sharing a screen anchor. Visible affordances replace the old invisible
+    // tap-zones + instruction text (and keep every touch target off the notch).
+    spawn_title_button(
+        &mut commands,
+        TitleAction::Play,
+        PLAY_ANCHOR_Y,
+        Vec2::new(760.0, 172.0),
+        60.0,
+    );
+    spawn_title_button(
+        &mut commands,
+        TitleAction::Practice,
+        PRACTICE_ANCHOR_Y,
+        Vec2::new(640.0, 104.0),
+        34.0,
+    );
+    // Summary overlay — screen-centered (the kill-cam holds zoomed-in on
+    // MatchOver, so a world-parked summary would sit off-center), shown only
+    // on MatchOver.
     commands.spawn((
         SummaryOverlay,
         Text2d::new(String::new()),
         TextFont {
-            font_size: 56.0,
+            font_size: 72.0,
             ..default()
         },
         TextColor(render::palette::HOT_BONE),
         TextLayout::new_with_justify(Justify::Center),
+        ScreenAnchor::new(0.0, 0.0, 0.0, 0.0),
         Transform::from_xyz(0.0, 0.0, 200.0),
         Visibility::Hidden,
     ));
@@ -402,8 +544,12 @@ fn pick_arena(
     keys: Res<ButtonInput<KeyCode>>,
     touches: Res<Touches>,
     window: Res<WindowSize>,
+    netplay: Res<NetplayConfig>,
     mut selected: ResMut<SelectedArena>,
 ) {
+    if netplay.room_url.is_some() {
+        return;
+    }
     if keys.just_pressed(KeyCode::Digit1) || keys.just_pressed(KeyCode::Numpad1) {
         selected.0 = sim::ArenaId::Anchor;
     } else if keys.just_pressed(KeyCode::Digit2) || keys.just_pressed(KeyCode::Numpad2) {
@@ -412,35 +558,138 @@ fn pick_arena(
         selected.0 = sim::ArenaId::Reliquary;
     }
     let win = window.0;
+    // Couch: tap the arena-name band to cycle (online has no picker — the
+    // room hash decides the arena so both peers agree).
     if win.y > 0.0
         && touches
             .iter_just_pressed()
-            .any(|t| t.position().y < win.y * 0.5)
+            .any(|t| in_band(t.position().y / win.y, ARENA_TAP_RECT))
     {
         selected.0 = next_arena(selected.0);
     }
 }
 
-/// Title → InMatch on a start press: Space / Enter (desktop) or a tap in the
-/// *lower* half of the screen (mobile — the upper half is the arena picker).
-/// The sim input layer is dormant here (no session), so this reads raw Bevy
-/// input directly — it's app-UI, not wire input.
-fn start_match(
+/// The single title input handler: keyboard shortcuts plus taps dispatched to
+/// the visible button bands. No more invisible screen-half zones — a touch
+/// only does something when it lands on the PLAY or PRACTICE button.
+fn title_buttons_input(
     keys: Res<ButtonInput<KeyCode>>,
     touches: Res<Touches>,
     window: Res<WindowSize>,
     mut next: ResMut<NextState<AppScreen>>,
+    mut practice: ResMut<crate::bot::PracticeMode>,
+    mut autostart: Local<Option<bool>>,
 ) {
+    // TWOTOP_AUTOSTART=1 skips the gesture (headless capture verification).
+    let auto = *autostart
+        .get_or_insert_with(|| std::env::var("TWOTOP_AUTOSTART").is_ok_and(|v| v == "1"));
+    if auto {
+        next.set(AppScreen::InMatch);
+        return;
+    }
+
+    if keys.just_pressed(KeyCode::KeyP) {
+        practice.0 = !practice.0;
+    }
     let key_start = keys.just_pressed(KeyCode::Space)
         || keys.just_pressed(KeyCode::Enter)
         || keys.just_pressed(KeyCode::NumpadEnter);
-    let win = window.0;
-    let touch_start = win.y > 0.0
-        && touches
-            .iter_just_pressed()
-            .any(|t| t.position().y >= win.y * 0.5);
-    if key_start || touch_start {
+    if key_start {
         next.set(AppScreen::InMatch);
+        return;
+    }
+
+    let win = window.0;
+    if win.y <= 0.0 {
+        return;
+    }
+    for t in touches.iter_just_pressed() {
+        let yd = t.position().y / win.y;
+        if in_band(yd, PLAY_BTN_RECT) {
+            next.set(AppScreen::InMatch);
+            return;
+        }
+        if in_band(yd, PRACTICE_BTN_RECT) {
+            practice.0 = !practice.0;
+        }
+    }
+}
+
+/// Show + label the title buttons (Title screen only). PLAY reads FIND
+/// OPPONENT online / PLAY on couch; PRACTICE inverts (bone fill, void text)
+/// while active so its state is unmistakable.
+type TitleButtonQuery<'w, 's> = Query<
+    'w,
+    's,
+    (
+        &'static TitleButton,
+        &'static mut Visibility,
+        Option<&'static mut Sprite>,
+        Option<&'static mut Text2d>,
+        Option<&'static mut TextColor>,
+    ),
+>;
+
+fn update_title_buttons(
+    screen: Res<State<AppScreen>>,
+    netplay: Res<NetplayConfig>,
+    practice: Res<crate::bot::PracticeMode>,
+    mut q: TitleButtonQuery,
+) {
+    let on_title = *screen.get() == AppScreen::Title;
+    let online = netplay.room_url.is_some();
+    for (btn, mut vis, sprite, text, color) in &mut q {
+        *vis = if on_title {
+            Visibility::Visible
+        } else {
+            Visibility::Hidden
+        };
+        if !on_title {
+            continue;
+        }
+        let active = btn.action == TitleAction::Practice && practice.0;
+        match btn.role {
+            BtnRole::Border => {
+                if let Some(mut s) = sprite {
+                    s.color = render::palette::HOT_BONE;
+                }
+            }
+            BtnRole::Fill => {
+                if let Some(mut s) = sprite {
+                    s.color = if active {
+                        render::palette::HOT_BONE
+                    } else {
+                        render::palette::DEEP_ASH
+                    };
+                }
+            }
+            BtnRole::Label => {
+                if let Some(mut t) = text {
+                    t.0 = match btn.action {
+                        // The primary button says what tapping it does NOW:
+                        // practice armed → PLAY the bot match; else online →
+                        // FIND OPPONENT (matchmaking); else couch → PLAY.
+                        TitleAction::Play => {
+                            if online && !practice.0 {
+                                "FIND OPPONENT".to_string()
+                            } else {
+                                "PLAY".to_string()
+                            }
+                        }
+                        // The label is constant; the filled/inverted box is
+                        // the on/off state (a standard toggle affordance).
+                        TitleAction::Practice => "PRACTICE VS BOT".to_string(),
+                    };
+                }
+                if let Some(mut c) = color {
+                    c.0 = if active {
+                        render::palette::VOID
+                    } else {
+                        render::palette::HOT_BONE
+                    };
+                }
+            }
+        }
     }
 }
 
@@ -449,23 +698,85 @@ fn start_match(
 /// in-sim rematch (throw) is the other MatchOver exit and stays InMatch.
 fn back_to_lobby(
     keys: Res<ButtonInput<KeyCode>>,
+    touches: Res<Touches>,
+    window: Res<WindowSize>,
     state: Res<MatchState>,
     netplay: Res<NetplayConfig>,
+    practice: Res<crate::bot::PracticeMode>,
     mut next: ResMut<NextState<AppScreen>>,
 ) {
-    if netplay.room_url.is_some() {
+    if netplay.room_url.is_some() && !practice.0 {
         return; // online: the lobby FSM owns teardown
     }
-    if matches!(*state, MatchState::MatchOver) && keys.just_pressed(KeyCode::Escape) {
+    if !matches!(*state, MatchState::MatchOver) {
+        return;
+    }
+    // Escape (desktop) or a tap in the upper area, clear of the notch, is the
+    // no-keyboard way home from a decided practice/couch match.
+    let win = window.0;
+    let tapped = win.y > 0.0
+        && touches
+            .iter_just_pressed()
+            .any(|t| in_band(t.position().y / win.y, (0.12, 0.30)));
+    if keys.just_pressed(KeyCode::Escape) || tapped {
         next.set(AppScreen::Title);
+    }
+}
+
+/// Recompute [`AwaitingPeer`] each frame (runs before every consumer).
+fn update_awaiting_peer(
+    screen: Res<State<AppScreen>>,
+    netplay: Res<NetplayConfig>,
+    practice: Res<crate::bot::PracticeMode>,
+    lobby: Res<net::LobbyState>,
+    mut awaiting: ResMut<AwaitingPeer>,
+) {
+    awaiting.0 = *screen.get() == AppScreen::InMatch
+        && netplay.room_url.is_some()
+        && !practice.0
+        && !lobby.is_in_match();
+}
+
+/// While online and still unpaired, the far seat stays EMPTY: you wait at
+/// your table edge alone (the back-facing duelist you control), and the
+/// challenger's body only materializes when a peer actually connects.
+/// Before the handshake resolves handles, "you" defaults to the near seat.
+#[allow(clippy::type_complexity)]
+fn hide_absent_challenger(
+    awaiting: Res<AwaitingPeer>,
+    local: Res<crate::netplay::LocalPlayerHandle>,
+    mut players: Query<(Entity, &Player, &mut Visibility)>,
+    mut shadows: Query<
+        (&render::GroundShadow, &mut Visibility),
+        (Without<Player>, With<render::GroundShadow>),
+    >,
+) {
+    let me = local.0.unwrap_or(0);
+    let mut hidden: Option<Entity> = None;
+    for (entity, player, mut vis) in &mut players {
+        let hide = awaiting.0 && player.handle != me;
+        *vis = if hide {
+            hidden = Some(entity);
+            Visibility::Hidden
+        } else {
+            Visibility::Inherited
+        };
+    }
+    for (shadow, mut vis) in &mut shadows {
+        *vis = if Some(shadow.target) == hidden {
+            Visibility::Hidden
+        } else {
+            Visibility::Inherited
+        };
     }
 }
 
 fn update_title_overlay(
     screen: Res<State<AppScreen>>,
     selected: Res<SelectedArena>,
-    settings: Res<Settings>,
     netplay: Res<NetplayConfig>,
+    career: Res<crate::grudge::CareerRecord>,
+    practice: Res<crate::bot::PracticeMode>,
     mut q: Query<(&mut Text2d, &mut Visibility), With<TitleOverlay>>,
     mut banner: Query<&mut Visibility, (With<TitleBanner>, Without<TitleOverlay>)>,
 ) {
@@ -480,37 +791,22 @@ fn update_title_overlay(
     let Ok((mut text, mut vis)) = q.single_mut() else {
         return;
     };
+    let _ = &practice; // practice state now reads on its own button
     if on_title {
         *vis = Visibility::Visible;
         let online = netplay.room_url.is_some();
-        let options = [
-            sim::ArenaId::Anchor,
-            sim::ArenaId::Crossing,
-            sim::ArenaId::Reliquary,
-        ]
-        .iter()
-        .map(|&id| {
-            if id == selected.0 {
-                format!("> {} <", arena_name(id))
-            } else {
-                format!("  {}  ", arena_name(id))
-            }
-        })
-        .collect::<Vec<_>>()
-        .join("   ");
         if online {
-            text.0 = format!("{options}\n\n\nTAP TO FIND OPPONENT",);
+            // One tagline: the private-room dialer sits on its own labelled
+            // pad below; the career line rides here when there's a record.
+            let career_line = if career.total() > 0 {
+                format!("     career {}W-{}L", career.wins, career.losses)
+            } else {
+                String::new()
+            };
+            text.0 = format!("dial a code below for a private duel{career_line}");
         } else {
-            let haptics = if settings.haptics { "on" } else { "off" };
-            text.0 = format!(
-                "{options}\n\n1/2/3 or tap top to choose\n\npress START  (Space / tap bottom)\
-                 \n\n— settings —\n\
-                 [H] haptics {haptics}    [-/=] sfx {sfx:.0}%\n\
-                 [ [ / ] ] music {music:.0}%    [ , / . ] deadzone {dz:.0}%",
-                sfx = settings.sfx_volume * 100.0,
-                music = settings.music_volume * 100.0,
-                dz = settings.stick_deadzone * 100.0,
-            );
+            // Couch: the tappable arena name (cycles on tap / 1-2-3).
+            text.0 = format!("< {} >", arena_name(selected.0));
         }
     } else {
         *vis = Visibility::Hidden;
@@ -521,6 +817,7 @@ fn update_summary_overlay(
     state: Res<MatchState>,
     score: Res<MatchScore>,
     netplay: Res<NetplayConfig>,
+    saved: Res<crate::recorder::LastSavedReplay>,
     mut q: Query<(&mut Text2d, &mut Visibility), With<SummaryOverlay>>,
 ) {
     let Ok((mut text, mut vis)) = q.single_mut() else {
@@ -535,8 +832,15 @@ fn update_summary_overlay(
         } else {
             ""
         };
+        // The whole match is a shareable file (deterministic sim = the input
+        // tape IS the recording). Point at it once the recorder lands it.
+        let replay_line = if saved.0.is_some() {
+            "\n\nmatch replay saved - share the .bmrg"
+        } else {
+            ""
+        };
         text.0 = format!(
-            "{winner}\n\n{}  —  {}\n\n{again}{lobby}",
+            "{winner}\n\n{}  -  {}\n\n{again}{lobby}{replay_line}",
             score.p0, score.p1
         );
     } else {

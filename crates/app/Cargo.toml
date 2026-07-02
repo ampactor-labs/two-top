@@ -70,6 +70,9 @@ input_touch = { path = "../input_touch" }
 input_desktop = { path = "../input_desktop" }
 net = { path = "../net" }
 render = { path = "../render" }
+# Match recorder: every decided match is written out as a shareable .bmrg
+# replay (the deterministic sim makes the input tape a perfect recording).
+replay = { path = "../replay" }
 sim = { path = "../sim" }
 # Cosmetic-only RNG for the screen-shake direction (Phase 18). Reads the
 # render crate's `CosmeticRng` (never `SimRng` — shake must never feed back
