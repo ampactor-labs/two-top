@@ -25,12 +25,25 @@ fn main() {
             .find(|entry| entry.file_type().is_ok_and(|ty| ty.is_dir()))
             .expect("NDK prebuilt host toolchain exists")
             .path();
-        let abi_lib_dir = host_dir
+        let libcxxabi = host_dir
             .join("sysroot")
             .join("usr")
             .join("lib")
-            .join(lib_triple);
-        println!("cargo:rustc-link-search=native={}", abi_lib_dir.display());
-        println!("cargo:rustc-link-lib=static=c++abi");
+            .join(lib_triple)
+            .join("libc++abi.a");
+        println!("cargo:rerun-if-env-changed=ANDROID_NDK_ROOT");
+        println!("cargo:rerun-if-env-changed=ANDROID_NDK_HOME");
+        // Link only the C++ ABI archive that oboe/cpal needs. Do not add the
+        // containing NDK sysroot dir to the global search path: it also holds
+        // static Bionic libc.a, which can make the Android cdylib embed libc
+        // startup/getauxval code and crash before Rust starts on some phones.
+        println!("cargo:rustc-link-arg-cdylib={}", libcxxabi.display());
+        // Android 15+ requires every LOAD segment 16 KB-aligned (devices with
+        // 16 KB pages refuse to load the library; Samsung surfaces it as the
+        // "ELF alignment check failed" compatibility dialog). This must live
+        // HERE, not .cargo/config.toml: cargo-apk exports its own RUSTFLAGS
+        // env for the NDK linker, and env RUSTFLAGS *replaces* config-file
+        // target rustflags — link-args from build scripts compose instead.
+        println!("cargo:rustc-link-arg-cdylib=-Wl,-z,max-page-size=16384");
     }
 }

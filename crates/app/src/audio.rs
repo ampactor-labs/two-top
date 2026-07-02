@@ -67,6 +67,7 @@ pub struct AudioAssets {
     pub pickup_spawn: Handle<AudioSource>,
     pub pickup_collect: Handle<AudioSource>,
     pub ambient_loop: Handle<AudioSource>,
+    pub heartbeat_loop: Handle<AudioSource>,
 }
 
 /// Spawn a one-shot cue at `volume`, set to despawn its entity when finished
@@ -110,6 +111,7 @@ fn load_audio_and_start_ambient(
         pickup_spawn: asset_server.load("audio/pickup_spawn.wav"),
         pickup_collect: asset_server.load("audio/pickup_collect.wav"),
         ambient_loop: asset_server.load("audio/ambient_loop.wav"),
+        heartbeat_loop: asset_server.load("audio/heartbeat_loop.wav"),
     };
     commands.spawn((
         AmbientLoop,
@@ -120,16 +122,51 @@ fn load_audio_and_start_ambient(
 }
 
 /// Keep the looping ambient bed at the current music-volume setting (the bed
-/// plays from boot, so a Title-screen volume change must reach it live).
+/// plays from boot, so a Title-screen volume change must reach it live) —
+/// DUCKED hard while the match-point ritual holds, so the heartbeat owns
+/// the room.
 fn sync_ambient_volume(
     settings: Res<Settings>,
+    ritual: Res<render::MatchPointRitual>,
     mut sinks: Query<&mut AudioSink, With<AmbientLoop>>,
 ) {
-    if !settings.is_changed() {
+    if !settings.is_changed() && !ritual.is_changed() {
         return;
     }
+    let duck = if ritual.0 { 0.25 } else { 1.0 };
     for mut sink in &mut sinks {
-        sink.set_volume(Volume::Linear(settings.music_volume));
+        sink.set_volume(Volume::Linear(settings.music_volume * duck));
+    }
+}
+
+/// Marker on the looping heartbeat entity (match-point ritual bed).
+#[derive(Component)]
+struct HeartbeatLoop;
+
+/// Start/stop the 40 BPM heartbeat with the match-point ritual. The loop
+/// entity exists only while the ritual holds, so there's nothing to keep
+/// in sync outside those edges.
+fn match_point_heartbeat(
+    mut commands: Commands,
+    ritual: Res<render::MatchPointRitual>,
+    assets: Option<Res<AudioAssets>>,
+    settings: Res<Settings>,
+    running: Query<Entity, With<HeartbeatLoop>>,
+) {
+    let Some(assets) = assets else {
+        return;
+    };
+    let have = !running.is_empty();
+    if ritual.0 && !have {
+        commands.spawn((
+            HeartbeatLoop,
+            AudioPlayer::new(assets.heartbeat_loop.clone()),
+            PlaybackSettings::LOOP.with_volume(Volume::Linear(settings.music_volume)),
+        ));
+    } else if !ritual.0 && have {
+        for entity in &running {
+            commands.entity(entity).despawn();
+        }
     }
 }
 
@@ -412,6 +449,7 @@ impl Plugin for GameAudioPlugin {
                     play_pickup_collect_sfx,
                     play_match_state_sfx,
                     sync_ambient_volume,
+                    match_point_heartbeat,
                 ),
             );
     }

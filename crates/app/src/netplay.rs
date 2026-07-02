@@ -148,6 +148,11 @@ impl Plugin for MatchboxPlugin {
 /// `TaskPoolPlugin` has initialized `IoTaskPool`, so the spawn is safe here
 /// (it would not be in `run()` before `App::run`).
 fn start_matchbox(world: &mut World) {
+    // Practice mode runs a local session against the bot — no socket, even
+    // on an online build.
+    if world.resource::<crate::bot::PracticeMode>().0 {
+        return;
+    }
     let Some(url) = world.resource::<NetplayConfig>().room_url.clone() else {
         return;
     };

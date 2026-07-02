@@ -11,7 +11,7 @@
 //! Android setups) settings simply stay in-memory for the session.
 
 use bevy::prelude::*;
-use input_touch::StickDeadzone;
+use input_touch::{StickDeadzone, WindowSize};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
@@ -103,8 +103,14 @@ pub struct SettingsPlugin;
 impl Plugin for SettingsPlugin {
     fn build(&self, app: &mut App) {
         app.insert_resource(load_settings())
-            .add_systems(Startup, push_deadzone)
-            .add_systems(Update, adjust_settings.run_if(in_state(AppScreen::Title)));
+            .add_systems(Startup, (push_deadzone, spawn_setting_rows))
+            .add_systems(
+                Update,
+                (
+                    adjust_settings.run_if(in_state(AppScreen::Title)),
+                    update_setting_rows,
+                ),
+            );
     }
 }
 
@@ -117,8 +123,71 @@ fn push_deadzone(settings: Res<Settings>, mut deadzone: ResMut<StickDeadzone>) {
 /// (1/2/3) and start (Space/Enter): H toggles haptics, −/= the SFX volume,
 /// `[`/`]` the music volume, `,`/`.` the deadzone. Any change re-clamps,
 /// pushes the deadzone to `input_touch`, and saves to disk.
+/// Title settings rows: window-fraction band (y-down, like `Touches`).
+/// Four rows from 0.42 at a 0.034 pitch → band ~0.42–0.56, sitting above the
+/// practice button (0.575) in the title's bottom-menu budget.
+const ROWS_TOP: f32 = 0.42;
+const ROW_PITCH: f32 = 0.034;
+const ROW_COUNT: usize = 4;
+
+/// One tappable settings row (0 haptics, 1 sfx, 2 music, 3 deadzone).
+#[derive(Component)]
+struct SettingRow(usize);
+
+fn spawn_setting_rows(mut commands: Commands) {
+    for row in 0..ROW_COUNT {
+        let fy = ROWS_TOP + (row as f32 + 0.5) * ROW_PITCH;
+        commands.spawn((
+            SettingRow(row),
+            Text2d::new(String::new()),
+            TextFont {
+                font_size: 34.0,
+                ..default()
+            },
+            TextColor(render::palette::BONE.with_alpha(0.8)),
+            TextLayout::new_with_justify(Justify::Center),
+            crate::anchor::ScreenAnchor::new(0.0, 1.0 - 2.0 * fy, 0.0, 0.0),
+            Transform::from_xyz(0.0, 0.0, 200.0),
+            Visibility::Hidden,
+        ));
+    }
+}
+
+/// Render each row with tap arrows; visible on the title only.
+fn update_setting_rows(
+    screen: Res<State<crate::screen::AppScreen>>,
+    settings: Res<Settings>,
+    mut rows: Query<(&SettingRow, &mut Text2d, &mut Visibility)>,
+) {
+    let on_title = *screen.get() == crate::screen::AppScreen::Title;
+    for (row, mut text, mut vis) in &mut rows {
+        *vis = if on_title {
+            Visibility::Visible
+        } else {
+            Visibility::Hidden
+        };
+        if !on_title {
+            continue;
+        }
+        text.0 = match row.0 {
+            0 => format!(
+                "<  haptics {}  >",
+                if settings.haptics { "on" } else { "off" }
+            ),
+            1 => format!("<  sfx {:.0}%  >", settings.sfx_volume * 100.0),
+            2 => format!("<  music {:.0}%  >", settings.music_volume * 100.0),
+            _ => format!("<  deadzone {:.0}%  >", settings.stick_deadzone * 100.0),
+        };
+    }
+}
+
+/// Keyboard + touch settings edits, one owner for clamp/mirror/save.
+/// Touch: a tap on a row's left half decreases (or toggles), right half
+/// increases — the phone finally gets the same knobs the keyboard had.
 fn adjust_settings(
     keys: Res<ButtonInput<KeyCode>>,
+    touches: Res<Touches>,
+    window: Res<WindowSize>,
     mut settings: ResMut<Settings>,
     mut deadzone: ResMut<StickDeadzone>,
 ) {
@@ -145,6 +214,25 @@ fn adjust_settings(
     }
     if keys.just_pressed(KeyCode::Period) {
         s.stick_deadzone += 0.02;
+    }
+
+    let win = window.0;
+    if win.x > 0.0 && win.y > 0.0 {
+        for t in touches.iter_just_pressed() {
+            let fy = t.position().y / win.y;
+            if !(ROWS_TOP..ROWS_TOP + ROW_COUNT as f32 * ROW_PITCH).contains(&fy) {
+                continue;
+            }
+            let row = ((fy - ROWS_TOP) / ROW_PITCH) as usize;
+            let up = t.position().x > win.x * 0.5;
+            let sign = if up { 1.0 } else { -1.0 };
+            match row {
+                0 => s.haptics = !s.haptics,
+                1 => s.sfx_volume += 0.1 * sign,
+                2 => s.music_volume += 0.1 * sign,
+                _ => s.stick_deadzone += 0.02 * sign,
+            }
+        }
     }
 
     let s = s.clamped();

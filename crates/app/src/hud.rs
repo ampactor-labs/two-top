@@ -12,24 +12,22 @@
 //!   * **Countdown** — the big 3·2·1 glyphs at round start, a brief GO on the
 //!     first round frame.
 //!
-//! Render-only: reads sim resources, never writes them. Positioned in
-//! world-space at arena-relative anchors (consistent with the title/summary
-//! overlays) so it frames correctly on the desktop whole-arena camera; a
-//! dedicated screen-space HUD camera for the mobile follow-cam is a follow-up.
+//! Render-only: reads sim resources, never writes them. Every element is
+//! pinned to the *screen* via [`ScreenAnchor`], so the HUD hugs the real
+//! display edges on any phone aspect and stays rock-stable under the
+//! kill-cam zoom / follow cam / screen shake.
 
 use bevy::prelude::*;
-use sim::{
-    ARENA_HALF_HEIGHT_CM, ARENA_HALF_WIDTH_CM, FrameCount, MATCH_WIN_THRESHOLD, MatchScore,
-    MatchState, ROUND_DURATION_FRAMES,
-};
+use sim::{FrameCount, MATCH_WIN_THRESHOLD, MatchScore, MatchState, ROUND_DURATION_FRAMES};
 
-use crate::screen::AppScreen;
+use crate::anchor::ScreenAnchor;
+use crate::screen::{AppScreen, AwaitingPeer};
 
-const PIP_SIZE: f32 = 30.0;
-const PIP_GAP: f32 = 8.0;
-const HUD_MARGIN: f32 = 64.0;
-const TIMER_WIDTH: f32 = 360.0;
-const TIMER_HEIGHT: f32 = 10.0;
+const PIP_SIZE: f32 = 42.0;
+const PIP_GAP: f32 = 10.0;
+const HUD_MARGIN: f32 = 70.0;
+const TIMER_WIDTH: f32 = 520.0;
+const TIMER_HEIGHT: f32 = 14.0;
 const COUNTDOWN_SIZE: f32 = 220.0;
 /// Frames a "GO" glyph flashes at the top of a fresh round.
 const GO_FLASH_FRAMES: u32 = 24;
@@ -62,9 +60,6 @@ fn spawn_hud(
     asset_server: Res<AssetServer>,
     mut atlases: ResMut<Assets<TextureAtlasLayout>>,
 ) {
-    let top_y = ARENA_HALF_HEIGHT_CM as f32 - HUD_MARGIN;
-    let half_w = ARENA_HALF_WIDTH_CM as f32;
-
     // Score pips — 3-cell 8x8 atlas: [empty, filled-P0, filled-P1].
     let pip_layout = atlases.add(TextureAtlasLayout::from_grid(
         UVec2::splat(8),
@@ -77,11 +72,12 @@ fn spawn_hud(
     for player in 0..2u8 {
         for idx in 0..MATCH_WIN_THRESHOLD {
             let step = (PIP_SIZE + PIP_GAP) * idx as f32;
-            // P0 fills rightward from the left edge, P1 leftward from the right.
-            let x = if player == 0 {
-                -half_w + HUD_MARGIN + step
+            // P0 fills rightward from the screen's left edge, P1 leftward
+            // from the right — true display corners on every aspect.
+            let anchor = if player == 0 {
+                ScreenAnchor::new(-1.0, 1.0, HUD_MARGIN + step, -HUD_MARGIN)
             } else {
-                half_w - HUD_MARGIN - step
+                ScreenAnchor::new(1.0, 1.0, -(HUD_MARGIN + step), -HUD_MARGIN)
             };
             commands.spawn((
                 ScorePip { player, idx },
@@ -94,13 +90,14 @@ fn spawn_hud(
                     custom_size: Some(Vec2::splat(PIP_SIZE)),
                     ..default()
                 },
-                Transform::from_xyz(x, top_y, 50.0),
+                anchor,
+                Transform::from_xyz(0.0, 0.0, 50.0),
                 Visibility::Hidden,
             ));
         }
     }
 
-    // Round clock — a thin depleting bar, centered under the pips.
+    // Round clock — a thin depleting bar, top-center under the pip row.
     commands.spawn((
         TimerBar,
         Sprite {
@@ -108,7 +105,8 @@ fn spawn_hud(
             custom_size: Some(Vec2::new(TIMER_WIDTH, TIMER_HEIGHT)),
             ..default()
         },
-        Transform::from_xyz(0.0, top_y - PIP_SIZE, 50.0),
+        ScreenAnchor::new(0.0, 1.0, 0.0, -(HUD_MARGIN + PIP_SIZE)),
+        Transform::from_xyz(0.0, 0.0, 50.0),
         Visibility::Hidden,
     ));
 
@@ -131,6 +129,7 @@ fn spawn_hud(
             custom_size: Some(Vec2::splat(COUNTDOWN_SIZE)),
             ..default()
         },
+        ScreenAnchor::new(0.0, 0.0, 0.0, 40.0),
         Transform::from_xyz(0.0, 40.0, 150.0),
         Visibility::Hidden,
     ));
@@ -138,11 +137,13 @@ fn spawn_hud(
 
 fn update_score_pips(
     screen: Res<State<AppScreen>>,
+    awaiting: Res<AwaitingPeer>,
     score: Res<MatchScore>,
     time: Res<Time<Real>>,
     mut q: Query<(&ScorePip, &mut Sprite, &mut Visibility)>,
 ) {
-    let in_match = *screen.get() == AppScreen::InMatch;
+    // Pips are premature while sitting alone in an online room.
+    let in_match = *screen.get() == AppScreen::InMatch && !awaiting.0;
     // Smooth pulse for the match-point pip (render-only, non-rollback clock).
     let pulse = 0.4 + 0.6 * (time.elapsed_secs() * 6.0).sin().mul_add(0.5, 0.5);
     for (pip, mut sprite, mut vis) in &mut q {
@@ -175,6 +176,7 @@ fn update_score_pips(
 
 fn update_countdown(
     screen: Res<State<AppScreen>>,
+    awaiting: Res<AwaitingPeer>,
     state: Res<MatchState>,
     frame: Res<FrameCount>,
     mut q: Query<(&mut Sprite, &mut Visibility), With<CountdownGlyph>>,
@@ -182,6 +184,12 @@ fn update_countdown(
     let Ok((mut sprite, mut vis)) = q.single_mut() else {
         return;
     };
+    // The idle session parks MatchState at Countdown{3}; don't freeze a "3"
+    // over the empty room while waiting for the challenger to arrive.
+    if awaiting.0 {
+        *vis = Visibility::Hidden;
+        return;
+    }
     let show = |index: usize, sprite: &mut Sprite, vis: &mut Visibility| {
         if let Some(atlas) = sprite.texture_atlas.as_mut() {
             atlas.index = index;

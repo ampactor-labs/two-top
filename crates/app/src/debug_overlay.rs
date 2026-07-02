@@ -10,13 +10,14 @@
 //!   * `InputHistory` — per-handle ring of the last `INPUT_HISTORY_LEN` ticks
 //!
 //! Writes a single multi-line `Text2d` pinned near the top-left of the
-//! window. Uses the existing `WindowSize` resource (populated by the
-//! app's `update_window_metrics`) so the overlay reflows when the
-//! window resizes.
+//! screen via `ScreenAnchor`, so it reflows with the window and stays put
+//! under the follow-cam/kill-cam.
 
 use bevy::prelude::*;
-use input_touch::{TouchState, WindowSize, quantize_inputs};
+use input_touch::{TouchState, quantize_inputs};
 use sim::{INPUT_HISTORY_LEN, InputHistory, PlayerInput};
+
+use crate::anchor::ScreenAnchor;
 
 #[derive(Component)]
 struct DebugOverlayText;
@@ -46,7 +47,9 @@ fn spawn_overlay(mut commands: Commands) {
             ..default()
         },
         TextColor(render::palette::HIT_WHITE),
-        // Initial transform — re-positioned each frame from WindowSize.
+        // Text2d anchors at its bounding-box center, so offset inward by
+        // ~half the expected block size from the top-left screen corner.
+        ScreenAnchor::new(-1.0, 1.0, 200.0, -60.0),
         Transform::from_xyz(0.0, 0.0, 100.0),
         // Off by default; F3 reveals it. Keeps the live stage uncluttered.
         Visibility::Hidden,
@@ -72,23 +75,11 @@ fn toggle_overlay(
 fn update_overlay(
     touch: Res<TouchState>,
     history: Res<InputHistory>,
-    window: Res<WindowSize>,
-    mut q: Query<(&mut Text2d, &mut Transform), With<DebugOverlayText>>,
+    mut q: Query<&mut Text2d, With<DebugOverlayText>>,
 ) {
-    let Ok((mut text, mut tx)) = q.single_mut() else {
+    let Ok(mut text) = q.single_mut() else {
         return;
     };
-
-    // Pin the overlay to roughly the upper-left of the screen. Text2d
-    // anchors at the text's bounding-box center by default, so we offset
-    // inward by ~half the expected text size. With a ~13px font and ~5
-    // visible lines, a rough offset of (200, -60) from the top-left of
-    // world space puts the block visibly inside the window without
-    // clipping.
-    if window.0.length_squared() > 0.0 {
-        tx.translation.x = -window.0.x * 0.5 + 200.0;
-        tx.translation.y = window.0.y * 0.5 - 60.0;
-    }
 
     let p = quantize_inputs(&touch);
     let stick = touch.stick.unwrap_or(Vec2::ZERO);

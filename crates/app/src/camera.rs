@@ -12,21 +12,27 @@ use rand::Rng as _;
 use render::{
     CosmeticRng, LastKillPos, SHAKE_DECAY_PER_SEC, SHAKE_MAX_OFFSET, ScreenShake, shake_offset,
 };
-use sim::{
-    ARENA_HALF_HEIGHT_CM, ARENA_HALF_WIDTH_CM, Boomerang, BoomerangState, MatchState, Player,
-    PositionF, TICK_HZ, VelocityF,
-};
-
-/// Marker for the camera that should track the players. The mobile build
-/// adds it (a zoomed follow cam for a phone); the desktop build omits it
-/// and frames the whole arena statically, so `camera_follow` no-ops there
-/// with no platform `cfg` in this module.
-#[derive(Component)]
-pub struct FollowCam;
+use sim::{Boomerang, BoomerangState, MatchState, Player, PositionF, TICK_HZ, VelocityF};
 
 /// Damping rate in 1/sec. Higher = camera snaps to target faster.
 /// 4.0 means ~250 ms time constant — responsive but not jarring.
 pub const CAMERA_FOLLOW_RATE: f32 = 4.0;
+
+/// Fraction of the action-centroid offset the camera leans toward. The
+/// whole arena stays framed (AutoMin guarantees the minimum view); the
+/// lean just gives the frame a subtle life that tracks the duel — the
+/// dynamic-camera feel without the fairness/legibility cost of a real
+/// zoomed follow cam (which stays deferred to live device tuning).
+pub const CAMERA_LEAN_FRAC: f32 = 0.12;
+
+/// Hard cap (world units) on the lean so the frame never wanders far
+/// enough to feel like a moving camera.
+pub const CAMERA_LEAN_MAX: f32 = 48.0;
+
+/// Pure lean: scale the action-centroid offset down and cap its length.
+pub fn lean_offset(centroid: Vec2) -> Vec2 {
+    (centroid * CAMERA_LEAN_FRAC).clamp_length_max(CAMERA_LEAN_MAX)
+}
 
 /// How much a live (Flying) boomerang pulls the follow centroid relative to a
 /// player (weight 1.0). The camera leans toward the in-flight threat so the
@@ -105,6 +111,12 @@ pub fn kill_cam_scale(eased: f32) -> f32 {
     1.0 + (1.0 / KILL_CAM_ZOOM - 1.0) * eased
 }
 
+/// Label for the whole camera rig (base → kill-cam → shake composition).
+/// Screen-anchored UI (`crate::anchor`) orders after this so it reads the
+/// camera transform *after* it has been written for the frame.
+#[derive(SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct CameraRigSet;
+
 pub struct CameraFollowPlugin;
 
 impl Plugin for CameraFollowPlugin {
@@ -113,16 +125,18 @@ impl Plugin for CameraFollowPlugin {
             .init_resource::<KillCam>()
             .add_systems(
                 Update,
-                ((update_camera_base, update_kill_cam), compose_camera).chain(),
+                ((update_camera_base, update_kill_cam), compose_camera)
+                    .chain()
+                    .in_set(CameraRigSet),
             );
     }
 }
 
-/// Layer 1: update the follow/static base. Mobile (a `FollowCam` exists) damps
-/// toward a weighted centroid of the duelists PLUS any in-flight boomerangs, led
-/// by player velocity (lookahead) and clamped to the playfield — so the camera
-/// tracks the action without ever wandering off the arena. Desktop has no
-/// `FollowCam`, so the base stays at the origin for static whole-arena framing.
+/// Layer 1: update the base — a damped LEAN toward the weighted action
+/// centroid (duelists + any in-flight boomerangs, led by player velocity).
+/// Every platform gets the same subtle life: the arena stays fully framed
+/// (AutoMin) while the frame breathes toward the action. A real zoomed
+/// follow cam remains deferred to live device tuning.
 ///
 /// Pure render-side: reads sim `PositionF`/`VelocityF`/`Boomerang`, writes only
 /// the non-rollback `CameraBase`. Never feeds back into sim.
@@ -130,13 +144,9 @@ fn update_camera_base(
     time: Res<Time<Real>>,
     players: Query<(&PositionF, &VelocityF), With<Player>>,
     boomerangs: Query<(&PositionF, &Boomerang)>,
-    follow: Query<(), With<FollowCam>>,
     persp: Res<render::PerspectiveFlip>,
     mut base: ResMut<CameraBase>,
 ) {
-    if follow.is_empty() {
-        return; // desktop: static origin framing
-    }
     let mut sum = Vec2::ZERO;
     let mut vel_sum = Vec2::ZERO;
     let mut count = 0u32;
@@ -148,10 +158,14 @@ fn update_camera_base(
         count += 1;
     }
     if count == 0 {
+        // No duelists (title screen / between matches): ease back to origin.
+        let dt = time.delta_secs();
+        base.0.x = damped_step(base.0.x, 0.0, CAMERA_FOLLOW_RATE, dt);
+        base.0.y = damped_step(base.0.y, 0.0, CAMERA_FOLLOW_RATE, dt);
         return;
     }
     // Lean the centroid toward live (Flying) boomerangs so the thrown fang —
-    // the thing both players are tracking — stays in frame.
+    // the thing both players are tracking — pulls the frame.
     let mut weighted = sum;
     let mut weight = count as f32;
     for (p, b) in &boomerangs {
@@ -165,14 +179,10 @@ fn update_camera_base(
     let lead = (vel_sum / count as f32) * (TICK_HZ as f32 * CAMERA_LOOKAHEAD_SEC);
     let mut target = weighted / weight + lead;
     // The world renders Y-foreshortened into the tabletop tilt, so the camera —
-    // which lives in that rendered space — must foreshorten its target Y (and
-    // its playfield clamp) to stay centred on the action.
+    // which lives in that rendered space — must foreshorten its target Y to
+    // stay centred on the action.
     target.y *= render::WORLD_TILT_Y * persp.0;
-    // Soft clamp: never center past the playfield edge.
-    let half_w = ARENA_HALF_WIDTH_CM as f32;
-    let half_h = ARENA_HALF_HEIGHT_CM as f32 * render::WORLD_TILT_Y;
-    target.x = target.x.clamp(-half_w, half_w);
-    target.y = target.y.clamp(-half_h, half_h);
+    let target = lean_offset(target);
 
     let dt = time.delta_secs();
     base.0.x = damped_step(base.0.x, target.x, CAMERA_FOLLOW_RATE, dt);
@@ -325,6 +335,24 @@ mod tests {
         assert!(smoothstep(0.1) < 0.1);
         // Soft stop: near 1.0 the output is pulled above the linear line.
         assert!(smoothstep(0.9) > 0.9);
+    }
+
+    #[test]
+    fn lean_is_a_small_fraction_of_the_centroid() {
+        let lean = lean_offset(Vec2::new(100.0, 0.0));
+        assert!((lean.x - 100.0 * CAMERA_LEAN_FRAC).abs() < 1e-5);
+        assert_eq!(lean.y, 0.0);
+    }
+
+    #[test]
+    fn lean_is_capped() {
+        let lean = lean_offset(Vec2::new(10_000.0, 0.0));
+        assert!((lean.length() - CAMERA_LEAN_MAX).abs() < 1e-4);
+    }
+
+    #[test]
+    fn lean_of_center_is_zero() {
+        assert_eq!(lean_offset(Vec2::ZERO), Vec2::ZERO);
     }
 
     #[test]

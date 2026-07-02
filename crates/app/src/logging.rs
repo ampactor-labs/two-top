@@ -9,10 +9,12 @@
 //!
 //! - **Dev (`debug_assertions`)**: `fmt` layer → `stderr`. Matches the
 //!   prior bevy-default behavior so existing dev workflow is preserved.
-//! - **Release**: `fmt` layer (no ANSI) → daily-rotated file under
-//!   `<exe-dir>/logs/two_top.log`. Writes go through
-//!   `tracing-appender`'s non-blocking writer so disk I/O never stalls
-//!   the game thread.
+//! - **Release desktop**: `fmt` layer (no ANSI) → daily-rotated file under
+//!   `<exe-dir>/logs/two_top.log`. Writes go through `tracing-appender`'s
+//!   non-blocking writer so disk I/O never stalls the game thread.
+//! - **Release Android**: `fmt` layer (no ANSI) → stderr/logcat. NativeActivity
+//!   does not give us a stable writable cwd/exe dir, and trying to open a file
+//!   appender during startup can panic before the first frame.
 //!
 //! ## Filter
 //!
@@ -40,12 +42,12 @@ const DEFAULT_FILTER: &str = "info,\
     bevy_app=warn,bevy_winit=warn,bevy_render=warn,bevy_ecs=warn";
 
 /// Holds resources whose `Drop` must run when the app exits. In
-/// release, this carries the `tracing-appender` `WorkerGuard` that
-/// flushes pending log writes. In dev it's a unit struct — the dev
-/// path writes synchronously to stderr and has nothing to flush.
+/// release desktop, this carries the `tracing-appender` `WorkerGuard` that
+/// flushes pending log writes. In dev and Android release it's a unit struct —
+/// those paths write synchronously to stderr/logcat and have nothing to flush.
 #[must_use = "drop the LogGuard at the end of run() to flush pending log writes"]
 pub struct LogGuard {
-    #[cfg(not(debug_assertions))]
+    #[cfg(all(not(debug_assertions), not(target_os = "android")))]
     _appender_guard: tracing_appender::non_blocking::WorkerGuard,
 }
 
@@ -83,7 +85,26 @@ pub fn init_logging() -> LogGuard {
         LogGuard {}
     }
 
-    #[cfg(not(debug_assertions))]
+    #[cfg(all(not(debug_assertions), target_os = "android"))]
+    {
+        tracing_subscriber::registry()
+            .with(filter)
+            .with(
+                tracing_subscriber::fmt::layer()
+                    .with_writer(std::io::stderr)
+                    .with_ansi(false),
+            )
+            .init();
+        tracing::info!(
+            target: "two_top::logging",
+            static_max_level = ?static_max,
+            mode = "android-release",
+            "tracing subscriber installed",
+        );
+        LogGuard {}
+    }
+
+    #[cfg(all(not(debug_assertions), not(target_os = "android")))]
     {
         let log_dir = log_dir();
         // Best-effort directory creation; if it fails the appender's
@@ -120,11 +141,7 @@ pub fn init_logging() -> LogGuard {
 /// 1. `<exe-dir>/logs/` if the current exe path is resolvable.
 /// 2. `./logs/` as a last-resort cwd fallback.
 ///
-/// Android note: `cargo-apk`-launched processes have their cwd set to
-/// the app's internal storage, so `./logs/` lands inside the
-/// `/data/data/com.ampactorlabs.twotop/` sandbox — exactly where a
-/// `.bmrg` companion file would live when match-recording lands.
-#[cfg(not(debug_assertions))]
+#[cfg(all(not(debug_assertions), not(target_os = "android")))]
 fn log_dir() -> std::path::PathBuf {
     use std::path::PathBuf;
     if let Ok(exe) = std::env::current_exe()
