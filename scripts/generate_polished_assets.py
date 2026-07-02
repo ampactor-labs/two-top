@@ -2734,14 +2734,15 @@ kkkkkkk.
 
 
 def pickup_sheet() -> Canvas:
-    """6-cell strip, 24x24 each — one floor pickup per PickupKind in the
-    sim's `as_u8` order: Fire / Heavy / Bouncy / Curve / Multishot / Phantom.
-    Each is a kind-colored glyph resting on a dark stone plinth so it reads
-    as an item on the arena floor. Palette-true per ART_DIRECTION v2:
-    Fire=Ember, Heavy=Cold Stone, Bouncy=Spark, Curve=Recall Blue,
-    Multishot=Hot Bone, Phantom=Bruise Shadow."""
+    """7-cell strip, 24x24 each — one floor pickup per PickupKind in the
+    sim's `as_u8` order: Fire / Heavy / Bouncy / Curve / Multishot /
+    Phantom / Swap. Each is a kind-colored glyph resting on a dark stone
+    plinth so it reads as an item on the arena floor. Palette-true per
+    ART_DIRECTION v2: Fire=Ember, Heavy=Cold Stone, Bouncy=Spark,
+    Curve=Recall Blue, Multishot=Hot Bone, Phantom=Bruise Shadow,
+    Swap=P1 Cyan."""
     cell = 24
-    c = Canvas(cell * 6, cell)
+    c = Canvas(cell * 7, cell)
     char = PALETTE["charcoal_line"]
     stone = PALETTE["cold_stone"]
     dark = PALETTE["bruise_shadow"]
@@ -2753,7 +2754,7 @@ def pickup_sheet() -> Canvas:
                     c.set(ox + cx + xx, cy + yy, color)
 
     # Dark stone plinth at the bottom of every cell grounds the item.
-    for i in range(6):
+    for i in range(7):
         ox = i * cell
         c.rect(ox + 5, 21, 14, 1, char)
         c.rect(ox + 6, 20, 12, 1, stone)
@@ -2822,6 +2823,19 @@ def pickup_sheet() -> Canvas:
         c.set(ox + 17, y, stone)
     c.set(ox + 10, 11, hw)
     c.set(ox + 14, 11, hw)
+
+    # 6 — Swap: two opposing cyan arrows trading places around a teal core.
+    ox = 6 * cell
+    cyn2, teal = PALETTE["p1_cyan"], PALETTE["deep_teal"]
+    disc(ox, 12, 11, 2, teal)
+    # Upper arrow: left-to-right.
+    c.line(ox + 6, 7, ox + 16, 7, cyn2)
+    c.line(ox + 16, 7, ox + 13, 4, cyn2)
+    c.line(ox + 16, 7, ox + 13, 10, cyn2)
+    # Lower arrow: right-to-left.
+    c.line(ox + 18, 15, ox + 8, 15, cyn2)
+    c.line(ox + 8, 15, ox + 11, 12, cyn2)
+    c.line(ox + 8, 15, ox + 11, 18, cyn2)
 
     _ramp_shade(c)  # directional hue-shift form, palette-locked
     return c

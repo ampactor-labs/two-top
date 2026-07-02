@@ -191,17 +191,22 @@ pub fn is_lower_left(pos: Vec2, window: Vec2) -> bool {
     pos.x < window.x * 0.5 && pos.y > window.y * 0.5
 }
 
-/// Lower-right quadrant (x >= w/2, y > h/2). The throw/aim zone.
-/// Disjoint from both the movement stick (lower-left) and the dash
-/// button (upper-right).
-pub fn is_right_side(pos: Vec2, window: Vec2) -> bool {
-    window.x > 0.0 && pos.x >= window.x * 0.5 && pos.y > window.y * 0.5
+/// The DASH button: a thumb-sized rectangle in the BOTTOM-RIGHT corner,
+/// where the right thumb rests. Reachable without a chord or a stretch to
+/// an unreachable corner (input-systems: "sized for thumbs"). Movement now
+/// locks during a throw, so the right thumb is free to dash while you move.
+pub fn is_dash_zone(pos: Vec2, window: Vec2) -> bool {
+    window.x > 0.0 && pos.x >= window.x * 0.66 && pos.y >= window.y * 0.80
 }
 
-/// Upper-right quadrant (x >= w/2, y <= h/2). The dash button zone.
-/// Right thumb flicks up from the throw area to tap dash.
-pub fn is_dash_zone(pos: Vec2, window: Vec2) -> bool {
-    window.x > 0.0 && pos.x >= window.x * 0.5 && pos.y <= window.y * 0.5
+/// The throw/aim zone: the lower-right, MINUS the dash button carved out of
+/// its bottom-right corner. Hold to charge, drag to aim. Disjoint from the
+/// movement stick (lower-left) and the dash button.
+pub fn is_right_side(pos: Vec2, window: Vec2) -> bool {
+    window.x > 0.0
+        && pos.x >= window.x * 0.5
+        && pos.y > window.y * 0.5
+        && !is_dash_zone(pos, window)
 }
 
 /// Pick the touch driving the virtual stick. Sticky: if the
@@ -946,32 +951,37 @@ mod tests {
     #[test]
     fn right_side_recognizes_lower_right() {
         let win = Vec2::new(1080.0, 2400.0);
+        // Lower-right, above/left of the bottom-right dash corner.
         assert!(is_right_side(Vec2::new(540.0, 1201.0), win));
-        assert!(is_right_side(Vec2::new(900.0, 1800.0), win));
-        assert!(is_right_side(Vec2::new(1079.0, 2300.0), win));
+        assert!(is_right_side(Vec2::new(900.0, 1800.0), win)); // y < 1920 dash floor
+        assert!(is_right_side(Vec2::new(1079.0, 1500.0), win));
+        assert!(is_right_side(Vec2::new(600.0, 2300.0), win)); // x < 712 dash edge
     }
 
     #[test]
-    fn right_side_rejects_upper_right_and_left() {
+    fn right_side_rejects_upper_half_left_and_dash_corner() {
         let win = Vec2::new(1080.0, 2400.0);
-        assert!(!is_right_side(Vec2::new(900.0, 100.0), win)); // upper-right = dash
+        assert!(!is_right_side(Vec2::new(900.0, 100.0), win)); // upper half
         assert!(!is_right_side(Vec2::new(539.0, 1800.0), win)); // left side
         assert!(!is_right_side(Vec2::new(0.0, 0.0), win));
+        assert!(!is_right_side(Vec2::new(900.0, 2100.0), win)); // bottom-right = dash
     }
 
     #[test]
-    fn dash_zone_recognizes_upper_right() {
+    fn dash_zone_recognizes_bottom_right_corner() {
         let win = Vec2::new(1080.0, 2400.0);
-        assert!(is_dash_zone(Vec2::new(540.0, 100.0), win));
-        assert!(is_dash_zone(Vec2::new(900.0, 1200.0), win)); // y=midpoint
-        assert!(is_dash_zone(Vec2::new(1079.0, 0.0), win));
+        assert!(is_dash_zone(Vec2::new(900.0, 2000.0), win));
+        assert!(is_dash_zone(Vec2::new(1079.0, 2399.0), win));
+        assert!(is_dash_zone(Vec2::new(720.0, 1930.0), win)); // just inside the corner
     }
 
     #[test]
-    fn dash_zone_rejects_left_and_lower_right() {
+    fn dash_zone_rejects_everything_but_the_corner() {
         let win = Vec2::new(1080.0, 2400.0);
         assert!(!is_dash_zone(Vec2::new(100.0, 100.0), win)); // left
+        assert!(!is_dash_zone(Vec2::new(900.0, 100.0), win)); // upper-right
         assert!(!is_dash_zone(Vec2::new(900.0, 1800.0), win)); // lower-right = throw
+        assert!(!is_dash_zone(Vec2::new(600.0, 2300.0), win)); // bottom but x < 712
     }
 
     #[test]
