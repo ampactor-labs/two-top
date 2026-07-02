@@ -436,6 +436,34 @@ playtesting. For store distribution, use a real upload/release key instead.
 For same-wifi: the signaling server runs on your machine (Rung 4 setup).
 For cross-network: deploy `matchbox_server` to a public host (see Rung 5).
 
+## Solo practice, private rooms, replays
+
+Three things every install now carries, no server or second phone needed:
+
+**Practice vs the bot.** Tap the top edge of the Title screen (or press P on
+desktop) to arm practice mode, then start as usual. The match runs the normal
+local session with the bot supplying player 2's inputs — it keeps range,
+plants visibly before it throws, dashes through your fangs, and steers its
+recalls. Tap the top edge on the summary screen (or Esc) to get back to the
+lobby. Practice results don't touch your online career record.
+`TWOTOP_PRACTICE=1` env arms it for desktop automation.
+
+**Private rooms.** On the online Title, the glyph row under the menu dials a
+room code: tap a glyph to cycle it (letters of CUR + STAG, 2401 combinations),
+tap QUICK to go back to public matchmaking. Two phones dialed to the same four
+glyphs only ever meet each other. The code persists across launches. Desktop:
+keys 1-4 cycle the slots, 0 resets to quick.
+
+**Match replays.** Every decided match writes a `.bmrg` input tape:
+`~/Downloads/two-top/replays/` on desktop,
+`Android/data/<pkg>/files/replays/` on the phone (reachable with any Files
+app). The file is a few KB and reproduces the whole match bit-for-bit in
+`replay_viewer` — share it however you like. A sim-version mismatch refuses
+to load rather than desyncing; keep the tagged binary around for old tapes.
+
+Settings (haptics, sfx, music, deadzone) are the four tappable rows on the
+Title — left half of a row lowers, right half raises.
+
 ## Known gaps (so you don't chase non-bugs)
 
 - **No in-app way to enter a room URL.** The lobby overlay is read-only.

@@ -39,3 +39,7 @@ AGENTS.override.md
 credentials.json
 secrets.json
 # <<< claude-protocol <<<
+
+# Ad-hoc device debug dumps / built APKs (never source of truth)
+logcat*.txt
+*.apk
