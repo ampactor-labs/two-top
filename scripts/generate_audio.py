@@ -358,6 +358,31 @@ def cue_ambient_loop(rng: random.Random) -> list[float]:
 # files are order-independent (adding a cue doesn't perturb the others' noise).
 # ---------------------------------------------------------------------------
 
+def cue_heartbeat_loop(_rng: random.Random) -> list[float]:
+    """Match-point ritual bed: a slow human lub-dub, loopable at 1.5 s
+    (40 BPM — dread, not exertion). Each thump is a pitch-dropping sine
+    knock low-passed to a chest-feel; the 'dub' is softer and closer."""
+    total = int(SR * 1.5)
+    sig = [0.0] * total
+
+    def thump(at_s: float, f0: float, f1: float, dur_s: float, amp: float) -> None:
+        n = int(SR * dur_s)
+        start = int(SR * at_s)
+        freqs = sweep(f0, f1, n)
+        phase = 0.0
+        for i in range(n):
+            phase += 2.0 * math.pi * freqs[i] / SR
+            env = math.exp(-i / (SR * dur_s * 0.28))
+            v = math.sin(phase) * env * amp
+            j = start + i
+            if j < total:
+                sig[j] += v
+
+    thump(0.00, 68.0, 46.0, 0.22, 1.0)   # lub
+    thump(0.26, 60.0, 42.0, 0.18, 0.72)  # dub
+    return one_pole_lp(sig, 140.0)
+
+
 CUES = [
     ("throw.wav", cue_throw, SFX_PEAK),
     ("throw_empowered.wav", cue_throw_empowered, SFX_PEAK),
@@ -371,6 +396,7 @@ CUES = [
     ("pickup_spawn.wav", cue_pickup_spawn, SFX_PEAK),
     ("pickup_collect.wav", cue_pickup_collect, SFX_PEAK),
     ("ambient_loop.wav", cue_ambient_loop, AMBIENT_PEAK),
+    ("heartbeat_loop.wav", cue_heartbeat_loop, AMBIENT_PEAK),
 ]
 
 
