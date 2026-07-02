@@ -195,11 +195,10 @@ fn tap_release_spawns_one_boomerang_in_stick_direction() {
     let (boom, pos, vel) = first_boomerang(&mut app).unwrap();
     assert_eq!(boom.owner_handle, 0);
     assert!(matches!(boom.state, BoomerangState::Flying));
-    // Player held stick at zero through tick 1 and only deflected for
-    // tick 2 — by the time throw_boomerangs runs (after movement), the
-    // player has moved one walk-tick in +x.
-    let walk_step = Fix::const_from_int(sim::WALK_SPEED_CM_PER_TICK);
-    assert!((pos.x - walk_step).abs() <= Fix::from_bits(2));
+    // The player is ROOTED while charging (the release tick still carries
+    // charge>0 when player_movement runs), so the fang spawns at the origin
+    // — no strafe-while-winding-up.
+    assert!(pos.x.abs() <= Fix::from_bits(2));
     assert!(pos.y.abs() <= Fix::from_bits(2));
     // Velocity in +x direction at THROW_SPEED.
     let speed = Fix::const_from_int(THROW_SPEED_CM_PER_TICK);
@@ -233,9 +232,12 @@ fn boomerang_advances_by_throw_speed_each_subsequent_tick() {
     app.update();
     let (_b2, pos_after_flight, _) = first_boomerang(&mut app).unwrap();
     let dx = pos_after_flight.x - pos_after_spawn.x;
+    // Grow-slow: a Flying fang bleeds FLY_DECAY per tick, so the first full
+    // flight tick advances THROW_SPEED × FLY_DECAY (24 × 0.99 ≈ 23.76).
+    let expected = Fix::const_from_int(THROW_SPEED_CM_PER_TICK) * sim::FLY_DECAY;
     assert!(
-        (dx - Fix::const_from_int(THROW_SPEED_CM_PER_TICK)).abs() <= Fix::from_bits(2),
-        "boomerang dx {dx} should be ~{THROW_SPEED_CM_PER_TICK} cm/tick",
+        (dx - expected).abs() <= Fix::from_bits(2),
+        "boomerang dx {dx} should be ~{expected} cm/tick (throw speed × fly decay)",
     );
 }
 
