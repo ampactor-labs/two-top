@@ -49,15 +49,112 @@ pub const PLAYER_RENDER_SIZE: f32 = 80.0;
 /// tilt and BFu's stronger one. Applied to every world-space Y at render time
 /// (positions foreshorten; sprite HEIGHTS stay full so actors stand upright).
 /// Render-only — sim stays in true coordinates, so determinism is untouched.
+///
+/// Since the PERSPECTIVE TABLE landed this is the *fallback* linear factor:
+/// it drives every frame rendered before the app publishes a device-adaptive
+/// projection (headless tests, the first window frames) and remains the
+/// floor of the clamp range.
 pub const WORLD_TILT_Y: f32 = 0.75;
 
-/// Foreshorten a world-space Y for rendering (the single tilt hook).
-/// For SIZE foreshortening (tile heights, view extents), pass raw Y.
-/// For POSITION foreshortening, multiply `y` by `PerspectiveFlip.0` first
-/// so P1's client sees the world Y-mirrored (their character at the bottom).
+// =========================================================================
+// The perspective table — a seat-based depth projection.
+//
+// The island's WORLD is identical on every device (determinism + fairness:
+// everyone sees 100% of the arena, always). What adapts is the PROJECTION:
+// the near edge of the table lands at the bottom of *your* screen, the far
+// edge at the top, and rows compress with distance like a real table seen
+// from your seat — Mode-7 lineage, done with sprite rows instead of a
+// shader. `PerspectiveFlip` decides which edge is near, so the two phones
+// are literally opposite seats at the same table.
+//
+// The projection is published once per frame by the app (from the live
+// window aspect) through relaxed atomics rather than a Resource, so the
+// twenty `tilt_y` call sites across four crates keep their signatures and
+// every consumer — positions, prop rects, strips, effects — stays on one
+// map. Cosmetic state only: sim never reads it.
+//
+// Math: with t = depth from the near table edge in [0, T] and F the focal
+// depth, screen position is the 1D homography
+//     S(t) = span · t·(F+T) / (T·(F+t))          (S(0)=0, S(T)=span)
+// and the per-row magnification is its derivative, normalized to 1.0 at
+// mid-table so tuned art sizes hold at center:
+//     scale(t) = ((F + T/2) / (F + t))²
+// =========================================================================
+
+use core::sync::atomic::{AtomicU32, Ordering};
+
+/// Screen span (world units of the fitted view's height) the table maps
+/// onto. 0 = unpublished → linear WORLD_TILT_Y fallback.
+static DEPTH_SPAN_BITS: AtomicU32 = AtomicU32::new(0);
+
+/// Focal depth F in cm: smaller = stronger perspective. Published with the
+/// span; defaults to [`DEPTH_FOCAL_DEFAULT`].
+static DEPTH_FOCAL_BITS: AtomicU32 = AtomicU32::new(0);
+
+/// World half-depth of the projected table (arena half-height plus the
+/// view margin) — the near/far edges of the mapping.
+pub const TABLE_HALF_DEPTH: f32 = 830.0;
+
+/// Default focal depth. ~1.6 table-depths: a clear perspective read without
+/// squashing the far court into unreadability.
+pub const DEPTH_FOCAL_DEFAULT: f32 = 2600.0;
+
+/// Publish this frame's projection. `span` is the vertical world-extent the
+/// table should fill (the fitted view height minus UI reserve); anything
+/// under the linear fallback's span disables the homography (wide/landscape
+/// windows keep the classic tilt + letterbox-into-void look).
+pub fn publish_depth_projection(span: f32, focal: f32) {
+    DEPTH_SPAN_BITS.store(span.max(0.0).to_bits(), Ordering::Relaxed);
+    DEPTH_FOCAL_BITS.store(focal.max(1.0).to_bits(), Ordering::Relaxed);
+}
+
+fn depth_params() -> Option<(f32, f32)> {
+    let span = f32::from_bits(DEPTH_SPAN_BITS.load(Ordering::Relaxed));
+    // The homography only engages once it can show MORE table than the
+    // linear fallback would (span beyond the classic tilted height).
+    if span <= 2.0 * TABLE_HALF_DEPTH * WORLD_TILT_Y {
+        return None;
+    }
+    let focal = f32::from_bits(DEPTH_FOCAL_BITS.load(Ordering::Relaxed));
+    Some((
+        span,
+        if focal > 1.0 {
+            focal
+        } else {
+            DEPTH_FOCAL_DEFAULT
+        },
+    ))
+}
+
+/// Project a (flip-applied) world Y to screen Y — the single depth hook.
+/// Fallback: the classic linear tilt. For POSITION projection, multiply `y`
+/// by `PerspectiveFlip.0` first so each client sits at their own table edge.
 #[inline]
 pub fn tilt_y(y: f32) -> f32 {
-    y * WORLD_TILT_Y
+    match depth_params() {
+        None => y * WORLD_TILT_Y,
+        Some((span, focal)) => {
+            let t = (y + TABLE_HALF_DEPTH).clamp(0.0, 2.0 * TABLE_HALF_DEPTH);
+            let total = 2.0 * TABLE_HALF_DEPTH;
+            span * (t * (focal + total)) / (total * (focal + t)) - span * 0.5
+        }
+    }
+}
+
+/// Per-row magnification at a (flip-applied) world Y: how much bigger or
+/// smaller an actor standing there draws. 1.0 at mid-table (and everywhere
+/// under the linear fallback), >1 near your edge, <1 at the far court.
+#[inline]
+pub fn depth_scale(y: f32) -> f32 {
+    match depth_params() {
+        None => 1.0,
+        Some((_, focal)) => {
+            let t = (y + TABLE_HALF_DEPTH).clamp(0.0, 2.0 * TABLE_HALF_DEPTH);
+            let mid = focal + TABLE_HALF_DEPTH;
+            let d = mid / (focal + t);
+            d * d
+        }
+    }
 }
 
 /// Per-client Y-sign for the depth-duel perspective. `1.0` on P0's device
@@ -175,7 +272,9 @@ pub const GROUND_Z_FRONT: f32 = 0.4;
 /// World-y mapped to the front/back edges of the band — roughly the arena half-
 /// height, so the whole field uses the band. Past it the z clamps (an out-of-
 /// bounds actor just pins to the nearest/farthest layer rather than inverting).
-const GROUND_Z_HALF_SPAN_CM: f32 = 800.0;
+/// Wide enough for the perspective table's full projected span on the
+/// tallest phones (the projection can push near-edge feet past ±1200).
+const GROUND_Z_HALF_SPAN_CM: f32 = 1400.0;
 
 /// Map a ground-contact world-y to a draw z: smaller y (nearer) → larger z.
 /// The single source of the painter's order shared by the y-sort system, the
@@ -288,6 +387,7 @@ impl Plugin for RenderSyncPlugin {
                 apply_ground_ysort.after(sync_transforms_from_sim),
                 sync_ground_shadows.after(sync_transforms_from_sim),
                 sync_charge_auras.after(sync_transforms_from_sim),
+                sync_aim_telegraphs.after(sync_transforms_from_sim),
             ),
         );
     }
@@ -306,6 +406,7 @@ fn boomerang_tint(modifier: Option<sim::PickupKind>) -> Color {
         Some(Curve) => palette::RECALL_BLUE,
         Some(Multishot) => palette::HOT_BONE,
         Some(Phantom) => palette::BRUISE_SHADOW,
+        Some(Swap) => palette::P1_CYAN,
     }
 }
 
@@ -391,11 +492,11 @@ pub fn spawn_charge_aura(
 /// size tightens and brightness overdrives toward full charge; hidden at zero.
 pub fn sync_charge_auras(
     time: Res<Time<Real>>,
-    targets: Query<(&Transform, &sim::ThrowCharge), Without<ChargeAura>>,
+    targets: Query<(&Transform, &sim::ThrowCharge, &sim::CatchStreak), Without<ChargeAura>>,
     mut auras: Query<(&ChargeAura, &mut Transform, &mut Sprite, &mut Visibility)>,
 ) {
     for (aura, mut xf, mut sprite, mut vis) in &mut auras {
-        let Ok((target, charge)) = targets.get(aura.target) else {
+        let Ok((target, charge, streak)) = targets.get(aura.target) else {
             *vis = Visibility::Hidden;
             continue;
         };
@@ -408,8 +509,15 @@ pub fn sync_charge_auras(
         let size = CHARGE_AURA_MAX_SIZE + (CHARGE_AURA_MIN_SIZE - CHARGE_AURA_MAX_SIZE) * power;
         sprite.custom_size = Some(Vec2::splat(size));
         // Overdrive past white toward full charge → the ring blooms harder.
+        // The perfect-catch STREAK escalates the ring's color: ember at
+        // tier 2, overdriven spark at tier 3 — the storm the opponent can
+        // see building in the wind-up.
         let bright = 1.0 + power * 1.1;
-        sprite.color = Color::linear_rgb(bright, bright, bright);
+        sprite.color = match streak.0 {
+            0 | 1 => Color::linear_rgb(bright, bright, bright),
+            2 => scale_color(palette::EMBER, bright + 0.2),
+            _ => scale_color(palette::SPARK, bright + 0.5),
+        };
         let foot_y = target.translation.y - aura.foot_offset;
         xf.translation.x = target.translation.x;
         xf.translation.y = foot_y;
@@ -419,8 +527,106 @@ pub fn sync_charge_auras(
     }
 }
 
+/// The aim telegraph: a thin beam showing where a planted duelist is
+/// aiming. BOTH telegraphs render — your own plant is your aiming UI, the
+/// opponent's plant is the read you dodge on (the Boomerang-Fu fairness:
+/// a committed aim is public information). Driven by the wire inputs
+/// themselves (`InputHistory` ring), so it shows exactly what the sim will
+/// act on — including the steer during a recalled fang's return arc.
+#[derive(Component)]
+pub struct AimTelegraph {
+    pub target: Entity,
+    pub handle: usize,
+}
+
+/// Telegraph beam length (world units) and thickness.
+pub const TELEGRAPH_LEN: f32 = 150.0;
+pub const TELEGRAPH_THICKNESS: f32 = 5.0;
+
+/// Spawn the (hidden) beam for one duelist. Tag the returned entity with
+/// the caller's match-teardown marker.
+pub fn spawn_aim_telegraph(commands: &mut Commands, target: Entity, handle: usize) -> Entity {
+    let color = if handle == 0 {
+        palette::P0_BLOOD
+    } else {
+        palette::P1_CYAN
+    };
+    commands
+        .spawn((
+            AimTelegraph { target, handle },
+            Sprite {
+                color: color.with_alpha(0.0),
+                custom_size: Some(Vec2::new(TELEGRAPH_LEN, TELEGRAPH_THICKNESS)),
+                ..default()
+            },
+            // Above the floor + stains, below the duelists — a ground marking.
+            Transform::from_xyz(0.0, 0.0, -0.35),
+        ))
+        .id()
+}
+
+/// Pure pose math for the beam: given the duelist's render position, the
+/// wire stick, and the perspective flip, returns the beam's center + z
+/// rotation — or `None` when the stick is too slight to aim with.
+pub fn telegraph_pose(origin: Vec2, stick: Vec2, flip: f32) -> Option<(Vec2, f32)> {
+    if stick.length() < 0.1 {
+        return None;
+    }
+    // Wire stick is world y-up; the beam lives in the tilted (and, for the
+    // far client, flipped) render space.
+    let dir = Vec2::new(stick.x, stick.y * WORLD_TILT_Y * flip).normalize_or_zero();
+    let mid = origin + dir * (TELEGRAPH_LEN * 0.5 + 26.0);
+    Some((mid, dir.y.atan2(dir.x)))
+}
+
+/// Follow each duelist's live wire input: visible while AIM is held, aimed
+/// along the wire stick (which carries the aim vector during AIM_ACTIVE),
+/// brightening with the throw charge.
+pub fn sync_aim_telegraphs(
+    history: Res<sim::InputHistory>,
+    flip: Res<PerspectiveFlip>,
+    targets: Query<(&Transform, &sim::Dead, &sim::ThrowCharge), Without<AimTelegraph>>,
+    mut beams: Query<(&AimTelegraph, &mut Transform, &mut Sprite, &mut Visibility)>,
+) {
+    for (beam, mut tx, mut sprite, mut vis) in &mut beams {
+        let Ok((target, dead, charge)) = targets.get(beam.target) else {
+            *vis = Visibility::Hidden;
+            continue;
+        };
+        let input = history
+            .0
+            .get(&beam.handle)
+            .map(|ring| ring[sim::INPUT_HISTORY_LEN - 1])
+            .unwrap_or_default();
+        let aiming = input.buttons & sim::PlayerInput::AIM_ACTIVE != 0;
+        let stick = Vec2::new(
+            input.stick_x as f32 / 127.0,
+            input.stick_y as f32 / 127.0,
+        );
+        let pose = (!dead.is_dying() && aiming)
+            .then(|| telegraph_pose(target.translation.truncate(), stick, flip.0))
+            .flatten();
+        let Some((mid, angle)) = pose else {
+            *vis = Visibility::Hidden;
+            continue;
+        };
+        *vis = Visibility::Visible;
+        tx.translation.x = mid.x;
+        tx.translation.y = mid.y;
+        tx.rotation = Quat::from_rotation_z(angle);
+        // A tap-plant reads faint; a full-charge plant burns.
+        let power = (charge.0 as f32 / sim::CHARGE_MAX_FRAMES as f32).clamp(0.0, 1.0);
+        let base = if beam.handle == 0 {
+            palette::P0_BLOOD
+        } else {
+            palette::P1_CYAN
+        };
+        sprite.color = scale_color(base, 1.0 + power * 0.8).with_alpha(0.3 + 0.45 * power);
+    }
+}
+
 /// `Update` system: give each freshly-spawned floor `Pickup` (sim) entity a
-/// sprite from the 6-cell pickup atlas, indexed by kind. Pickups don't
+/// sprite from the 7-cell pickup atlas, indexed by kind. Pickups don't
 /// move, so the transform is set once here; when sim despawns the pickup
 /// (collected / expired) the sprite goes with the entity. A `Local` caches
 /// the atlas layout so we don't leak a layout asset per spawn.
@@ -439,7 +645,7 @@ pub fn ensure_pickup_visuals(
         .get_or_insert_with(|| {
             atlases.add(TextureAtlasLayout::from_grid(
                 UVec2::splat(24),
-                6,
+                7,
                 1,
                 None,
                 None,
@@ -507,9 +713,13 @@ pub fn spawn_arena_props(
 fn rect_center_size(rect: fixed_math::RectF, flip: f32) -> (Vec2, Vec2) {
     let (min_x, min_y) = rect.min.to_f32();
     let (max_x, max_y) = rect.max.to_f32();
+    // Project BOTH depth edges so the footprint's height adapts to the
+    // perspective table (a constant factor would misplace far-court props).
+    let e0 = tilt_y(min_y * flip);
+    let e1 = tilt_y(max_y * flip);
     (
-        Vec2::new((min_x + max_x) * 0.5, tilt_y((min_y + max_y) * 0.5 * flip)),
-        Vec2::new(max_x - min_x, (max_y - min_y) * WORLD_TILT_Y),
+        Vec2::new((min_x + max_x) * 0.5, (e0 + e1) * 0.5),
+        Vec2::new(max_x - min_x, (e1 - e0).abs()),
     )
 }
 
@@ -692,11 +902,44 @@ pub fn sync_crossing_visuals(
 /// makes `Changed`/`Added` fire unreliably, so an edge-filtered visual can
 /// miss — or wrongly replay — a shatter after a rollback. There are only a
 /// handful of pyres, so the per-frame write is free.
-pub fn sync_pyre_visuals(mut q: Query<(&sim::BonePyre, &mut Sprite)>) {
+/// True while BOTH duelists sit one kill from victory — the match-point
+/// RITUAL. Render + audio read it: the stage darkens, the pyres smolder,
+/// the music drops to a heartbeat. Computed each frame from `MatchScore`
+/// (pure derived state, so it needs no rollback of its own).
+#[derive(Resource, Default)]
+pub struct MatchPointRitual(pub bool);
+
+pub fn update_match_point_ritual(score: Res<sim::MatchScore>, mut ritual: ResMut<MatchPointRitual>) {
+    let brink = sim::MATCH_WIN_THRESHOLD.saturating_sub(1);
+    let on = score.p0 == brink && score.p1 == brink;
+    if ritual.0 != on {
+        ritual.0 = on;
+    }
+}
+
+pub fn sync_pyre_visuals(
+    frame: Res<sim::FrameCount>,
+    time: Res<Time<Real>>,
+    ritual: Res<MatchPointRitual>,
+    mut q: Query<(&sim::BonePyre, &mut Sprite)>,
+) {
     for (pyre, mut sprite) in &mut q {
         if let Some(atlas) = sprite.texture_atlas.as_mut() {
             atlas.index = if pyre.shattered { 2 } else { 0 };
         }
+        // A FIRE-lit pyre burns: ember overdrive with a live flicker so the
+        // lethal window reads at a glance (and blooms under HDR). During the
+        // match-point ritual every intact pyre SMOLDERS — the ceremony's
+        // candles (visual only; a smoldering pyre is not lethal).
+        sprite.color = if pyre.is_burning(frame.0) {
+            let flicker = 1.35 + 0.35 * (time.elapsed_secs() * 9.0).sin();
+            scale_color(palette::EMBER, flicker)
+        } else if ritual.0 && !pyre.shattered {
+            let smolder = 0.95 + 0.2 * (time.elapsed_secs() * 2.4).sin();
+            scale_color(palette::EMBER, smolder)
+        } else {
+            Color::WHITE
+        };
     }
 }
 
@@ -983,6 +1226,45 @@ pub fn spawn_dash_dust(
     }
 }
 
+/// Trauma kicked by a mid-air fang clash — a felt "clang" well under a kill.
+pub const TRAUMA_CLASH: f32 = 0.22;
+
+/// Tracks each fang entity's last-observed `LastClashFrame` so
+/// [`spawn_clash_sparks`] fires exactly once per clash.
+#[derive(Default)]
+pub struct PrevClash(pub bevy::platform::collections::HashMap<Entity, u32>);
+
+/// Render-side: burst sparks + a shake kick where two enemy fangs clashed
+/// mid-air. Reads the rolled-back `LastClashFrame` edge (cosmetic only —
+/// the FX sprite is never rolled back).
+pub fn spawn_clash_sparks(
+    mut commands: Commands,
+    assets: Res<EffectAssets>,
+    mut shake: ResMut<ScreenShake>,
+    fangs: Query<(Entity, &sim::LastClashFrame, &Transform), With<Boomerang>>,
+    mut prev: Local<PrevClash>,
+) {
+    for (entity, clash, xform) in &fangs {
+        let was = prev.0.get(&entity).copied().unwrap_or(0);
+        if clash.0 != 0 && clash.0 != was {
+            spawn_effect(
+                &mut commands,
+                assets.hit_burst.0.clone(),
+                assets.hit_burst.1.clone(),
+                4,
+                0.04,
+                xform.translation.truncate(),
+                48.0,
+                0.55, // above the fangs — the clang reads on top
+            );
+            shake.add_trauma(TRAUMA_CLASH);
+        }
+        prev.0.insert(entity, clash.0);
+    }
+    // Despawned fangs drop out of the cache so it can't grow unbounded.
+    prev.0.retain(|e, _| fangs.contains(*e));
+}
+
 /// Tracks each Player handle's last-observed `Dead.is_dying()` so
 /// [`spawn_hit_and_death_bursts`] can fire effect sprites only on the
 /// rising edge — the tick the player transitions from alive to dying.
@@ -1180,21 +1462,39 @@ pub fn spawn_recall_pulses(
 pub struct TrailGhost {
     pub age: f32,
     pub ttl: f32,
+    /// The stamp's palette ramp: it *cycles down the palette* as it ages
+    /// (state color → charcoal → bruise) in three hard bands — a chunky
+    /// dithered ribbon, never a smooth alpha gradient (the 16-color read).
+    pub ramp: [Color; 3],
+    /// Alternate stamps shrink — the broken, dithered cadence of the ribbon.
+    pub small: bool,
 }
 
-/// Per-boomerang last-stamp position, so stamps are spaced by distance
-/// (framerate-independent) rather than per-frame. Rebuilt from live
-/// boomerangs each frame, so despawned fangs drop out (no unbounded growth).
+/// Per-boomerang last-stamp anchor + stamp counter, so stamps are spaced by
+/// distance (framerate-independent) and alternate the dither cadence.
+/// Rebuilt from live boomerangs each frame, so despawned fangs drop out
+/// (no unbounded growth).
 #[derive(Default)]
-pub struct TrailStampPos(pub bevy::platform::collections::HashMap<Entity, Vec2>);
+pub struct TrailStampPos(pub bevy::platform::collections::HashMap<Entity, (Vec2, u32)>);
 
 /// World-units of travel between ghost-stamps (~half a fang).
 pub const TRAIL_STAMP_SPACING: f32 = 22.0;
 /// Real seconds a ghost-stamp lives — short so the trail never walls off
 /// the arena.
-pub const TRAIL_GHOST_TTL: f32 = 0.13;
+pub const TRAIL_GHOST_TTL: f32 = 0.18;
 /// Starting opacity of a fresh stamp (the wake stays quieter than the fang).
-pub const TRAIL_GHOST_ALPHA: f32 = 0.5;
+pub const TRAIL_GHOST_ALPHA: f32 = 0.55;
+
+/// The three-band palette ramp for a stamp: bright state color at the head,
+/// then the violet darks the whole stage is built from. Stepped, not lerped.
+pub fn trail_ramp(returning: bool, owner_handle: usize, modifier: Option<sim::PickupKind>) -> [Color; 3] {
+    let head = trail_tint(returning, owner_handle, modifier);
+    [
+        head.with_alpha(TRAIL_GHOST_ALPHA),
+        palette::CHARCOAL_LINE.with_alpha(0.35),
+        palette::BRUISE_SHADOW.with_alpha(0.18),
+    ]
+}
 
 /// State→color for a trail stamp. Returning overrides everything (the return
 /// read is the one players most need); else the active modifier's color; else
@@ -1231,15 +1531,16 @@ pub fn spawn_boomerang_trail(
     for (entity, boom, xform, mods) in &boomerangs {
         let pos = xform.translation.truncate();
         let prev = last.0.get(&entity).copied();
-        let stamp = prev.is_none_or(|p| pos.distance(p) >= TRAIL_STAMP_SPACING);
+        let stamp = prev.is_none_or(|(p, _)| pos.distance(p) >= TRAIL_STAMP_SPACING);
         if stamp {
+            let count = prev.map(|(_, c)| c + 1).unwrap_or(0);
             let returning = matches!(boom.state, BoomerangState::Returning { .. });
-            let tint = trail_tint(returning, boom.owner_handle, mods.modifier);
+            let ramp = trail_ramp(returning, boom.owner_handle, mods.modifier);
             commands.spawn((
                 Sprite {
                     image: img.clone(),
-                    color: tint.with_alpha(TRAIL_GHOST_ALPHA),
-                    custom_size: Some(Vec2::splat(32.0)),
+                    color: ramp[0],
+                    custom_size: Some(Vec2::splat(30.0)),
                     ..default()
                 },
                 // Just under the boomerang (z=0.5) so the live fang stays the
@@ -1248,18 +1549,22 @@ pub fn spawn_boomerang_trail(
                 TrailGhost {
                     age: 0.0,
                     ttl: TRAIL_GHOST_TTL,
+                    ramp,
+                    small: count % 2 == 1,
                 },
             ));
-            next.insert(entity, pos);
+            next.insert(entity, (pos, count));
         } else {
             // keep the *old* anchor so distance keeps accumulating to threshold
-            next.insert(entity, prev.unwrap_or(pos));
+            next.insert(entity, prev.unwrap_or((pos, 0)));
         }
     }
     last.0 = next;
 }
 
-/// Render-side: fade + despawn trail ghosts.
+/// Render-side: age trail ghosts through their three hard palette bands
+/// (color + size step down together — chunky ribbon, no smooth gradient),
+/// then despawn.
 pub fn advance_trail_ghosts(
     time: Res<Time<Real>>,
     mut commands: Commands,
@@ -1272,8 +1577,10 @@ pub fn advance_trail_ghosts(
             commands.entity(entity).despawn();
             continue;
         }
-        let k = 1.0 - ghost.age / ghost.ttl;
-        sprite.color = sprite.color.with_alpha(TRAIL_GHOST_ALPHA * k);
+        let band = (((ghost.age / ghost.ttl) * 3.0) as usize).min(2);
+        sprite.color = ghost.ramp[band];
+        let size = [30.0, 22.0, 14.0][band] * if ghost.small { 0.75 } else { 1.0 };
+        sprite.custom_size = Some(Vec2::splat(size));
     }
 }
 
@@ -1486,6 +1793,7 @@ impl Plugin for EffectsPlugin {
             .insert_resource(EmberAccumulator { elapsed: 0.0 })
             .init_resource::<ScreenShake>()
             .init_resource::<LastKillPos>()
+            .init_resource::<MatchPointRitual>()
             .add_systems(Startup, load_effect_assets)
             .add_systems(
                 Update,
@@ -1502,6 +1810,8 @@ impl Plugin for EffectsPlugin {
                     shake_on_perfect_catch,
                     shake_on_pyre_shatter,
                     spawn_dash_dust,
+                    spawn_clash_sparks,
+                    update_match_point_ritual,
                 ),
             );
     }
@@ -1510,6 +1820,55 @@ impl Plugin for EffectsPlugin {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn depth_projection_fallback_is_the_linear_tilt() {
+        publish_depth_projection(0.0, DEPTH_FOCAL_DEFAULT);
+        assert_eq!(tilt_y(400.0), 400.0 * WORLD_TILT_Y);
+        assert_eq!(depth_scale(400.0), 1.0);
+    }
+
+    #[test]
+    fn depth_projection_maps_edges_to_span_and_magnifies_near() {
+        let span = 2400.0;
+        publish_depth_projection(span, DEPTH_FOCAL_DEFAULT);
+        // Table edges land exactly at the span's edges.
+        assert!((tilt_y(-TABLE_HALF_DEPTH) - (-span * 0.5)).abs() < 1e-3);
+        assert!((tilt_y(TABLE_HALF_DEPTH) - (span * 0.5)).abs() < 1e-3);
+        // Monotonic through the middle.
+        assert!(tilt_y(-200.0) < tilt_y(0.0) && tilt_y(0.0) < tilt_y(200.0));
+        // Near rows draw bigger than far rows; mid-table is the tuned 1.0.
+        assert!(depth_scale(-TABLE_HALF_DEPTH) > 1.0);
+        assert!(depth_scale(TABLE_HALF_DEPTH) < 1.0);
+        assert!((depth_scale(0.0) - 1.0).abs() < 1e-4);
+        // Equal world steps take MORE screen near, LESS far.
+        let near_step = tilt_y(-600.0) - tilt_y(-700.0);
+        let far_step = tilt_y(700.0) - tilt_y(600.0);
+        assert!(near_step > far_step, "{near_step} vs {far_step}");
+        publish_depth_projection(0.0, DEPTH_FOCAL_DEFAULT); // restore for other tests
+    }
+
+    #[test]
+    fn telegraph_pose_extends_ahead_along_the_aim() {
+        let origin = Vec2::new(100.0, 50.0);
+        let (mid, angle) = telegraph_pose(origin, Vec2::new(1.0, 0.0), 1.0).unwrap();
+        assert!(mid.x > origin.x + TELEGRAPH_LEN * 0.4, "extends east");
+        assert!((mid.y - origin.y).abs() < 1e-4, "no vertical drift");
+        assert!(angle.abs() < 1e-4, "level beam");
+    }
+
+    #[test]
+    fn telegraph_pose_foreshortens_and_flips_vertical_aim() {
+        let up = telegraph_pose(Vec2::ZERO, Vec2::new(0.0, 1.0), 1.0).unwrap();
+        assert!(up.0.y > 0.0, "aims up-table on the near client");
+        let flipped = telegraph_pose(Vec2::ZERO, Vec2::new(0.0, 1.0), -1.0).unwrap();
+        assert!(flipped.0.y < 0.0, "the far client sees the mirrored plant");
+    }
+
+    #[test]
+    fn telegraph_pose_hides_on_a_slack_stick() {
+        assert!(telegraph_pose(Vec2::ZERO, Vec2::new(0.03, 0.02), 1.0).is_none());
+    }
 
     #[test]
     fn shake_offset_zero_trauma_is_zero() {
