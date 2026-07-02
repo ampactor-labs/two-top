@@ -523,9 +523,10 @@ fn dash_into_opponent_is_a_melee_kill() {
     app.update();
     let p0e = player_entity(&mut app, 0);
     let p1e = player_entity(&mut app, 1);
-    // p0 is mid-dash east, positioned so the dash step lands it on p1 (at 100).
+    // p0 is mid-dash east, positioned so the dash step (DASH_SPEED=46) lands
+    // it overlapping p1 (at 100): 70 + 46 = 116, within the 32 cm hitbox.
     app.world_mut().entity_mut(p0e).insert((
-        PositionF(Vec2F::from_cm(90, 0)),
+        PositionF(Vec2F::from_cm(70, 0)),
         DashState::Dashing {
             frames_remaining: 5,
             dir: Vec2F::from_cm(1, 0),

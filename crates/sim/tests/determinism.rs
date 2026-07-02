@@ -89,9 +89,11 @@ fn determinism_locked_600_frame_synctest() {
     //     (+ stick magnitude clamp, but this 1-axis test doesn't exercise it)
     //   * 0x0007dfbe — 2026-06-30 operator tune, walk speed 13 → 10 cm/tick
     //   * 0x00064c98 — 2026-06-30 charge pass, walk speed 10 → 8 cm/tick
+    //   * 0x000a3c77 — 2026-07-02 feel tune, walk speed 8 → 13 cm/tick
+    //     (back to the Phase-9 value, so the 1-axis walk checksum matches it)
     assert_eq!(
         positions,
-        vec![(0, 0x00064c98, 0x00000000), (1, 0x00064c98, 0x00000000)],
+        vec![(0, 0x000a3c77, 0x00000000), (1, 0x000a3c77, 0x00000000)],
         "matrix target produced non-baseline bits"
     );
 }

@@ -65,7 +65,7 @@ pub const TICK_DT: Fix = Fix::lit("0.01666666666");
 /// stamps this value, see `replay_sync::canonical_replay`) must be
 /// regenerated (`gen_canonical --write`). See
 /// `replay::decode_for_sim_version` for the gate.
-pub const SIM_VERSION: u32 = 5;
+pub const SIM_VERSION: u32 = 7;
 
 // ---- Components ----
 
@@ -97,7 +97,8 @@ pub struct VelocityF(pub Vec2F);
     HeldModifier,
     OobTimer,
     ThrowCapacity,
-    ThrowCharge
+    ThrowCharge,
+    CatchStreak
 )]
 pub struct Player {
     pub handle: usize,
@@ -120,7 +121,7 @@ pub const PERFECT_CATCH_WINDOW_FRAMES: u32 = 10;
 /// Full-charge throw speed of an empowered (perfect-catch) throw. 31 vs the
 /// base 24 (~1.3×): a clearly faster, harder-to-react-to fang. Charge scales
 /// this down for a partial draw just like the base (see [`aimed_throw_speed`]).
-pub const EMPOWERED_THROW_SPEED_CM_PER_TICK: i32 = 31;
+pub const EMPOWERED_THROW_SPEED_CM_PER_TICK: i32 = 44;
 
 /// Throw speed (cm/tick) for a throw, empowered or not. The single place
 /// the perfect-catch speed bonus is applied.
@@ -247,7 +248,7 @@ pub enum BoomerangState {
 }
 
 #[derive(Component, Clone, Copy, PartialEq, Eq, Hash, Debug)]
-#[require(Rollback, BoomerangMods)]
+#[require(Rollback, BoomerangMods, LastClashFrame)]
 pub struct Boomerang {
     pub owner_handle: usize,
     pub state: BoomerangState,
@@ -318,7 +319,7 @@ impl Default for ThrowCapacity {
 /// Frames of THROW-hold to reach full charge (max speed + reach). 45 ≈ 0.75 s:
 /// chargeable under pressure without feeling sluggish. A release before this
 /// throws proportionally weaker (never a dud — even an instant tap lobs).
-pub const CHARGE_MAX_FRAMES: u32 = 45;
+pub const CHARGE_MAX_FRAMES: u32 = 34;
 
 /// Per-tick velocity retention for a loose (tumbling-to-rest) fang. 0.86 bleeds
 /// ~half the speed every ~4-5 ticks, so a bounced fang slows and settles in
@@ -342,7 +343,7 @@ pub const BOOMERANG_MAX_THROW_DISTANCE_CM: i32 = 1000;
 /// runs slower/floatier and the DASH gains value by contrast. A partial charge
 /// scales this down toward `THROW_SPEED × MIN_THROW_POWER_FRAC` (see
 /// [`aimed_throw_speed`]). 24 × 60 = 1440 cm/sec at full draw.
-pub const THROW_SPEED_CM_PER_TICK: i32 = 24;
+pub const THROW_SPEED_CM_PER_TICK: i32 = 34;
 
 /// Floor of the charge→speed ramp: a zero-charge (instant tap) throw launches
 /// at `base × MIN_THROW_POWER_FRAC`, a full charge at `base × 1.0`. 0.35 makes a
@@ -392,7 +393,7 @@ pub const BOOMERANG_HALF_EXTENT_CM: i32 = 10;
 /// boomerang catches up to a player who's moved forward since the
 /// throw — recall reads as "reeling in" rather than "drifting back".
 /// A touch above the full-charge throw speed (26 vs 24) so recall still reels in.
-pub const RECALL_SPEED_CM_PER_TICK: i32 = 26;
+pub const RECALL_SPEED_CM_PER_TICK: i32 = 40;
 
 /// Distance from the world origin at which a boomerang is despawned.
 /// Generously outside the arena (1000 cm half-extent of the visible
@@ -407,6 +408,114 @@ pub fn boomerang_rect(pos: Vec2F) -> RectF {
     let half = Vec2F::from_cm(BOOMERANG_HALF_EXTENT_CM, BOOMERANG_HALF_EXTENT_CM);
     RectF::from_center_half_extents(pos, half)
 }
+
+// ---- Feel batch (SIM_VERSION 6): grow-slow, clash, graze, streak, ----
+// ---- steered recall, swap, pyre burn, sudden-death crumble.        ----
+
+/// Per-tick velocity retention for a FLYING fang (grow-slow). The fang
+/// launches fast and bleeds ~1%/tick, so it visibly floats at the far end of
+/// its arc — airtime the victim can dash through and the owner can steer a
+/// recall around. Returning fangs recompute velocity per tick (no decay);
+/// Loose fangs use the heavier [`LOOSE_DRAG`].
+pub const FLY_DECAY: Fix = Fix::lit("0.99");
+
+/// Lethal-hitbox growth at full reach (grow-slow's "grow"): the fang's kill
+/// rect swells from 1.0× at the thrower's hand to this × at [`ThrowReach`].
+/// Slower far fang, bigger threat — range control instead of range spam.
+pub const GROW_MAX_FACTOR: Fix = Fix::lit("1.6");
+
+/// Lethal half-extent for a fang `dist` from its origin on a throw with
+/// `reach`: linear from 1.0× at dist 0 to [`GROW_MAX_FACTOR`] at full reach.
+/// Pure fixed-point for matrix determinism.
+pub fn grown_half_extent(dist: Fix, reach: Fix) -> Fix {
+    let base = Fix::const_from_int(BOOMERANG_HALF_EXTENT_CM);
+    if reach <= Fix::ZERO {
+        return base;
+    }
+    let t = (dist / reach).clamp(Fix::ZERO, Fix::const_from_int(1));
+    base * (Fix::const_from_int(1) + (GROW_MAX_FACTOR - Fix::const_from_int(1)) * t)
+}
+
+/// The lethal rect for a fang, grown by its flight progress when it carries
+/// a `ThrowOrigin`/`ThrowReach` pair (bare test fangs stay at base size).
+pub fn lethal_boomerang_rect(
+    pos: Vec2F,
+    origin: Option<ThrowOrigin>,
+    reach: Option<ThrowReach>,
+) -> RectF {
+    let half = match (origin, reach) {
+        (Some(o), Some(r)) => grown_half_extent((pos - o.0).length(), r.0),
+        _ => Fix::const_from_int(BOOMERANG_HALF_EXTENT_CM),
+    };
+    RectF::from_center_half_extents(pos, Vec2F::new(half, half))
+}
+
+/// Consecutive PERFECT catches (`catch_boomerangs`). Feeds the escalation
+/// tiers: each perfect catch raises the next throw's speed, and at
+/// [`STREAK_LIGHTNING`] the throw gains full board reach regardless of
+/// charge — the storm the opponent watches build. Reset by a non-perfect
+/// catch, by dying, and by the round reset. Rolled back + checksummed.
+#[derive(Component, Clone, Copy, PartialEq, Eq, Hash, Debug, Default)]
+#[require(Rollback)]
+pub struct CatchStreak(pub u32);
+
+/// Streak tier at which a throw becomes the "lightning" fang: full
+/// [`REACH_MAX_CM`] reach at any charge (plus the top speed bonus).
+pub const STREAK_LIGHTNING: u32 = 3;
+
+/// Launch-speed multiplier from the perfect-catch streak: 1.0 / 1.12 / 1.30
+/// at streak 0-1 / 2 / 3+. On top of the empowered base — chaining perfect
+/// catches keeps raising the stakes.
+pub fn streak_speed_factor(streak: u32) -> Fix {
+    match streak {
+        0 | 1 => Fix::const_from_int(1),
+        2 => Fix::lit("1.12"),
+        _ => Fix::lit("1.30"),
+    }
+}
+
+/// Frame a fang last CLASHED with an enemy fang (0 = never). Render reads
+/// the change to spark the deflection; sim state so it rolls back cleanly.
+/// `#[require]`d on every Boomerang via [`Boomerang`]'s require list.
+#[derive(Component, Clone, Copy, PartialEq, Eq, Hash, Debug, Default)]
+#[require(Rollback)]
+pub struct LastClashFrame(pub u32);
+
+/// Recall-steer acceleration (cm/tick²-ish): while a fang is Returning and
+/// the owner holds AIM, the aim stick adds up to this much lateral velocity
+/// per tick on top of the homing pull — bending the return arc into an
+/// attack. ~0.4× the recall speed: a committed steer visibly curves the
+/// path without ever overpowering the pull home.
+pub const RECALL_STEER_CM_PER_TICK: i32 = 10;
+
+/// Sudden-death crumble: over the final [`SUDDEN_DEATH_FRAMES`] of each
+/// round the island's safe bounds shrink linearly toward the centre, down
+/// to [`SUDDEN_DEATH_MIN_FACTOR`] of the arena at the buzzer — the duel is
+/// physically squeezed together so no round peters out at range.
+pub const SUDDEN_DEATH_FRAMES: u32 = 480; // final 8 s of the 30 s round
+
+/// Fraction of the arena half-extents still safe at frame zero of the round.
+pub const SUDDEN_DEATH_MIN_FACTOR: Fix = Fix::lit("0.4");
+
+/// OOB grace while the floor is crumbling. Much tighter than the open-play
+/// [`OOB_GRACE_FRAMES`]: past the receding edge you have under a second.
+pub const SUDDEN_DEATH_OOB_GRACE_FRAMES: u32 = 45;
+
+/// Safe-bounds factor for the remaining round frames: 1.0 outside the
+/// sudden-death window, shrinking linearly to [`SUDDEN_DEATH_MIN_FACTOR`]
+/// as the clock hits zero. Pure fixed-point for matrix determinism.
+pub fn sudden_death_factor(remaining_frames: u32) -> Fix {
+    if remaining_frames >= SUDDEN_DEATH_FRAMES {
+        return Fix::const_from_int(1);
+    }
+    let t = Fix::const_from_int(remaining_frames as i32)
+        / Fix::const_from_int(SUDDEN_DEATH_FRAMES as i32);
+    SUDDEN_DEATH_MIN_FACTOR + (Fix::const_from_int(1) - SUDDEN_DEATH_MIN_FACTOR) * t
+}
+
+/// How long a fire-lit pyre burns (and kills) once ignited. 5 s: long
+/// enough to zone a corner of the arena, short enough to play around.
+pub const PYRE_BURN_FRAMES: u32 = 300;
 
 /// Forgiveness window for THROW_DOWN edge detection. Same 6-frame
 /// window as Phase 8's standard forgiveness — 100 ms at 60 Hz.
@@ -456,7 +565,7 @@ pub const DASH_COOLDOWN_FRAMES: u32 = 20;
 /// distinctly impulsive without crossing more than a fifth of the
 /// arena per dash (10 ticks × 30 cm = 300 cm of travel; arena width is
 /// 1000 cm).
-pub const DASH_SPEED_CM_PER_TICK: i32 = 30;
+pub const DASH_SPEED_CM_PER_TICK: i32 = 46;
 /// Minimum stick magnitude required to start a dash. Without this, a
 /// barely-deflected stick would commit to a near-random dash direction
 /// after the deadzone-collapse rounding.
@@ -955,7 +1064,7 @@ pub fn read_local_inputs(
 /// Walk speed in cm/tick. Brought down to 8 (2026-06-30 charge pass) so the
 /// DASH (30 cm/tick, unchanged) reads as a big, valuable burst by contrast —
 /// ~3.75× walk. Slower, more deliberate spacing pairs with the charged fang.
-pub const WALK_SPEED_CM_PER_TICK: i32 = 8;
+pub const WALK_SPEED_CM_PER_TICK: i32 = 13;
 
 /// Decode the wire-format stick into a Fix-space vector with
 /// magnitude clamped to ≤ 1. Independent-axis i8 quantization means a
@@ -1037,12 +1146,12 @@ pub fn start_dash(
     match_state: Res<MatchState>,
     inputs: Res<PlayerInputs<GgrsCfg>>,
     history: Res<InputHistory>,
-    mut q: Query<(&Player, &Dead, &mut DashState, &mut StunFrames)>,
+    mut q: Query<(&Player, &Dead, &mut DashState, &mut StunFrames, &ThrowCharge)>,
 ) {
     if !match_state.is_in_round() {
         return;
     }
-    for (player, dead, mut dash, mut stun) in &mut q {
+    for (player, dead, mut dash, mut stun, charge) in &mut q {
         if dead.is_dying() {
             continue;
         }
@@ -1052,7 +1161,8 @@ pub fn start_dash(
             .get(&player.handle)
             .map(previous_input)
             .unwrap_or_default();
-        let edge = just_pressed(curr, prev, PlayerInput::DASH_DOWN);
+        // No dashing out of a wind-up: a charge commits you in place.
+        let edge = charge.0 == 0 && just_pressed(curr, prev, PlayerInput::DASH_DOWN);
         let stick = decode_stick(curr);
         let (new_state, committed) = try_start_dash(*dash, stick, edge);
         *dash = new_state;
@@ -1076,17 +1186,25 @@ pub fn start_dash(
 /// NOT lock movement, so running-and-throwing flows unbroken. Dash
 /// overrides this — a dash committed before AIM_ACTIVE was set
 /// continues through the aim windup.
+#[allow(clippy::type_complexity)]
 pub fn player_movement(
     match_state: Res<MatchState>,
     inputs: Res<PlayerInputs<GgrsCfg>>,
-    mut q: Query<(&Player, &Dead, &mut PositionF, &mut VelocityF, &DashState)>,
+    mut q: Query<(
+        &Player,
+        &Dead,
+        &mut PositionF,
+        &mut VelocityF,
+        &DashState,
+        &ThrowCharge,
+    )>,
 ) {
     if !match_state.is_in_round() {
         return;
     }
     let walk_speed = Fix::const_from_int(WALK_SPEED_CM_PER_TICK);
     let dash_speed = Fix::const_from_int(DASH_SPEED_CM_PER_TICK);
-    for (player, dead, mut pos, mut vel, dash) in &mut q {
+    for (player, dead, mut pos, mut vel, dash, charge) in &mut q {
         if dead.is_dying() {
             continue;
         }
@@ -1094,7 +1212,10 @@ pub fn player_movement(
             DashState::Dashing { dir, .. } => Vec2F::new(dir.x * dash_speed, dir.y * dash_speed),
             _ => {
                 let (input, _status) = inputs[player.handle];
-                if input.buttons & PlayerInput::AIM_ACTIVE != 0 {
+                // Rooted while aiming OR winding up a throw: a charge plants
+                // you, so spacing must be set *before* the wind-up — no
+                // strafe-and-charge.
+                if input.buttons & PlayerInput::AIM_ACTIVE != 0 || charge.0 > 0 {
                     Vec2F::ZERO
                 } else {
                     let stick = decode_stick(input);
@@ -1139,21 +1260,38 @@ pub fn tick_player_timers(mut q: Query<(&mut DashState, &mut StunFrames)>) {
 /// dash mechanic seeds `StunFrames` for `DASH_DURATION_FRAMES` ticks,
 /// so a well-timed dash dodges incoming projectiles. Phase 11 cycle 4
 /// will additionally use `StunFrames` for hit-stop on the killer.
+/// The lethal-fang query for [`hit_boomerang_player`]: origin + reach ride
+/// along (Option — bare test fangs omit them) so the kill rect can grow
+/// with flight progress. Aliased for clippy's type-complexity lint.
+type LethalFangQuery<'w, 's> = Query<
+    'w,
+    's,
+    (
+        Entity,
+        &'static Boomerang,
+        &'static PositionF,
+        Option<&'static ThrowOrigin>,
+        Option<&'static ThrowReach>,
+    ),
+>;
+
 pub fn hit_boomerang_player(
     mut commands: Commands,
     frame: Res<FrameCount>,
     mut score: ResMut<MatchScore>,
-    boomerangs: Query<(Entity, &Boomerang, &PositionF)>,
+    boomerangs: LethalFangQuery,
     mut players: Query<(Entity, &Player, &PositionF, &mut Dead, &StunFrames)>,
 ) {
-    for (boom_entity, boom, boom_pos) in &boomerangs {
+    for (boom_entity, boom, boom_pos, origin, reach) in &boomerangs {
         // A Loose (dropped) fang is a harmless pickup — you walk over it to
         // steal/reclaim it (catch_boomerangs), it does NOT kill. Only Flying
         // and Returning fangs are lethal.
         if matches!(boom.state, BoomerangState::Loose) {
             continue;
         }
-        let bb = boomerang_rect(boom_pos.0);
+        // Grow-slow: the kill rect swells with flight progress (up to
+        // GROW_MAX_FACTOR at full reach) — the far fang is slow but big.
+        let bb = lethal_boomerang_rect(boom_pos.0, origin.copied(), reach.copied());
         // First pass: locate the kill target via an immutable iter.
         // Reading `&Dead` and `&StunFrames` lets us check liveness +
         // i-frames without holding a mut borrow on the query.
@@ -1283,6 +1421,142 @@ pub fn dash_melee_kill(
     }
 }
 
+/// `GgrsSchedule` system: GRAZE — i-frame-dashing *through* an enemy fang
+/// (not merely away from it) empowers the next throw. Flips dash from a
+/// purely defensive verb into a bet: the closest call is the most rewarded.
+/// Idempotent (sets a flag from observable state) so rollback resimulation
+/// converges — same contract as the other state-derived systems.
+pub fn graze_empower(
+    match_state: Res<MatchState>,
+    mut players: Query<(&Player, &PositionF, &DashState, &Dead, &mut Empowered)>,
+    boomerangs: Query<(&Boomerang, &PositionF)>,
+) {
+    if !match_state.is_in_round() {
+        return;
+    }
+    for (player, pos, dash, dead, mut empowered) in &mut players {
+        if dead.is_dying() || !matches!(dash, DashState::Dashing { .. }) {
+            continue;
+        }
+        let pr = player_rect(pos.0);
+        let grazed = boomerangs.iter().any(|(boom, bpos)| {
+            boom.owner_handle != player.handle
+                && !matches!(boom.state, BoomerangState::Loose)
+                && pr.overlaps(boomerang_rect(bpos.0))
+        });
+        if grazed {
+            empowered.0 = true;
+        }
+    }
+}
+
+/// `GgrsSchedule` system: FANG CLASH — two enemy fangs meeting mid-air
+/// deflect off each other (elastic reflection along the line between them,
+/// plus a separating push so they don't re-clash next tick). Throwing at
+/// the opponent's throw becomes a defensive option, and simultaneous
+/// full-charge throws joust instead of trading kills. Only Flying fangs
+/// clash — Returning is the uncanny phasing pull, Loose is ground litter.
+/// `LastClashFrame` records the hit for the render spark; pairs come from
+/// Bevy's deterministic query iteration order.
+pub fn boomerang_clash(
+    frame: Res<FrameCount>,
+    mut q: Query<(
+        &Boomerang,
+        &PreviousPositionF,
+        &mut PositionF,
+        &mut VelocityF,
+        &mut LastClashFrame,
+    )>,
+) {
+    let mut pairs = q.iter_combinations_mut();
+    while let Some(
+        [
+            (a, aprev, mut apos, mut avel, mut aclash),
+            (b, bprev, mut bpos, mut bvel, mut bclash),
+        ],
+    ) = pairs.fetch_next()
+    {
+        if a.owner_handle == b.owner_handle {
+            continue;
+        }
+        if !matches!(a.state, BoomerangState::Flying) || !matches!(b.state, BoomerangState::Flying)
+        {
+            continue;
+        }
+        if !boomerang_rect(apos.0).overlaps(boomerang_rect(bpos.0)) {
+            continue;
+        }
+        // Contact normal from the START-of-tick positions: two fast fangs can
+        // fully cross within one tick, which flips the post-move delta and
+        // would read as "already separating". Where they *came from* is the
+        // truthful approach axis. Falls back to the post-move delta for fangs
+        // that spawned overlapping this tick.
+        let delta = {
+            let prev_delta = bprev.0 - aprev.0;
+            if prev_delta == Vec2F::ZERO {
+                bpos.0 - apos.0
+            } else {
+                prev_delta
+            }
+        };
+        // Coincident centers: keep velocities, just mark the clash (the
+        // separating push has no defined axis; next tick resolves it).
+        let n = if delta == Vec2F::ZERO {
+            Vec2F::ZERO
+        } else {
+            delta.normalize()
+        };
+        if n != Vec2F::ZERO {
+            // Reflect each fang's velocity off the contact normal (only the
+            // approaching component flips, so a glancing pass stays glancing).
+            let adot = avel.0.x * n.x + avel.0.y * n.y;
+            if adot > Fix::ZERO {
+                avel.0 = avel.0 - n * (adot * Fix::const_from_int(2));
+            }
+            let bdot = bvel.0.x * n.x + bvel.0.y * n.y;
+            if bdot < Fix::ZERO {
+                bvel.0 = bvel.0 - n * (bdot * Fix::const_from_int(2));
+            }
+            // Separate along the normal so the pair can't re-clash next tick.
+            let half_push = Fix::const_from_int(BOOMERANG_HALF_EXTENT_CM);
+            apos.0 = apos.0 - n * half_push;
+            bpos.0 = bpos.0 + n * half_push;
+        }
+        aclash.0 = frame.0;
+        bclash.0 = frame.0;
+    }
+}
+
+/// `GgrsSchedule` system: a BURNING pyre kills on touch (see
+/// `boomerang_pyre_collision` for how a Fire fang lights one). Kill credit
+/// goes to the igniter — unless the igniter walks into their own flame, in
+/// which case the opponent collects (fire is nobody's friend).
+pub fn pyre_burn_kills(
+    frame: Res<FrameCount>,
+    mut score: ResMut<MatchScore>,
+    pyres: Query<&BonePyre>,
+    mut players: Query<(&Player, &PositionF, &mut Dead, &StunFrames)>,
+) {
+    for pyre in &pyres {
+        if !pyre.is_burning(frame.0) {
+            continue;
+        }
+        for (player, pos, mut dead, stun) in &mut players {
+            if dead.is_dying() || stun.0 > 0 {
+                continue;
+            }
+            if player_rect(pos.0).overlaps(pyre.rect) {
+                let credit = if player.handle == pyre.lit_by {
+                    1 - player.handle
+                } else {
+                    pyre.lit_by
+                };
+                award_kill(&mut dead, credit, frame.0, &mut score);
+            }
+        }
+    }
+}
+
 /// `GgrsSchedule` system: wipe the round's boomerang litter and reset each
 /// player's arsenal at the top of every round. While `Countdown` is active
 /// (no throws happen — gameplay is gated on `is_in_round`) every fang is
@@ -1293,7 +1567,7 @@ pub fn reset_round_state(
     match_state: Res<MatchState>,
     mut commands: Commands,
     boomerangs: Query<Entity, With<Boomerang>>,
-    mut players: Query<(&mut ThrowCapacity, &mut ThrowCharge)>,
+    mut players: Query<(&mut ThrowCapacity, &mut ThrowCharge, &mut CatchStreak)>,
 ) {
     if !matches!(*match_state, MatchState::Countdown { .. }) {
         return;
@@ -1301,9 +1575,10 @@ pub fn reset_round_state(
     for entity in &boomerangs {
         commands.entity(entity).despawn();
     }
-    for (mut cap, mut charge) in &mut players {
+    for (mut cap, mut charge, mut streak) in &mut players {
         cap.0 = 1;
         charge.0 = 0;
+        streak.0 = 0;
     }
 }
 
@@ -1329,6 +1604,7 @@ pub fn catch_boomerangs(
         &mut AnimState,
         &mut Empowered,
         &mut ThrowCapacity,
+        &mut CatchStreak,
     )>,
     boomerangs: Query<(Entity, &Boomerang, &PositionF)>,
 ) {
@@ -1339,19 +1615,25 @@ pub fn catch_boomerangs(
             // the owner would self-catch on tick 1.
             BoomerangState::Flying => continue,
             // A Returning fang is caught only by its OWNER; a catch inside the
-            // recall window empowers the next throw (perfect catch).
+            // recall window empowers the next throw (perfect catch) and
+            // extends the escalation STREAK — a sloppy catch breaks it.
             BoomerangState::Returning { since } => {
-                let Some((_, owner_pos, mut anim, mut empowered, _)) = players
+                let Some((_, owner_pos, mut anim, mut empowered, _, mut streak)) = players
                     .iter_mut()
-                    .find(|(p, _, _, _, _)| p.handle == boom.owner_handle)
+                    .find(|(p, _, _, _, _, _)| p.handle == boom.owner_handle)
                 else {
                     continue;
                 };
                 if player_rect(owner_pos.0).overlaps(bb) {
                     commands.entity(entity).despawn();
-                    // `frame >= since` always (recall began in the past).
-                    if frame.0 - since <= PERFECT_CATCH_WINDOW_FRAMES {
+                    // `frame >= since` in confirmed play (recall began in the
+                    // past); saturating guards the resim edge where a fang
+                    // introduced mid-stream carries a same-tick `since`.
+                    if frame.0.saturating_sub(since) <= PERFECT_CATCH_WINDOW_FRAMES {
                         empowered.0 = true;
+                        streak.0 = streak.0.saturating_add(1);
+                    } else {
+                        streak.0 = 0;
                     }
                     anim.anim_id = AnimState::CATCH;
                     anim.ticks = 0;
@@ -1364,15 +1646,15 @@ pub fn catch_boomerangs(
             BoomerangState::Loose => {
                 let picker = players
                     .iter()
-                    .find(|(_, pos, _, _, _)| player_rect(pos.0).overlaps(bb))
-                    .map(|(p, _, _, _, _)| p.handle);
+                    .find(|(_, pos, _, _, _, _)| player_rect(pos.0).overlaps(bb))
+                    .map(|(p, _, _, _, _, _)| p.handle);
                 let Some(handle) = picker else {
                     continue;
                 };
                 commands.entity(entity).despawn();
-                if let Some((_, _, mut anim, _, mut cap)) = players
+                if let Some((_, _, mut anim, _, mut cap, _)) = players
                     .iter_mut()
-                    .find(|(p, _, _, _, _)| p.handle == handle)
+                    .find(|(p, _, _, _, _, _)| p.handle == handle)
                 {
                     if handle != boom.owner_handle {
                         cap.0 = cap.0.saturating_add(1); // stolen → a 2nd boomerang
@@ -1404,6 +1686,8 @@ type ThrowerQuery<'w, 's> = Query<
         &'static mut Empowered,
         &'static mut HeldModifier,
         &'static mut ThrowCharge,
+        &'static CatchStreak,
+        &'static DashState,
     ),
 >;
 
@@ -1419,9 +1703,23 @@ pub fn throw_boomerangs(
     if !match_state.is_in_round() {
         return;
     }
-    for (player, dead, pos, capacity, mut anim, mut empowered, mut held, mut charge) in &mut players
+    // Opponent positions (immutable pre-pass) for the tap-throw fallback:
+    // a release with no usable stick direction throws straight at the enemy —
+    // the duel default — instead of silently eating the charge.
+    let positions: std::collections::BTreeMap<usize, Vec2F> = players
+        .iter()
+        .map(|(p, _, pos, ..)| (p.handle, pos.0))
+        .collect();
+    for (player, dead, pos, capacity, mut anim, mut empowered, mut held, mut charge, streak, dash) in
+        &mut players
     {
         if dead.is_dying() {
+            charge.0 = 0;
+            continue;
+        }
+        // Dash and charge are mutually exclusive — a dash can't build a
+        // wind-up (and `start_dash` already forbids dashing out of one).
+        if matches!(dash, DashState::Dashing { .. }) {
             charge.0 = 0;
             continue;
         }
@@ -1440,7 +1738,8 @@ pub fn throw_boomerangs(
         // Throw fires on the THROW RELEASE edge iff a slot is free. Otherwise
         // the hold is either building charge (slot free) or, with every slot
         // out, a recall press consumed by recall_boomerangs.
-        let Some(unit_dir) = try_throw_direction(ring, curr, !can_throw) else {
+        let released = just_released(curr, previous_input(ring), PlayerInput::THROW_DOWN);
+        if !(released && can_throw) {
             let throw_held = curr.buttons & PlayerInput::THROW_DOWN != 0;
             charge.0 = if throw_held && can_throw {
                 (charge.0 + 1).min(CHARGE_MAX_FRAMES)
@@ -1448,17 +1747,41 @@ pub fn throw_boomerangs(
                 0
             };
             continue;
+        }
+        // Direction: the aim/move stick when usable; otherwise straight at
+        // the opponent (a neutral-stick tap must still throw — it's a duel).
+        let stick = decode_stick(curr);
+        let unit_dir = if stick.length() > DASH_MIN_STICK_MAG {
+            stick.normalize()
+        } else {
+            let at_opponent = positions
+                .iter()
+                .find(|(h, _)| **h != player.handle)
+                .map(|(_, opp)| *opp - pos.0)
+                .filter(|d| d.length() > Fix::ZERO);
+            match at_opponent {
+                Some(d) => d.normalize(),
+                // Overlapping / no opponent: fall back to up-table (+Y).
+                None => Vec2F::new(Fix::ZERO, Fix::const_from_int(1)),
+            }
         };
         // Release: the accumulated CHARGE sets the fang's speed AND reach — a
         // quick tap lobs a slow short fang, a full hold hurls a fast far one.
         let power = charge_power(charge.0);
         charge.0 = 0;
         // A held pickup rides this throw; consumed here. Perfect-catch
-        // empowerment is also consumed.
+        // empowerment is also consumed. The perfect-catch STREAK multiplies
+        // the launch speed on top, and at STREAK_LIGHTNING the fang gets
+        // full board reach regardless of charge — the built storm breaks.
         let modifier = held.0.take();
         let base_speed = modified_throw_speed(empowered.0, modifier);
-        let velocity = unit_dir * aimed_throw_speed(base_speed, power);
-        let reach = charged_reach(power);
+        let velocity =
+            unit_dir * (aimed_throw_speed(base_speed, power) * streak_speed_factor(streak.0));
+        let reach = if streak.0 >= STREAK_LIGHTNING {
+            Fix::const_from_int(REACH_MAX_CM)
+        } else {
+            charged_reach(power)
+        };
         empowered.0 = false;
         // The primary (recallable, catchable) fang flies straight.
         commands.spawn((
@@ -1646,7 +1969,7 @@ fn bouncy_accelerate(vel: Vec2F) -> Vec2F {
 /// Bouncy speed ceiling — fast enough to be scary, bounded so it can't run
 /// away past the despawn radius in a single tick. Halved with the rest of the
 /// boomerang speeds (still 1.6× the base throw, as before).
-pub const BOUNCY_MAX_SPEED_CM_PER_TICK: i32 = 40;
+pub const BOUNCY_MAX_SPEED_CM_PER_TICK: i32 = 56;
 
 /// Curve's turn rate while flying: 1.5° per tick (≈90°/sec) in radians.
 pub const CURVE_RAD_PER_TICK: Fix = Fix::lit("0.0261799");
@@ -1817,9 +2140,27 @@ type RecallQuery<'w, 's> = Query<
         &'static BoomerangMods,
         Option<&'static ThrowOrigin>,
         Option<&'static ThrowReach>,
-        &'static PositionF,
+        &'static mut PositionF,
+        &'static mut PreviousPositionF,
         &'static mut VelocityF,
     ),
+    Without<Player>,
+>;
+
+/// The recall-side player query: mutable position so a SWAP fang can
+/// teleport its owner. `Without<Boomerang>` keeps it provably disjoint
+/// from [`RecallQuery`]'s mutable `PositionF` access.
+type RecallOwnerQuery<'w, 's> = Query<
+    'w,
+    's,
+    (
+        &'static Player,
+        &'static mut PositionF,
+        &'static mut PreviousPositionF,
+        &'static ThrowCapacity,
+        &'static Dead,
+    ),
+    Without<Boomerang>,
 >;
 
 pub fn recall_boomerangs(
@@ -1827,7 +2168,7 @@ pub fn recall_boomerangs(
     match_state: Res<MatchState>,
     inputs: Res<PlayerInputs<GgrsCfg>>,
     history: Res<InputHistory>,
-    players: Query<(&Player, &PositionF, &ThrowCapacity)>,
+    mut players: RecallOwnerQuery,
     mut boomerangs: RecallQuery,
 ) {
     if !match_state.is_in_round() {
@@ -1838,52 +2179,81 @@ pub fn recall_boomerangs(
     // when the owner has NO free throw slot (every fang out). With a slot free
     // a THROW press is a new charged throw (throw_boomerangs), not a recall.
     let mut owned: std::collections::BTreeMap<usize, u32> = std::collections::BTreeMap::new();
-    for (boom, mods, _, _, _, _) in boomerangs.iter() {
+    for (boom, mods, _, _, _, _, _) in boomerangs.iter() {
         if !mods.is_secondary {
             *owned.entry(boom.owner_handle).or_default() += 1;
         }
     }
-    for (mut boom, mods, origin, reach, boom_pos, mut vel) in &mut boomerangs {
+    let steer_accel = Fix::const_from_int(RECALL_STEER_CM_PER_TICK);
+    for (mut boom, mods, origin, reach, mut boom_pos, mut boom_prev, mut vel) in &mut boomerangs {
         // Multishot side-fangs never return — they're throw-and-forget.
         if mods.is_secondary {
             continue;
         }
-        let Some((_, owner_pos, capacity)) = players
-            .iter()
-            .find(|(p, _, _)| p.handle == boom.owner_handle)
+        let Some((_, mut owner_pos, mut owner_prev, capacity, owner_dead)) = players
+            .iter_mut()
+            .find(|(p, _, _, _, _)| p.handle == boom.owner_handle)
         else {
             continue;
         };
         let no_free_slot = owned.get(&boom.owner_handle).copied().unwrap_or(0) >= capacity.0;
+        let (curr, _) = inputs[boom.owner_handle];
         // Manual recall: owner pressed THROW_DOWN this tick AND has no slot to
-        // throw into (else the press is a fresh charged throw).
-        let manual = no_free_slot
-            && history.0.get(&boom.owner_handle).is_some_and(|ring| {
-                let (curr, _) = inputs[boom.owner_handle];
-                just_pressed(curr, previous_input(ring), PlayerInput::THROW_DOWN)
-            });
+        // throw into (else the press is a fresh charged throw). A ring that
+        // hasn't been created yet (first-ever tick) reads as default inputs,
+        // so a first-tick press still counts as an edge.
+        let prev = history
+            .0
+            .get(&boom.owner_handle)
+            .map(previous_input)
+            .unwrap_or_default();
+        let manual = no_free_slot && just_pressed(curr, prev, PlayerInput::THROW_DOWN);
+        // Steered recall: while the owner holds AIM, the aim stick (carried on
+        // the wire stick during AIM_ACTIVE) bends the return arc — the homing
+        // pull is recomputed every tick, so a per-tick lateral bias curves the
+        // path without ever losing the way home.
+        let steer = if curr.buttons & PlayerInput::AIM_ACTIVE != 0 {
+            decode_stick(curr) * steer_accel
+        } else {
+            Vec2F::ZERO
+        };
         let max_dist = reach
             .map(|r| r.0)
             .unwrap_or_else(|| Fix::const_from_int(BOOMERANG_MAX_THROW_DISTANCE_CM));
         match boom.state {
             BoomerangState::Flying => {
+                // SWAP: the recall press on a Swap fang in flight trades
+                // places instead — owner teleports to the fang, the fang
+                // drops Loose where the owner stood. A dying owner can't
+                // teleport (their corpse stays where it fell).
+                if manual && !owner_dead.is_dying() && matches!(mods.modifier, Some(PickupKind::Swap))
+                {
+                    let old_owner = owner_pos.0;
+                    let fang_at = boom_pos.0;
+                    snap_position(&mut owner_pos, &mut owner_prev, fang_at);
+                    boom_pos.0 = old_owner;
+                    boom_prev.0 = old_owner;
+                    boom.state = BoomerangState::Loose;
+                    vel.0 = Vec2F::ZERO;
+                    continue;
+                }
                 // Auto recall: the fang reached its charge-scaled reach from the
                 // origin, so it turns back instead of sailing on / out.
                 let reached_max = origin.is_some_and(|o| (boom_pos.0 - o.0).length() >= max_dist);
                 if manual || reached_max {
                     boom.state = BoomerangState::Returning { since: frame.0 };
-                    vel.0 = recall_velocity(boom_pos.0, owner_pos.0, recall_speed);
+                    vel.0 = recall_velocity(boom_pos.0, owner_pos.0, recall_speed) + steer;
                 }
             }
             BoomerangState::Returning { .. } => {
-                vel.0 = recall_velocity(boom_pos.0, owner_pos.0, recall_speed);
+                vel.0 = recall_velocity(boom_pos.0, owner_pos.0, recall_speed) + steer;
             }
             BoomerangState::Loose => {
                 // A dropped fang lies still; a THROW_DOWN edge hold-recalls it
                 // back to the owner (you're disarmed until you retrieve it).
                 if manual {
                     boom.state = BoomerangState::Returning { since: frame.0 };
-                    vel.0 = recall_velocity(boom_pos.0, owner_pos.0, recall_speed);
+                    vel.0 = recall_velocity(boom_pos.0, owner_pos.0, recall_speed) + steer;
                 }
             }
         }
@@ -1915,6 +2285,13 @@ pub fn boomerang_physics(
             if vel.0.length() <= rest_speed {
                 vel.0 = Vec2F::ZERO;
             }
+        }
+        // Grow-slow: a FLYING fang bleeds speed every tick so it launches
+        // hot and floats at the far end of its arc (its lethal rect grows
+        // over the same span — see `lethal_boomerang_rect`). Returning
+        // recomputes velocity per tick; Loose has its own heavier drag.
+        if matches!(boom.state, BoomerangState::Flying) {
+            vel.0 = vel.0 * FLY_DECAY;
         }
         let new_x = pos.0.x.saturating_add(vel.0.x);
         let new_y = pos.0.y.saturating_add(vel.0.y);
@@ -2063,8 +2440,24 @@ pub fn oob_death(
     if !match_state.is_in_round() {
         return;
     }
-    let half_w = Fix::const_from_int(ARENA_HALF_WIDTH_CM);
-    let half_h = Fix::const_from_int(ARENA_HALF_HEIGHT_CM);
+    // SUDDEN-DEATH CRUMBLE: over the round's final seconds the safe island
+    // shrinks toward the centre (deterministic — pure frame arithmetic) and
+    // the OOB grace tightens, physically squeezing the duel together so no
+    // round peters out at range. Render mirrors the factor on the floor art.
+    let remaining = match *match_state {
+        MatchState::InRound { expires_at_frame } => {
+            expires_at_frame.saturating_sub(frame.0)
+        }
+        _ => u32::MAX,
+    };
+    let factor = sudden_death_factor(remaining);
+    let grace = if remaining < SUDDEN_DEATH_FRAMES {
+        SUDDEN_DEATH_OOB_GRACE_FRAMES
+    } else {
+        OOB_GRACE_FRAMES
+    };
+    let half_w = Fix::const_from_int(ARENA_HALF_WIDTH_CM) * factor;
+    let half_h = Fix::const_from_int(ARENA_HALF_HEIGHT_CM) * factor;
     for (player, mut pos, mut prev, mut dead, mut oob) in &mut q {
         if dead.is_dying() {
             oob.0 = 0;
@@ -2073,7 +2466,7 @@ pub fn oob_death(
         let out_of_bounds = pos.0.x.abs() > half_w || pos.0.y.abs() > half_h;
         if out_of_bounds {
             oob.0 += 1;
-            if oob.0 >= OOB_GRACE_FRAMES {
+            if oob.0 >= grace {
                 // Credit the opponent (2-player) so running out isn't free.
                 award_kill(&mut dead, 1 - player.handle, frame.0, &mut score);
                 // The void spits the corpse back to the spawn point immediately,
@@ -2142,12 +2535,23 @@ type PlayerStateQuery<'w, 's> = Query<
         &'static mut StunFrames,
         &'static mut ThrowCapacity,
         &'static mut ThrowCharge,
+        &'static mut CatchStreak,
     ),
 >;
 
 pub fn tick_respawn(frame: Res<FrameCount>, mut q: PlayerStateQuery) {
-    for (player, mut dead, mut pos, mut prev, mut vel, mut dash, mut stun, mut cap, mut charge) in
-        &mut q
+    for (
+        player,
+        mut dead,
+        mut pos,
+        mut prev,
+        mut vel,
+        mut dash,
+        mut stun,
+        mut cap,
+        mut charge,
+        mut streak,
+    ) in &mut q
     {
         let Some(at) = dead.respawn_at_frame else {
             continue;
@@ -2159,9 +2563,11 @@ pub fn tick_respawn(frame: Res<FrameCount>, mut q: PlayerStateQuery) {
         vel.0 = Vec2F::ZERO;
         *dash = DashState::default();
         *stun = StunFrames(0);
-        // Death forfeits any stolen "second boomerang" and pending charge.
+        // Death forfeits any stolen "second boomerang", pending charge, and
+        // the perfect-catch streak.
         cap.0 = 1;
         charge.0 = 0;
+        streak.0 = 0;
         dead.respawn_at_frame = None;
     }
 }
@@ -2343,6 +2749,8 @@ pub fn apply_rematch(
     for mut pyre in &mut pyres {
         pyre.shattered = false;
         pyre.chain_delay = None;
+        pyre.lit_until_frame = None;
+        pyre.lit_by = 0;
     }
     *bridge = BridgeState::default();
     *door = DoorCooldown::default();
@@ -2513,6 +2921,8 @@ impl Plugin for SimPlugin {
             .rollback_component_with_copy::<ThrowReach>()
             .rollback_component_with_copy::<ThrowCharge>()
             .rollback_component_with_copy::<ThrowCapacity>()
+            .rollback_component_with_copy::<CatchStreak>()
+            .rollback_component_with_copy::<LastClashFrame>()
             .rollback_component_with_copy::<AnimState>()
             .rollback_component_with_copy::<Empowered>()
             .rollback_component_with_copy::<HeldModifier>()
@@ -2545,6 +2955,8 @@ impl Plugin for SimPlugin {
             .checksum_component_with_hash::<ThrowReach>()
             .checksum_component_with_hash::<ThrowCharge>()
             .checksum_component_with_hash::<ThrowCapacity>()
+            .checksum_component_with_hash::<CatchStreak>()
+            .checksum_component_with_hash::<LastClashFrame>()
             .checksum_component_with_hash::<AnimState>()
             .checksum_component_with_hash::<Empowered>()
             .checksum_component_with_hash::<HeldModifier>()
@@ -2586,11 +2998,13 @@ impl Plugin for SimPlugin {
                 wall_collision,
                 oob_death,
                 dash_melee_kill,
+                graze_empower,
                 (
                     recall_boomerangs,
                     curve_boomerangs,
                     boomerang_physics,
                     boomerang_wall_collision,
+                    boomerang_clash,
                     expire_secondary_boomerangs,
                     drop_fire_trail,
                     boomerang_pyre_collision,
@@ -2598,6 +3012,7 @@ impl Plugin for SimPlugin {
                     boomerang_sigil_collision.run_if(arena_is(ArenaId::Crossing)),
                     hit_boomerang_player,
                     fire_trail_kills,
+                    pyre_burn_kills,
                     chasm_kills.run_if(arena_is(ArenaId::Crossing)),
                     sigil_door_teleport.run_if(arena_is(ArenaId::Reliquary)),
                     catch_boomerangs,
@@ -2794,6 +3209,12 @@ pub struct BonePyre {
     /// Pending chain-ignition frame: `Some(f)` once a group-mate has
     /// shattered; this pyre auto-shatters when `frame >= f`.
     pub chain_delay: Option<u32>,
+    /// A FIRE fang set this pyre alight: it burns (and kills on touch,
+    /// `pyre_burn_kills`) until this frame. `None` = not burning.
+    pub lit_until_frame: Option<u32>,
+    /// Handle of the player whose fire lit it (kill credit). Meaningless
+    /// while `lit_until_frame` is `None`.
+    pub lit_by: usize,
 }
 
 impl BonePyre {
@@ -2804,7 +3225,14 @@ impl BonePyre {
             shattered: false,
             chain_group: 0,
             chain_delay: None,
+            lit_until_frame: None,
+            lit_by: 0,
         }
+    }
+
+    /// True iff the pyre is burning (lethal) at `frame`.
+    pub fn is_burning(&self, frame: u32) -> bool {
+        self.lit_until_frame.is_some_and(|until| frame < until)
     }
 }
 
@@ -2851,6 +3279,7 @@ pub fn arena_pyres_for(arena: ArenaId) -> Vec<BonePyre> {
 /// `Returning` boomerangs phase through pyres just as they phase through
 /// walls — the recall pull is uncanny by design.
 pub fn boomerang_pyre_collision(
+    frame: Res<FrameCount>,
     mut pyres: Query<&mut BonePyre>,
     mut boomerangs: Query<(&Boomerang, &BoomerangMods, &mut PositionF, &mut VelocityF)>,
 ) {
@@ -2875,6 +3304,13 @@ pub fn boomerang_pyre_collision(
                     vel.0 = reflect_velocity_for_push(vel.0, push);
                 }
                 pyre.shattered = true;
+                // A FIRE fang doesn't just shatter the bones — it LIGHTS
+                // them. The pyre burns lethal for PYRE_BURN_FRAMES
+                // (`pyre_burn_kills`), credited to the igniter.
+                if matches!(mods.modifier, Some(PickupKind::Fire)) {
+                    pyre.lit_until_frame = Some(frame.0 + PYRE_BURN_FRAMES);
+                    pyre.lit_by = boom.owner_handle;
+                }
             }
         }
     }
@@ -3130,16 +3566,20 @@ pub enum PickupKind {
     Multishot,
     /// Phases through walls + cover (through-wall snipe).
     Phantom,
+    /// While the fang is in flight, the recall press TRADES PLACES with it:
+    /// you teleport to the fang, the fang drops Loose where you stood.
+    Swap,
 }
 
 impl PickupKind {
-    pub const ALL: [PickupKind; 6] = [
+    pub const ALL: [PickupKind; 7] = [
         PickupKind::Fire,
         PickupKind::Heavy,
         PickupKind::Bouncy,
         PickupKind::Curve,
         PickupKind::Multishot,
         PickupKind::Phantom,
+        PickupKind::Swap,
     ];
 
     pub fn as_u8(self) -> u8 {
@@ -3150,6 +3590,7 @@ impl PickupKind {
             PickupKind::Curve => 3,
             PickupKind::Multishot => 4,
             PickupKind::Phantom => 5,
+            PickupKind::Swap => 6,
         }
     }
 }

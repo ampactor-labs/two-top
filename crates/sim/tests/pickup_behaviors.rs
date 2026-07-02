@@ -77,16 +77,16 @@ fn fire_throws_faster_heavy_slower() {
     );
     assert_eq!(
         modified_throw_speed(false, Some(PickupKind::Fire)),
-        Fix::const_from_int(32) // base 24 + 8
+        Fix::const_from_int(42) // base 34 + 8
     );
     assert_eq!(
         modified_throw_speed(false, Some(PickupKind::Heavy)),
-        Fix::const_from_int(19) // base 24 × 4/5
+        Fix::const_from_int(27) // base 34 × 4/5
     );
     // Modifiers compose with the perfect-catch empowerment.
     assert_eq!(
         modified_throw_speed(true, Some(PickupKind::Fire)),
-        Fix::const_from_int(39) // empowered 31 + 8
+        Fix::const_from_int(52) // empowered 44 + 8
     );
 }
 
