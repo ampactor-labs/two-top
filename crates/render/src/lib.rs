@@ -144,6 +144,11 @@ pub fn tilt_y(y: f32) -> f32 {
 /// Per-row magnification at a (flip-applied) world Y: how much bigger or
 /// smaller an actor standing there draws. 1.0 at mid-table (and everywhere
 /// under the linear fallback), >1 near your edge, <1 at the far court.
+/// Linear in 1/(focal + depth) — the true perspective scale of a STANDING
+/// body (a billboard). The floor's row spacing compresses by the square of
+/// this (see `tilt_y`'s derivative); an earlier build squared the body
+/// scale too, which read ~2.7x near-vs-far and flattened the far duelist
+/// into a speck next to full-size cover.
 #[inline]
 pub fn depth_scale(y: f32) -> f32 {
     match depth_params() {
@@ -151,8 +156,7 @@ pub fn depth_scale(y: f32) -> f32 {
         Some((_, focal)) => {
             let t = (y + TABLE_HALF_DEPTH).clamp(0.0, 2.0 * TABLE_HALF_DEPTH);
             let mid = focal + TABLE_HALF_DEPTH;
-            let d = mid / (focal + t);
-            d * d
+            mid / (focal + t)
         }
     }
 }
@@ -311,19 +315,25 @@ pub fn apply_ground_ysort(mut q: Query<(&YSorted, &mut Transform)>) {
 pub struct GroundShadow {
     pub target: Entity,
     pub foot_offset: f32,
+    /// Unscaled shadow diameter (world units) — the depth pass multiplies
+    /// this per frame so the shadow shrinks with its receding owner.
+    pub width: f32,
 }
 
 /// Render-side: park each [`GroundShadow`] under its target's foot point and
-/// just below it in z so the actor always reads on top. Orphaned shadows
+/// just below it in z so the actor always reads on top, sized by the owner's
+/// table depth (the actor sprites already depth-scale; a full-size shadow
+/// under a receded far-court body reads as a puddle). Orphaned shadows
 /// (target despawned) remove themselves. Disjoint from its target query via
 /// `Without<GroundShadow>`.
 pub fn sync_ground_shadows(
     mut commands: Commands,
-    targets: Query<&Transform, Without<GroundShadow>>,
-    mut shadows: Query<(Entity, &GroundShadow, &mut Transform)>,
+    flip: Res<PerspectiveFlip>,
+    targets: Query<(&Transform, Option<&sim::PositionF>), Without<GroundShadow>>,
+    mut shadows: Query<(Entity, &GroundShadow, &mut Transform, &mut Sprite)>,
 ) {
-    for (entity, shadow, mut xform) in &mut shadows {
-        let Ok(target) = targets.get(shadow.target) else {
+    for (entity, shadow, mut xform, mut sprite) in &mut shadows {
+        let Ok((target, sim_pos)) = targets.get(shadow.target) else {
             commands.entity(entity).despawn();
             continue;
         };
@@ -331,6 +341,12 @@ pub fn sync_ground_shadows(
         xform.translation.x = target.translation.x;
         xform.translation.y = foot_y;
         xform.translation.z = ground_z(foot_y) - 0.01;
+        // Cosmetic-only targets (no sim position) keep their spawn size.
+        if let Some(pos) = sim_pos {
+            let (_, y) = pos.0.to_f32();
+            let s = depth_scale(y * flip.0);
+            sprite.custom_size = Some(Vec2::new(shadow.width * s, shadow.width * 0.5 * s));
+        }
     }
 }
 
@@ -365,6 +381,7 @@ pub fn spawn_ground_shadow(
             GroundShadow {
                 target,
                 foot_offset,
+                width,
             },
         ))
         .id()
@@ -490,34 +507,68 @@ pub fn spawn_charge_aura(
 
 /// `Update` system: drive each [`ChargeAura`] from its target's `ThrowCharge` —
 /// size tightens and brightness overdrives toward full charge; hidden at zero.
+/// A TAUNT wears the same ring inverted: it *swells* over the flex and burns
+/// bone-white → spark, so the gamble is as public as a wind-up. The ring
+/// depth-scales with its owner so a far-court plant doesn't out-shine the
+/// receded body it sits under.
+#[allow(clippy::type_complexity)]
 pub fn sync_charge_auras(
     time: Res<Time<Real>>,
-    targets: Query<(&Transform, &sim::ThrowCharge, &sim::CatchStreak), Without<ChargeAura>>,
+    flip: Res<PerspectiveFlip>,
+    targets: Query<
+        (
+            &Transform,
+            &sim::PositionF,
+            &sim::ThrowCharge,
+            &sim::CatchStreak,
+            &sim::Taunt,
+        ),
+        Without<ChargeAura>,
+    >,
     mut auras: Query<(&ChargeAura, &mut Transform, &mut Sprite, &mut Visibility)>,
 ) {
     for (aura, mut xf, mut sprite, mut vis) in &mut auras {
-        let Ok((target, charge, streak)) = targets.get(aura.target) else {
+        let Ok((target, pos, charge, streak, taunt)) = targets.get(aura.target) else {
             *vis = Visibility::Hidden;
             continue;
         };
-        if charge.0 == 0 {
+        if charge.0 == 0 && taunt.0 == 0 {
             *vis = Visibility::Hidden;
             continue;
         }
         *vis = Visibility::Visible;
-        let power = (charge.0 as f32 / sim::CHARGE_MAX_FRAMES as f32).clamp(0.0, 1.0);
-        let size = CHARGE_AURA_MAX_SIZE + (CHARGE_AURA_MIN_SIZE - CHARGE_AURA_MAX_SIZE) * power;
-        sprite.custom_size = Some(Vec2::splat(size));
-        // Overdrive past white toward full charge → the ring blooms harder.
-        // The perfect-catch STREAK escalates the ring's color: ember at
-        // tier 2, overdriven spark at tier 3 — the storm the opponent can
-        // see building in the wind-up.
-        let bright = 1.0 + power * 1.1;
-        sprite.color = match streak.0 {
-            0 | 1 => Color::linear_rgb(bright, bright, bright),
-            2 => scale_color(palette::EMBER, bright + 0.2),
-            _ => scale_color(palette::SPARK, bright + 0.5),
+        let (size, color) = if charge.0 > 0 {
+            let power = (charge.0 as f32 / sim::CHARGE_MAX_FRAMES as f32).clamp(0.0, 1.0);
+            let size =
+                CHARGE_AURA_MAX_SIZE + (CHARGE_AURA_MIN_SIZE - CHARGE_AURA_MAX_SIZE) * power;
+            // Overdrive past white toward full charge → the ring blooms harder.
+            // The perfect-catch STREAK escalates the ring's color: ember at
+            // tier 2, overdriven spark at tier 3 — the storm the opponent can
+            // see building in the wind-up.
+            let bright = 1.0 + power * 1.1;
+            let color = match streak.0 {
+                0 | 1 => Color::linear_rgb(bright, bright, bright),
+                2 => scale_color(palette::EMBER, bright + 0.2),
+                _ => scale_color(palette::SPARK, bright + 0.5),
+            };
+            (size, color)
+        } else {
+            // The flex: the ring swells outward over the taunt and heats
+            // from bone to spark as the payout approaches.
+            let flex = 1.0 - (taunt.0 as f32 / sim::TAUNT_FRAMES as f32).clamp(0.0, 1.0);
+            let size =
+                CHARGE_AURA_MIN_SIZE + (CHARGE_AURA_MAX_SIZE - CHARGE_AURA_MIN_SIZE) * flex;
+            let color = if flex < 0.6 {
+                scale_color(palette::HOT_BONE, 1.0 + flex)
+            } else {
+                scale_color(palette::SPARK, 1.0 + flex)
+            };
+            (size, color)
         };
+        let (_, wy) = pos.0.to_f32();
+        let s = depth_scale(wy * flip.0);
+        sprite.custom_size = Some(Vec2::splat(size * s));
+        sprite.color = color;
         let foot_y = target.translation.y - aura.foot_offset;
         xf.translation.x = target.translation.x;
         xf.translation.y = foot_y;
@@ -585,11 +636,15 @@ pub fn telegraph_pose(origin: Vec2, stick: Vec2, flip: f32) -> Option<(Vec2, f32
 pub fn sync_aim_telegraphs(
     history: Res<sim::InputHistory>,
     flip: Res<PerspectiveFlip>,
-    targets: Query<(&Transform, &sim::Dead, &sim::ThrowCharge), Without<AimTelegraph>>,
+    targets: Query<
+        (&Transform, &sim::PositionF, &sim::Dead, &sim::ThrowCharge),
+        Without<AimTelegraph>,
+    >,
+    booms: Query<(&sim::Boomerang, &sim::BoomerangMods)>,
     mut beams: Query<(&AimTelegraph, &mut Transform, &mut Sprite, &mut Visibility)>,
 ) {
     for (beam, mut tx, mut sprite, mut vis) in &mut beams {
-        let Ok((target, dead, charge)) = targets.get(beam.target) else {
+        let Ok((target, pos, dead, charge)) = targets.get(beam.target) else {
             *vis = Visibility::Hidden;
             continue;
         };
@@ -598,7 +653,14 @@ pub fn sync_aim_telegraphs(
             .get(&beam.handle)
             .map(|ring| ring[sim::INPUT_HISTORY_LEN - 1])
             .unwrap_or_default();
-        let aiming = input.buttons & sim::PlayerInput::AIM_ACTIVE != 0;
+        // Only a LIVE aim telegraphs: an armed charge (the plant) or a fang
+        // out (the steered recall). An inert hold's AIM bit means nothing —
+        // sim ignores it too (see sim::player_movement's aim lock).
+        let fang_out = booms
+            .iter()
+            .any(|(b, m)| b.owner_handle == beam.handle && !m.is_secondary);
+        let aiming = input.buttons & sim::PlayerInput::AIM_ACTIVE != 0
+            && (charge.0 > 0 || fang_out);
         let stick = Vec2::new(
             input.stick_x as f32 / 127.0,
             input.stick_y as f32 / 127.0,
@@ -611,8 +673,16 @@ pub fn sync_aim_telegraphs(
             continue;
         };
         *vis = Visibility::Visible;
-        tx.translation.x = mid.x;
-        tx.translation.y = mid.y;
+        // The beam is a ground marking under a depth-scaled body — size it
+        // to the plant's table row so near plants loom and far ones recede
+        // with their owner. Pose stays centered on the scaled length.
+        let (_, wy) = pos.0.to_f32();
+        let s = depth_scale(wy * flip.0);
+        sprite.custom_size = Some(Vec2::new(TELEGRAPH_LEN * s, TELEGRAPH_THICKNESS * s));
+        let scaled_mid = target.translation.truncate()
+            + (mid - target.translation.truncate()) * s;
+        tx.translation.x = scaled_mid.x;
+        tx.translation.y = scaled_mid.y;
         tx.rotation = Quat::from_rotation_z(angle);
         // A tap-plant reads faint; a full-charge plant burns.
         let power = (charge.0 as f32 / sim::CHARGE_MAX_FRAMES as f32).clamp(0.0, 1.0);
