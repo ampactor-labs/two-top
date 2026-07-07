@@ -65,7 +65,12 @@ pub const TICK_DT: Fix = Fix::lit("0.01666666666");
 /// stamps this value, see `replay_sync::canonical_replay`) must be
 /// regenerated (`gen_canonical --write`). See
 /// `replay::decode_for_sim_version` for the gate.
-pub const SIM_VERSION: u32 = 7;
+///
+/// `9` = the sweat batch: TAUNT (rooted flex, completion feeds the
+/// perfect-catch streak) consumes the previously-dead `TAUNT_DOWN` wire
+/// bit, and respawns get a [`SpawnGuard`] window that breaks on the
+/// first offensive act. Two new registered/checksummed components.
+pub const SIM_VERSION: u32 = 9;
 
 // ---- Components ----
 
@@ -98,11 +103,47 @@ pub struct VelocityF(pub Vec2F);
     OobTimer,
     ThrowCapacity,
     ThrowCharge,
-    CatchStreak
+    CatchStreak,
+    Taunt,
+    SpawnGuard
 )]
 pub struct Player {
     pub handle: usize,
 }
+
+/// TAUNT frames remaining (0 = not taunting). A taunt is a rooted,
+/// public flex started on a fresh TAUNT press edge: the demon plants
+/// for [`TAUNT_FRAMES`] ticks, fully vulnerable, and if the flex
+/// completes uninterrupted the perfect-catch STREAK climbs one tier
+/// ([`CatchStreak`] — the same speed/reach ladder a perfect catch
+/// feeds). Dashing or arming a throw cancels it with no reward; dying
+/// obviously ends it. Disrespect as strategy: the reward is real, the
+/// window to punish it is public and generous. Value component on
+/// every Player (same no-archetype-churn rationale as [`Dead`]).
+#[derive(Component, Clone, Copy, PartialEq, Eq, Hash, Debug, Default)]
+#[require(Rollback)]
+pub struct Taunt(pub u32);
+
+/// Ticks a completed taunt takes. 42 = 0.7 s at 60 Hz — long enough
+/// that an opponent with a fang in hand punishes it for free, short
+/// enough to sneak one in during the respawn beat you just earned.
+pub const TAUNT_FRAMES: u32 = 42;
+
+/// Post-respawn protection frames remaining (0 = unguarded). Respawn
+/// points are fixed per handle and kills are one-hit, so without this a
+/// killer camps the spawn with a charged fang and the round snowballs.
+/// While > 0 the fang/dash/fire/pyre kill systems skip the player; the
+/// chasm and OOB stay lethal (walking off the world is a choice, not a
+/// camp). The guard BREAKS the moment the revived player acts — holding
+/// THROW or committing a dash — so it can never be an offensive shield.
+#[derive(Component, Clone, Copy, PartialEq, Eq, Hash, Debug, Default)]
+#[require(Rollback)]
+pub struct SpawnGuard(pub u32);
+
+/// Respawn-protection window. 45 = 0.75 s at 60 Hz: enough to walk off
+/// the spawn point through a camped fang, not enough to reposition for
+/// free across the table.
+pub const SPAWN_GUARD_FRAMES: u32 = 45;
 
 /// Phase 17: set true by a *perfect catch* (catching a returning boomerang
 /// within `PERFECT_CATCH_WINDOW_FRAMES` of recall). The player's next throw
@@ -561,6 +602,16 @@ pub fn try_throw_direction(
 
 pub const DASH_DURATION_FRAMES: u32 = 10;
 pub const DASH_COOLDOWN_FRAMES: u32 = 20;
+
+/// Dash input buffer: a DASH press up to this many ticks back still counts
+/// once the dash becomes legal — the tick after a throw releases (a charge
+/// commits you in place, but "throw then dash" is a natural combo), at
+/// cooldown's end, or when the stick finds a direction a beat after the
+/// press. 7 ticks ≈ 117 ms at 60 Hz, inside the 100–150 ms feel-standard
+/// band, and far below `DASH_DURATION_FRAMES + DASH_COOLDOWN_FRAMES` (30),
+/// so one press can never fire two dashes. Also the widest window the
+/// 8-slot input ring can answer (`INPUT_HISTORY_LEN - 1`).
+pub const DASH_BUFFER_TICKS: usize = 7;
 /// Dash impulse speed in cm/tick. ~2.3× walk speed: makes dash feel
 /// distinctly impulsive without crossing more than a fifth of the
 /// arena per dash (10 ticks × 30 cm = 300 cm of travel; arena width is
@@ -1156,13 +1207,20 @@ pub fn start_dash(
             continue;
         }
         let (curr, _status) = inputs[player.handle];
-        let prev = history
-            .0
-            .get(&player.handle)
-            .map(previous_input)
-            .unwrap_or_default();
-        // No dashing out of a wind-up: a charge commits you in place.
-        let edge = charge.0 == 0 && just_pressed(curr, prev, PlayerInput::DASH_DOWN);
+        let ring = history.0.get(&player.handle);
+        let prev = ring.map(previous_input).unwrap_or_default();
+        // A fresh DASH edge, or one still alive in the buffer window: a
+        // press eaten by a wind-up, a cooldown, or a not-yet-deflected
+        // stick fires the instant the dash becomes legal — "I clearly
+        // pressed dash" is honored (input-buffer forgiveness). Refire is
+        // impossible: the buffer window is far shorter than a dash's
+        // duration + cooldown. No dashing out of a wind-up: a charge
+        // commits you in place, so a mid-charge press fires the tick
+        // AFTER the throw releases.
+        let fresh = just_pressed(curr, prev, PlayerInput::DASH_DOWN);
+        let buffered =
+            ring.is_some_and(|r| pressed_within(r, DASH_BUFFER_TICKS, PlayerInput::DASH_DOWN));
+        let edge = charge.0 == 0 && (fresh || buffered);
         let stick = decode_stick(curr);
         let (new_state, committed) = try_start_dash(*dash, stick, edge);
         *dash = new_state;
@@ -1172,20 +1230,55 @@ pub fn start_dash(
     }
 }
 
+/// `GgrsSchedule` system: detect TAUNT_DOWN edges and start the rooted
+/// flex. Gated exactly like a charge plant: alive, in-round, not
+/// dashing, no wind-up armed, not already taunting. Runs right after
+/// `start_dash` so a same-tick DASH+TAUNT press resolves in the dash's
+/// favor (`tick_taunt_and_guard` cancels the taunt the same tick).
+pub fn start_taunt(
+    match_state: Res<MatchState>,
+    inputs: Res<PlayerInputs<GgrsCfg>>,
+    history: Res<InputHistory>,
+    mut q: Query<(&Player, &Dead, &DashState, &ThrowCharge, &mut Taunt)>,
+) {
+    if !match_state.is_in_round() {
+        return;
+    }
+    for (player, dead, dash, charge, mut taunt) in &mut q {
+        if dead.is_dying()
+            || taunt.0 > 0
+            || charge.0 > 0
+            || matches!(dash, DashState::Dashing { .. })
+        {
+            continue;
+        }
+        let (curr, _status) = inputs[player.handle];
+        let prev = history
+            .0
+            .get(&player.handle)
+            .map(previous_input)
+            .unwrap_or_default();
+        if just_pressed(curr, prev, PlayerInput::TAUNT_DOWN) {
+            taunt.0 = TAUNT_FRAMES;
+        }
+    }
+}
+
 /// Move players. Branches on `DashState`: while `Dashing`, velocity is
 /// the locked dash direction × `DASH_SPEED_CM_PER_TICK`; otherwise
 /// velocity comes from the (mag-clamped) stick × `WALK_SPEED_CM_PER_TICK`.
 ///
-/// **Aim lock**: while `AIM_ACTIVE` is set, the stick is repurposed as
-/// aim direction/power (input_touch's throw state machine engages
-/// aim mode after a hold-and-drag threshold). The player is anchored
-/// during aim so committing to a precise throw means committing
-/// position — the risk dimension that makes aimed throws skill
-/// expression rather than free-cost optimal play. A quick tap-throw
-/// (THROW_DOWN held briefly without crossing the aim threshold) does
-/// NOT lock movement, so running-and-throwing flows unbroken. Dash
-/// overrides this — a dash committed before AIM_ACTIVE was set
-/// continues through the aim windup.
+/// **Aim lock**: `AIM_ACTIVE` anchors the player only while the hold is
+/// LIVE — a charge is armed (`ThrowCharge > 0`, the plant) or a primary
+/// fang is out (the steered recall, where the stick bends the return
+/// arc). Committing to a precise throw or a steered recall means
+/// committing position — the risk dimension that makes aimed throws
+/// skill expression rather than free-cost optimal play. An INERT hold
+/// (thumb still down after the catch, nothing armed) neither aims nor
+/// anchors: the stick just walks, until a fresh press arms again. A
+/// quick tap-throw does NOT lock movement, so running-and-throwing
+/// flows unbroken. Dash overrides this — a dash committed before the
+/// aim continues through the windup.
 #[allow(clippy::type_complexity)]
 pub fn player_movement(
     match_state: Res<MatchState>,
@@ -1197,14 +1290,16 @@ pub fn player_movement(
         &mut VelocityF,
         &DashState,
         &ThrowCharge,
+        &Taunt,
     )>,
+    boomerangs: Query<(&Boomerang, &BoomerangMods)>,
 ) {
     if !match_state.is_in_round() {
         return;
     }
     let walk_speed = Fix::const_from_int(WALK_SPEED_CM_PER_TICK);
     let dash_speed = Fix::const_from_int(DASH_SPEED_CM_PER_TICK);
-    for (player, dead, mut pos, mut vel, dash, charge) in &mut q {
+    for (player, dead, mut pos, mut vel, dash, charge, taunt) in &mut q {
         if dead.is_dying() {
             continue;
         }
@@ -1212,10 +1307,15 @@ pub fn player_movement(
             DashState::Dashing { dir, .. } => Vec2F::new(dir.x * dash_speed, dir.y * dash_speed),
             _ => {
                 let (input, _status) = inputs[player.handle];
-                // Rooted while aiming OR winding up a throw: a charge plants
-                // you, so spacing must be set *before* the wind-up — no
-                // strafe-and-charge.
-                if input.buttons & PlayerInput::AIM_ACTIVE != 0 || charge.0 > 0 {
+                // Rooted while winding up OR steering a fang home with AIM
+                // held. An inert hold (no charge armed, no fang out) leaves
+                // the stick to walk — the AIM bit alone means nothing.
+                let aiming = input.buttons & PlayerInput::AIM_ACTIVE != 0;
+                let fang_out = boomerangs
+                    .iter()
+                    .any(|(b, m)| b.owner_handle == player.handle && !m.is_secondary);
+                // A taunt roots exactly like a wind-up — the flex is a plant.
+                if charge.0 > 0 || taunt.0 > 0 || (aiming && fang_out) {
                     Vec2F::ZERO
                 } else {
                     let stick = decode_stick(input);
@@ -1237,6 +1337,61 @@ pub fn tick_player_timers(mut q: Query<(&mut DashState, &mut StunFrames)>) {
         *dash = tick_dash_state(*dash);
         if stun.0 > 0 {
             stun.0 -= 1;
+        }
+    }
+}
+
+/// `GgrsSchedule` system: advance the taunt and the spawn guard, and
+/// resolve their break conditions. Runs after the throw/dash systems so
+/// a charge armed or a dash committed THIS tick cancels/breaks THIS
+/// tick — no one-tick grace where a taunter is already winding up or a
+/// guarded player is already attacking.
+///
+/// * The guard breaks on offensive intent: a live dash, an armed
+///   wind-up, or a fresh THROW press (which is also the recall trigger,
+///   so a guarded player can't reel a lethal fang home for free). An
+///   inert held-over thumb — kept down through the death and respawn —
+///   breaks nothing, matching the v8 press-edge arming rule. Walking
+///   keeps the guard: escaping the spawn camp is the protected act.
+/// * The taunt cancels (no reward) on death, dash, or an armed wind-up;
+///   otherwise it counts down, and completing the full flex feeds the
+///   perfect-catch streak ladder one tier.
+pub fn tick_taunt_and_guard(
+    inputs: Res<PlayerInputs<GgrsCfg>>,
+    history: Res<InputHistory>,
+    mut q: Query<(
+        &Player,
+        &Dead,
+        &DashState,
+        &ThrowCharge,
+        &mut Taunt,
+        &mut SpawnGuard,
+        &mut CatchStreak,
+    )>,
+) {
+    for (player, dead, dash, charge, mut taunt, mut guard, mut streak) in &mut q {
+        let (curr, _status) = inputs[player.handle];
+        let prev = history
+            .0
+            .get(&player.handle)
+            .map(previous_input)
+            .unwrap_or_default();
+        let dashing = matches!(dash, DashState::Dashing { .. });
+        let threw = just_pressed(curr, prev, PlayerInput::THROW_DOWN);
+        if guard.0 > 0 {
+            if dashing || charge.0 > 0 || threw {
+                guard.0 = 0;
+            } else {
+                guard.0 -= 1;
+            }
+        }
+        if dead.is_dying() || dashing || charge.0 > 0 {
+            taunt.0 = 0;
+        } else if taunt.0 > 0 {
+            taunt.0 -= 1;
+            if taunt.0 == 0 {
+                streak.0 += 1;
+            }
         }
     }
 }
@@ -1280,7 +1435,14 @@ pub fn hit_boomerang_player(
     frame: Res<FrameCount>,
     mut score: ResMut<MatchScore>,
     boomerangs: LethalFangQuery,
-    mut players: Query<(Entity, &Player, &PositionF, &mut Dead, &StunFrames)>,
+    mut players: Query<(
+        Entity,
+        &Player,
+        &PositionF,
+        &mut Dead,
+        &StunFrames,
+        &SpawnGuard,
+    )>,
 ) {
     for (boom_entity, boom, boom_pos, origin, reach) in &boomerangs {
         // A Loose (dropped) fang is a harmless pickup — you walk over it to
@@ -1308,14 +1470,14 @@ pub fn hit_boomerang_player(
         // demo gate. Deferred Commands keep mid-system reads
         // unaffected, so coincident kills remain commutative.
         let mut hit: Option<Entity> = None;
-        for (player_entity, player, player_pos, dead, stun) in &players {
+        for (player_entity, player, player_pos, dead, stun, guard) in &players {
             if dead.is_dying() {
                 continue;
             }
             if player.handle == boom.owner_handle {
                 continue;
             }
-            if stun.0 > 0 {
+            if stun.0 > 0 || guard.0 > 0 {
                 continue;
             }
             if !player_rect(player_pos.0).overlaps(bb) {
@@ -1333,20 +1495,32 @@ pub fn hit_boomerang_player(
         // bevy_ggrs's snapshot/restore stays bit-stable across
         // rollback resimulation) and credit the kill to the thrower —
         // both through the shared `award_kill` path.
-        if let Ok((_, _, _, mut dead, _)) = players.get_mut(player_entity) {
+        if let Ok((_, _, _, mut dead, _, _)) = players.get_mut(player_entity) {
             award_kill(&mut dead, boom.owner_handle, frame.0, &mut score);
         }
         commands.entity(boom_entity).despawn();
 
-        // Hit-stop on the killer, deferred via Commands. Snapshot
-        // the existing `StunFrames` so a mid-dash killer keeps any
-        // longer i-frame window. Skipped if the killer is itself
-        // dying.
+        // Hit-stop on the killer, deferred via Commands. Snapshot the existing
+        // `StunFrames` so a mid-dash killer keeps any longer i-frame window.
+        //
+        // The killer earns hit-stop even if it was ITSELF killed on this same
+        // tick (a coincident double-kill). This is order-independent by
+        // construction — and it must be, because it is checksummed. The old
+        // `&& !d.is_dying()` filter made the hit-stop depend on which fang the
+        // (rollback-unstable) boomerang iteration processed first: the
+        // second-processed killer was already flagged dying by the first
+        // fang's `award_kill`, so it was denied the hit-stop, and the
+        // assignment flipped forward-vs-resim → a `StunFrames` desync (fuzz
+        // seed 330). Assigning unconditionally removes the dependence. It is
+        // gameplay-inert for a dying killer: `tick_respawn` clears `StunFrames`
+        // on revive, and dying players are skipped by every kill system
+        // meanwhile, so the moot stun on a corpse changes nothing but the
+        // checksum's determinism.
         let killer_handle = boom.owner_handle;
         let killer_data = players
             .iter()
-            .find(|(_, p, _, d, _)| p.handle == killer_handle && !d.is_dying())
-            .map(|(e, _, _, _, s)| (e, s.0));
+            .find(|(_, p, ..)| p.handle == killer_handle)
+            .map(|(e, _, _, _, s, _)| (e, s.0));
         if let Some((killer_entity, existing_stun)) = killer_data {
             commands
                 .entity(killer_entity)
@@ -1390,6 +1564,7 @@ pub fn dash_melee_kill(
         &DashState,
         &mut Dead,
         &StunFrames,
+        &SpawnGuard,
     )>,
 ) {
     if !match_state.is_in_round() {
@@ -1397,14 +1572,19 @@ pub fn dash_melee_kill(
     }
     // Scan (victim_entity, killer_handle) with the query held immutably.
     let mut kills: Vec<(Entity, usize)> = Vec::new();
-    for (_, dasher, dpos, dash, ddead, _) in &players {
+    for (_, dasher, dpos, dash, ddead, _, _) in &players {
         if ddead.is_dying() || !matches!(dash, DashState::Dashing { .. }) {
             continue;
         }
         let drect = player_rect(dpos.0);
-        for (ventity, victim, vpos, _, vdead, vstun) in &players {
-            if victim.handle == dasher.handle || vdead.is_dying() || vstun.0 > 0 {
-                // Same player, already dying, or invincible (incl. its own dash).
+        for (ventity, victim, vpos, _, vdead, vstun, vguard) in &players {
+            if victim.handle == dasher.handle
+                || vdead.is_dying()
+                || vstun.0 > 0
+                || vguard.0 > 0
+            {
+                // Same player, already dying, or invincible (its own
+                // dash i-frames or the respawn guard).
                 continue;
             }
             if drect.overlaps(player_rect(vpos.0)) {
@@ -1413,7 +1593,7 @@ pub fn dash_melee_kill(
         }
     }
     for (ventity, killer) in kills {
-        if let Ok((_, _, _, _, mut dead, _)) = players.get_mut(ventity)
+        if let Ok((_, _, _, _, mut dead, _, _)) = players.get_mut(ventity)
             && !dead.is_dying()
         {
             award_kill(&mut dead, killer, frame.0, &mut score);
@@ -1450,14 +1630,41 @@ pub fn graze_empower(
     }
 }
 
+/// The outward contact normal for one fang of a clashing pair, from its own
+/// perspective: the unit vector pointing from `self_prev` away from
+/// `other_prev` (falling back to the current positions for fangs that
+/// spawned coincident, then to zero for a truly coincident pair). Computing
+/// each fang's normal independently through this helper — rather than
+/// sharing one signed normal across the pair — is what makes
+/// [`boomerang_clash`] independent of the `iter_combinations_mut` iteration
+/// order; see the note in that system.
+fn clash_outward(self_prev: Vec2F, other_prev: Vec2F, self_pos: Vec2F, other_pos: Vec2F) -> Vec2F {
+    let sep = self_prev - other_prev;
+    let sep = if sep == Vec2F::ZERO {
+        self_pos - other_pos
+    } else {
+        sep
+    };
+    if sep == Vec2F::ZERO {
+        Vec2F::ZERO
+    } else {
+        sep.normalize()
+    }
+}
+
 /// `GgrsSchedule` system: FANG CLASH — two enemy fangs meeting mid-air
 /// deflect off each other (elastic reflection along the line between them,
 /// plus a separating push so they don't re-clash next tick). Throwing at
 /// the opponent's throw becomes a defensive option, and simultaneous
 /// full-charge throws joust instead of trading kills. Only Flying fangs
 /// clash — Returning is the uncanny phasing pull, Loose is ground litter.
-/// `LastClashFrame` records the hit for the render spark; pairs come from
-/// Bevy's deterministic query iteration order.
+/// `LastClashFrame` records the hit for the render spark.
+///
+/// The reflection is computed per fang through [`clash_outward`] so it does
+/// NOT depend on which fang `iter_combinations_mut` yields first — that
+/// order is unstable across rollback (boomerangs despawn/respawn), and
+/// `Fix` multiply's floor-toward-negative-infinity rounding makes a shared
+/// signed normal order-sensitive. See the inline note.
 pub fn boomerang_clash(
     frame: Res<FrameCount>,
     mut q: Query<(
@@ -1486,41 +1693,44 @@ pub fn boomerang_clash(
         if !boomerang_rect(apos.0).overlaps(boomerang_rect(bpos.0)) {
             continue;
         }
-        // Contact normal from the START-of-tick positions: two fast fangs can
-        // fully cross within one tick, which flips the post-move delta and
-        // would read as "already separating". Where they *came from* is the
-        // truthful approach axis. Falls back to the post-move delta for fangs
-        // that spawned overlapping this tick.
-        let delta = {
-            let prev_delta = bprev.0 - aprev.0;
-            if prev_delta == Vec2F::ZERO {
-                bpos.0 - apos.0
-            } else {
-                prev_delta
+        // Per-fang OUTWARD contact normals, each from that fang's own
+        // perspective: the unit vector pointing from its start-of-tick
+        // position away from the other's (falling back to the post-move
+        // positions for fangs that spawned overlapping this tick — two fast
+        // fangs can fully cross within one tick, so where they *came from* is
+        // the truthful approach axis).
+        //
+        // Deriving each fang's normal INDEPENDENTLY — rather than sharing one
+        // signed normal and its negation across the pair — is load-bearing
+        // for rollback determinism. `Fix` multiply floors toward negative
+        // infinity, so `(-a)*b != -(a*b)` at the bit level; a single shared
+        // normal whose sign depends on which fang `iter_combinations_mut`
+        // presents as `a` therefore reflects to bit-different velocities when
+        // the pair order flips. Boomerang entities despawn/respawn during
+        // rollback, which reorders the iteration, so the old shared-normal
+        // form diverged forward-vs-resim (fuzz seeds 192/330/435 desynced on
+        // `VelocityF` at a clash). Computing each fang's normal the same way
+        // regardless of order removes the dependence entirely.
+        let a_out = clash_outward(aprev.0, bprev.0, apos.0, bpos.0);
+        let b_out = clash_outward(bprev.0, aprev.0, bpos.0, apos.0);
+        if a_out != Vec2F::ZERO {
+            // Reflect the component of each fang's velocity heading INTO the
+            // other (moving inward = negative along its own outward normal);
+            // a glancing pass stays glancing.
+            let two = Fix::const_from_int(2);
+            let adot = avel.0.x * a_out.x + avel.0.y * a_out.y;
+            if adot < Fix::ZERO {
+                avel.0 = avel.0 - a_out * (adot * two);
             }
-        };
-        // Coincident centers: keep velocities, just mark the clash (the
-        // separating push has no defined axis; next tick resolves it).
-        let n = if delta == Vec2F::ZERO {
-            Vec2F::ZERO
-        } else {
-            delta.normalize()
-        };
-        if n != Vec2F::ZERO {
-            // Reflect each fang's velocity off the contact normal (only the
-            // approaching component flips, so a glancing pass stays glancing).
-            let adot = avel.0.x * n.x + avel.0.y * n.y;
-            if adot > Fix::ZERO {
-                avel.0 = avel.0 - n * (adot * Fix::const_from_int(2));
-            }
-            let bdot = bvel.0.x * n.x + bvel.0.y * n.y;
+            let bdot = bvel.0.x * b_out.x + bvel.0.y * b_out.y;
             if bdot < Fix::ZERO {
-                bvel.0 = bvel.0 - n * (bdot * Fix::const_from_int(2));
+                bvel.0 = bvel.0 - b_out * (bdot * two);
             }
-            // Separate along the normal so the pair can't re-clash next tick.
+            // Separate each fang along its own outward normal so the pair
+            // can't re-clash next tick.
             let half_push = Fix::const_from_int(BOOMERANG_HALF_EXTENT_CM);
-            apos.0 = apos.0 - n * half_push;
-            bpos.0 = bpos.0 + n * half_push;
+            apos.0 = apos.0 + a_out * half_push;
+            bpos.0 = bpos.0 + b_out * half_push;
         }
         aclash.0 = frame.0;
         bclash.0 = frame.0;
@@ -1535,14 +1745,14 @@ pub fn pyre_burn_kills(
     frame: Res<FrameCount>,
     mut score: ResMut<MatchScore>,
     pyres: Query<&BonePyre>,
-    mut players: Query<(&Player, &PositionF, &mut Dead, &StunFrames)>,
+    mut players: Query<(&Player, &PositionF, &mut Dead, &StunFrames, &SpawnGuard)>,
 ) {
     for pyre in &pyres {
         if !pyre.is_burning(frame.0) {
             continue;
         }
-        for (player, pos, mut dead, stun) in &mut players {
-            if dead.is_dying() || stun.0 > 0 {
+        for (player, pos, mut dead, stun, guard) in &mut players {
+            if dead.is_dying() || stun.0 > 0 || guard.0 > 0 {
                 continue;
             }
             if player_rect(pos.0).overlaps(pyre.rect) {
@@ -1567,7 +1777,13 @@ pub fn reset_round_state(
     match_state: Res<MatchState>,
     mut commands: Commands,
     boomerangs: Query<Entity, With<Boomerang>>,
-    mut players: Query<(&mut ThrowCapacity, &mut ThrowCharge, &mut CatchStreak)>,
+    mut players: Query<(
+        &mut ThrowCapacity,
+        &mut ThrowCharge,
+        &mut CatchStreak,
+        &mut Taunt,
+        &mut SpawnGuard,
+    )>,
 ) {
     if !matches!(*match_state, MatchState::Countdown { .. }) {
         return;
@@ -1575,10 +1791,13 @@ pub fn reset_round_state(
     for entity in &boomerangs {
         commands.entity(entity).despawn();
     }
-    for (mut cap, mut charge, mut streak) in &mut players {
+    for (mut cap, mut charge, mut streak, mut taunt, mut guard) in &mut players {
         cap.0 = 1;
         charge.0 = 0;
         streak.0 = 0;
+        taunt.0 = 0;
+        // Round start is symmetric — no camp to guard against.
+        guard.0 = 0;
     }
 }
 
@@ -1731,17 +1950,30 @@ pub fn throw_boomerangs(
             .filter(|(b, m)| b.owner_handle == player.handle && !m.is_secondary)
             .count();
         let can_throw = owned < capacity.0 as usize;
-        let Some(ring) = history.0.get(&player.handle) else {
-            continue;
-        };
         let (curr, _) = inputs[player.handle];
-        // Throw fires on the THROW RELEASE edge iff a slot is free. Otherwise
-        // the hold is either building charge (slot free) or, with every slot
-        // out, a recall press consumed by recall_boomerangs.
-        let released = just_released(curr, previous_input(ring), PlayerInput::THROW_DOWN);
-        if !(released && can_throw) {
+        // A ring that hasn't been created yet (first-ever tick) reads as
+        // default inputs, so a first-tick press still counts as a fresh
+        // edge — same convention as recall_boomerangs. Skipping the tick
+        // instead would eat the press and never arm the charge.
+        let prev = history
+            .0
+            .get(&player.handle)
+            .map(previous_input)
+            .unwrap_or_default();
+        // Throw fires on the THROW RELEASE edge iff a slot is free AND this
+        // hold ARMED a charge. Otherwise the hold is building charge (armed,
+        // slot free), or it's a recall press consumed by recall_boomerangs,
+        // or it's INERT — a hold that outlived its purpose (kept down through
+        // the catch) stays dead until the thumb lifts and presses fresh, so a
+        // recall-hold never flips into a surprise wind-up or lob.
+        let released = just_released(curr, prev, PlayerInput::THROW_DOWN);
+        if !(released && can_throw && charge.0 > 0) {
             let throw_held = curr.buttons & PlayerInput::THROW_DOWN != 0;
-            charge.0 = if throw_held && can_throw {
+            let pressed = just_pressed(curr, prev, PlayerInput::THROW_DOWN);
+            // Charge ARMS only on a fresh press edge with a free slot, then
+            // sustains while held — a slot freeing up mid-hold (the recalled
+            // fang landing in hand) must not start a wind-up on its own.
+            charge.0 = if throw_held && can_throw && (charge.0 > 0 || pressed) {
                 (charge.0 + 1).min(CHARGE_MAX_FRAMES)
             } else {
                 0
@@ -2078,12 +2310,16 @@ pub fn fire_trail_kills(
     frame: Res<FrameCount>,
     mut score: ResMut<MatchScore>,
     cells: Query<(&FireTrailCell, &PositionF)>,
-    mut players: Query<(&Player, &PositionF, &mut Dead, &StunFrames)>,
+    mut players: Query<(&Player, &PositionF, &mut Dead, &StunFrames, &SpawnGuard)>,
 ) {
     for (cell, cell_pos) in &cells {
         let cr = fire_trail_rect(cell_pos.0);
-        for (player, player_pos, mut dead, stun) in &mut players {
-            if dead.is_dying() || player.handle == cell.owner_handle || stun.0 > 0 {
+        for (player, player_pos, mut dead, stun, guard) in &mut players {
+            if dead.is_dying()
+                || player.handle == cell.owner_handle
+                || stun.0 > 0
+                || guard.0 > 0
+            {
                 continue;
             }
             if player_rect(player_pos.0).overlaps(cr) {
@@ -2536,6 +2772,8 @@ type PlayerStateQuery<'w, 's> = Query<
         &'static mut ThrowCapacity,
         &'static mut ThrowCharge,
         &'static mut CatchStreak,
+        &'static mut Taunt,
+        &'static mut SpawnGuard,
     ),
 >;
 
@@ -2551,6 +2789,8 @@ pub fn tick_respawn(frame: Res<FrameCount>, mut q: PlayerStateQuery) {
         mut cap,
         mut charge,
         mut streak,
+        mut taunt,
+        mut guard,
     ) in &mut q
     {
         let Some(at) = dead.respawn_at_frame else {
@@ -2568,6 +2808,9 @@ pub fn tick_respawn(frame: Res<FrameCount>, mut q: PlayerStateQuery) {
         cap.0 = 1;
         charge.0 = 0;
         streak.0 = 0;
+        taunt.0 = 0;
+        // The revive itself is protected — see [`SpawnGuard`].
+        guard.0 = SPAWN_GUARD_FRAMES;
         dead.respawn_at_frame = None;
     }
 }
@@ -2843,17 +3086,27 @@ pub fn advance_animation(
         &DashState,
         &StunFrames,
         &ThrowCharge,
+        &Taunt,
         &mut AnimState,
     )>,
+    boomerangs: Query<(&Boomerang, &BoomerangMods)>,
 ) {
-    for (player, dead, dash, stun, charge, mut anim) in &mut q {
+    for (player, dead, dash, stun, charge, taunt, mut anim) in &mut q {
         let (curr, _) = inputs[player.handle];
-        // While AIM_ACTIVE the wire stick carries the aim, not movement, and
-        // the player is anchored (player_movement zeroes velocity) — so it
-        // must not read as "moving" or it'd play the run cycle while planted.
+        // While a LIVE aim rides the wire (charge armed, or a fang out being
+        // steered) the stick carries aim, not movement, and the player is
+        // anchored — it must not read as "moving" or it'd play the run cycle
+        // while planted. An inert hold's AIM bit is ignored, matching
+        // player_movement: the player really is walking.
         let aiming = curr.buttons & PlayerInput::AIM_ACTIVE != 0;
-        let is_moving = !aiming && decode_stick(curr).length() > DASH_MIN_STICK_MAG;
-        let charging = charge.0 > 0;
+        let fang_out = boomerangs
+            .iter()
+            .any(|(b, m)| b.owner_handle == player.handle && !m.is_secondary);
+        let live_aim = aiming && (charge.0 > 0 || fang_out);
+        let is_moving = !live_aim && decode_stick(curr).length() > DASH_MIN_STICK_MAG;
+        // A taunt wears the coiled CHARGE pose — same planted read, and the
+        // render layer's aura flare (keyed on `Taunt`) sells the flex.
+        let charging = charge.0 > 0 || taunt.0 > 0;
         *anim = next_anim_state(*dead, *dash, *stun, *anim, is_moving, charging);
     }
 }
@@ -2922,6 +3175,8 @@ impl Plugin for SimPlugin {
             .rollback_component_with_copy::<ThrowCharge>()
             .rollback_component_with_copy::<ThrowCapacity>()
             .rollback_component_with_copy::<CatchStreak>()
+            .rollback_component_with_copy::<Taunt>()
+            .rollback_component_with_copy::<SpawnGuard>()
             .rollback_component_with_copy::<LastClashFrame>()
             .rollback_component_with_copy::<AnimState>()
             .rollback_component_with_copy::<Empowered>()
@@ -2956,6 +3211,8 @@ impl Plugin for SimPlugin {
             .checksum_component_with_hash::<ThrowCharge>()
             .checksum_component_with_hash::<ThrowCapacity>()
             .checksum_component_with_hash::<CatchStreak>()
+            .checksum_component_with_hash::<Taunt>()
+            .checksum_component_with_hash::<SpawnGuard>()
             .checksum_component_with_hash::<LastClashFrame>()
             .checksum_component_with_hash::<AnimState>()
             .checksum_component_with_hash::<Empowered>()
@@ -2993,7 +3250,7 @@ impl Plugin for SimPlugin {
                 apply_rematch,
                 tick_match_state,
                 reset_round_state,
-                start_dash,
+                (start_dash, start_taunt).chain(),
                 player_movement,
                 wall_collision,
                 oob_death,
@@ -3023,7 +3280,7 @@ impl Plugin for SimPlugin {
                 collect_pickups,
                 expire_pickups,
                 expire_fire_trail,
-                tick_player_timers,
+                (tick_player_timers, tick_taunt_and_guard).chain(),
                 advance_animation,
                 advance_frame_count,
                 advance_input_history,
@@ -3772,6 +4029,12 @@ pub struct PlayerSnap {
     pub anim: AnimState,
     pub empowered: Empowered,
     pub held: HeldModifier,
+    pub oob: OobTimer,
+    pub charge: ThrowCharge,
+    pub capacity: ThrowCapacity,
+    pub streak: CatchStreak,
+    pub taunt: Taunt,
+    pub guard: SpawnGuard,
 }
 
 /// All rolled-back component values for a single Boomerang entity.
@@ -3823,20 +4086,33 @@ impl SimSnapshot {
 
         let mut players: Vec<PlayerSnap> = world
             .query::<(
-                &Player,
-                &PositionF,
-                &PreviousPositionF,
-                &VelocityF,
-                &DashState,
-                &StunFrames,
-                &Dead,
-                &AnimState,
-                &Empowered,
-                &HeldModifier,
+                (
+                    &Player,
+                    &PositionF,
+                    &PreviousPositionF,
+                    &VelocityF,
+                    &DashState,
+                    &StunFrames,
+                    &Dead,
+                    &AnimState,
+                    &Empowered,
+                    &HeldModifier,
+                ),
+                (
+                    &OobTimer,
+                    &ThrowCharge,
+                    &ThrowCapacity,
+                    &CatchStreak,
+                    &Taunt,
+                    &SpawnGuard,
+                ),
             )>()
             .iter(world)
             .map(
-                |(p, pos, prev, vel, dash, stun, dead, anim, empowered, held)| PlayerSnap {
+                |(
+                    (p, pos, prev, vel, dash, stun, dead, anim, empowered, held),
+                    (oob, charge, capacity, streak, taunt, guard),
+                )| PlayerSnap {
                     player: *p,
                     pos: *pos,
                     prev_pos: *prev,
@@ -3847,6 +4123,12 @@ impl SimSnapshot {
                     anim: *anim,
                     empowered: *empowered,
                     held: *held,
+                    oob: *oob,
+                    charge: *charge,
+                    capacity: *capacity,
+                    streak: *streak,
+                    taunt: *taunt,
+                    guard: *guard,
                 },
             )
             .collect();
@@ -4012,21 +4294,49 @@ impl SimSnapshot {
                 if let Some(mut c) = entity_mut.get_mut::<HeldModifier>() {
                     *c = snap.held;
                 }
+                if let Some(mut c) = entity_mut.get_mut::<OobTimer>() {
+                    *c = snap.oob;
+                }
+                if let Some(mut c) = entity_mut.get_mut::<ThrowCharge>() {
+                    *c = snap.charge;
+                }
+                if let Some(mut c) = entity_mut.get_mut::<ThrowCapacity>() {
+                    *c = snap.capacity;
+                }
+                if let Some(mut c) = entity_mut.get_mut::<CatchStreak>() {
+                    *c = snap.streak;
+                }
+                if let Some(mut c) = entity_mut.get_mut::<Taunt>() {
+                    *c = snap.taunt;
+                }
+                if let Some(mut c) = entity_mut.get_mut::<SpawnGuard>() {
+                    *c = snap.guard;
+                }
             } else {
                 // Snapshot has a player handle the live world doesn't.
                 // Spawn it. Should not happen during normal scrub; the
                 // app's startup already placed both Players.
                 world.spawn((
-                    snap.player,
-                    snap.pos,
-                    snap.prev_pos,
-                    snap.vel,
-                    snap.dash,
-                    snap.stun,
-                    snap.dead,
-                    snap.anim,
-                    snap.empowered,
-                    snap.held,
+                    (
+                        snap.player,
+                        snap.pos,
+                        snap.prev_pos,
+                        snap.vel,
+                        snap.dash,
+                        snap.stun,
+                        snap.dead,
+                        snap.anim,
+                        snap.empowered,
+                        snap.held,
+                    ),
+                    (
+                        snap.oob,
+                        snap.charge,
+                        snap.capacity,
+                        snap.streak,
+                        snap.taunt,
+                        snap.guard,
+                    ),
                 ));
             }
         }

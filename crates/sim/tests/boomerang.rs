@@ -988,8 +988,32 @@ fn catch_frees_owner_to_throw_again() {
         "boomerang should have been caught before re-throw test"
     );
 
-    // After catch, with THROW_DOWN still held: a release tick with stick
-    // aimed should spawn a fresh Flying boomerang.
+    // The still-held THROW is now INERT — the hold outlived its purpose
+    // (it was a recall press, and the fang is home). Releasing it must NOT
+    // lob a surprise throw.
+    app.world_mut().resource_mut::<SynthesizedInputs>().0 = PlayerInput {
+        stick_x: 0,
+        stick_y: -127,
+        aim_angle: 0,
+        buttons: 0,
+    };
+    app.update();
+    assert_eq!(
+        count_boomerangs(&mut app),
+        0,
+        "releasing a leftover recall hold must not throw",
+    );
+
+    // A FRESH press + hold + release: the catch really did free the slot.
+    app.world_mut().resource_mut::<SynthesizedInputs>().0 = PlayerInput {
+        stick_x: 0,
+        stick_y: 0,
+        aim_angle: 0,
+        buttons: PlayerInput::THROW_DOWN,
+    };
+    for _ in 0..5 {
+        app.update();
+    }
     app.world_mut().resource_mut::<SynthesizedInputs>().0 = PlayerInput {
         stick_x: 0,
         stick_y: -127,
@@ -1004,11 +1028,11 @@ fn catch_frees_owner_to_throw_again() {
     );
     let (b, _, vel) = first_boomerang(&mut app).unwrap();
     assert!(matches!(b.state, BoomerangState::Flying));
-    // South throw — vy negative, vx ~ 0. Speed depends on how much CHARGE built
-    // between the catch (which freed the throw slot) and this release, and the
-    // catch may also empower it; here we only assert re-throw freedom + aim, so
-    // accept any plausible charged speed from the min-charge floor up to the
-    // empowered ceiling. Exact speed selection is pinned in catch.rs.
+    // South throw — vy negative, vx ~ 0. Speed depends on the short fresh
+    // hold's CHARGE, and the catch may also empower it; here we only assert
+    // re-throw freedom + aim, so accept any plausible charged speed from the
+    // min-charge floor up to the empowered ceiling. Exact speed selection is
+    // pinned in catch.rs.
     let speed = vel.y.abs();
     assert!(
         vel.y < Fix::ZERO
@@ -1065,4 +1089,85 @@ fn cannot_throw_again_while_boomerang_in_flight() {
         1,
         "second throw spawned a duplicate boomerang"
     );
+}
+
+// ---- SIM_VERSION 8: fresh-press throw arming ----
+
+fn player_x(app: &mut App) -> Fix {
+    let mut q = app
+        .world_mut()
+        .query_filtered::<&PositionF, With<Player>>();
+    q.iter(app.world()).next().unwrap().0.x
+}
+
+fn charge_of(app: &mut App) -> u32 {
+    let mut q = app.world_mut().query::<&sim::ThrowCharge>();
+    q.iter(app.world()).next().unwrap().0
+}
+
+#[test]
+fn leftover_recall_hold_is_inert_walks_free_and_never_charges() {
+    let mut app = build_app();
+    app.update();
+
+    // Quick lob out, idle a beat, then recall-press and hold to the catch.
+    app.world_mut().resource_mut::<SynthesizedInputs>().0 = PlayerInput {
+        stick_x: 0,
+        stick_y: 0,
+        aim_angle: 0,
+        buttons: PlayerInput::THROW_DOWN,
+    };
+    app.update();
+    app.world_mut().resource_mut::<SynthesizedInputs>().0 = PlayerInput {
+        stick_x: 127,
+        stick_y: 0,
+        aim_angle: 0,
+        buttons: 0,
+    };
+    app.update();
+    assert_eq!(count_boomerangs(&mut app), 1);
+    app.world_mut().resource_mut::<SynthesizedInputs>().0 = PlayerInput::default();
+    for _ in 0..6 {
+        app.update();
+    }
+    app.world_mut().resource_mut::<SynthesizedInputs>().0 = PlayerInput {
+        stick_x: 0,
+        stick_y: 0,
+        aim_angle: 0,
+        buttons: PlayerInput::THROW_DOWN,
+    };
+    let mut caught = false;
+    for _ in 0..40 {
+        app.update();
+        if count_boomerangs(&mut app) == 0 {
+            caught = true;
+            break;
+        }
+    }
+    assert!(caught, "recall should have brought the fang home");
+
+    // Keep the dead hold down with the stick deflected and the AIM bit set
+    // (exactly what the touch layer sends): no wind-up may arm, and the
+    // player must WALK — the aim lock only binds a LIVE hold.
+    app.world_mut().resource_mut::<SynthesizedInputs>().0 = PlayerInput {
+        stick_x: 127,
+        stick_y: 0,
+        aim_angle: 128,
+        buttons: PlayerInput::THROW_DOWN | PlayerInput::AIM_ACTIVE,
+    };
+    let x_before = player_x(&mut app);
+    for _ in 0..10 {
+        app.update();
+    }
+    assert_eq!(
+        charge_of(&mut app),
+        0,
+        "a hold kept down through the catch must not re-arm the charge"
+    );
+    let moved = player_x(&mut app) - x_before;
+    assert!(
+        moved > Fix::const_from_int(50),
+        "inert hold must not root the player (moved {moved:?})"
+    );
+    assert_eq!(count_boomerangs(&mut app), 0, "and nothing was thrown");
 }

@@ -267,3 +267,114 @@ fn dash_cannot_restart_during_cooldown() {
         read_dash(&mut app)
     );
 }
+
+// ---- SIM_VERSION 8: dash input buffer ----
+
+fn set_input(app: &mut App, stick_x: i8, buttons: u8) {
+    app.world_mut().resource_mut::<SynthesizedInputs>().0 = PlayerInput {
+        stick_x,
+        stick_y: 0,
+        aim_angle: 0,
+        buttons,
+    };
+}
+
+fn count_boomerangs(app: &mut App) -> usize {
+    let mut q = app.world_mut().query::<&sim::Boomerang>();
+    q.iter(app.world()).count()
+}
+
+#[test]
+fn dash_pressed_during_windup_fires_right_after_the_throw() {
+    let mut app = build_app();
+    app.update(); // warmup
+
+    // Wind up a throw (fresh press arms the charge), stick centered.
+    set_input(&mut app, 0, PlayerInput::THROW_DOWN);
+    for _ in 0..6 {
+        app.update();
+    }
+    // Press DASH mid-charge: eaten now (a charge commits you in place)...
+    set_input(&mut app, 0, PlayerInput::THROW_DOWN | PlayerInput::DASH_DOWN);
+    app.update();
+    assert!(matches!(read_dash(&mut app), DashState::Idle), "no dash out of a wind-up");
+
+    // ...release everything with a direction: the throw fires, and the
+    // buffered dash press fires the very next legal tick.
+    set_input(&mut app, 127, 0);
+    app.update();
+    assert_eq!(count_boomerangs(&mut app), 1, "throw must not be eaten by the dash");
+    app.update();
+    assert!(
+        matches!(read_dash(&mut app), DashState::Dashing { .. }),
+        "buffered dash should fire after the throw: {:?}",
+        read_dash(&mut app)
+    );
+}
+
+#[test]
+fn dash_pressed_late_in_cooldown_fires_the_moment_it_ends() {
+    let mut app = build_app();
+    app.update();
+
+    // First dash, then coast into cooldown (button released, stick held).
+    set_input(&mut app, 127, PlayerInput::DASH_DOWN);
+    app.update();
+    assert!(matches!(read_dash(&mut app), DashState::Dashing { .. }));
+    set_input(&mut app, 127, 0);
+    // Run until 4 cooldown ticks remain (inside the 7-tick buffer window).
+    for _ in 0..200 {
+        app.update();
+        if matches!(read_dash(&mut app), DashState::Cooldown { frames_remaining: 4 }) {
+            break;
+        }
+    }
+    assert!(matches!(
+        read_dash(&mut app),
+        DashState::Cooldown { frames_remaining: 4 }
+    ));
+
+    // Press DASH now: no-op during cooldown, but buffered.
+    set_input(&mut app, 127, PlayerInput::DASH_DOWN);
+    app.update();
+    assert!(matches!(read_dash(&mut app), DashState::Cooldown { .. }));
+    set_input(&mut app, 127, 0);
+    for _ in 0..5 {
+        app.update();
+    }
+    assert!(
+        matches!(read_dash(&mut app), DashState::Dashing { .. }),
+        "press within the buffer window should fire at cooldown end: {:?}",
+        read_dash(&mut app)
+    );
+}
+
+#[test]
+fn dash_press_expires_if_the_windup_holds_too_long() {
+    let mut app = build_app();
+    app.update();
+
+    set_input(&mut app, 0, PlayerInput::THROW_DOWN);
+    for _ in 0..4 {
+        app.update();
+    }
+    // Press DASH, then keep charging well past the buffer window.
+    set_input(&mut app, 0, PlayerInput::THROW_DOWN | PlayerInput::DASH_DOWN);
+    app.update();
+    set_input(&mut app, 0, PlayerInput::THROW_DOWN);
+    for _ in 0..12 {
+        app.update();
+    }
+    // Release: the throw fires, but the stale dash press stays dead.
+    set_input(&mut app, 127, 0);
+    app.update();
+    assert_eq!(count_boomerangs(&mut app), 1);
+    for _ in 0..3 {
+        app.update();
+    }
+    assert!(
+        matches!(read_dash(&mut app), DashState::Idle),
+        "a press older than the buffer window must not dash: {:?}",
+        read_dash(&mut app)
+    );
+}
