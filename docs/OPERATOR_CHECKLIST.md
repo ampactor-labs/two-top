@@ -60,9 +60,10 @@ vibrator/speaker is a device), so the phone is the *only* place to confirm them.
       desktop-only).
 - [ ] **Start + play:** tapping the **lower half** starts the match; duelists
       spawn, the 3-2-1-GO countdown runs, a fresh SyncTest session drives the sim.
-      Lower-left drag = move; lower-right touch held/dragged = aim → release
-      throws; upper-right tap = dash. (**Note:** TAUNT has no touch affordance —
-      not testable on touch.)
+      Left-half drag = move (a joystick spawns under the thumb); right-half
+      hold = charge, the LEFT stick aims while held, release throws;
+      bottom-right corner tap = dash; **top-strip tap = taunt** (roots you
+      0.7 s; finishing the flex feeds the perfect-catch streak one tier).
 - [ ] **Couch-on-one-device is lockstep, not 1v1:** both duelists move identically
       from one touch (Android SyncTest = both players local). A true 1v1 needs two
       devices over netplay (§B). Confirm the mirror behavior is what's seen.

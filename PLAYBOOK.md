@@ -477,5 +477,8 @@ Title — left half of a row lowers, right half raises.
 - **Cross-platform determinism is CI-only.** You verify single-machine
   determinism locally (SyncTest); the four-platform byte-identical matrix
   runs in CI.
-- **No touch taunt yet.** Touch controls cover move, throw/aim, and dash; taunt
-  remains desktop-only/debug-only.
+- **Taunt is live on every input path.** Touch: tap the top strip of the
+  screen (top 24%). Desktop: `T` (P0) / `Enter` (P1); gamepad: North. The
+  flex roots you for 0.7 s, cancels on dash or throw with no reward, and
+  completing it feeds the perfect-catch streak one tier. The bot taunts
+  your corpse once it has sharpened up — punish it on your next life.

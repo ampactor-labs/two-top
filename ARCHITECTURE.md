@@ -350,12 +350,12 @@ impl PlayerInput {
 
 **Touch layer (`PreUpdate`, not rolled back):**
 - `TouchState` resource updated from Bevy's `Touches`
-- Floating virtual stick: first touch in lower-left quadrant becomes the stick, origin at first-touch position
+- Floating virtual stick: the screen is split down the center — the first touch in the left half becomes the move stick, origin at first-touch position; the right half (minus the bottom-right dash corner) drives throw/aim the same way
 - Radial deadzone curve: 12% inner deadzone (the `DEADZONE_DEFAULT` of the configurable `stick_deadzone`, clamped to `DEADZONE_MAX = 0.40`; see § Settings), 75% saturation
-- Three throw interactions:
-  - **Tap** (touch + release within ~150ms, drag distance < 20px): instant throw in facing direction at default power
-  - **Hold + drag**: enters aim mode, `AIM_ACTIVE` set, stick bytes encode aim
-  - **Release while aiming**: throw fires with last-frame aim values; `aim_angle` is sticky for one frame across release
+- Three throw interactions (the right half is a throw BUTTON; the left stick aims, mirroring the desktop throw-key + d-pad model):
+  - **Tap** with the left stick centered: instant throw in facing direction at default power
+  - **Hold + deflect the left stick**: `AIM_ACTIVE` set, stick bytes encode the aim (sim roots the character while charging, so the stick is free)
+  - **Release while aiming**: throw fires with last-frame aim values; the aim is sticky for one frame across release, even if both thumbs lift at once
 
 **Forgiveness buffer:**
 - `InputHistory` resource (per-handle ring buffer of 8 frames, ~133ms)

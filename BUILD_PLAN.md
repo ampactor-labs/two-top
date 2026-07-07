@@ -184,7 +184,7 @@ This is not a numbered phase — it's the smallest viable cross-platform-build u
 **Produces:**
 - `input_touch` crate
 - `TouchState` resource, populated from Bevy `Touches` in `PreUpdate`
-- Floating virtual stick logic (first touch in lower-left quadrant)
+- Floating virtual stick logic (first touch in the left half; shipped as lower-left quadrant, widened to the full half later)
 - Radial deadzone curve (12% inner, 75% saturation)
 - Throw interaction state machine (tap / hold-drag-aim / release)
 - `read_local_inputs` system in GGRS's `ReadInputs` schedule that converts `TouchState` to `LocalInputs<GgrsConfig>`
