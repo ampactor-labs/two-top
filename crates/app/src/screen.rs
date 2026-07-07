@@ -214,10 +214,15 @@ fn spawn_match(
         let (max_x, max_y_raw) = wall.rect.max.to_f32();
         // Foreshorten the footprint Y into the tabletop tilt (visual only — the
         // collision `wall` keeps its true coords). The block's RISE is a screen-
-        // vertical height and stays full, so cover still stands up.
+        // vertical height scaled by its base row's depth, so far cover stands
+        // shorter than near cover — the same perspective the duelists obey.
+        // The footprint's WIDTH stays collision-true (the table's X axis is
+        // not projected), so a fang that visually clears a corner really does.
         let y0 = render::tilt_y(min_y_raw * flip.0);
         let y1 = render::tilt_y(max_y_raw * flip.0);
         let (min_y, max_y) = if y0 < y1 { (y0, y1) } else { (y1, y0) };
+        let near_row = (min_y_raw * flip.0).min(max_y_raw * flip.0);
+        let rise = OBSTACLE_RISE * render::depth_scale(near_row);
         commands.spawn((MatchEntity, wall));
         spawn_obstacle_block(
             &mut commands,
@@ -226,6 +231,7 @@ fn spawn_match(
             min_y,
             max_x,
             max_y,
+            rise,
         );
     }
 
@@ -262,11 +268,11 @@ fn spawn_obstacle_block(
     min_y: f32,
     max_x: f32,
     max_y: f32,
+    rise: f32,
 ) {
     let w = max_x - min_x;
     let d = max_y - min_y;
     let cx = (min_x + max_x) * 0.5;
-    let rise = OBSTACLE_RISE;
     let total_h = rise + d;
     let z = render::ground_z(min_y);
 

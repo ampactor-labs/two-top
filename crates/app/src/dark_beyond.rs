@@ -22,13 +22,15 @@ const EYE_PAIRS: usize = 26;
 /// Gap between the two dots of a pair (world units).
 const EYE_GAP: f32 = 8.0;
 /// Dot size (world units — chunky pixels, not points).
-const EYE_W: f32 = 5.0;
-const EYE_H: f32 = 3.5;
+const EYE_W: f32 = 6.5;
+const EYE_H: f32 = 4.5;
 /// How far a pair's gaze shifts toward the flying fang.
 const GAZE_SHIFT: f32 = 3.0;
-/// Resting glow alpha range (breathes between blinks).
-const ALPHA_DIM: f32 = 0.10;
-const ALPHA_OPEN: f32 = 0.34;
+/// Resting glow alpha range (breathes between blinks). Raised from
+/// 0.10/0.34 — at that level the audience read as dead pixels on a phone
+/// at arm's length; the void should feel *watched*.
+const ALPHA_DIM: f32 = 0.18;
+const ALPHA_OPEN: f32 = 0.52;
 
 /// One dot of an eye-pair. The pair shares `base`/`phase`/`speed`; `side`
 /// places the left/right dot.

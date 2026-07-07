@@ -41,7 +41,7 @@ mod logging;
 mod netplay;
 mod screen;
 mod settings;
-use anchor::{FullScreenSprite, ScreenAnchor, ScreenAnchorPlugin};
+use anchor::{FullScreenSprite, ScreenAnchorPlugin};
 use audio::GameAudioPlugin;
 use bot::BotPlugin;
 use camera::CameraFollowPlugin;
@@ -219,6 +219,7 @@ pub fn run() {
                 update_arena_floor,
                 crumble_arena_floor.after(update_arena_floor),
                 scale_actors_by_depth,
+                blink_spawn_guard,
                 animate_ritual_wash,
                 update_menu_scrim,
             ),
@@ -241,10 +242,15 @@ pub fn run() {
     #[cfg(not(target_os = "android"))]
     {
         app.add_plugins(input_desktop::DesktopInputsPlugin);
-        // The bot patches handle 1 after the keyboard source's insert applies.
+        // Mirror-for-flip runs between the keyboard source and the bot: the
+        // P1 window of a desktop loopback session needs the same world-Y
+        // reflection as the P1 phone, and the bot's world-space inputs must
+        // never be mirrored (it patches handle 1 afterwards).
         app.add_systems(
             bevy_ggrs::prelude::ReadInputs,
-            bot::drive_bot.after(input_desktop::read_local_desktop_inputs),
+            (mirror_desktop_inputs_for_flip, bot::drive_bot)
+                .chain()
+                .after(input_desktop::read_local_desktop_inputs),
         );
         app.add_systems(Update, toggle_fullscreen);
     }
@@ -265,8 +271,17 @@ fn read_android_touch_inputs(
     touch_state: Res<input_touch::TouchState>,
     local_players: Res<bevy_ggrs::LocalPlayers>,
     local_handle: Res<netplay::LocalPlayerHandle>,
+    flip: Res<render::PerspectiveFlip>,
 ) {
-    let input = input_touch::quantize_inputs(&touch_state);
+    let mut input = input_touch::quantize_inputs(&touch_state);
+    // The flipped client (P1's phone) renders the world mirrored top-for-
+    // bottom so its player sits at the near edge; its screen drags must be
+    // reflected into world space PRE-wire or "down" walks the character up
+    // (and aim inverts with it). Both peers still exchange plain world-space
+    // inputs, so determinism is untouched.
+    if flip.0 < 0.0 {
+        input = input_touch::mirror_input_y(input);
+    }
     let mut map = bevy::platform::collections::HashMap::default();
     if let Some(handle) = local_handle.0 {
         map.insert(handle, input);
@@ -276,6 +291,27 @@ fn read_android_touch_inputs(
         }
     }
     commands.insert_resource(bevy_ggrs::LocalInputs::<GgrsCfg>(map));
+}
+
+/// Desktop twin of the flip mirror inside `read_android_touch_inputs`: when
+/// this window is the flipped (P1) client of an online session, reflect the
+/// keyboard's world-Y before the wire so "up" on this screen moves the
+/// character up on this screen. Couch and practice run with flip = 1.0, so
+/// this is a no-op everywhere but a desktop loopback P1 window.
+#[cfg(not(target_os = "android"))]
+fn mirror_desktop_inputs_for_flip(
+    flip: Res<render::PerspectiveFlip>,
+    inputs: Option<ResMut<bevy_ggrs::LocalInputs<GgrsCfg>>>,
+) {
+    if flip.0 >= 0.0 {
+        return;
+    }
+    let Some(mut inputs) = inputs else {
+        return;
+    };
+    for input in inputs.0.values_mut() {
+        *input = input_touch::mirror_input_y(*input);
+    }
 }
 
 /// Desktop: toggle borderless fullscreen on F11 — handy for showing a
@@ -439,6 +475,30 @@ fn scale_actors_by_depth(
         let (_, y) = pos.0.to_f32();
         let s = render::depth_scale(y * flip.0);
         sprite.custom_size = Some(Vec2::splat(24.0 * 1.8 * s));
+    }
+}
+
+/// Flicker a freshly-respawned duelist while its `SpawnGuard` holds — the
+/// arcade "can't touch me yet" read. Both guards are public information
+/// (the killer needs to know the camp won't pay), so both players blink.
+/// This system owns the player sprite's alpha; nothing else writes it.
+fn blink_spawn_guard(
+    time: Res<Time<Real>>,
+    mut q: Query<(&sim::SpawnGuard, &mut Sprite), With<Player>>,
+) {
+    for (guard, mut sprite) in &mut q {
+        let alpha = if guard.0 > 0 {
+            // ~7 Hz square-wave flicker: unmistakably "protected", never
+            // strobe-fast (the window is only 0.75 s).
+            if (time.elapsed_secs() * 7.0).fract() < 0.5 {
+                0.35
+            } else {
+                0.9
+            }
+        } else {
+            1.0
+        };
+        sprite.color.set_alpha(alpha);
     }
 }
 
@@ -677,8 +737,8 @@ fn setup(mut commands: Commands, asset_server: Res<AssetServer>, selected: Res<S
         // round clock) on any window aspect.
         commands.spawn((
             Text2d::new(
-                "P0: WASD  -  Space throw  -  LShift dash\n\
-                 P1: Arrows  -  RShift throw  -  RCtrl dash\n\
+                "P0: WASD  -  Space throw  -  LShift dash  -  T taunt\n\
+                 P1: Arrows  -  RShift throw  -  RCtrl dash  -  Enter taunt\n\
                  or controllers (build --features gamepad)  -  F11 fullscreen",
             ),
             TextFont {
@@ -686,7 +746,7 @@ fn setup(mut commands: Commands, asset_server: Res<AssetServer>, selected: Res<S
                 ..default()
             },
             TextColor(render::palette::BONE.with_alpha(0.55)),
-            ScreenAnchor::new(0.0, -1.0, 0.0, 70.0),
+            anchor::ScreenAnchor::new(0.0, -1.0, 0.0, 70.0),
             Transform::from_xyz(0.0, -(sim::ARENA_HALF_HEIGHT_CM as f32) + 44.0, 100.0),
         ));
     }
@@ -731,11 +791,12 @@ fn setup(mut commands: Commands, asset_server: Res<AssetServer>, selected: Res<S
     // Menu scrim: a dark wash over the busy arena while the title menu or the
     // "awaiting a challenger" room is up, so the text reads with real
     // contrast instead of fighting the dithered floor and the center sigil.
-    // Above the arena + HUD, below the menu text (z=200).
+    // Above the arena + HUD, below the menu text (z=200). 0.85 — 0.72 still
+    // let the center sigil ghost through behind the title copy.
     commands.spawn((
         MenuScrim,
         Sprite {
-            color: render::palette::VOID.with_alpha(0.72),
+            color: render::palette::VOID.with_alpha(0.85),
             ..default()
         },
         FullScreenSprite { cover: 1.02 },

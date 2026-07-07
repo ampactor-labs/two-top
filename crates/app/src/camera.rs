@@ -81,6 +81,14 @@ pub const KILL_CAM_ZOOM: f32 = 1.6;
 /// plan's 20-frame beat — counted in render frames, so it's ~0.33 s at 60 Hz
 /// and proportionally snappier on a high-refresh display.
 pub const KILL_CAM_EASE_FRAMES: f32 = 20.0;
+/// Peak blend of the MICRO punch — the camera beat every mid-round kill
+/// gets. Rounds are continuous kill-count, so most kills never reach
+/// `RoundOver`; without this they had no camera acknowledgment at all.
+/// Roughly half the full beat: felt, never disorienting, and the dead
+/// player's 3 s respawn wait means nothing on-screen is being hidden.
+pub const KILL_CAM_MICRO_STRENGTH: f32 = 0.45;
+/// Render frames the micro punch holds at peak before easing back.
+pub const KILL_CAM_MICRO_HOLD_FRAMES: f32 = 26.0;
 
 /// The follow/static base position the camera tracks before kill-cam + shake.
 /// Mobile damps it toward the player centroid; desktop leaves it at the
@@ -88,14 +96,32 @@ pub const KILL_CAM_EASE_FRAMES: f32 = 20.0;
 #[derive(Resource, Default)]
 pub struct CameraBase(pub Vec2);
 
-/// Kill-cam beat state. `blend` is the raw 0..1 ease progress (0 = base
-/// framing, 1 = fully punched in on `target`); `zooming_in` is the ramp
+/// Kill-cam beat state. `blend` is the raw ease progress (0 = base framing,
+/// `strength` = fully punched in on `target`); `zooming_in` is the ramp
 /// direction (true while holding on the kill, false while easing back).
-#[derive(Resource, Default)]
+/// `strength` caps the blend per beat: 1.0 for the round/match-end punch,
+/// [`KILL_CAM_MICRO_STRENGTH`] for a mid-round kill. `hold_frames` is the
+/// remaining at-peak hold for a micro beat (`INFINITY` for the full beat,
+/// which holds until the next countdown releases it).
+#[derive(Resource)]
 pub struct KillCam {
     pub blend: f32,
     pub zooming_in: bool,
     pub target: Vec2,
+    pub strength: f32,
+    pub hold_frames: f32,
+}
+
+impl Default for KillCam {
+    fn default() -> Self {
+        Self {
+            blend: 0.0,
+            zooming_in: false,
+            target: Vec2::ZERO,
+            strength: 1.0,
+            hold_frames: f32::INFINITY,
+        }
+    }
 }
 
 /// Smoothstep ease (pure, testable): `3t² − 2t³`, clamped. Gives the kill-cam
@@ -189,17 +215,23 @@ fn update_camera_base(
     base.0.y = damped_step(base.0.y, target.y, CAMERA_FOLLOW_RATE, dt);
 }
 
-/// Layer 2: advance the kill-cam beat from `MatchState` transitions. A round
-/// ends on the clock and the match ends on the threshold-crossing kill (sim's
-/// model), so the beat triggers on entering `RoundOver` *or* `MatchOver` and
-/// punches in on the most recent kill (`LastKillPos`). It eases back when the
-/// next `Countdown` begins; `MatchOver` is terminal, so it simply holds (the
-/// match-summary overlay lands in Task 5.5).
+/// Layer 2: advance the kill-cam beat. Two beat tiers share the rig:
+///
+/// * **Full** — entering `RoundOver` / `MatchOver`: punch to blend 1.0 on
+///   the final kill and hold until the next `Countdown` releases it (the
+///   original Task 5.2 behavior; `MatchOver` is terminal and holds for
+///   the summary/devour ceremony).
+/// * **Micro** — any mid-round kill (the `MatchScore` total climbing while
+///   `InRound`): a half-strength punch that holds ~26 frames and eases
+///   itself back while the round keeps running. Rounds are continuous
+///   kill-count, so this is the beat most kills get.
 fn update_kill_cam(
     state: Res<MatchState>,
+    score: Res<sim::MatchScore>,
     last_kill: Res<LastKillPos>,
     mut kc: ResMut<KillCam>,
     mut prev: Local<Option<MatchState>>,
+    mut prev_kills: Local<Option<u32>>,
 ) {
     let now = *state;
     let in_beat =
@@ -209,19 +241,42 @@ fn update_kill_cam(
     let entering_beat = in_beat(&now) && !prev.map(|p| in_beat(&p)).unwrap_or(false);
     let entering_countdown = in_countdown(&now) && !prev.map(|p| in_countdown(&p)).unwrap_or(false);
 
+    let kills = score.p0 as u32 + score.p1 as u32;
+    let fresh_kill = prev_kills.is_some_and(|k| kills > k);
+    *prev_kills = Some(kills);
+
     if entering_beat {
         kc.target = last_kill.0;
         kc.zooming_in = true;
+        kc.strength = 1.0;
+        kc.hold_frames = f32::INFINITY;
     } else if entering_countdown {
         kc.zooming_in = false;
+    } else if fresh_kill && matches!(now, MatchState::InRound { .. }) {
+        kc.target = last_kill.0;
+        kc.zooming_in = true;
+        kc.strength = KILL_CAM_MICRO_STRENGTH;
+        kc.hold_frames = KILL_CAM_MICRO_HOLD_FRAMES;
     }
 
     let step = 1.0 / KILL_CAM_EASE_FRAMES;
-    kc.blend = if kc.zooming_in {
-        (kc.blend + step).min(1.0)
+    if kc.zooming_in {
+        kc.blend = (kc.blend + step).min(kc.strength);
+        if kc.blend >= kc.strength {
+            kc.hold_frames -= 1.0;
+            if kc.hold_frames <= 0.0 {
+                kc.zooming_in = false;
+            }
+        }
     } else {
-        (kc.blend - step).max(0.0)
-    };
+        kc.blend = (kc.blend - step).max(0.0);
+        // A finished beat resets to full strength so the next full beat
+        // isn't accidentally capped by a stale micro ceiling.
+        if kc.blend <= 0.0 {
+            kc.strength = 1.0;
+            kc.hold_frames = f32::INFINITY;
+        }
+    }
 
     *prev = Some(now);
 }

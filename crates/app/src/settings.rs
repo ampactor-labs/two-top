@@ -17,9 +17,11 @@ use std::path::PathBuf;
 
 use crate::screen::AppScreen;
 
-/// Default SFX bus level (the cues are peak-normalized to −3 dBFS).
+/// Default SFX bus level. The slider maps through `audio::bus_gain`'s square
+/// perceptual taper; the cue files are peak-normalized to −3 dBFS.
 pub const SFX_VOLUME_DEFAULT: f32 = 0.7;
-/// Default music/ambient-bed level (the loop asset is a −18 dBFS bed).
+/// Default music bus level (same square taper; the music loops master at
+/// −12 dBFS so the beds sit under gameplay cues at these defaults).
 pub const MUSIC_VOLUME_DEFAULT: f32 = 0.6;
 /// Default virtual-stick inner deadzone (matches `input_touch`'s baseline).
 pub const DEADZONE_DEFAULT: f32 = 0.12;

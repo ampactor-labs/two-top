@@ -55,22 +55,58 @@ pub struct BotView {
     pub can_dash: bool,
     /// Current safe half-extents (sudden-death aware).
     pub bounds: Vec2,
+    /// Practice difficulty = how many kills the PLAYER has landed on the bot
+    /// so far this match (0..=4). 0 = passive sparring dummy; it ramps up one
+    /// notch each time the player scores.
+    pub difficulty: u32,
 }
 
 /// Preferred dueling range (cm). Inside it the bot backs off, outside it
-/// closes — with an orbit component so it never runs a straight line. A
-/// touch farther out (the practice bot keeps its distance, giving the
-/// player room to breathe).
+/// closes — with an orbit component so it never runs a straight line.
 const PREFERRED_RANGE: f32 = 440.0;
-/// Charge frames before the bot commits to the throw. The practice bot
-/// throws at roughly HALF charge — weaker, slower, shorter fangs that are
-/// much easier to read, dodge, and recall-punish than a full-power shot.
-const THROW_AT_CHARGE: u32 = CHARGE_MAX_FRAMES / 2;
 /// Ticks of visible plant (AIM_ACTIVE) before the release.
 const PLANT_TICKS: u32 = 5;
-/// Enemy fang distance that triggers the dodge/graze reflex. Tightened so
-/// the practice bot reacts LATE (it eats more of the player's throws).
-const THREAT_RADIUS: f32 = 150.0;
+
+// ---- Difficulty ramp (practice mode) ----
+// The bot starts as a passive dummy and sharpens one notch per player kill.
+// Level 0 never attacks or dodges; each level raises the commit charge (so
+// throws hit harder and reach farther), the dodge range (so it protects
+// itself sooner), and the aim accuracy.
+
+/// Charge the bot commits its throw at, by level. Level 1 lobs a barely-
+/// charged fang; level 4 throws at ~70% charge — still short of a human's
+/// full-power shot, so it stays practice, not a wall.
+fn throw_at_charge(lvl: u32) -> u32 {
+    let frac = match lvl {
+        0 | 1 => 0.30,
+        2 => 0.42,
+        3 => 0.55,
+        _ => 0.70,
+    };
+    (CHARGE_MAX_FRAMES as f32 * frac) as u32
+}
+
+/// Fang distance that triggers the dodge reflex, by level. Dodging is off
+/// below level 2; then it reacts progressively sooner.
+fn threat_radius(lvl: u32) -> f32 {
+    match lvl {
+        0 | 1 => 0.0,
+        2 => 120.0,
+        3 => 165.0,
+        _ => 210.0,
+    }
+}
+
+/// Peak aim wobble (radians), by level: a wide spray early, tightening as
+/// the bot levels up but never fully honing in.
+fn wobble_amp(lvl: u32) -> f32 {
+    match lvl {
+        0 | 1 => 0.42,
+        2 => 0.30,
+        3 => 0.20,
+        _ => 0.12,
+    }
+}
 
 fn quantize(dir: Vec2) -> (i8, i8) {
     let d = dir.clamp_length_max(1.0);
@@ -94,18 +130,39 @@ fn input_from(dir: Vec2, buttons: u8) -> PlayerInput {
 
 /// The whole duelist, pure and testable.
 pub fn bot_decide(v: &BotView) -> PlayerInput {
-    // Dead opponent / out of round: drift back toward the safe center.
+    let lvl = v.difficulty;
+
+    // Dead opponent / out of round: drift back toward the safe center —
+    // and, once the bot has sharpened up (level >= 2), flex over the
+    // corpse. The taunt is a real mechanic (a completed flex feeds the
+    // streak ladder), so the bot both teaches it and profits from it.
+    // It only taunts with no lethal fang inbound (the victim's own
+    // throw can still be flying), and holds TAUNT through one flex
+    // window per death beat — the level signal needs a fresh edge to
+    // re-trigger, so this reads as one clean taunt, not a stutter.
     if !v.foe_alive {
+        let beat = v.frame % 180;
+        if lvl >= 2 && v.threat.is_none() && (30..90).contains(&beat) {
+            return input_from(Vec2::ZERO, PlayerInput::TAUNT_DOWN);
+        }
         return input_from(-v.me * 0.002, 0);
     }
 
-    // 1) Survival reflex: a lethal fang closing in → dash through it
-    //    (i-frames + the graze reward), or strafe off its line if the dash
-    //    is spent. Highest priority — nothing else matters while dying.
-    if let Some((tpos, tvel)) = v.threat {
+    // Level 0 — a passive sparring dummy: it just ambles around slowly and
+    // never throws or dodges, so the player warms up and lands the first free
+    // kill. Every kill the player scores raises the level by one.
+    if lvl == 0 {
+        return input_from(wander_dir(v), 0);
+    }
+
+    // 1) Survival dodge: a lethal fang closing in → dash through it. The bot
+    //    only starts protecting itself once it has been beaten a couple of
+    //    times (level >= 2); below that it eats the player's throws.
+    if lvl >= 2
+        && let Some((tpos, tvel)) = v.threat
+    {
         let to_me = v.me - tpos;
-        let closing = tvel.dot(to_me) > 0.0;
-        if closing && to_me.length() < THREAT_RADIUS {
+        if tvel.dot(to_me) > 0.0 && to_me.length() < threat_radius(lvl) {
             // Perpendicular to the fang's path, biased toward the center so
             // the dodge never carries the bot off the island.
             let perp = Vec2::new(-tvel.y, tvel.x).normalize_or_zero();
@@ -146,20 +203,29 @@ pub fn bot_decide(v: &BotView) -> PlayerInput {
         );
     }
 
-    // 4) Armed and free: charge while positioning; plant + aim for the
-    //    final ticks; release at the throw threshold.
-    if v.my_charge >= THROW_AT_CHARGE {
+    // 4) Armed and free (level >= 1): charge while positioning; plant + aim
+    //    for the final ticks; release at the level's commit charge, which
+    //    grows with the level so throws hit harder as the player wins.
+    let commit = throw_at_charge(lvl);
+    if v.my_charge >= commit {
         // RELEASE tick: drop THROW, keep AIM + the aim vector on the stick.
         return input_from(aim_at_foe(v), PlayerInput::AIM_ACTIVE);
     }
-    if v.my_charge >= THROW_AT_CHARGE.saturating_sub(PLANT_TICKS) {
+    if v.my_charge >= commit.saturating_sub(PLANT_TICKS) {
         // The plant: still holding, aim visible — the human gets the read.
         return input_from(
             aim_at_foe(v),
             PlayerInput::THROW_DOWN | PlayerInput::AIM_ACTIVE,
         );
     }
-    // Charge while orbiting at range.
+    // Charge while orbiting at range. A charge only ARMS on a fresh THROW
+    // press edge (SIM_VERSION 8): if the button was still down when the
+    // recall landed in hand, that hold is inert — drop it for one beat so
+    // the next frame presses fresh, else the bot would orbit forever
+    // squeezing a dead button.
+    if v.my_charge == 0 && v.frame.is_multiple_of(8) {
+        return input_from(edge_safe(v, orbit_dir(v)), 0);
+    }
     input_from(edge_safe(v, orbit_dir(v)), PlayerInput::THROW_DOWN)
 }
 
@@ -182,10 +248,18 @@ fn orbit_dir(v: &BotView) -> Vec2 {
 /// beatable at the dash-dodge game.
 fn aim_at_foe(v: &BotView) -> Vec2 {
     let base = (v.foe - v.me).normalize_or_zero();
-    // A wide, slow wobble (~13° peak) — the practice bot sprays wide of the
-    // mark often enough that a player who keeps moving rarely gets clipped.
-    let wobble = (v.frame as f32 * 0.11).sin() * 0.22;
+    // Wobble amplitude shrinks as the bot levels up: a wide early spray, a
+    // tighter (still imperfect) aim once the player has been winning.
+    let wobble = (v.frame as f32 * 0.11).sin() * wobble_amp(v.difficulty);
     Vec2::from_angle(wobble).rotate(base)
+}
+
+/// Level-0 idle: a slow, gentle wander (a Lissajous drift), clamped to the
+/// island. Reads as a dummy ambling around, not tracking or attacking.
+fn wander_dir(v: &BotView) -> Vec2 {
+    let f = v.frame as f32;
+    let drift = Vec2::new((f * 0.018).sin(), (f * 0.013).cos());
+    edge_safe(v, drift) * 0.42
 }
 
 /// Clamp a movement intent so it never walks the bot over the (possibly
@@ -211,9 +285,14 @@ pub fn drive_bot(world: &mut World) {
     let frame = world.resource::<FrameCount>().0;
     let in_round = world.resource::<MatchState>().is_in_round();
 
+    // Difficulty ramps with the PLAYER's kills on the bot (score.p0 — the
+    // player is always handle 0 in practice). 0 = passive dummy.
+    let difficulty = world.resource::<sim::MatchScore>().p0 as u32;
+
     let mut view = BotView {
         frame,
         bounds: Vec2::new(ARENA_HALF_WIDTH_CM as f32, ARENA_HALF_HEIGHT_CM as f32),
+        difficulty,
         ..default()
     };
     // Sudden-death crumble awareness.
@@ -306,6 +385,8 @@ impl Plugin for BotPlugin {
 mod tests {
     use super::*;
 
+    /// A mid-ramp view (difficulty 3) so the fighting behaviors are active;
+    /// level-0 passivity is exercised by its own test.
     fn base_view() -> BotView {
         BotView {
             frame: 600,
@@ -314,26 +395,75 @@ mod tests {
             foe_alive: true,
             can_dash: true,
             bounds: Vec2::new(500.0, 750.0),
+            difficulty: 3,
             ..default()
         }
     }
 
     #[test]
+    fn flexes_over_the_corpse_when_safe_and_sharpened() {
+        let mut v = base_view();
+        v.foe_alive = false;
+        v.frame = 600; // beat 60 — inside the 30..90 flex window
+        assert_ne!(
+            bot_decide(&v).buttons & PlayerInput::TAUNT_DOWN,
+            0,
+            "level 3 with no threat inbound taunts the kill"
+        );
+        // A lethal fang still flying at it: no flex, survival first.
+        v.threat = Some((v.me + Vec2::new(0.0, -80.0), Vec2::new(0.0, 24.0)));
+        assert_eq!(bot_decide(&v).buttons & PlayerInput::TAUNT_DOWN, 0);
+        // A green bot (level < 2) doesn't know the move yet.
+        v.threat = None;
+        v.difficulty = 1;
+        assert_eq!(bot_decide(&v).buttons & PlayerInput::TAUNT_DOWN, 0);
+    }
+
+    #[test]
+    fn level_zero_is_a_passive_dummy() {
+        let mut v = base_view();
+        v.difficulty = 0;
+        // Even with a fang bearing down, level 0 never throws or dashes.
+        v.threat = Some((v.me + Vec2::new(0.0, -80.0), Vec2::new(0.0, 24.0)));
+        let input = bot_decide(&v);
+        assert!(input.buttons & PlayerInput::THROW_DOWN == 0, "no throw");
+        assert!(input.buttons & PlayerInput::DASH_DOWN == 0, "no dodge");
+        assert!(input.buttons & PlayerInput::AIM_ACTIVE == 0, "no aim");
+    }
+
+    #[test]
     fn charges_while_free_and_unthreatened() {
-        let v = base_view();
+        let mut v = base_view();
+        v.frame += 1; // off the re-arm beat (frame % 8 == 0 releases at charge 0)
         let input = bot_decide(&v);
         assert!(input.buttons & PlayerInput::THROW_DOWN != 0, "should charge");
         assert!(input.buttons & PlayerInput::AIM_ACTIVE == 0, "no plant yet");
     }
 
     #[test]
+    fn rearm_beat_releases_a_dead_hold_but_not_a_live_charge() {
+        // At charge 0 the beat frame drops THROW for one tick so the next
+        // frame is a fresh press edge — without it a hold kept down through
+        // the catch would never arm under the press-edge rule.
+        let v = base_view(); // frame 600 — on the beat, charge 0
+        assert!(
+            bot_decide(&v).buttons & PlayerInput::THROW_DOWN == 0,
+            "beat releases the dead hold"
+        );
+        let mut armed = base_view();
+        armed.my_charge = 3; // a live wind-up must survive the beat
+        assert!(bot_decide(&armed).buttons & PlayerInput::THROW_DOWN != 0);
+    }
+
+    #[test]
     fn plants_then_releases_at_threshold() {
         let mut v = base_view();
-        v.my_charge = THROW_AT_CHARGE - 2;
+        let commit = throw_at_charge(v.difficulty);
+        v.my_charge = commit - 2;
         let plant = bot_decide(&v);
         assert!(plant.buttons & PlayerInput::THROW_DOWN != 0);
         assert!(plant.buttons & PlayerInput::AIM_ACTIVE != 0, "visible plant");
-        v.my_charge = THROW_AT_CHARGE;
+        v.my_charge = commit;
         let release = bot_decide(&v);
         assert!(
             release.buttons & PlayerInput::THROW_DOWN == 0,
@@ -342,6 +472,14 @@ mod tests {
         assert!(release.buttons & PlayerInput::AIM_ACTIVE != 0);
         // Aim points broadly at the foe (down-table from the bot's spawn).
         assert!(release.stick_y < 0, "aims toward the foe");
+    }
+
+    #[test]
+    fn difficulty_ramps_commit_charge_and_dodge_range() {
+        assert!(throw_at_charge(1) < throw_at_charge(4), "throws harden");
+        assert_eq!(threat_radius(1), 0.0, "no dodge below level 2");
+        assert!(threat_radius(2) < threat_radius(4), "dodges sooner");
+        assert!(wobble_amp(1) > wobble_amp(4), "aim tightens");
     }
 
     #[test]

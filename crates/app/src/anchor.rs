@@ -136,6 +136,13 @@ fn size_fullscreen_sprites(
     }
 }
 
+/// Public ordering handle: schedule `.after(ScreenAnchorSet)` to read a
+/// `ViewRect` that already reflects this frame's camera rig (follow, kill-
+/// cam zoom, shake) — anything converting screen coords to world without
+/// this ordering lags the camera by a frame and jitters during shake.
+#[derive(SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct ScreenAnchorSet;
+
 pub struct ScreenAnchorPlugin;
 
 impl Plugin for ScreenAnchorPlugin {
@@ -147,6 +154,7 @@ impl Plugin for ScreenAnchorPlugin {
                 (apply_screen_anchors, size_fullscreen_sprites),
             )
                 .chain()
+                .in_set(ScreenAnchorSet)
                 .after(CameraRigSet),
         );
     }
