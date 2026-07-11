@@ -32,6 +32,54 @@ inputs (4 bytes per player per tick) flow peer-to-peer with no server
 in the path — that's the property the 2-Top determinism stack is
 designed for.
 
+Two datachannels ride that one peer connection: channel 0 is the
+unreliable/unordered ggrs input stream, and channel 1 is a **reliable
+side-channel** carrying the small postcard messages that are not sim
+input — the identity handshake (`NetMsg::Profile`: install-id + dialed
+name, which feeds the per-opponent grudge ledger), rematch consent
+(`RematchWant`), and a clean goodbye (`Bye`, so the peer's screen flips
+immediately instead of waiting out the disconnect grace).
+
+---
+
+## NAT traversal: STUN, and when you need TURN
+
+WebRTC finds the direct path with STUN (the default config points at
+Google's public STUN servers). That works for most home-wifi pairs and
+many phone pairs — but **carrier-grade NAT (very common on cellular)
+regularly defeats STUN-only traversal**. The failure is silent: both
+phones reach the signaling server, see each other, and never complete
+the datachannel. On screen that reads as an eternal `AWAITING A
+CHALLENGER` (the summoning overlay names this after ~15 s).
+
+The fix is a TURN relay — a fallback server both peers can reach that
+relays the datachannel when no direct path exists. Configure it the
+same way as the room URL (runtime env for desktop, compile-time bake
+for the APK):
+
+```bash
+TWOTOP_TURN_URL="turn:turn.example.net:3478" \
+TWOTOP_TURN_USER="twotop" \
+TWOTOP_TURN_PASS="<secret>" \
+  cargo apk run -p app --lib --target aarch64-linux-android
+```
+
+All three unset ⇒ STUN-only, exactly the pre-TURN behavior. The STUN
+urls stay in the ICE list either way; WebRTC applies the credentials
+only to the `turn:` entry.
+
+Server options, in order of effort:
+
+* **Managed TURN** (Twilio NTS, Metered, Cloudflare Calls): zero ops,
+  metered pricing; static-credential offerings drop straight into the
+  three env vars above.
+* **Self-hosted coturn** beside the signaling server:
+  `turnserver --lt-cred-mech --user twotop:<secret> --realm two-top`.
+  Note TURN wants UDP ingress (3478 + a relay port range) — hosts that
+  only proxy HTTP/TCP (Railway's proxy model, for one) can't carry it;
+  a plain VPS can. TURN traffic is only used when STUN fails, so a
+  small box covers a lot of matches.
+
 ---
 
 ## Choosing a signaling server
@@ -151,9 +199,15 @@ identically on both sides (same `setup`), so only "which handle reads
 local input" differs; the deterministic sim guarantees the rest.
 
 The ggrs session is built with `input_delay = 2`, desync detection on
-(`interval = 30`, ~2 checks/sec), and a 3 s disconnect timeout. A
-`DesyncDetected` event logs a loud `ERROR` on `target: two_top::net`;
-a `Disconnected` event forfeits the match (sets
+(`interval = 30`, ~2 checks/sec), and a **9 s disconnect timeout** —
+the away grace that lets a phone survive a notification-shade peek or
+a short call banner and rejoin the live match (ggrs replays the missed
+ticks on resume). During an interruption the healthy side's overlay
+shows `<NAME> AWAY` after ~1 s of silence; at 9 s ggrs declares the
+peer gone and the match forfeits (net's own silence FSM backstops at
+10 s). A `DesyncDetected` event logs a loud `ERROR` on
+`target: two_top::net`; a `Disconnected` event (or a `Bye` on the
+side-channel — the clean-leave path) forfeits the match (sets
 `sim::MatchState::MatchOver`).
 
 ### Loopback verification (Gate 0 — done, automatable)
@@ -190,36 +244,51 @@ laptop on home wifi), launch the build pointed at the same room URL.
 If either side desyncs visibly, take both `.bmrg.log` files and run
 `scripts/diagnose_desync.sh` against the per-frame checksum logs.
 
-* **Rematch**: after `MatchOver`, *either* player pressing THROW
-  restarts the match in lockstep (`sim::apply_rematch`, which runs in
-  `GgrsSchedule` right before `tick_match_state` and is input-driven,
-  so it's rollback/netplay-safe). Verify both devices restart
-  together — score back to 0-0, fresh countdown, no desync. Note the
-  couch-only ESC back-to-lobby does **not** apply online:
-  `screen::back_to_lobby` early-returns when a room URL is set (the
-  lobby FSM owns teardown).
+* **Rematch (RUN IT BACK)**: after `MatchOver`, an ONLINE rematch is a
+  two-sided handshake. A local THROW press becomes consent
+  (`RematchWant` on the side-channel) instead of an instant restart;
+  the summary shows `waiting on <NAME>...` / `<NAME> WANTS TO RUN IT
+  BACK`. Once both sides consent, each client emits the real THROW
+  input and `sim::apply_rematch` restarts the match in lockstep —
+  still input-driven and rollback-safe (the gate only shapes when the
+  local input is emitted, `netplay::gate_rematch_inputs`). Couch and
+  practice keep the classic either-player-instant rematch. Verify both
+  devices restart together — score back to 0-0, fresh countdown, no
+  desync.
+* **Leaving**: online at `MatchOver`, a top-band tap or ESC leaves
+  cleanly — `Bye` on the side-channel (peer's screen flips to
+  `<NAME> FLED` immediately), socket + session torn down, back to
+  Title. Re-tapping FIND OPPONENT opens a fresh socket.
 
-### Gate 2: brief disconnection blip
+### Gate 2: brief disconnection blip (the away grace)
 
 * Launch two peers, get them connected, start a round.
-* Briefly toggle airplane mode on one device for ~1.5 seconds.
-* Lobby overlay on both sides should show `reconnecting…` once the
-  silence threshold (`DISCONNECT_AFTER_FRAMES = 60`, ~1 s) is crossed.
-* Restore connectivity within the forfeit window
-  (`FORFEIT_AFTER_FRAMES = 180`, ~3 s total silence).
-* Both sides should return to `connected`, the round resumes, and
-  the post-blip simulation stays bit-identical.
+* Briefly toggle airplane mode on one device for ~2-4 seconds — or
+  just pull down the notification shade / take a fake call: the whole
+  point of the 9 s grace is surviving normal phone life.
+* The healthy side shows `<NAME> AWAY` once the silence threshold
+  (`DISCONNECT_AFTER_FRAMES = 60`, ~1 s) is crossed; its sim stalls
+  (prediction window full) under the overlay.
+* Restore connectivity within the 9 s ggrs window.
+* Both sides should return to `connected`, the round resumes (ggrs
+  replays the missed ticks), and the post-blip simulation stays
+  bit-identical.
 
 ### Gate 3: forfeit on long disconnection
 
-* Same setup, but kill connectivity on one device for 5+ seconds.
-* The surviving device's lobby overlay transitions
-  `connected → reconnecting… → FORFEIT` within ~3 seconds of silence.
+* Same setup, but kill connectivity on one device for 12+ seconds.
+* The surviving device transitions `<NAME> AWAY → <NAME> FLED - the
+  field is yours` at ~9 s of silence (ggrs `Disconnected`;
+  `FORFEIT_AFTER_FRAMES = 600` is the 10 s fallback), records a career
+  WIN, and offers the top-band LEAVE.
 * `sim::MatchState::MatchOver` fires (the round flow ends; HUD shows
   match-over state).
-* The forfeiting peer, on regaining connectivity, sees
-  `reconnecting…` then a permanent `FORFEIT` (terminal — no recovery
-  from `Forfeited`, by design).
+* The forfeiting peer, on coming back, sees `MATCH ABANDONED — you
+  left the duel` (its own absence is tracked, so the copy doesn't
+  gaslight) and records the LOSS.
+* Bonus check: instead of killing connectivity, tap LEAVE on one
+  device — the other flips to `<NAME> FLED` *immediately* (the `Bye`
+  message), no 9 s wait.
 
 ---
 
@@ -245,13 +314,21 @@ If either side desyncs visibly, take both `.bmrg.log` files and run
 
 These are tracked but not blocking Phase 12's CI gate:
 
-* Room-code-based pairing (current impl is first-pair queue only).
+* ~~Room-code-based pairing~~ — done: the title's room pad dials 7⁴
+  private rooms (`crates/app/src/room_code.rs`).
+* ~~Player identity~~ — done: install-id + dialed name exchanged on the
+  reliable side-channel; the grudge ledger files per-opponent records.
 * TLS configuration default in the signaling URL builder.
-* Auth / username / matchmaking filters — not in V1 scope.
-* Spectator slot (room joins beyond 2 are queued; spectator mode lands
-  with Phase 14's replay viewer).
+* Auth / matchmaking filters — not in V1 scope.
+* Spectator slot (room joins beyond 2 are queued; the on-device replay
+  theater covers after-the-fact viewing).
 * Settings UI for signaling URL (currently edit-and-rebuild only).
 * The `Disconnected → Connected` reconnect path currently treats the
   reconnect as a fresh peer-connection edge (firing `PendingP2PSwap`
   again). If the existing P2PSession should be kept alive across
   blips, refine `should_swap_to_p2p` to suppress reconnect re-swaps.
+  (Post-swap, ggrs interruptions no longer touch this path — the
+  lobby's `Disconnected` now comes from honest silence aging and
+  recovers without a re-swap.)
+* Emotes: one `NetMsg` variant away — the side-channel is the hard
+  part and it's in. Waiting on a design for where they live on screen.

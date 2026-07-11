@@ -61,14 +61,24 @@ The `sim` crate has zero `bevy_render` dependency. The `render` crate depends on
 
 The `app` crate is split into focused modules (`crates/app/src/`):
 
-- `audio` — `GameAudioPlugin`: synthesized WAV cues + ambient bed (cosmetic; see § Audio).
-- `camera` — `CameraFollowPlugin`: base follow + kill-cam zoom + screen-shake rig.
+- `audio` — `GameAudioPlugin`: synthesized WAV cues + two music beds (cosmetic; see § Audio).
+- `camera` — `CameraFollowPlugin`: base lean + kill-cam zoom + screen-shake rig.
 - `haptics` — Android JNI `Vibrator` (Settings-gated; no-op off-Android).
-- `screen` — `AppScreen` Title ↔ InMatch state machine (see § App Screen Lifecycle).
+- `screen` — `AppScreen` Title ↔ InMatch ↔ Replays state machine, title buttons, match spawn/teardown, summary + victory pose (see § App Screen Lifecycle).
 - `settings` — persisted JSON `Settings` (see § Settings).
-- `netplay` — matchbox session swap + `LocalPlayerHandle`.
+- `netplay` — matchbox session swap, `LocalPlayerHandle`, ICE/TURN config, the reliable side-channel pump, the online rematch gate, absence tracking, clean leave.
+- `profile` — install identity: random per-install u128 + the dialed 4-glyph name (persisted `profile.json`, exchanged as `NetMsg::Profile`).
+- `grudge` — `career.json`: online W-L, per-opponent rivalry records keyed by peer install-id, and the practice gauntlet tier.
+- `recorder` — harvests confirmed inputs into shareable `.bmrg` tapes on match end.
+- `theater` — the REPLAYS screen + on-device playback of saved tapes through the live presentation (ported from `replay_viewer`'s snapshot-scrub machinery).
+- `bot` — the practice/gauntlet opponent (a pure input-policy source).
+- `room_code` — private-room glyph pad (7⁴ rooms, suffixes the room name).
+- `hud` — score pips (with the kill's pip-slam beat), round clock, countdown.
+- `touch_controls` — on-screen move/throw/dash/taunt affordances, southpaw-aware.
+- `anchor` — `ScreenAnchor`/`ViewRect`/`FullScreenSprite`: real-screen-edge UI pinning on any aspect.
+- `dark_beyond` / `devour` — the void's ember eyes; the victor's devouring.
 - `logging` — `tracing-subscriber` setup + match-lifecycle log edges.
-- `lobby_overlay` / `debug_overlay` — on-screen netplay-status and dev overlays.
+- `lobby_overlay` / `debug_overlay` — summoning/away/forfeit ceremony text (with stall diagnosis) and dev overlays.
 
 ## Determinism Rules
 
@@ -295,13 +305,14 @@ The `app` crate wraps the match in a small bevy `States` machine (`crates/app/sr
 
 ```rust
 #[derive(States, ... Default)]
-pub enum AppScreen { #[default] Title, InMatch }
+pub enum AppScreen { #[default] Title, InMatch, Replays }
 ```
 
-- **`Title`** — session-less. With no ggrs `Session` inserted, bevy_ggrs idles `GgrsSchedule` and the sim sits at frame 0. The title overlay carries the arena picker (1/2/3 keys, or a tap in the upper-half cycles arenas) and the settings keys (see § Settings). Pressing start (Space/Enter, or a tap in the lower half) transitions to `InMatch`.
-- **`InMatch`** — `OnEnter(InMatch)` spawns the two players, arena walls, and the selected arena's props; in couch (local SyncTest) mode it then inserts a *fresh* `SyncTestSession` via `build_synctest_session`, so the rollback frame count restarts at 0 every match. `OnExit(InMatch)` despawns every match/arena/play-spawned entity and removes the `Session<GgrsCfg>` so bevy_ggrs idles the sim back at frame 0.
+- **`Title`** — session-less. With no ggrs `Session` inserted, bevy_ggrs idles `GgrsSchedule` and the sim sits at frame 0. The title carries the arena picker (couch), the NAME and room-code glyph pads (online), the settings rows, and the PLAY / PRACTICE / REPLAYS buttons.
+- **`InMatch`** — `OnEnter(InMatch)` spawns the two players, arena walls, and the selected arena's props, then inserts the right session: theater → a playback session (`check_distance: 0`, `input_delay: 0`), couch/practice → a fresh `SyncTestSession`, online → none (the matchbox driver inserts the P2P session on connect). `OnExit(InMatch)` despawns every match/arena/play-spawned entity and removes the `Session<GgrsCfg>` so bevy_ggrs idles the sim back at frame 0.
+- **`Replays`** — the saved-tape list (`theater` module). Picking a tape re-enters `InMatch` with the theater flag up, so playback wears the entire live presentation; the tape's inputs drive the sim via `replay::playback_inputs_system`, which runs after every platform input source and replaces the `LocalInputs` map wholesale.
 
-Online also boots to `Title`. With a room URL configured, the title copy becomes "TAP TO FIND OPPONENT"; pressing start enters `InMatch`, starts the matchbox connection, and `perform_swap` inserts the P2P session once the peer connects. Arena selection still happens on the Title screen before the online connection starts.
+Online also boots to `Title`. With a room URL configured, the primary button reads FIND OPPONENT; pressing it enters `InMatch`, starts the matchbox connection, and `perform_swap` inserts the P2P session once the peer connects. Right after the swap the local `NetMsg::Profile` (install-id + name) goes out on the **reliable side-channel** (matchbox channel 1; ggrs owns unreliable channel 0) — the channel that also carries rematch consent (`RematchWant`) and the clean goodbye (`Bye`). Side-channel messages never enter the sim: they change what a client shows and when it emits its own inputs, never how a tick resolves. The ONLINE rematch is consent-gated pre-wire (`netplay::gate_rematch_inputs`): a `MatchOver` THROW press becomes consent and is masked off the wire until both sides are in, then the real input is emitted and `sim::apply_rematch` restarts the match exactly as always.
 
 ## Settings
 
@@ -315,12 +326,13 @@ pub struct Settings {
     pub haptics: bool,
     pub sfx_volume: f32,
     pub music_volume: f32,
+    pub southpaw: bool,
 }
 ```
 
-Stored as JSON at `dirs::config_dir()/two-top/settings.json` (via `serde`/`serde_json`/`dirs`). `#[serde(default)]` keeps old files forward-compatible, and `Settings::clamped()` pins every field into range (non-finite falls back to the default). Adjusted only on the `Title` screen (H toggles haptics, `-`/`=` SFX, `[`/`]` music, `,`/`.` deadzone), saved on every change.
+Stored as JSON at `dirs::config_dir()/two-top/settings.json` (via `serde`/`serde_json`/`dirs`). `#[serde(default)]` keeps old files forward-compatible, and `Settings::clamped()` pins every field into range (non-finite falls back to the default). Adjusted only on the `Title` screen (H toggles haptics, `-`/`=` SFX, `[`/`]` music, `,`/`.` deadzone, L southpaw), saved on every change.
 
-The deadzone is mirrored into `input_touch::StickDeadzone`, which shapes the virtual stick *before* quantization to the wire format — a legal pre-wire input change, never post-wire. `DEADZONE_DEFAULT = 0.12` is the baseline; `DEADZONE_MAX = 0.40` the upper bound.
+The deadzone is mirrored into `input_touch::StickDeadzone`, which shapes the virtual stick *before* quantization to the wire format — a legal pre-wire input change, never post-wire. `DEADZONE_DEFAULT = 0.12` is the baseline; `DEADZONE_MAX = 0.40` the upper bound. `southpaw` mirrors the same way into `input_touch::Southpaw`, which reflects the touch ZONE tests left-for-right (move on the right half, throw on the left, dash bottom-left); drag math is untouched and the wire never knows.
 
 ## Input Model
 

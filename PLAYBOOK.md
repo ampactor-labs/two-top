@@ -436,16 +436,20 @@ playtesting. For store distribution, use a real upload/release key instead.
 For same-wifi: the signaling server runs on your machine (Rung 4 setup).
 For cross-network: deploy `matchbox_server` to a public host (see Rung 5).
 
-## Solo practice, private rooms, replays
+## Solo practice, private rooms, replays, identity
 
-Three things every install now carries, no server or second phone needed:
+What every install carries, no server or second phone needed:
 
-**Practice vs the bot.** Tap the top edge of the Title screen (or press P on
-desktop) to arm practice mode, then start as usual. The match runs the normal
-local session with the bot supplying player 2's inputs — it keeps range,
-plants visibly before it throws, dashes through your fangs, and steers its
-recalls. Tap the top edge on the summary screen (or Esc) to get back to the
-lobby. Practice results don't touch your online career record.
+**The gauntlet (practice vs the bot).** Tap PRACTICE VS BOT on the Title
+(P on desktop), then PLAY. The match runs the normal local session with the
+bot supplying player 2's inputs — it keeps range, plants visibly before it
+throws, dashes through your fangs, and steers its recalls. Beat it and your
+GAUNTLET TIER climbs (the button label carries the number); every tier the
+bot opens sharper — harder throws, earlier dodges, tighter aim, up to a
+beatable ceiling. Lose once and the tier resets to zero (best tier is
+remembered in `career.json`). A fresh install's bot starts as a passive
+dummy and sharpens one notch per kill you land, so the first match is the
+tutorial. Practice results never touch the online career W-L.
 `TWOTOP_PRACTICE=1` env arms it for desktop automation.
 
 **Private rooms.** On the online Title, the glyph row under the menu dials a
@@ -454,29 +458,58 @@ tap QUICK to go back to public matchmaking. Two phones dialed to the same four
 glyphs only ever meet each other. The code persists across launches. Desktop:
 keys 1-4 cycle the slots, 0 resets to quick.
 
-**Match replays.** Every decided match writes a `.bmrg` input tape:
-`~/Downloads/two-top/replays/` on desktop,
-`Android/data/<pkg>/files/replays/` on the phone (reachable with any Files
-app). The file is a few KB and reproduces the whole match bit-for-bit in
-`replay_viewer` — share it however you like. A sim-version mismatch refuses
-to load rather than desyncing; keep the tagged binary around for old tapes.
+**Your name.** The online Title's NAME row dials a 4-glyph name from the
+same alphabet (desktop: keys 5-8). A fresh install gets one dealt from its
+install identity, so every phone is named before its owner touches the pad.
+The name rides the identity handshake to your opponent: it shows on their
+summary, in their grudge ledger ("4TH MEETING with TAGC — you lead 2-1"),
+and in the replay tape header.
 
-Settings (haptics, sfx, music, deadzone) are the four tappable rows on the
-Title — left half of a row lowers, right half raises.
+**Match replays + the theater.** Every decided match writes a `.bmrg` input
+tape: `~/Downloads/two-top/replays/` on desktop,
+`Android/data/<pkg>/files/replays/` on the phone (reachable with any Files
+app). The file is a few KB and reproduces the whole match bit-for-bit.
+Watch them ON THE DEVICE: the REPLAYS button on the Title lists the saved
+tapes (V on desktop); tap one and it plays back through the live game's own
+presentation — HUD, kill-cam, audio, the works — because the deterministic
+sim just replays the inputs. Tap to pause, drag the bottom strip to scrub,
+tap a speed (0.5x-4x), tap the top edge to exit. A tape from another sim
+version is honestly absent from the list rather than desyncing; keep the
+tagged binary around for old tapes. (Desktop `replay_viewer` still works.)
+
+**Online etiquette, enforced.** A finished online match offers RUN IT BACK:
+your THROW press asks for the rematch (the opponent's summary shows who's
+in) and the match restarts only when both sides consent. A top-band tap (or
+Esc) LEAVES cleanly — the opponent's screen flips to `<NAME> FLED`
+immediately instead of waiting out the grace. If a phone goes away
+mid-match (call, notification shade), the other side sees `<NAME> AWAY`
+and the match survives interruptions up to ~9 s; past that it forfeits,
+the survivor records the win, and the leaver's own screen says MATCH
+ABANDONED.
+
+Settings (haptics, sfx, music, deadzone, southpaw) are the five tappable
+rows on the Title — left half of a row lowers/toggles, right half raises.
+**Southpaw** mirrors the whole touch layout left-for-right: move stick on
+the right half, throw on the left, dash bottom-LEFT.
 
 ## Known gaps (so you don't chase non-bugs)
 
 - **No in-app way to enter a room URL.** The lobby overlay is read-only.
   Desktop uses `--room`/`MATCHBOX_ROOM`; the phone uses the compile-time
   `TWOTOP_ROOM` bake (Rung 4d). An in-app lobby text field is future work.
-- **First-pair queue only.** The first two peers in a room get matched, in
-  arrival order. No room codes / private match codes yet, so don't share a
-  room name with anyone else mid-test.
-- **STUN/TURN isn't a build knob yet** (blocks Rung 5 cross-network play
-  through restrictive carrier NATs).
+  (Private ROOMS within the baked server are in — the glyph pad above.)
+- **STUN-only traversal fails behind carrier NAT.** For Rung 5
+  cross-network play through restrictive carrier NATs, bake a TURN relay:
+  `TWOTOP_TURN_URL` / `TWOTOP_TURN_USER` / `TWOTOP_TURN_PASS` (see
+  SIGNALING.md § NAT traversal). All unset ⇒ STUN-only, as before.
 - **Cross-platform determinism is CI-only.** You verify single-machine
   determinism locally (SyncTest); the four-platform byte-identical matrix
   runs in CI.
+- **A cold `TWOTOP_AUTOSTART=1` desktop match can poison its replay tape**
+  (the first-throw shader compile stalls a frame past the 8-tick harvest
+  ring; the recorder refuses to write the corrupt tape, by design). The
+  normal flow — title screen first — warms the pipelines; the phone holds
+  60 fps and is unaffected.
 - **Taunt is live on every input path.** Touch: tap the top strip of the
   screen (top 24%). Desktop: `T` (P0) / `Enter` (P1); gamepad: North. The
   flex roots you for 0.7 s, cancels on dash or throw with no reward, and

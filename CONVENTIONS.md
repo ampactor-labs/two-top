@@ -71,7 +71,7 @@ Hard rules. Violations cause subtle bugs that are expensive to find. The CI and 
 - `fixed_math` depends on `fixed`, `cordic`, `serde`. Nothing else.
 - `sim` depends on `fixed_math`, `bevy` (no `bevy_render`), `bevy_ggrs`, `bytemuck`, `serde`, `tracing`, plus an android-only `android-activity` dep (the `native-activity` feature workaround). `SimRng` is a hand-rolled xorshift64* — `rand_xoshiro` is NOT a sim dep (it lives only in `replay_sync` for the fuzzer).
 - `render` depends on `sim`, `bevy` (features `std`, `bevy_log`, `bevy_asset`, `bevy_render`, `bevy_core_pipeline`, `bevy_sprite`), plus `rand` for cosmetic RNG. No reverse dependency. Render has NO `bevy_audio` — audio is deliberately in `app`, never render (see § Render Layer Rules).
-- `net` depends on `sim`, raw `ggrs` (NOT `bevy_ggrs` — it supplies its own `MatchboxBridge`), `matchbox_socket` (no `ggrs` feature), `bincode`, `uuid`, `tracing`, and `bevy` (no render).
+- `net` depends on `sim`, raw `ggrs` (NOT `bevy_ggrs` — it supplies its own `MatchboxBridge`), `matchbox_socket` (no `ggrs` feature), `bincode` (channel 0 only: mirrors matchbox's ggrs reference codec byte-for-byte), `postcard` + `serde` (the reliable side-channel's `NetMsg` — the project's serialization convention), `uuid`, `tracing`, and `bevy` (no render).
 - `input_touch` depends on `sim`, `bevy` (features `std`, `touch`, `mouse`), `bevy_ggrs`.
 - `input_desktop` depends on `sim`, `bevy` (features `keyboard`, `gamepad`), `bevy_ggrs`.
 - `replay` depends on `sim`, `bevy` (no `bevy_render`), `bevy_ggrs`, `postcard`, `serde`. The codec (`encode`/`decode`) is pure; the `RecordPlugin` / `ReplayPlaybackPlugin` are why `bevy` and `bevy_ggrs` are direct deps.
