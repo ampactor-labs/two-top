@@ -74,6 +74,20 @@ impl Default for StickDeadzone {
     }
 }
 
+/// Southpaw layout: mirror every touch ZONE left-for-right — move stick on
+/// the right half, throw on the left, dash in the bottom-LEFT corner. Set
+/// from the persisted `Settings` like the deadzone. Zone tests are the only
+/// thing mirrored; drag math is untouched, and like every input-shaping
+/// setting this acts strictly pre-wire (the peer never knows).
+#[derive(Resource, Debug, Clone, Copy, Default)]
+pub struct Southpaw(pub bool);
+
+/// Reflect a position's X across the window's vertical centerline —
+/// the southpaw transform applied to zone probes.
+pub fn mirror_x(pos: Vec2, window: Vec2) -> Vec2 {
+    Vec2::new(window.x - pos.x, pos.y)
+}
+
 /// Sentinel id for the synthesized left-mouse-button touch. `u64::MAX`
 /// is well outside any real touchscreen id space (Bevy/Android emit
 /// small monotonic ids), so it cannot collide with a real touch.
@@ -223,14 +237,27 @@ pub fn is_throw_zone(pos: Vec2, window: Vec2) -> bool {
         && !is_taunt_zone(pos, window)
 }
 
+/// A touch's zone-probe position: the raw start position, or its mirror
+/// for the southpaw layout.
+#[inline]
+fn zone_probe(t: &TrackedTouch, window: Vec2, southpaw: bool) -> Vec2 {
+    if southpaw {
+        mirror_x(t.start_pos, window)
+    } else {
+        t.start_pos
+    }
+}
+
 /// Pick the touch driving the virtual stick. Sticky: if the
 /// `current` choice is still in the active list, keep it. Otherwise
-/// promote the first touch that STARTED in the left half. Returns
-/// `None` if no candidate exists.
+/// promote the first touch that STARTED in the move zone (the left
+/// half; the right for southpaw). Returns `None` if no candidate
+/// exists.
 pub fn select_stick_touch(
     current: Option<u64>,
     touches: &[TrackedTouch],
     window: Vec2,
+    southpaw: bool,
 ) -> Option<u64> {
     if let Some(id) = current
         && touches.iter().any(|t| t.id == id)
@@ -239,7 +266,7 @@ pub fn select_stick_touch(
     }
     touches
         .iter()
-        .find(|t| is_move_zone(t.start_pos, window))
+        .find(|t| is_move_zone(zone_probe(t, window, southpaw), window))
         .map(|t| t.id)
 }
 
@@ -250,6 +277,7 @@ pub fn select_throw_touch(
     current: Option<u64>,
     touches: &[TrackedTouch],
     window: Vec2,
+    southpaw: bool,
 ) -> Option<u64> {
     if let Some(id) = current
         && touches.iter().any(|t| t.id == id)
@@ -258,15 +286,18 @@ pub fn select_throw_touch(
     }
     touches
         .iter()
-        .find(|t| is_throw_zone(t.start_pos, window))
+        .find(|t| is_throw_zone(zone_probe(t, window, southpaw), window))
         .map(|t| t.id)
 }
 
 /// Pick the touch driving taunt. Same sticky pattern as stick/throw.
+/// (The taunt strip is full-width, so southpaw changes nothing here —
+/// the probe mirror is applied for uniformity.)
 pub fn select_taunt_touch(
     current: Option<u64>,
     touches: &[TrackedTouch],
     window: Vec2,
+    southpaw: bool,
 ) -> Option<u64> {
     if let Some(id) = current
         && touches.iter().any(|t| t.id == id)
@@ -275,7 +306,7 @@ pub fn select_taunt_touch(
     }
     touches
         .iter()
-        .find(|t| is_taunt_zone(t.start_pos, window))
+        .find(|t| is_taunt_zone(zone_probe(t, window, southpaw), window))
         .map(|t| t.id)
 }
 
@@ -284,6 +315,7 @@ pub fn select_dash_touch(
     current: Option<u64>,
     touches: &[TrackedTouch],
     window: Vec2,
+    southpaw: bool,
 ) -> Option<u64> {
     if let Some(id) = current
         && touches.iter().any(|t| t.id == id)
@@ -292,7 +324,7 @@ pub fn select_dash_touch(
     }
     touches
         .iter()
-        .find(|t| is_dash_zone(t.start_pos, window))
+        .find(|t| is_dash_zone(zone_probe(t, window, southpaw), window))
         .map(|t| t.id)
 }
 
@@ -399,9 +431,11 @@ pub fn update_virtual_stick(
     mut state: ResMut<TouchState>,
     window: Res<WindowSize>,
     deadzone: Res<StickDeadzone>,
+    southpaw: Res<Southpaw>,
 ) {
     let window_size = window.0;
-    state.stick_touch = select_stick_touch(state.stick_touch, &state.touches, window_size);
+    state.stick_touch =
+        select_stick_touch(state.stick_touch, &state.touches, window_size, southpaw.0);
     let inner = deadzone.0;
     state.stick = state.stick_touch.and_then(|id| {
         state.find(id).map(|t| {
@@ -416,20 +450,20 @@ pub fn update_virtual_stick(
     });
 }
 
-/// Pure transition for dash + throw/aim state. The LEFT stick aims while
-/// the throw button (any right-half touch) is held: `state.stick` must
+/// Pure transition for dash + throw/aim state. The move stick aims while
+/// the throw button (any throw-zone touch) is held: `state.stick` must
 /// already be resolved for this frame — the plugin chains
 /// `update_virtual_stick` first. Bevy-free so tests can drive it directly;
 /// [`update_throw_state`] is the system shim.
-pub fn apply_throw_state(state: &mut TouchState, window: Vec2) {
-    state.dash_touch = select_dash_touch(state.dash_touch, &state.touches, window);
+pub fn apply_throw_state(state: &mut TouchState, window: Vec2, southpaw: bool) {
+    state.dash_touch = select_dash_touch(state.dash_touch, &state.touches, window, southpaw);
     state.dash_held = state.dash_touch.is_some();
 
-    state.taunt_touch = select_taunt_touch(state.taunt_touch, &state.touches, window);
+    state.taunt_touch = select_taunt_touch(state.taunt_touch, &state.touches, window, southpaw);
     state.taunt_held = state.taunt_touch.is_some();
 
     let prev_throw = state.right_touch;
-    let new_throw = select_throw_touch(prev_throw, &state.touches, window);
+    let new_throw = select_throw_touch(prev_throw, &state.touches, window, southpaw);
     state.right_touch = new_throw;
 
     match new_throw {
@@ -469,9 +503,13 @@ pub fn apply_throw_state(state: &mut TouchState, window: Vec2) {
 
 /// PreUpdate system: resolves dash + throw/aim after the stick has been
 /// resolved. Thin shim over [`apply_throw_state`].
-pub fn update_throw_state(mut state: ResMut<TouchState>, window: Res<WindowSize>) {
+pub fn update_throw_state(
+    mut state: ResMut<TouchState>,
+    window: Res<WindowSize>,
+    southpaw: Res<Southpaw>,
+) {
     let window_size = window.0;
-    apply_throw_state(&mut state, window_size);
+    apply_throw_state(&mut state, window_size, southpaw.0);
 }
 
 /// Quantize an aim angle from radians (atan2 range, [-π, π]) to a u8
@@ -580,6 +618,7 @@ impl Plugin for InputTouchPlugin {
             .init_resource::<WindowSize>()
             .init_resource::<CursorPosition>()
             .init_resource::<StickDeadzone>()
+            .init_resource::<Southpaw>()
             .add_systems(
                 PreUpdate,
                 (update_touch_state, update_virtual_stick, update_throw_state).chain(),
@@ -930,7 +969,7 @@ mod tests {
             t(2, Vec2::new(200.0, 2000.0)), // left half (yes)
             t(3, Vec2::new(100.0, 2200.0)), // also left half (would tie but order wins)
         ];
-        assert_eq!(select_stick_touch(None, &touches, win), Some(2));
+        assert_eq!(select_stick_touch(None, &touches, win, false), Some(2));
     }
 
     #[test]
@@ -942,7 +981,7 @@ mod tests {
         ];
         // Touch 2 was selected when it started in the lower-left and
         // since drifted to the top-right; we still want to keep it.
-        assert_eq!(select_stick_touch(Some(2), &touches, win), Some(2));
+        assert_eq!(select_stick_touch(Some(2), &touches, win, false), Some(2));
     }
 
     #[test]
@@ -950,7 +989,7 @@ mod tests {
         let win = Vec2::new(1080.0, 2400.0);
         let touches = vec![t(3, Vec2::new(100.0, 2200.0))];
         // Touch 2 ended; touch 3 is in the left half so it gets promoted.
-        assert_eq!(select_stick_touch(Some(2), &touches, win), Some(3));
+        assert_eq!(select_stick_touch(Some(2), &touches, win, false), Some(3));
     }
 
     #[test]
@@ -960,14 +999,14 @@ mod tests {
             t(1, Vec2::new(900.0, 100.0)),
             t(2, Vec2::new(900.0, 2300.0)),
         ];
-        assert_eq!(select_stick_touch(None, &touches, win), None);
+        assert_eq!(select_stick_touch(None, &touches, win, false), None);
     }
 
     #[test]
     fn select_stick_no_touches_returns_none() {
         let win = Vec2::new(1080.0, 2400.0);
-        assert_eq!(select_stick_touch(None, &[], win), None);
-        assert_eq!(select_stick_touch(Some(99), &[], win), None);
+        assert_eq!(select_stick_touch(None, &[], win, false), None);
+        assert_eq!(select_stick_touch(Some(99), &[], win, false), None);
     }
 
     // ---- Cycle 3: throw-zone gate (right half minus the dash corner) ----
@@ -990,13 +1029,13 @@ mod tests {
         let win = Vec2::new(1080.0, 2400.0);
         // A move-zone start never becomes the taunt touch.
         let low = [t(1, Vec2::new(100.0, 2000.0))];
-        assert_eq!(select_taunt_touch(None, &low, win), None);
+        assert_eq!(select_taunt_touch(None, &low, win, false), None);
         // A strip start does, and stays selected while alive.
         let strip = [t(2, Vec2::new(540.0, 200.0))];
-        assert_eq!(select_taunt_touch(None, &strip, win), Some(2));
-        assert_eq!(select_taunt_touch(Some(2), &strip, win), Some(2));
+        assert_eq!(select_taunt_touch(None, &strip, win, false), Some(2));
+        assert_eq!(select_taunt_touch(Some(2), &strip, win, false), Some(2));
         // Gone touch: selection clears.
-        assert_eq!(select_taunt_touch(Some(2), &low, win), None);
+        assert_eq!(select_taunt_touch(Some(2), &low, win, false), None);
     }
 
     #[test]
@@ -1066,7 +1105,7 @@ mod tests {
             t(2, Vec2::new(900.0, 1800.0)), // right half (yes)
             t(3, Vec2::new(800.0, 1900.0)), // right half too, but order wins
         ];
-        assert_eq!(select_throw_touch(None, &touches, win), Some(2));
+        assert_eq!(select_throw_touch(None, &touches, win, false), Some(2));
     }
 
     #[test]
@@ -1076,14 +1115,14 @@ mod tests {
             t(2, Vec2::new(100.0, 1800.0)), // dragged into the left half
             t(3, Vec2::new(900.0, 1800.0)),
         ];
-        assert_eq!(select_throw_touch(Some(2), &touches, win), Some(2));
+        assert_eq!(select_throw_touch(Some(2), &touches, win, false), Some(2));
     }
 
     #[test]
     fn select_throw_replaces_when_current_ended() {
         let win = Vec2::new(1080.0, 2400.0);
         let touches = vec![t(3, Vec2::new(900.0, 1800.0))];
-        assert_eq!(select_throw_touch(Some(2), &touches, win), Some(3));
+        assert_eq!(select_throw_touch(Some(2), &touches, win, false), Some(3));
     }
 
     #[test]
@@ -1093,14 +1132,14 @@ mod tests {
             t(1, Vec2::new(100.0, 100.0)),
             t(2, Vec2::new(200.0, 2300.0)),
         ];
-        assert_eq!(select_throw_touch(None, &touches, win), None);
+        assert_eq!(select_throw_touch(None, &touches, win, false), None);
     }
 
     #[test]
     fn select_throw_no_touches_returns_none() {
         let win = Vec2::new(1080.0, 2400.0);
-        assert_eq!(select_throw_touch(None, &[], win), None);
-        assert_eq!(select_throw_touch(Some(99), &[], win), None);
+        assert_eq!(select_throw_touch(None, &[], win, false), None);
+        assert_eq!(select_throw_touch(Some(99), &[], win, false), None);
     }
 
     // ---- Cycle 3: stick heading ----
@@ -1144,7 +1183,7 @@ mod tests {
         let win = Vec2::new(1080.0, 2400.0);
         let mut s = TouchState::default();
         hold_throw_button(&mut s, 1);
-        apply_throw_state(&mut s, win);
+        apply_throw_state(&mut s, win, false);
         assert!(s.throw_held);
         assert!(!s.aim_active, "no left stick → tap-throw on release");
         assert_eq!(s.aim_vec, None);
@@ -1159,7 +1198,7 @@ mod tests {
             ..Default::default()
         };
         hold_throw_button(&mut s, 1);
-        apply_throw_state(&mut s, win);
+        apply_throw_state(&mut s, win, false);
         assert!(s.throw_held);
         assert!(s.aim_active);
         assert_eq!(s.aim_vec, Some(Vec2::new(0.0, -1.0)));
@@ -1178,11 +1217,11 @@ mod tests {
             ..Default::default()
         };
         hold_throw_button(&mut s, 1);
-        apply_throw_state(&mut s, win);
+        apply_throw_state(&mut s, win, false);
         assert!(s.aim_active);
         // Next frame the left thumb re-centers (or lifts): back to tap mode.
         s.stick = Some(Vec2::ZERO);
-        apply_throw_state(&mut s, win);
+        apply_throw_state(&mut s, win, false);
         assert!(s.throw_held);
         assert!(!s.aim_active);
         assert_eq!(s.aim_vec, None);
@@ -1196,7 +1235,7 @@ mod tests {
             ..Default::default()
         };
         hold_throw_button(&mut s, 1);
-        apply_throw_state(&mut s, win);
+        apply_throw_state(&mut s, win, false);
         assert!(s.aim_active);
 
         // Frame 2: both thumbs lift at once.
@@ -1209,7 +1248,7 @@ mod tests {
             empty_canceled_helper(),
             empty_active(),
         );
-        apply_throw_state(&mut s, win);
+        apply_throw_state(&mut s, win, false);
         assert!(!s.throw_held, "release edge must fire");
         assert!(s.aim_active, "aim held for the spawn frame");
         assert_eq!(s.aim_vec, Some(Vec2::new(0.0, -1.0)));
@@ -1224,7 +1263,7 @@ mod tests {
             empty_canceled_helper(),
             empty_active(),
         );
-        apply_throw_state(&mut s, win);
+        apply_throw_state(&mut s, win, false);
         assert!(!s.aim_active);
         assert_eq!(s.aim_vec, None);
         assert!(!s.aim_release_sticky);
@@ -1235,7 +1274,7 @@ mod tests {
         let win = Vec2::new(1080.0, 2400.0);
         let mut s = TouchState::default();
         hold_throw_button(&mut s, 1);
-        apply_throw_state(&mut s, win);
+        apply_throw_state(&mut s, win, false);
         assert!(s.throw_held && !s.aim_active);
         apply_touch_events(
             &mut s,
@@ -1245,7 +1284,7 @@ mod tests {
             empty_canceled_helper(),
             empty_active(),
         );
-        apply_throw_state(&mut s, win);
+        apply_throw_state(&mut s, win, false);
         assert!(!s.throw_held);
         assert!(!s.aim_active);
         assert!(!s.aim_release_sticky);
@@ -1352,7 +1391,7 @@ mod tests {
             mouse_active(drift),
         );
         // Now run the same select+compute the system would.
-        s.stick_touch = select_stick_touch(s.stick_touch, &s.touches, win);
+        s.stick_touch = select_stick_touch(s.stick_touch, &s.touches, win, false);
         assert_eq!(s.stick_touch, Some(MOUSE_TOUCH_ID));
         let stick = compute_stick(
             start,
