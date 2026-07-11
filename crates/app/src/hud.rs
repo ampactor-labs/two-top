@@ -135,17 +135,49 @@ fn spawn_hud(
     ));
 }
 
+/// Seconds a freshly-earned pip spends slamming in (oversized + overdriven,
+/// settling to rest). The score beat was the one silent thing about a kill.
+const PIP_SLAM_SECS: f32 = 0.38;
+/// Scale multiplier at the moment the pip lands.
+const PIP_SLAM_SCALE: f32 = 2.3;
+
+/// Per-player slam bookkeeping: previous score + the live slam (pip index,
+/// seconds remaining).
+#[derive(Default)]
+struct PipSlams {
+    prev: [u8; 2],
+    live: [Option<(u8, f32)>; 2],
+}
+
 fn update_score_pips(
     screen: Res<State<AppScreen>>,
     awaiting: Res<AwaitingPeer>,
     score: Res<MatchScore>,
     time: Res<Time<Real>>,
+    mut slams: Local<PipSlams>,
     mut q: Query<(&ScorePip, &mut Sprite, &mut Visibility)>,
 ) {
     // Pips are premature while sitting alone in an online room.
     let in_match = *screen.get() == AppScreen::InMatch && !awaiting.0;
     // Smooth pulse for the match-point pip (render-only, non-rollback clock).
     let pulse = 0.4 + 0.6 * (time.elapsed_secs() * 6.0).sin().mul_add(0.5, 0.5);
+
+    // Slam detection: a player's count climbing arms a slam on the pip that
+    // just filled; a reset (rematch) just re-baselines quietly.
+    let dt = time.delta_secs();
+    for (player, won) in [(0usize, score.p0), (1usize, score.p1)] {
+        if won > slams.prev[player] && in_match {
+            slams.live[player] = Some((won - 1, PIP_SLAM_SECS));
+        }
+        slams.prev[player] = won;
+        if let Some((_, ref mut left)) = slams.live[player] {
+            *left -= dt;
+            if *left <= 0.0 {
+                slams.live[player] = None;
+            }
+        }
+    }
+
     for (pip, mut sprite, mut vis) in &mut q {
         if !in_match {
             *vis = Visibility::Hidden;
@@ -166,6 +198,19 @@ fn update_score_pips(
                 0
             };
         }
+        // The slam: the freshly-earned pip lands oversized and overdriven,
+        // easing back to rest — the kill writes itself onto the scoreboard.
+        let slam = slams.live[pip.player as usize]
+            .filter(|(idx, _)| *idx == pip.idx)
+            .map(|(_, left)| (left / PIP_SLAM_SECS).clamp(0.0, 1.0));
+        if let Some(t) = slam {
+            let eased = t * t; // decelerating settle
+            let scale = 1.0 + (PIP_SLAM_SCALE - 1.0) * eased;
+            sprite.custom_size = Some(Vec2::splat(PIP_SIZE * scale));
+            sprite.color = render::scale_color(Color::WHITE, 1.0 + 2.0 * eased);
+            continue;
+        }
+        sprite.custom_size = Some(Vec2::splat(PIP_SIZE));
         sprite.color = if at_match_point && is_next && !filled {
             Color::WHITE.with_alpha(pulse)
         } else {

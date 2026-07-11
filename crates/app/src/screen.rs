@@ -44,12 +44,15 @@ pub struct AwaitingPeer(pub bool);
 
 /// Which screen the app is showing. Both local and online builds boot into
 /// [`Title`](Self::Title); online starts the netplay lifecycle only after the
-/// player enters [`InMatch`](Self::InMatch).
+/// player enters [`InMatch`](Self::InMatch). [`Replays`](Self::Replays) is
+/// the tape list — picking one re-enters `InMatch` with the theater flag up
+/// (`crate::theater`), so playback wears the whole live presentation.
 #[derive(States, Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum AppScreen {
     #[default]
     Title,
     InMatch,
+    Replays,
 }
 
 /// World units below a duelist's (centre-anchored) origin where its feet meet
@@ -87,6 +90,7 @@ pub struct ScreenPlugin;
 impl Plugin for ScreenPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<AwaitingPeer>()
+            .init_resource::<VictoryPose>()
             .add_systems(Startup, spawn_overlays)
             .add_systems(OnEnter(AppScreen::InMatch), spawn_match)
             .add_systems(OnExit(AppScreen::InMatch), despawn_match)
@@ -97,6 +101,8 @@ impl Plugin for ScreenPlugin {
                     pick_arena.run_if(in_state(AppScreen::Title)),
                     title_buttons_input.run_if(in_state(AppScreen::Title)),
                     back_to_lobby.run_if(in_state(AppScreen::InMatch)),
+                    online_leave_input.run_if(in_state(AppScreen::InMatch)),
+                    update_victory_pose,
                     hide_absent_challenger,
                     update_title_overlay,
                     update_title_buttons,
@@ -105,6 +111,26 @@ impl Plugin for ScreenPlugin {
                     .chain(),
             );
     }
+}
+
+/// The decided match's winner, held through the summary. The app's atlas
+/// picker reads this and pins the winner's sprite on the CHARGE pose — a
+/// victory statue over the devouring. Render-only; the sim knows nothing.
+#[derive(Resource, Default)]
+pub struct VictoryPose(pub Option<usize>);
+
+fn update_victory_pose(
+    state: Res<MatchState>,
+    score: Res<MatchScore>,
+    mut pose: ResMut<VictoryPose>,
+) {
+    pose.0 = matches!(*state, MatchState::MatchOver).then(|| {
+        if score.p0 >= MATCH_WIN_THRESHOLD {
+            0
+        } else {
+            1
+        }
+    });
 }
 
 /// Build a fresh local SyncTest session (2 local players, distinct per-handle
@@ -126,6 +152,7 @@ fn build_synctest_session() -> Session<GgrsCfg> {
 /// selected arena's props, then (couch only) install a fresh SyncTest session.
 /// Spawn order is fixed so rollback entity ids are bit-identical across hosts
 /// (CONVENTIONS § Determinism). Online leaves the session to `perform_swap`.
+#[allow(clippy::too_many_arguments)]
 fn spawn_match(
     mut commands: Commands,
     asset_server: Res<AssetServer>,
@@ -133,6 +160,7 @@ fn spawn_match(
     selected: Res<SelectedArena>,
     netplay: Res<NetplayConfig>,
     practice: Res<crate::bot::PracticeMode>,
+    theater: Res<crate::theater::TheaterMode>,
     flip: Res<render::PerspectiveFlip>,
 ) {
     let layout = player_atlas_layout(&mut atlases);
@@ -244,11 +272,14 @@ fn spawn_match(
         flip.0,
     );
 
-    // Couch + practice: a fresh local session starts the sim from frame 0
-    // (practice forces local even on an online build — the bot supplies
-    // handle 1). Online: the matchbox driver inserts the P2P session once
-    // the peer connects.
-    if netplay.room_url.is_none() || practice.0 {
+    // Theater: the tape drives a playback session (check_distance 0 +
+    // input_delay 0 — the snapshot-scrub requirements). Couch + practice:
+    // a fresh local session starts the sim from frame 0 (practice forces
+    // local even on an online build — the bot supplies handle 1). Online:
+    // the matchbox driver inserts the P2P session once the peer connects.
+    if theater.active() {
+        commands.insert_resource(crate::theater::build_playback_session());
+    } else if netplay.room_url.is_none() || practice.0 {
         commands.insert_resource(build_synctest_session());
     }
 }
@@ -364,23 +395,28 @@ const TITLE_BODY_WIDTH: f32 = 1080.0;
 
 // ---- Title menu layout (window-fraction, y-down for taps) ----
 // Every interactive band lives below the notch/status-bar strip and inside
-// the thumb zone. Bands never overlap (settings.rs and room_code.rs share
-// this budget): settings 0.42–0.56 · practice 0.575–0.655 · room 0.68–0.78
-// · play 0.80–0.95.
+// the thumb zone. Bands never overlap (settings.rs, room_code.rs and
+// profile.rs share this budget): name/arena 0.24–0.36 · replays 0.365–0.415
+// · settings 0.42–0.565 · practice 0.575–0.655 · room 0.68–0.78 · play
+// 0.80–0.92.
 const PRACTICE_BTN_RECT: (f32, f32) = (0.575, 0.655);
 // PLAY sits clear of the bottom nav-bar/gesture strip (~last 6% of a phone).
 const PLAY_BTN_RECT: (f32, f32) = (0.80, 0.92);
+/// The thin REPLAYS band between the arena/name row and the settings rows.
+const REPLAYS_BTN_RECT: (f32, f32) = (0.365, 0.415);
 /// Couch-only: tapping the arena-name band cycles the arena.
 const ARENA_TAP_RECT: (f32, f32) = (0.24, 0.36);
 /// Screen-anchor Y (y-up, [-1,1]) for each button's center = 1 − 2·y_down.
 const PLAY_ANCHOR_Y: f32 = 1.0 - 2.0 * 0.855;
 const PRACTICE_ANCHOR_Y: f32 = 1.0 - 2.0 * 0.615;
+const REPLAYS_ANCHOR_Y: f32 = 1.0 - 2.0 * 0.39;
 
 /// Which title action a button fires.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum TitleAction {
     Play,
     Practice,
+    Replays,
 }
 
 /// One piece of a title button. Border/fill are quads, label is text; all
@@ -492,7 +528,10 @@ fn spawn_overlays(mut commands: Commands) {
         TextColor(render::palette::BONE),
         TextLayout::new_with_justify(Justify::Center),
         TextBounds::new_horizontal(TITLE_BODY_WIDTH),
-        ScreenAnchor::new(0.0, 0.40, 0.0, 0.0),
+        // 0.46 y-up ≈ 0.27 y-down: above the online NAME row (0.30–0.36)
+        // and still inside the couch arena-tap band (0.24–0.36, where this
+        // text IS the tappable arena name).
+        ScreenAnchor::new(0.0, 0.46, 0.0, 0.0),
         Transform::from_xyz(0.0, 0.0, 200.0),
         Visibility::Hidden,
     ));
@@ -513,6 +552,15 @@ fn spawn_overlays(mut commands: Commands) {
         PRACTICE_ANCHOR_Y,
         Vec2::new(640.0, 104.0),
         34.0,
+    );
+    // REPLAYS — a slimmer tertiary button; the tape list is a den, not a
+    // destination you sprint to.
+    spawn_title_button(
+        &mut commands,
+        TitleAction::Replays,
+        REPLAYS_ANCHOR_Y,
+        Vec2::new(420.0, 74.0),
+        28.0,
     );
     // Summary overlay — screen-centered (the kill-cam holds zoomed-in on
     // MatchOver, so a world-parked summary would sit off-center), shown only
@@ -584,18 +632,30 @@ fn title_buttons_input(
     window: Res<WindowSize>,
     mut next: ResMut<NextState<AppScreen>>,
     mut practice: ResMut<crate::bot::PracticeMode>,
-    mut autostart: Local<Option<bool>>,
+    mut autostart: Local<Option<Option<AppScreen>>>,
 ) {
-    // TWOTOP_AUTOSTART=1 skips the gesture (headless capture verification).
-    let auto = *autostart
-        .get_or_insert_with(|| std::env::var("TWOTOP_AUTOSTART").is_ok_and(|v| v == "1"));
-    if auto {
-        next.set(AppScreen::InMatch);
+    // TWOTOP_AUTOSTART=1 skips the gesture; =replays boots into the tape
+    // list (both for headless capture verification).
+    let auto = *autostart.get_or_insert_with(|| {
+        std::env::var("TWOTOP_AUTOSTART")
+            .map(|v| match v.as_str() {
+                "1" => Some(AppScreen::InMatch),
+                "replays" => Some(AppScreen::Replays),
+                _ => None,
+            })
+            .unwrap_or(None)
+    });
+    if let Some(target) = auto {
+        next.set(target);
         return;
     }
 
     if keys.just_pressed(KeyCode::KeyP) {
         practice.0 = !practice.0;
+    }
+    if keys.just_pressed(KeyCode::KeyV) {
+        next.set(AppScreen::Replays);
+        return;
     }
     let key_start = keys.just_pressed(KeyCode::Space)
         || keys.just_pressed(KeyCode::Enter)
@@ -613,6 +673,10 @@ fn title_buttons_input(
         let yd = t.position().y / win.y;
         if in_band(yd, PLAY_BTN_RECT) {
             next.set(AppScreen::InMatch);
+            return;
+        }
+        if in_band(yd, REPLAYS_BTN_RECT) {
+            next.set(AppScreen::Replays);
             return;
         }
         if in_band(yd, PRACTICE_BTN_RECT) {
@@ -640,6 +704,7 @@ fn update_title_buttons(
     screen: Res<State<AppScreen>>,
     netplay: Res<NetplayConfig>,
     practice: Res<crate::bot::PracticeMode>,
+    career: Res<crate::grudge::CareerRecord>,
     mut q: TitleButtonQuery,
 ) {
     let on_title = *screen.get() == AppScreen::Title;
@@ -682,9 +747,17 @@ fn update_title_buttons(
                                 "PLAY".to_string()
                             }
                         }
-                        // The label is constant; the filled/inverted box is
-                        // the on/off state (a standard toggle affordance).
-                        TitleAction::Practice => "PRACTICE VS BOT".to_string(),
+                        // The label carries the gauntlet climb once one is
+                        // underway; the filled/inverted box stays the on/off
+                        // state either way.
+                        TitleAction::Practice => {
+                            if career.gauntlet_tier > 0 {
+                                format!("GAUNTLET TIER {}", career.gauntlet_tier)
+                            } else {
+                                "PRACTICE VS BOT".to_string()
+                            }
+                        }
+                        TitleAction::Replays => "REPLAYS".to_string(),
                     };
                 }
                 if let Some(mut c) = color {
@@ -734,12 +807,14 @@ fn update_awaiting_peer(
     screen: Res<State<AppScreen>>,
     netplay: Res<NetplayConfig>,
     practice: Res<crate::bot::PracticeMode>,
+    theater: Res<crate::theater::TheaterMode>,
     lobby: Res<net::LobbyState>,
     mut awaiting: ResMut<AwaitingPeer>,
 ) {
     awaiting.0 = *screen.get() == AppScreen::InMatch
         && netplay.room_url.is_some()
         && !practice.0
+        && !theater.active()
         && !lobby.is_in_match();
 }
 
@@ -819,10 +894,97 @@ fn update_title_overlay(
     }
 }
 
+/// Compose the MatchOver summary. Couch keeps its classic card; online adds
+/// names, the rivalry standing, and the RUN IT BACK handshake state; the
+/// theater says what a finished tape needs to say. Pure so the copy has
+/// tests (the RUN IT BACK state machine reads better in assertions than on
+/// two phones).
+#[allow(clippy::too_many_arguments)]
+fn summary_text(
+    score: MatchScore,
+    online: bool,
+    practice: bool,
+    theater_names: Option<[Option<String>; 2]>,
+    local_handle: Option<usize>,
+    local_name: &str,
+    peer: Option<net::ProfileData>,
+    rivalry: Option<String>,
+    consent: net::RematchConsent,
+    opponent_gone: bool,
+    saved: bool,
+) -> String {
+    let p0_won = score.p0 >= MATCH_WIN_THRESHOLD;
+
+    // Theater: the tape ran out — say who won it and how to leave.
+    if let Some(names) = theater_names {
+        let idx = if p0_won { 0 } else { 1 };
+        let fallback = if p0_won { "CUR" } else { "STAG" };
+        let who = names[idx].clone().unwrap_or_else(|| fallback.to_string());
+        return format!(
+            "{who} WINS\n\n{}  -  {}\n\nTAPE ENDS\ntap top edge for the list",
+            score.p0, score.p1
+        );
+    }
+
+    if !online || practice {
+        let winner = winner_label(score);
+        let replay_line = if saved {
+            "\n\nmatch replay saved - share the .bmrg"
+        } else {
+            ""
+        };
+        return format!(
+            "{winner}\n\n{}  -  {}\n\npress THROW to play again\npress ESC for lobby{replay_line}",
+            score.p0, score.p1
+        );
+    }
+
+    // Online: name the winner by who they ARE when we know it.
+    let me = local_handle.unwrap_or(0);
+    let peer_name = peer
+        .map(|p| crate::profile::name_from_slots(&p.name))
+        .unwrap_or_else(|| "THE CHALLENGER".to_string());
+    let i_won = if me == 0 { p0_won } else { !p0_won };
+    let winner = if i_won {
+        format!("{local_name} WINS")
+    } else {
+        format!("{peer_name} WINS")
+    };
+    let rivalry_line = rivalry.map(|r| format!("\n{r}")).unwrap_or_default();
+    let handshake = if opponent_gone {
+        "the field is yours".to_string()
+    } else {
+        match (consent.local, consent.peer) {
+            (false, false) => "tap THROW to run it back".to_string(),
+            (true, false) => format!("waiting on {peer_name}..."),
+            (false, true) => format!("{peer_name} WANTS TO RUN IT BACK\ntap THROW"),
+            (true, true) => "running it back...".to_string(),
+        }
+    };
+    let replay_line = if saved {
+        "\nmatch replay saved - share the .bmrg"
+    } else {
+        ""
+    };
+    format!(
+        "{winner}\n\n{}  -  {}{rivalry_line}\n\n{handshake}\ntap top edge to leave{replay_line}",
+        score.p0, score.p1
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
 fn update_summary_overlay(
     state: Res<MatchState>,
     score: Res<MatchScore>,
     netplay: Res<NetplayConfig>,
+    practice: Res<crate::bot::PracticeMode>,
+    theater: Res<crate::theater::TheaterMode>,
+    local: Res<crate::netplay::LocalPlayerHandle>,
+    profile: Res<crate::profile::LocalProfile>,
+    peer: Res<net::PeerProfile>,
+    career: Res<crate::grudge::CareerRecord>,
+    consent: Res<net::RematchConsent>,
+    lobby: Res<net::LobbyState>,
     saved: Res<crate::recorder::LastSavedReplay>,
     mut q: Query<(&mut Text2d, &mut Visibility), With<SummaryOverlay>>,
 ) {
@@ -831,27 +993,54 @@ fn update_summary_overlay(
     };
     if matches!(*state, MatchState::MatchOver) {
         *vis = Visibility::Visible;
-        let winner = winner_label(*score);
-        let again = "press THROW to play again";
-        let lobby = if netplay.room_url.is_none() {
-            "\npress ESC for lobby"
-        } else {
-            ""
-        };
-        // The whole match is a shareable file (deterministic sim = the input
-        // tape IS the recording). Point at it once the recorder lands it.
-        let replay_line = if saved.0.is_some() {
-            "\n\nmatch replay saved - share the .bmrg"
-        } else {
-            ""
-        };
-        text.0 = format!(
-            "{winner}\n\n{}  -  {}\n\n{again}{lobby}{replay_line}",
-            score.p0, score.p1
+        let opponent_gone = matches!(*lobby, net::LobbyState::Forfeited { .. });
+        text.0 = summary_text(
+            *score,
+            netplay.room_url.is_some(),
+            practice.0,
+            theater.active().then(|| theater.header_names()),
+            local.0,
+            &profile.name_string(),
+            peer.0,
+            career.rivalry_line(peer.0),
+            *consent,
+            opponent_gone,
+            saved.0.is_some(),
         );
     } else {
         *vis = Visibility::Hidden;
     }
+}
+
+/// Online summary exit: a top-band tap or Escape LEAVES the match cleanly —
+/// goodbye on the side-channel, socket + session torn down, back to Title.
+/// Exclusive-world because the teardown touches the non-send socket.
+fn online_leave_input(world: &mut World) {
+    let online = world.resource::<NetplayConfig>().room_url.is_some();
+    let practice = world.resource::<crate::bot::PracticeMode>().0;
+    let theater = world.resource::<crate::theater::TheaterMode>().active();
+    if !online || practice || theater {
+        return;
+    }
+    if !matches!(*world.resource::<MatchState>(), MatchState::MatchOver) {
+        return;
+    }
+    let esc = world
+        .resource::<ButtonInput<KeyCode>>()
+        .just_pressed(KeyCode::Escape);
+    let win = world.resource::<WindowSize>().0;
+    let tapped = win.y > 0.0
+        && world
+            .resource::<Touches>()
+            .iter_just_pressed()
+            .any(|t| in_band(t.position().y / win.y, (0.02, 0.18)));
+    if !(esc || tapped) {
+        return;
+    }
+    crate::netplay::leave_online_match(world);
+    world
+        .resource_mut::<NextState<AppScreen>>()
+        .set(AppScreen::Title);
 }
 
 fn arena_name(id: sim::ArenaId) -> &'static str {
@@ -916,5 +1105,118 @@ mod tests {
         assert_eq!(id, sim::ArenaId::Reliquary);
         id = next_arena(id);
         assert_eq!(id, sim::ArenaId::Anchor, "wraps back to the start");
+    }
+
+    // ---- The online summary's RUN IT BACK state machine ----
+
+    fn online_summary(consent: net::RematchConsent, gone: bool) -> String {
+        let peer = net::ProfileData {
+            install_id: 7,
+            name: [4, 5, 6, 0], // TAGC
+        };
+        summary_text(
+            MatchScore {
+                p0: MATCH_WIN_THRESHOLD,
+                p1: 2,
+            },
+            true,  // online
+            false, // practice
+            None,  // theater
+            Some(0),
+            "CURS",
+            Some(peer),
+            Some("2ND MEETING with TAGC - tied 1-1".into()),
+            consent,
+            gone,
+            true,
+        )
+    }
+
+    #[test]
+    fn summary_walks_the_handshake_states() {
+        let idle = online_summary(net::RematchConsent::default(), false);
+        assert!(idle.contains("CURS WINS"), "{idle}");
+        assert!(idle.contains("tap THROW to run it back"), "{idle}");
+        assert!(idle.contains("2ND MEETING"), "{idle}");
+
+        let waiting = online_summary(
+            net::RematchConsent {
+                local: true,
+                peer: false,
+            },
+            false,
+        );
+        assert!(waiting.contains("waiting on TAGC"), "{waiting}");
+
+        let asked = online_summary(
+            net::RematchConsent {
+                local: false,
+                peer: true,
+            },
+            false,
+        );
+        assert!(asked.contains("TAGC WANTS TO RUN IT BACK"), "{asked}");
+
+        let both = online_summary(
+            net::RematchConsent {
+                local: true,
+                peer: true,
+            },
+            false,
+        );
+        assert!(both.contains("running it back"), "{both}");
+    }
+
+    #[test]
+    fn summary_with_a_fled_opponent_offers_no_handshake() {
+        let fled = online_summary(net::RematchConsent::default(), true);
+        assert!(fled.contains("the field is yours"), "{fled}");
+        assert!(!fled.contains("run it back"), "{fled}");
+    }
+
+    #[test]
+    fn theater_summary_says_tape_ends() {
+        let text = summary_text(
+            MatchScore {
+                p0: 1,
+                p1: MATCH_WIN_THRESHOLD,
+            },
+            false,
+            false,
+            Some([Some("CURS".into()), Some("TAGC".into())]),
+            None,
+            "",
+            None,
+            None,
+            net::RematchConsent::default(),
+            false,
+            false,
+        );
+        assert!(text.contains("TAGC WINS"), "{text}");
+        assert!(text.contains("TAPE ENDS"), "{text}");
+        assert!(!text.contains("THROW"), "{text}");
+    }
+
+    #[test]
+    fn couch_summary_keeps_the_classic_card() {
+        let text = summary_text(
+            MatchScore {
+                p0: MATCH_WIN_THRESHOLD,
+                p1: 4,
+            },
+            false,
+            false,
+            None,
+            None,
+            "",
+            None,
+            None,
+            net::RematchConsent::default(),
+            false,
+            true,
+        );
+        assert!(text.contains("CUR WINS"), "{text}");
+        assert!(text.contains("press THROW to play again"), "{text}");
+        assert!(text.contains("replay saved"), "{text}");
     }
 }

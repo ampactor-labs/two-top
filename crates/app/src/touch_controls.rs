@@ -15,7 +15,9 @@
 //! desktop capture verification).
 
 use bevy::prelude::*;
-use input_touch::{STICK_DEADZONE_SATURATION, STICK_MAX_RADIUS_PX, TouchState, WindowSize};
+use input_touch::{
+    STICK_DEADZONE_SATURATION, STICK_MAX_RADIUS_PX, Southpaw, TouchState, WindowSize,
+};
 
 use crate::anchor::{ScreenAnchor, ScreenAnchorSet, ViewRect};
 use crate::screen::{AppScreen, AwaitingPeer};
@@ -27,10 +29,17 @@ enum Part {
     MoveKnob,
     ThrowRing,
     Dash,
+    /// The taunt strip's standing affordance — the one control that had
+    /// no visible home (the top strip was invisible; players never found
+    /// it without the one-shot hint).
+    Taunt,
 }
 
 #[derive(Component)]
 struct DashLabel;
+
+#[derive(Component)]
+struct TauntLabel;
 
 /// One-shot onboarding labels for the center-split scheme. Each hint
 /// disappears forever (this app run) the first time its control is used —
@@ -106,7 +115,8 @@ fn spawn_controls(
             Visibility::Hidden,
         ));
     }
-    // The dash corner ring + label.
+    // The dash corner ring + label (anchor re-set every frame — southpaw
+    // moves it to the bottom-left).
     commands.spawn((
         Part::Dash,
         Sprite {
@@ -115,7 +125,7 @@ fn spawn_controls(
             custom_size: Some(Vec2::splat(DASH_RING_SIZE)),
             ..default()
         },
-        dash_anchor(),
+        dash_anchor(false),
         Transform::from_xyz(0.0, 0.0, 60.0),
         Visibility::Hidden,
     ));
@@ -128,7 +138,35 @@ fn spawn_controls(
         },
         TextColor(dash_idle()),
         TextLayout::new_with_justify(Justify::Center),
-        dash_anchor(),
+        dash_anchor(false),
+        Transform::from_xyz(0.0, 0.0, 61.0),
+        Visibility::Hidden,
+    ));
+    // The taunt strip's standing mark: a slim ring + label top-center,
+    // inside the strip (`TAUNT_ZONE_Y_FRAC`), clear of the notch. Dim
+    // until the flex is live — a home, not a billboard.
+    commands.spawn((
+        Part::Taunt,
+        Sprite {
+            image: ring_img,
+            color: taunt_idle(),
+            custom_size: Some(Vec2::splat(TAUNT_RING_SIZE)),
+            ..default()
+        },
+        taunt_anchor(),
+        Transform::from_xyz(0.0, 0.0, 60.0),
+        Visibility::Hidden,
+    ));
+    commands.spawn((
+        TauntLabel,
+        Text2d::new("TAUNT"),
+        TextFont {
+            font_size: 24.0,
+            ..default()
+        },
+        TextColor(taunt_idle()),
+        TextLayout::new_with_justify(Justify::Center),
+        taunt_anchor(),
         Transform::from_xyz(0.0, 0.0, 61.0),
         Visibility::Hidden,
     ));
@@ -156,16 +194,35 @@ fn spawn_controls(
     }
 }
 
+/// Fixed taunt-mark ring diameter (world units) and its anchor: centered
+/// in the top strip, below any notch.
+const TAUNT_RING_SIZE: f32 = 96.0;
+
+fn taunt_anchor() -> ScreenAnchor {
+    // Strip spans [0, TAUNT_ZONE_Y_FRAC] y-down; sit at its lower half so
+    // a notch/status bar never covers the mark.
+    ScreenAnchor::new(0.0, 1.0 - 2.0 * (input_touch::TAUNT_ZONE_Y_FRAC * 0.72), 0.0, 0.0)
+}
+
+fn taunt_idle() -> Color {
+    render::palette::COLD_STONE.with_alpha(0.30)
+}
+
+fn taunt_active() -> Color {
+    render::scale_color(render::palette::SPARK, 1.3).with_alpha(0.9)
+}
+
 /// Center of the dash zone as a screen anchor. A zone spanning [F, 1] of
 /// the window has its center at anchor frac F on x — and -F on y, since
-/// the zone fraction counts y-down while anchors count y-up.
-fn dash_anchor() -> ScreenAnchor {
-    ScreenAnchor::new(
-        input_touch::DASH_ZONE_X_FRAC,
-        -input_touch::DASH_ZONE_Y_FRAC,
-        0.0,
-        0.0,
-    )
+/// the zone fraction counts y-down while anchors count y-up. Southpaw
+/// mirrors the corner to the bottom-left.
+fn dash_anchor(southpaw: bool) -> ScreenAnchor {
+    let x = if southpaw {
+        -input_touch::DASH_ZONE_X_FRAC
+    } else {
+        input_touch::DASH_ZONE_X_FRAC
+    };
+    ScreenAnchor::new(x, -input_touch::DASH_ZONE_Y_FRAC, 0.0, 0.0)
 }
 
 /// Dash reads brightest — it's the one control that must be findable blind.
@@ -184,31 +241,71 @@ fn screen_to_world(p: Vec2, win: Vec2, rect: &ViewRect) -> Vec2 {
     rect.center + rect.half * frac
 }
 
+/// The control layer's read-side context, bundled so `update_controls`
+/// stays under Bevy's 16-system-param ceiling.
+#[derive(bevy::ecs::system::SystemParam)]
+struct ControlCtx<'w> {
+    shown: Res<'w, TouchControlsShown>,
+    screen: Res<'w, State<AppScreen>>,
+    awaiting: Res<'w, AwaitingPeer>,
+    theater: Res<'w, crate::theater::TheaterMode>,
+    southpaw: Res<'w, Southpaw>,
+    match_state: Res<'w, sim::MatchState>,
+    touch: Res<'w, TouchState>,
+    window: Res<'w, WindowSize>,
+    rect: Res<'w, ViewRect>,
+    time: Res<'w, Time<Real>>,
+    local_handle: Res<'w, crate::netplay::LocalPlayerHandle>,
+}
+
 #[allow(clippy::type_complexity, clippy::too_many_arguments)]
 fn update_controls(
-    shown: Res<TouchControlsShown>,
-    screen: Res<State<AppScreen>>,
-    awaiting: Res<AwaitingPeer>,
-    match_state: Res<sim::MatchState>,
-    touch: Res<TouchState>,
-    window: Res<WindowSize>,
-    rect: Res<ViewRect>,
-    time: Res<Time<Real>>,
-    local_handle: Res<crate::netplay::LocalPlayerHandle>,
-    sim_players: Query<(&sim::Player, &sim::ThrowCharge, &sim::DashState)>,
+    ctx: ControlCtx,
+    sim_players: Query<(&sim::Player, &sim::ThrowCharge, &sim::DashState, &sim::Taunt)>,
     booms: Query<(&sim::Boomerang, &sim::BoomerangMods)>,
     mut hints_used: ResMut<HintsUsed>,
-    mut parts: Query<(&Part, &mut Sprite, &mut Visibility, &mut Transform)>,
-    mut labels: Query<(&mut TextColor, &mut Visibility), (With<DashLabel>, Without<Part>)>,
-    mut hints: Query<(&HintZone, &mut Visibility), (Without<Part>, Without<DashLabel>)>,
+    mut parts: Query<(
+        &Part,
+        &mut Sprite,
+        &mut Visibility,
+        &mut Transform,
+        Option<&mut ScreenAnchor>,
+    )>,
+    mut labels: Query<
+        (&mut TextColor, &mut Visibility, &mut ScreenAnchor),
+        (With<DashLabel>, Without<Part>),
+    >,
+    mut taunt_labels: Query<
+        (&mut TextColor, &mut Visibility),
+        (With<TauntLabel>, Without<DashLabel>, Without<Part>),
+    >,
+    mut hints: Query<
+        (&HintZone, &mut Visibility, &mut ScreenAnchor),
+        (Without<Part>, Without<DashLabel>, Without<TauntLabel>),
+    >,
 ) {
+    let ControlCtx {
+        shown,
+        screen,
+        awaiting,
+        theater,
+        southpaw,
+        match_state,
+        touch,
+        window,
+        rect,
+        time,
+        local_handle,
+    } = ctx;
     if !shown.0 {
         return;
     }
-    // Only during live play — not the title, the pre-peer waiting room, or
-    // the match-over summary (the controls were overlapping the win text).
+    // Only during live play — not the title, the pre-peer waiting room, the
+    // match-over summary (the controls were overlapping the win text), or
+    // a tape playing in the theater (the tape's thumbs, not yours).
     let over = matches!(*match_state, sim::MatchState::MatchOver);
-    let live = *screen.get() == AppScreen::InMatch && !awaiting.0 && !over;
+    let live =
+        *screen.get() == AppScreen::InMatch && !awaiting.0 && !over && !theater.active();
     let win = window.0;
     let ready = live && win.x > 0.0 && win.y > 0.0 && rect.half != Vec2::ZERO;
 
@@ -219,8 +316,9 @@ fn update_controls(
     // fresh press re-arms).
     let local = local_handle.0.unwrap_or(0);
     let local_sim = sim_players.iter().find(|(p, ..)| p.handle == local);
-    let charge_armed = local_sim.is_some_and(|(_, c, _)| c.0 > 0);
-    let dash_state = local_sim.map(|(_, _, d)| *d);
+    let charge_armed = local_sim.is_some_and(|(_, c, ..)| c.0 > 0);
+    let dash_state = local_sim.map(|(_, _, d, _)| *d);
+    let taunting = local_sim.is_some_and(|(.., t)| t.0 > 0);
     let fang_out = booms
         .iter()
         .any(|(b, m)| b.owner_handle == local && !m.is_secondary);
@@ -278,7 +376,7 @@ fn update_controls(
     // A slow breath on the dash ring so it draws the eye until first used.
     let pulse = 0.75 + 0.25 * (time.elapsed_secs() * 2.5).sin();
 
-    for (part, mut sprite, mut vis, mut tx) in &mut parts {
+    for (part, mut sprite, mut vis, mut tx, anchor) in &mut parts {
         match *part {
             Part::MoveBase | Part::MoveKnob => {
                 let Some((base, knob)) = move_pose else {
@@ -325,12 +423,35 @@ fn update_controls(
                     render::palette::EMBER.with_alpha(0.5)
                 };
             }
+            Part::Taunt => {
+                *vis = if live {
+                    Visibility::Visible
+                } else {
+                    Visibility::Hidden
+                };
+                tx.rotation = Quat::from_rotation_z(-time.elapsed_secs() * 0.4);
+                sprite.color = if taunting {
+                    taunt_active()
+                } else if touch.taunt_held {
+                    render::palette::SPARK.with_alpha(0.7)
+                } else {
+                    taunt_idle().with_alpha(0.30 * pulse)
+                };
+                sprite.custom_size = Some(Vec2::splat(
+                    TAUNT_RING_SIZE * if taunting { 1.25 } else { 1.0 },
+                ));
+            }
             Part::Dash => {
                 *vis = if live {
                     Visibility::Visible
                 } else {
                     Visibility::Hidden
                 };
+                // Southpaw parks the corner bottom-left; keep the anchor
+                // live so a title-screen toggle applies mid-session.
+                if let Some(mut a) = anchor {
+                    *a = dash_anchor(southpaw.0);
+                }
                 tx.rotation = Quat::from_rotation_z(time.elapsed_secs() * 0.6);
                 match dash_state {
                     // Refilling: dim and shrunken, growing back to full size
@@ -362,12 +483,13 @@ fn update_controls(
             }
         }
     }
-    for (mut color, mut vis) in &mut labels {
+    for (mut color, mut vis, mut anchor) in &mut labels {
         *vis = if live {
             Visibility::Visible
         } else {
             Visibility::Hidden
         };
+        *anchor = dash_anchor(southpaw.0);
         color.0 = match dash_state {
             Some(sim::DashState::Cooldown { .. }) => {
                 render::palette::COLD_STONE.with_alpha(0.35)
@@ -377,12 +499,31 @@ fn update_controls(
             _ => dash_idle(),
         };
     }
-    for (zone, mut vis) in &mut hints {
+    for (mut color, mut vis) in &mut taunt_labels {
+        *vis = if live {
+            Visibility::Visible
+        } else {
+            Visibility::Hidden
+        };
+        color.0 = if taunting {
+            taunt_active()
+        } else {
+            taunt_idle().with_alpha(0.45)
+        };
+    }
+    for (zone, mut vis, mut anchor) in &mut hints {
         let used = match zone {
             HintZone::Move => hints_used.moved,
             HintZone::Throw => hints_used.threw,
             HintZone::Taunt => hints_used.taunted,
         };
+        // The move/throw halves swap for southpaw; the hints follow.
+        let mirror = if southpaw.0 { -1.0 } else { 1.0 };
+        match zone {
+            HintZone::Move => anchor.frac.x = -0.5 * mirror,
+            HintZone::Throw => anchor.frac.x = 0.5 * mirror,
+            HintZone::Taunt => {}
+        }
         *vis = if live && !used {
             Visibility::Visible
         } else {

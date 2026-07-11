@@ -31,8 +31,10 @@ mod dark_beyond;
 mod debug_overlay;
 mod devour;
 mod grudge;
+mod profile;
 mod recorder;
 mod room_code;
+mod theater;
 mod touch_controls;
 mod haptics;
 mod hud;
@@ -49,8 +51,10 @@ use dark_beyond::DarkBeyondPlugin;
 use debug_overlay::DebugInputOverlayPlugin;
 use devour::DevourPlugin;
 use grudge::GrudgePlugin;
+use profile::ProfilePlugin;
 use recorder::MatchRecorderPlugin;
 use room_code::RoomCodePlugin;
+use theater::TheaterPlugin;
 use touch_controls::TouchControlsPlugin;
 use haptics::HapticsPlugin;
 use hud::HudPlugin;
@@ -182,8 +186,10 @@ pub fn run() {
         .add_plugins(DarkBeyondPlugin)
         .add_plugins(DevourPlugin)
         .add_plugins(GrudgePlugin)
+        .add_plugins(ProfilePlugin)
         .add_plugins(MatchRecorderPlugin)
         .add_plugins(RoomCodePlugin)
+        .add_plugins(TheaterPlugin)
         .add_plugins(TouchControlsPlugin)
         .add_plugins(BotPlugin)
         .add_plugins(HudPlugin)
@@ -193,6 +199,7 @@ pub fn run() {
         .add_plugins(ScreenPlugin)
         .add_plugins(SettingsPlugin)
         .init_resource::<netplay::LocalPlayerHandle>()
+        .init_resource::<netplay::RecentAbsence>()
         .init_resource::<render::PerspectiveFlip>()
         // Full-bleed void: whatever the aspect ratio shows beyond the arena
         // island is composed palette darkness, never engine-default gray.
@@ -232,7 +239,10 @@ pub fn run() {
 
     // Platform input source (level signals only; exactly one source).
     // Android: touch. Everything else (PC): keyboard — WASD for P0, arrows
-    // for P1, so two friends play couch versus on one keyboard.
+    // for P1, so two friends play couch versus on one keyboard. After the
+    // source (and the bot's patch): the online rematch gate converts a
+    // MatchOver THROW press into handshake consent, and — when a tape is
+    // loaded — the theater's playback source replaces the whole map.
     #[cfg(target_os = "android")]
     app.add_systems(
         bevy_ggrs::prelude::ReadInputs,
@@ -254,6 +264,15 @@ pub fn run() {
         );
         app.add_systems(Update, toggle_fullscreen);
     }
+    app.add_systems(
+        bevy_ggrs::prelude::ReadInputs,
+        (
+            netplay::gate_rematch_inputs,
+            replay::playback_inputs_system.run_if(resource_exists::<replay::ReplayPlayback>),
+        )
+            .chain()
+            .after(bot::drive_bot),
+    );
 
     // Verification capture (opt-in via TWOTOP_CAPTURE): screenshot then exit.
     if let Some(cap) = capture_config_from_env() {
@@ -510,14 +529,15 @@ struct RitualWash;
 #[derive(Component)]
 struct MenuScrim;
 
-/// Show the menu scrim on the title and while awaiting a peer; hide it the
-/// instant a real match is being played so gameplay is never dimmed.
+/// Show the menu scrim on the title, the replays list, and while awaiting
+/// a peer; hide it the instant a real match is being played so gameplay is
+/// never dimmed.
 fn update_menu_scrim(
     screen: Res<State<AppScreen>>,
     awaiting: Res<screen::AwaitingPeer>,
     mut q: Query<&mut Visibility, With<MenuScrim>>,
 ) {
-    let show = *screen.get() == AppScreen::Title || awaiting.0;
+    let show = matches!(*screen.get(), AppScreen::Title | AppScreen::Replays) || awaiting.0;
     for mut vis in &mut q {
         *vis = if show {
             Visibility::Visible
@@ -916,6 +936,7 @@ fn ensure_boomerang_visuals(
 fn sync_sprite_atlas_from_anim(
     mut q: Query<(&Player, &AnimState, &VelocityF, &mut Sprite)>,
     persp: Res<render::PerspectiveFlip>,
+    victory: Res<screen::VictoryPose>,
     mut facing: Local<HashMap<usize, (bool, u16)>>,
 ) {
     let deadzone = Fix::const_from_int(3);
@@ -926,7 +947,22 @@ fn sync_sprite_atlas_from_anim(
     } else {
         (render::FACING_BACK, render::FACING_FRONT)
     };
+    // The decided match's winner stands as a statue: pinned on the CHARGE
+    // pose, facing the camera, through the whole summary. Render-only.
+    let victory_frame = AnimState {
+        anim_id: AnimState::CHARGE,
+        ticks: 0,
+    }
+    .display_index();
     for (player, anim, vel, mut sprite) in &mut q {
+        if victory.0 == Some(player.handle) {
+            if let Some(atlas) = sprite.texture_atlas.as_mut() {
+                atlas.index =
+                    (render::FACING_FRONT as usize) * frames_per_row + victory_frame as usize;
+            }
+            sprite.flip_x = false;
+            continue;
+        }
         let (flip, dir) = facing.entry(player.handle).or_insert_with(|| {
             let default_dir = if (player.handle == 0) ^ flipped {
                 render::FACING_BACK

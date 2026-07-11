@@ -11,7 +11,7 @@
 //! Android setups) settings simply stay in-memory for the session.
 
 use bevy::prelude::*;
-use input_touch::{StickDeadzone, WindowSize};
+use input_touch::{Southpaw, StickDeadzone, WindowSize};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
@@ -35,6 +35,9 @@ pub struct Settings {
     pub haptics: bool,
     pub sfx_volume: f32,
     pub music_volume: f32,
+    /// Mirror the touch zones left-for-right (move on the right, throw on
+    /// the left, dash bottom-LEFT). A touch fighter owes lefties this.
+    pub southpaw: bool,
 }
 
 impl Default for Settings {
@@ -44,6 +47,7 @@ impl Default for Settings {
             haptics: true,
             sfx_volume: SFX_VOLUME_DEFAULT,
             music_volume: MUSIC_VOLUME_DEFAULT,
+            southpaw: false,
         }
     }
 }
@@ -116,23 +120,31 @@ impl Plugin for SettingsPlugin {
     }
 }
 
-/// Mirror the deadzone setting into `input_touch`'s resource (boot + on edit).
-fn push_deadzone(settings: Res<Settings>, mut deadzone: ResMut<StickDeadzone>) {
+/// Mirror the input-shaping settings into `input_touch`'s resources
+/// (boot + on edit).
+fn push_deadzone(
+    settings: Res<Settings>,
+    mut deadzone: ResMut<StickDeadzone>,
+    mut southpaw: ResMut<Southpaw>,
+) {
     deadzone.0 = settings.stick_deadzone;
+    southpaw.0 = settings.southpaw;
 }
 
 /// Title-screen settings adjustment. Keys chosen to avoid the arena picker
 /// (1/2/3) and start (Space/Enter): H toggles haptics, −/= the SFX volume,
-/// `[`/`]` the music volume, `,`/`.` the deadzone. Any change re-clamps,
-/// pushes the deadzone to `input_touch`, and saves to disk.
+/// `[`/`]` the music volume, `,`/`.` the deadzone, L the southpaw layout.
+/// Any change re-clamps, pushes the input mirrors to `input_touch`, and
+/// saves to disk.
 /// Title settings rows: window-fraction band (y-down, like `Touches`).
-/// Four rows from 0.42 at a 0.034 pitch → band ~0.42–0.56, sitting above the
-/// practice button (0.575) in the title's bottom-menu budget.
+/// Five rows from 0.42 at a 0.029 pitch → band 0.42–0.565, sitting above
+/// the practice button (0.575) in the title's bottom-menu budget.
 const ROWS_TOP: f32 = 0.42;
-const ROW_PITCH: f32 = 0.034;
-const ROW_COUNT: usize = 4;
+const ROW_PITCH: f32 = 0.029;
+const ROW_COUNT: usize = 5;
 
-/// One tappable settings row (0 haptics, 1 sfx, 2 music, 3 deadzone).
+/// One tappable settings row (0 haptics, 1 sfx, 2 music, 3 deadzone,
+/// 4 southpaw).
 #[derive(Component)]
 struct SettingRow(usize);
 
@@ -178,7 +190,11 @@ fn update_setting_rows(
             ),
             1 => format!("<  sfx {:.0}%  >", settings.sfx_volume * 100.0),
             2 => format!("<  music {:.0}%  >", settings.music_volume * 100.0),
-            _ => format!("<  deadzone {:.0}%  >", settings.stick_deadzone * 100.0),
+            3 => format!("<  deadzone {:.0}%  >", settings.stick_deadzone * 100.0),
+            _ => format!(
+                "<  southpaw {}  >",
+                if settings.southpaw { "on" } else { "off" }
+            ),
         };
     }
 }
@@ -192,12 +208,16 @@ fn adjust_settings(
     window: Res<WindowSize>,
     mut settings: ResMut<Settings>,
     mut deadzone: ResMut<StickDeadzone>,
+    mut southpaw: ResMut<Southpaw>,
 ) {
     let before = *settings;
     let mut s = *settings;
 
     if keys.just_pressed(KeyCode::KeyH) {
         s.haptics = !s.haptics;
+    }
+    if keys.just_pressed(KeyCode::KeyL) {
+        s.southpaw = !s.southpaw;
     }
     if keys.just_pressed(KeyCode::Minus) {
         s.sfx_volume -= 0.1;
@@ -232,7 +252,8 @@ fn adjust_settings(
                 0 => s.haptics = !s.haptics,
                 1 => s.sfx_volume += 0.1 * sign,
                 2 => s.music_volume += 0.1 * sign,
-                _ => s.stick_deadzone += 0.02 * sign,
+                3 => s.stick_deadzone += 0.02 * sign,
+                _ => s.southpaw = !s.southpaw,
             }
         }
     }
@@ -241,6 +262,7 @@ fn adjust_settings(
     if s != before {
         *settings = s;
         deadzone.0 = s.stick_deadzone;
+        southpaw.0 = s.southpaw;
         save_settings(&s);
     }
 }
@@ -265,6 +287,7 @@ mod tests {
             haptics: false,
             sfx_volume: -3.0,
             music_volume: f32::NAN,
+            southpaw: true,
         }
         .clamped();
         assert_eq!(wild.stick_deadzone, DEADZONE_MAX);

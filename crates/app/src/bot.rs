@@ -74,37 +74,42 @@ const PLANT_TICKS: u32 = 5;
 // itself sooner), and the aim accuracy.
 
 /// Charge the bot commits its throw at, by level. Level 1 lobs a barely-
-/// charged fang; level 4 throws at ~70% charge — still short of a human's
-/// full-power shot, so it stays practice, not a wall.
+/// charged fang; level 4 throws at ~70% charge. Past 4 the GAUNTLET tiers
+/// take over: +3% per tier, capped at 85% — hard, never a full-power wall.
 fn throw_at_charge(lvl: u32) -> u32 {
     let frac = match lvl {
         0 | 1 => 0.30,
         2 => 0.42,
         3 => 0.55,
-        _ => 0.70,
+        4 => 0.70,
+        n => (0.70 + 0.03 * (n - 4) as f32).min(0.85),
     };
     (CHARGE_MAX_FRAMES as f32 * frac) as u32
 }
 
 /// Fang distance that triggers the dodge reflex, by level. Dodging is off
-/// below level 2; then it reacts progressively sooner.
+/// below level 2; then it reacts progressively sooner. Gauntlet tiers past
+/// 4 widen the reflex up to a 300 cm bubble.
 fn threat_radius(lvl: u32) -> f32 {
     match lvl {
         0 | 1 => 0.0,
         2 => 120.0,
         3 => 165.0,
-        _ => 210.0,
+        4 => 210.0,
+        n => (210.0 + 15.0 * (n - 4) as f32).min(300.0),
     }
 }
 
 /// Peak aim wobble (radians), by level: a wide spray early, tightening as
-/// the bot levels up but never fully honing in.
+/// the bot levels up but never fully honing in — the gauntlet floor is
+/// 0.05 rad (~3°), beatable by a mover forever.
 fn wobble_amp(lvl: u32) -> f32 {
     match lvl {
         0 | 1 => 0.42,
         2 => 0.30,
         3 => 0.20,
-        _ => 0.12,
+        4 => 0.12,
+        n => (0.12 - 0.015 * (n - 4) as f32).max(0.05),
     }
 }
 
@@ -285,9 +290,13 @@ pub fn drive_bot(world: &mut World) {
     let frame = world.resource::<FrameCount>().0;
     let in_round = world.resource::<MatchState>().is_in_round();
 
-    // Difficulty ramps with the PLAYER's kills on the bot (score.p0 — the
-    // player is always handle 0 in practice). 0 = passive dummy.
-    let difficulty = world.resource::<sim::MatchScore>().p0 as u32;
+    // Difficulty = the persisted GAUNTLET tier plus the player's kills so
+    // far this match (score.p0 — the player is always handle 0 in
+    // practice). A fresh install starts at the passive dummy; a tier-6
+    // gauntlet runner faces a bot that opens sharp and still sharpens as
+    // it loses.
+    let tier = world.resource::<crate::grudge::CareerRecord>().gauntlet_tier;
+    let difficulty = tier + world.resource::<sim::MatchScore>().p0 as u32;
 
     let mut view = BotView {
         frame,
@@ -480,6 +489,20 @@ mod tests {
         assert_eq!(threat_radius(1), 0.0, "no dodge below level 2");
         assert!(threat_radius(2) < threat_radius(4), "dodges sooner");
         assert!(wobble_amp(1) > wobble_amp(4), "aim tightens");
+    }
+
+    #[test]
+    fn gauntlet_tiers_keep_sharpening_but_hit_ceilings() {
+        // Past level 4 the ramps keep moving...
+        assert!(throw_at_charge(6) > throw_at_charge(4));
+        assert!(threat_radius(6) > threat_radius(4));
+        assert!(wobble_amp(6) < wobble_amp(4));
+        // ...and saturate instead of becoming an aimbot wall.
+        assert_eq!(throw_at_charge(40), throw_at_charge(12));
+        assert_eq!(threat_radius(40), 300.0);
+        assert_eq!(wobble_amp(40), 0.05);
+        // The commit charge never reaches a human's full-power shot.
+        assert!(throw_at_charge(40) < CHARGE_MAX_FRAMES);
     }
 
     #[test]
