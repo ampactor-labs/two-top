@@ -38,7 +38,8 @@ use bevy_ggrs::ggrs::{DesyncDetection, GgrsEvent, PlayerType, SessionBuilder};
 // app needs no direct matchbox/uuid dependency.
 use net::{
     ChannelConfig, LastPeerMessageFrame, LobbyState, MatchboxBridge, MatchboxPeerId as PeerId,
-    PeerState, PendingP2PSwap, WebRtcSocket, WebRtcSocketBuilder, addr_to_peer, peer_to_addr,
+    NetMsg, NetSendQueue, PeerProfile, PeerState, PendingP2PSwap, RematchConsent, RtcIceServerConfig,
+    WebRtcSocket, WebRtcSocketBuilder, addr_to_peer, decode_net_msg, encode_net_msg, peer_to_addr,
 };
 use sim::GgrsCfg;
 
@@ -52,9 +53,20 @@ const ONLINE_INPUT_DELAY: usize = 2;
 /// within a few hundred ms, cheap enough to be free on the wire.
 const DESYNC_CHECK_INTERVAL: u32 = 30;
 
-/// Drop the peer (and forfeit) after this much silence. Matches the
-/// SIGNALING.md long-disconnect gate (~3 s).
-const DISCONNECT_TIMEOUT: Duration = Duration::from_secs(3);
+/// Drop the peer (and forfeit) after this much silence. 9 s — long enough
+/// that a phone surviving a notification-shade peek or a short call banner
+/// comes back into a live match (ggrs replays the missed ticks), short
+/// enough that a genuinely gone opponent doesn't hold the field hostage.
+/// The OPPONENT AWAY overlay covers the wait (net's silence FSM flips the
+/// lobby to `Disconnected` after ~1 s once the driver stops pinning the
+/// silence timer). net::FORFEIT_AFTER_FRAMES (10 s) is the fallback gate
+/// just behind this.
+const DISCONNECT_TIMEOUT: Duration = Duration::from_secs(9);
+
+/// The matchbox channel ggrs owns (unreliable + unordered).
+const GGRS_CHANNEL: usize = 0;
+/// The reliable side-channel (identity, rematch consent, goodbye).
+const SIDE_CHANNEL: usize = 1;
 
 /// Resolved at startup from `--room`/`MATCHBOX_ROOM`. `None` ⇒ local
 /// SyncTest mode (the driver systems no-op / aren't added).
@@ -119,15 +131,48 @@ impl NetplayConfig {
     }
 }
 
+/// TURN relay config, resolved like the room URL: runtime env first
+/// (`TWOTOP_TURN_URL` / `TWOTOP_TURN_USER` / `TWOTOP_TURN_PASS`), then the
+/// compile-time bake (the Android APK path). Returns the matchbox default
+/// (Google STUN only) when unset — same behavior as before this existed.
+///
+/// Why this matters: STUN-only traversal fails for phone pairs behind
+/// carrier-grade NAT (very common on cellular). A TURN relay is the
+/// fallback path that makes "two strangers on two networks" reliable.
+/// The STUN urls stay in the list either way; WebRTC only applies the
+/// credentials to the `turn:` entries.
+fn ice_server_config() -> RtcIceServerConfig {
+    let get = |run: &str, bake: Option<&'static str>| {
+        std::env::var(run)
+            .ok()
+            .filter(|s| !s.is_empty())
+            .or_else(|| bake.filter(|s| !s.is_empty()).map(str::to_string))
+    };
+    let turn_url = get("TWOTOP_TURN_URL", option_env!("TWOTOP_TURN_URL"));
+    let mut config = RtcIceServerConfig::default();
+    let Some(url) = turn_url else {
+        return config;
+    };
+    config.urls.push(url);
+    config.username = get("TWOTOP_TURN_USER", option_env!("TWOTOP_TURN_USER"));
+    config.credential = get("TWOTOP_TURN_PASS", option_env!("TWOTOP_TURN_PASS"));
+    config
+}
+
 /// Holds the live socket between lobby ticks. Kept as a **non-send**
 /// resource: the socket's async channels are `Send` on native but we never
 /// need it off the main schedule thread, and non-send sidesteps any `Sync`
 /// question. `channel_taken` flips once the unreliable channel has been
-/// handed to the ggrs bridge — after that the socket is only polled for
-/// peer-state (disconnect) updates.
+/// handed to the ggrs bridge — after that the socket is polled for
+/// peer-state updates and pumps the reliable side-channel.
 struct MatchboxDriver {
     socket: WebRtcSocket,
     channel_taken: bool,
+    /// ggrs reported `NetworkInterrupted` and no `NetworkResumed` yet.
+    /// While true the driver stops pinning `LastPeerMessageFrame`, so
+    /// net's silence FSM ages honestly into `Disconnected` (the
+    /// OPPONENT AWAY overlay) and recovers when traffic resumes.
+    interrupted: bool,
 }
 
 /// Phase 12 driver plugin. Added only when a room URL is present. The matchbox
@@ -140,7 +185,7 @@ pub struct MatchboxPlugin;
 impl Plugin for MatchboxPlugin {
     fn build(&self, app: &mut App) {
         app.add_systems(OnEnter(crate::screen::AppScreen::InMatch), start_matchbox)
-            .add_systems(Update, drive_netplay);
+            .add_systems(Update, (drive_netplay, track_absence, reset_rematch_consent));
     }
 }
 
@@ -149,16 +194,24 @@ impl Plugin for MatchboxPlugin {
 /// (it would not be in `run()` before `App::run`).
 fn start_matchbox(world: &mut World) {
     // Practice mode runs a local session against the bot — no socket, even
-    // on an online build.
-    if world.resource::<crate::bot::PracticeMode>().0 {
+    // on an online build. The replay theater replays a tape the same way.
+    if world.resource::<crate::bot::PracticeMode>().0
+        || world.resource::<crate::theater::TheaterMode>().active()
+    {
         return;
     }
     let Some(url) = world.resource::<NetplayConfig>().room_url.clone() else {
         return;
     };
 
+    let ice = ice_server_config();
+    let has_turn = ice.urls.iter().any(|u| u.starts_with("turn"));
     let (socket, message_loop) = WebRtcSocketBuilder::new(url.clone())
+        .ice_server(ice)
+        // Channel 0: ggrs (unreliable — it has its own reliability layer).
         .add_channel(ChannelConfig::unreliable())
+        // Channel 1: the reliable side-channel (identity, rematch, goodbye).
+        .add_channel(ChannelConfig::reliable())
         .build();
 
     // Drive the WebRTC message loop on the IO pool for the app's lifetime.
@@ -174,10 +227,16 @@ fn start_matchbox(world: &mut World) {
     world.insert_non_send_resource(MatchboxDriver {
         socket,
         channel_taken: false,
+        interrupted: false,
     });
     *world.resource_mut::<LobbyState>() = LobbyState::Connecting;
 
-    tracing::info!(target: "two_top::net", room = %url, "matchbox socket built — connecting");
+    tracing::info!(
+        target: "two_top::net",
+        room = %url,
+        turn_relay = has_turn,
+        "matchbox socket built — connecting",
+    );
 }
 
 /// Per-frame driver. Exclusive-world so it can touch the non-send socket,
@@ -191,10 +250,12 @@ fn drive_netplay(world: &mut World) {
     };
 
     if channel_taken {
-        // Post-swap: ggrs owns the channel. Drain session events and keep
-        // the silence timer fresh (ggrs's own disconnect path drives
-        // forfeit, so net's grace timer must not also trip).
+        // Post-swap: ggrs owns channel 0. Drain session events, pump the
+        // reliable side-channel, and keep the silence timer fresh only
+        // while ggrs reports a healthy link — during an interruption the
+        // timer ages honestly and net's silence FSM raises OPPONENT AWAY.
         drain_session_events(world);
+        pump_side_channel(world);
         return;
     }
 
@@ -253,7 +314,7 @@ fn perform_swap(world: &mut World, peer_id: PeerId) {
         let mut driver = world.non_send_resource_mut::<MatchboxDriver>();
         let channel = driver
             .socket
-            .take_channel(0)
+            .take_channel(GGRS_CHANNEL)
             .expect("unreliable channel 0 is present until taken exactly once");
         driver.channel_taken = true;
         MatchboxBridge::new(channel)
@@ -287,6 +348,14 @@ fn perform_swap(world: &mut World, peer_id: PeerId) {
     let frame = world.resource::<sim::FrameCount>().0;
     world.resource_mut::<LastPeerMessageFrame>().0 = frame;
 
+    // Open the duel with the identity handshake: install-id + name on the
+    // reliable channel. The peer's grudge ledger files this match under it.
+    let profile = world.resource::<crate::profile::LocalProfile>().as_data();
+    world
+        .resource_mut::<NetSendQueue>()
+        .0
+        .push(NetMsg::Profile(profile));
+
     tracing::info!(
         target: "two_top::net",
         local_handle,
@@ -305,6 +374,7 @@ fn perform_swap(world: &mut World, peer_id: PeerId) {
 /// mirroring `net::tick_disconnection_grace`'s forfeit handoff).
 fn drain_session_events(world: &mut World) {
     let mut forfeited_peer = None;
+    let mut interruption_edge: Option<bool> = None;
     {
         let mut session = world.resource_mut::<Session<GgrsCfg>>();
         if let Session::P2P(s) = &mut *session {
@@ -320,10 +390,12 @@ fn drain_session_events(world: &mut World) {
                         addr,
                         disconnect_timeout,
                     } => {
-                        tracing::warn!(target: "two_top::net", ?addr, disconnect_timeout, "network interrupted");
+                        tracing::warn!(target: "two_top::net", ?addr, disconnect_timeout, "network interrupted — opponent away");
+                        interruption_edge = Some(true);
                     }
                     GgrsEvent::NetworkResumed { addr } => {
-                        tracing::info!(target: "two_top::net", ?addr, "network resumed");
+                        tracing::info!(target: "two_top::net", ?addr, "network resumed — opponent back");
+                        interruption_edge = Some(false);
                     }
                     GgrsEvent::WaitRecommendation { skip_frames } => {
                         tracing::debug!(target: "two_top::net", skip_frames, "wait recommendation");
@@ -352,9 +424,18 @@ fn drain_session_events(world: &mut World) {
         }
     }
 
+    if let Some(interrupted) = interruption_edge {
+        world.non_send_resource_mut::<MatchboxDriver>().interrupted = interrupted;
+    }
+
     // Healthy session: keep silence ~0 so net's grace timer stays quiet.
-    let frame = world.resource::<sim::FrameCount>().0;
-    world.resource_mut::<LastPeerMessageFrame>().0 = frame;
+    // During an interruption the timer ages honestly — net's silence FSM
+    // flips the lobby to `Disconnected` (the OPPONENT AWAY overlay) after
+    // ~1 s and recovers it the moment pinning resumes.
+    if !world.non_send_resource::<MatchboxDriver>().interrupted {
+        let frame = world.resource::<sim::FrameCount>().0;
+        world.resource_mut::<LastPeerMessageFrame>().0 = frame;
+    }
 
     if let Some(addr) = forfeited_peer {
         *world.resource_mut::<LobbyState>() = LobbyState::Forfeited {
@@ -362,4 +443,198 @@ fn drain_session_events(world: &mut World) {
         };
         *world.resource_mut::<sim::MatchState>() = sim::MatchState::MatchOver;
     }
+}
+
+/// Pump the reliable side-channel: drain the app's outbound queue to the
+/// peer, then handle inbound identity / rematch / goodbye messages.
+fn pump_side_channel(world: &mut World) {
+    // The peer to address: whichever the lobby currently holds.
+    let peer = match world.resource::<LobbyState>() {
+        LobbyState::Connected { peer_id } => Some(*peer_id),
+        LobbyState::Disconnected { peer_id, .. } => Some(*peer_id),
+        _ => None,
+    };
+
+    let outbound: Vec<NetMsg> = std::mem::take(&mut world.resource_mut::<NetSendQueue>().0);
+    let inbound: Vec<(PeerId, Box<[u8]>)> = {
+        let mut driver = world.non_send_resource_mut::<MatchboxDriver>();
+        if let Some(peer) = peer {
+            for msg in &outbound {
+                driver
+                    .socket
+                    .channel_mut(SIDE_CHANNEL)
+                    .send(encode_net_msg(msg), peer);
+            }
+        } else if !outbound.is_empty() {
+            tracing::debug!(
+                target: "two_top::net",
+                dropped = outbound.len(),
+                "side-channel messages dropped — no peer to address",
+            );
+        }
+        driver.socket.channel_mut(SIDE_CHANNEL).receive()
+    };
+
+    for (from, bytes) in inbound {
+        let Some(msg) = decode_net_msg(&bytes) else {
+            tracing::warn!(target: "two_top::net", ?from, len = bytes.len(), "unreadable side-channel message ignored");
+            continue;
+        };
+        match msg {
+            NetMsg::Profile(profile) => {
+                tracing::info!(
+                    target: "two_top::net",
+                    install_id = format_args!("{:032x}", profile.install_id),
+                    "peer profile received",
+                );
+                world.resource_mut::<PeerProfile>().0 = Some(profile);
+            }
+            NetMsg::RematchWant => {
+                world.resource_mut::<RematchConsent>().peer = true;
+            }
+            NetMsg::Bye => {
+                tracing::info!(target: "two_top::net", ?from, "peer said goodbye — forfeit without the grace wait");
+                *world.resource_mut::<LobbyState>() = LobbyState::Forfeited { peer_id: from };
+                *world.resource_mut::<sim::MatchState>() = sim::MatchState::MatchOver;
+            }
+        }
+    }
+}
+
+/// When did this app last go away — a suspend, a focus loss, or a frozen
+/// main loop (Android holds the whole process while backgrounded, so a
+/// giant `Time<Real>` delta IS the suspension telling on itself). Stored
+/// as `Time<Real>` elapsed seconds. Consumed by the grudge ledger to
+/// decide who owns a forfeit: if we went absent just before the match
+/// forfeited, the walk-out (and the loss) is ours.
+#[derive(Resource, Default, Clone, Copy, Debug)]
+pub struct RecentAbsence(pub Option<f32>);
+
+impl RecentAbsence {
+    /// How close (seconds) an absence must be to a forfeit to take the
+    /// blame for it. Comfortably wider than the 9 s disconnect grace.
+    pub const FORFEIT_BLAME_SECS: f32 = 20.0;
+
+    pub fn within(&self, now: f32, window: f32) -> bool {
+        self.0.is_some_and(|at| now - at <= window)
+    }
+}
+
+/// A frozen frame this long means the OS held the process (or the window
+/// manager starved us) — either way, the peer watched us vanish.
+const ABSENCE_FREEZE_SECS: f32 = 2.0;
+
+/// Track absences: window focus loss and main-loop freezes.
+pub fn track_absence(
+    time: Res<Time<Real>>,
+    mut focus_events: MessageReader<bevy::window::WindowFocused>,
+    mut absence: ResMut<RecentAbsence>,
+) {
+    let now = time.elapsed_secs();
+    if time.delta_secs() > ABSENCE_FREEZE_SECS {
+        absence.0 = Some(now);
+    }
+    for ev in focus_events.read() {
+        if !ev.focused {
+            absence.0 = Some(now);
+        }
+    }
+}
+
+/// The ONLINE rematch gate (`ReadInputs`, after every input source): during
+/// `MatchOver` the local THROW press becomes rematch CONSENT instead of an
+/// instant restart. The press is masked off the wire and `RematchWant` goes
+/// to the peer on the reliable channel; once both sides have consented the
+/// gate emits the real THROW input and `sim::apply_rematch` restarts the
+/// match exactly as it always has — input-driven, rollback-correct, no
+/// out-of-band state writes (CONVENTIONS § match transitions).
+///
+/// This is pre-wire input shaping, the legal kind: it changes what WE
+/// choose to press, never what a received input means. Couch and practice
+/// keep the classic instant rematch; the theater plays tapes and needs no
+/// gate at all.
+#[allow(clippy::too_many_arguments)]
+pub fn gate_rematch_inputs(
+    netplay: Res<NetplayConfig>,
+    practice: Res<crate::bot::PracticeMode>,
+    theater: Res<crate::theater::TheaterMode>,
+    state: Res<sim::MatchState>,
+    local: Res<LocalPlayerHandle>,
+    mut consent: ResMut<RematchConsent>,
+    mut queue: ResMut<NetSendQueue>,
+    inputs: Option<ResMut<bevy_ggrs::LocalInputs<GgrsCfg>>>,
+) {
+    if netplay.room_url.is_none() || practice.0 || theater.active() {
+        return;
+    }
+    if !matches!(*state, sim::MatchState::MatchOver) {
+        return;
+    }
+    let Some(mut inputs) = inputs else {
+        return;
+    };
+    let Some(handle) = local.0 else {
+        return;
+    };
+    let Some(input) = inputs.0.get_mut(&handle) else {
+        return;
+    };
+    let pressed = input.buttons & sim::PlayerInput::THROW_DOWN != 0;
+    if pressed && !consent.local {
+        consent.local = true;
+        queue.0.push(NetMsg::RematchWant);
+        tracing::info!(target: "two_top::net", "rematch consent given — telling the peer");
+    }
+    if consent.local && consent.peer {
+        // Both in: emit the real input. The preceding masked frames
+        // guarantee sim sees a rising edge.
+        input.buttons |= sim::PlayerInput::THROW_DOWN;
+    } else {
+        input.buttons &= !sim::PlayerInput::THROW_DOWN;
+    }
+}
+
+/// Clear rematch consent whenever the sim is not sitting on a summary —
+/// covers the restart itself (MatchOver → Countdown) and every other path
+/// out of the screen.
+pub fn reset_rematch_consent(state: Res<sim::MatchState>, mut consent: ResMut<RematchConsent>) {
+    if !matches!(*state, sim::MatchState::MatchOver) && *consent != RematchConsent::default() {
+        *consent = RematchConsent::default();
+    }
+}
+
+/// Tear down the online session cleanly: tell the peer goodbye (so their
+/// screen flips to OPPONENT LEFT immediately instead of waiting out the
+/// grace), drop the socket + session, and reset every per-match netplay
+/// resource. The caller flips `AppScreen` back to Title.
+pub fn leave_online_match(world: &mut World) {
+    // Best-effort goodbye straight into the channel — the send queue won't
+    // get another pump after the driver is removed.
+    let peer = match world.resource::<LobbyState>() {
+        LobbyState::Connected { peer_id } => Some(*peer_id),
+        LobbyState::Disconnected { peer_id, .. } => Some(*peer_id),
+        _ => None,
+    };
+    // The removal is unconditional (dropping the socket ends the message
+    // loop); the goodbye rides out only when a peer is still addressable.
+    let mut driver = world.remove_non_send_resource::<MatchboxDriver>();
+    if let Some(driver) = driver.as_mut()
+        && let Some(peer) = peer
+        && driver.channel_taken
+    {
+        driver
+            .socket
+            .channel_mut(SIDE_CHANNEL)
+            .send(encode_net_msg(&NetMsg::Bye), peer);
+    }
+    drop(driver);
+    world.remove_resource::<Session<GgrsCfg>>();
+    *world.resource_mut::<LobbyState>() = LobbyState::Idle;
+    world.resource_mut::<PendingP2PSwap>().0 = None;
+    world.resource_mut::<PeerProfile>().0 = None;
+    *world.resource_mut::<RematchConsent>() = RematchConsent::default();
+    world.resource_mut::<NetSendQueue>().0.clear();
+    world.resource_mut::<LocalPlayerHandle>().0 = None;
+    world.resource_mut::<render::PerspectiveFlip>().0 = 1.0;
+    tracing::info!(target: "two_top::net", "left the online match — lobby reset");
 }

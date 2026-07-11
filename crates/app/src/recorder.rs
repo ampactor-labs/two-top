@@ -67,8 +67,16 @@ pub struct LastSavedReplay(pub Option<PathBuf>);
 fn harvest_confirmed_inputs(
     frame: Res<FrameCount>,
     history: Res<InputHistory>,
+    theater: Res<crate::theater::TheaterMode>,
     mut rec: ResMut<MatchRecorder>,
 ) {
+    // A replay being WATCHED must not re-record itself into a copy tape.
+    if theater.active() {
+        if !rec.frames.is_empty() || rec.next != 0 {
+            rec.reset();
+        }
+        return;
+    }
     let f = frame.0;
     let len = INPUT_HISTORY_LEN as u32;
     if f < rec.next {
@@ -106,12 +114,44 @@ fn harvest_confirmed_inputs(
     }
 }
 
+/// The two duelist names for the tape header, by handle. Online: the local
+/// profile fills our seat and the peer's `Profile` handshake fills theirs.
+/// Practice names the bot honestly. Couch leaves both `None` (two humans,
+/// one device — the viewer falls back to CUR/STAG).
+fn header_names(
+    netplay: &crate::netplay::NetplayConfig,
+    practice: bool,
+    local: Option<usize>,
+    profile: &crate::profile::LocalProfile,
+    peer: &net::PeerProfile,
+) -> [Option<String>; 2] {
+    if practice {
+        return [Some(profile.name_string()), Some("BOT".to_string())];
+    }
+    if netplay.room_url.is_none() {
+        return [None, None];
+    }
+    let mut names = [None, None];
+    let me = local.unwrap_or(0);
+    names[me] = Some(profile.name_string());
+    if let Some(peer) = peer.0 {
+        names[1 - me] = Some(crate::profile::name_from_slots(&peer.name));
+    }
+    names
+}
+
 /// On the tick a match is decided, arm a short delay (to let the harvest
 /// catch up past the deciding kill), then write the tape as a `.bmrg`.
+#[allow(clippy::too_many_arguments)]
 fn save_replay_on_match_over(
     state: Res<MatchState>,
     score: Res<MatchScore>,
     selected: Res<SelectedArena>,
+    netplay: Res<crate::netplay::NetplayConfig>,
+    practice: Res<crate::bot::PracticeMode>,
+    local: Res<crate::netplay::LocalPlayerHandle>,
+    profile: Res<crate::profile::LocalProfile>,
+    peer: Res<net::PeerProfile>,
     mut rec: ResMut<MatchRecorder>,
     mut last_saved: ResMut<LastSavedReplay>,
 ) {
@@ -145,7 +185,13 @@ fn save_replay_on_match_over(
                     frame_count: rec.frames.len() as u32,
                     recorded_at,
                     winner: Some(winner),
-                    player_handles: [None, None],
+                    player_handles: header_names(
+                        &netplay,
+                        practice.0,
+                        local.0,
+                        &profile,
+                        &peer,
+                    ),
                     arena_id: selected.0.as_u8(),
                 },
                 inputs: rec.frames.clone(),
@@ -200,7 +246,7 @@ fn write_replay(replay: &Replay, recorded_at: u64, winner: u8) -> Option<PathBuf
 /// Android: the app's external-files dir
 /// (`Android/data/co.<...>.twotop/files/replays`), browsable with any
 /// Files app and shareable from there — no storage permission needed.
-fn replays_dir() -> Option<PathBuf> {
+pub fn replays_dir() -> Option<PathBuf> {
     #[cfg(target_os = "android")]
     {
         bevy::android::ANDROID_APP
@@ -283,6 +329,7 @@ mod tests {
         app.add_plugins(DefaultInputsPlugin);
         app.insert_resource(Session::SyncTest(session));
         app.init_resource::<MatchRecorder>();
+        app.init_resource::<crate::theater::TheaterMode>();
         app.add_systems(Update, harvest_confirmed_inputs);
         for handle in 0..2usize {
             app.world_mut().spawn((

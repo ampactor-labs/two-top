@@ -1,35 +1,106 @@
-//! Career record — the grudge ledger, v1.
+//! Career record — the grudge ledger, v2.
 //!
-//! Persists online wins/losses across sessions (same JSON-in-config-dir
-//! scheme as `settings.rs`) and surfaces the record on the online title
-//! screen. Couch matches don't count — the ledger is the story of duels
-//! against *other phones*.
+//! v1 persisted a single online W-L. v2 adds the two ladders that hang off
+//! a durable identity:
 //!
-//! v1 scope note: matchbox `PeerId`s are ephemeral (fresh per connection),
-//! so a true per-opponent ledger ("12th meeting — Stag leads 7-4") needs a
-//! persistent install-id exchanged over a reliable app-data channel the
-//! netplay layer doesn't carry yet. The career total is the durable value
-//! we can record honestly today; the rivalry breakdown is the follow-up
-//! once the identity handshake exists.
+//!   * **Rivalry** — per-opponent records keyed by the peer's install-id
+//!     (exchanged over the reliable side-channel as `NetMsg::Profile`).
+//!     The summary can finally say "4TH MEETING — YOU LEAD 2-1".
+//!   * **Gauntlet** — the practice ladder: beat the bot, the tier climbs
+//!     and persists; lose once, it resets. Best tier is remembered. The
+//!     bot's policy sharpens with the tier (`bot::drive_bot`).
+//!
+//! Forfeits are scored honestly: the survivor of a fled match records a
+//! win (v1 wrongly gave them a LOSS — the score-threshold check assumed
+//! every MatchOver was earned), and a player whose own phone went away
+//! (suspend / focus loss, tracked in `netplay::RecentAbsence`) records
+//! the loss they walked into.
+//!
+//! Couch matches still count for nothing; the theater records nothing.
 
 use bevy::prelude::*;
 use serde::{Deserialize, Serialize};
 use sim::{MATCH_WIN_THRESHOLD, MatchScore, MatchState};
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 
-use crate::netplay::{LocalPlayerHandle, NetplayConfig};
+use crate::netplay::{LocalPlayerHandle, NetplayConfig, RecentAbsence};
 
-/// Lifetime online record. Loaded at boot, saved on every decided match.
-#[derive(Resource, Serialize, Deserialize, Default, Clone, Copy, Debug)]
+/// One opponent's ledger line. `name` is their latest dialed name — it can
+/// change between meetings; the install-id is the identity.
+#[derive(Serialize, Deserialize, Default, Clone, Debug)]
+pub struct RivalRecord {
+    pub name: String,
+    pub wins: u32,
+    pub losses: u32,
+}
+
+impl RivalRecord {
+    pub fn meetings(&self) -> u32 {
+        self.wins + self.losses
+    }
+}
+
+/// Lifetime record. Loaded at boot, saved on every decided match.
+/// `#[serde(default)]` keeps v1 career.json files (wins/losses only)
+/// loading cleanly with the new fields defaulted.
+#[derive(Resource, Serialize, Deserialize, Default, Clone, Debug)]
+#[serde(default)]
 pub struct CareerRecord {
     pub wins: u32,
     pub losses: u32,
+    /// Current practice-ladder tier (resets to 0 on a loss to the bot).
+    pub gauntlet_tier: u32,
+    /// Highest tier ever reached.
+    pub gauntlet_best: u32,
+    /// Per-opponent records, keyed by the peer install-id in lowercase hex.
+    pub rivals: BTreeMap<String, RivalRecord>,
 }
 
 impl CareerRecord {
     pub fn total(&self) -> u32 {
         self.wins + self.losses
     }
+
+    /// The rivalry line for the CURRENT match against `peer` — counting
+    /// this meeting. `None` when no identity arrived (offline peer build,
+    /// or the handshake hasn't landed yet).
+    pub fn rivalry_line(&self, peer: Option<net::ProfileData>) -> Option<String> {
+        let peer = peer?;
+        let key = rival_key(peer.install_id);
+        let name = crate::profile::name_from_slots(&peer.name);
+        let Some(rival) = self.rivals.get(&key) else {
+            return Some(format!("FIRST MEETING with {name}"));
+        };
+        let n = rival.meetings() + 1;
+        let standing = match rival.wins.cmp(&rival.losses) {
+            std::cmp::Ordering::Greater => {
+                format!("you lead {}-{}", rival.wins, rival.losses)
+            }
+            std::cmp::Ordering::Less => {
+                format!("{} leads {}-{}", name, rival.losses, rival.wins)
+            }
+            std::cmp::Ordering::Equal => format!("tied {}-{}", rival.wins, rival.losses),
+        };
+        Some(format!("{} MEETING with {name} - {standing}", ordinal(n)))
+    }
+}
+
+/// Install-id → ledger key (lowercase hex, stable and greppable).
+pub fn rival_key(install_id: u128) -> String {
+    format!("{install_id:032x}")
+}
+
+/// 1 → 1ST, 2 → 2ND, 3 → 3RD, 4 → 4TH, 11-13 → TH (the English trap).
+pub fn ordinal(n: u32) -> String {
+    let suffix = match (n % 10, n % 100) {
+        (1, 11) | (2, 12) | (3, 13) => "TH",
+        (1, _) => "ST",
+        (2, _) => "ND",
+        (3, _) => "RD",
+        _ => "TH",
+    };
+    format!("{n}{suffix}")
 }
 
 fn career_path() -> Option<PathBuf> {
@@ -60,32 +131,108 @@ fn save_career(record: &CareerRecord) {
     }
 }
 
+/// Did we win this decided match? Score settles it when someone actually
+/// reached the threshold; a forfeit goes to whoever stayed at the table.
+/// Pure for testing.
+pub fn match_won(
+    our_score: u8,
+    their_score: u8,
+    forfeited: bool,
+    we_went_absent: bool,
+) -> bool {
+    if our_score >= MATCH_WIN_THRESHOLD {
+        return true;
+    }
+    if their_score >= MATCH_WIN_THRESHOLD {
+        return false;
+    }
+    // Nobody reached the threshold: a forfeit decided it. If our own phone
+    // went away, the walk-out is ours to own; otherwise the field is ours.
+    forfeited && !we_went_absent
+}
+
 /// Commit the result on the tick a match is decided. Online only; the local
 /// handle decides which side of the score is "ours".
+#[allow(clippy::too_many_arguments)]
 fn record_match_result(
     state: Res<MatchState>,
     score: Res<MatchScore>,
     netplay: Res<NetplayConfig>,
     practice: Res<crate::bot::PracticeMode>,
+    theater: Res<crate::theater::TheaterMode>,
     local: Res<LocalPlayerHandle>,
+    lobby: Res<net::LobbyState>,
+    peer: Res<net::PeerProfile>,
+    absence: Res<RecentAbsence>,
+    time: Res<Time<Real>>,
     mut record: ResMut<CareerRecord>,
     mut prev_over: Local<bool>,
 ) {
     let over = matches!(*state, MatchState::MatchOver);
     let entered = over && !*prev_over;
     *prev_over = over;
-    // Only live duels count — beating the bot is training, not a record.
-    if !entered || netplay.room_url.is_none() || practice.0 {
+    // Only live duels count — beating the bot is the gauntlet's business,
+    // and a watched tape is nobody's.
+    if !entered || netplay.room_url.is_none() || practice.0 || theater.active() {
         return;
     }
     let Some(handle) = local.0 else {
         return;
     };
-    let ours = if handle == 0 { score.p0 } else { score.p1 };
-    if ours >= MATCH_WIN_THRESHOLD {
+    let (ours, theirs) = if handle == 0 {
+        (score.p0, score.p1)
+    } else {
+        (score.p1, score.p0)
+    };
+    let forfeited = matches!(*lobby, net::LobbyState::Forfeited { .. });
+    let we_went_absent = absence.within(time.elapsed_secs(), RecentAbsence::FORFEIT_BLAME_SECS);
+    let won = match_won(ours, theirs, forfeited, we_went_absent);
+
+    if won {
         record.wins += 1;
     } else {
         record.losses += 1;
+    }
+    if let Some(peer) = peer.0 {
+        let rival = record.rivals.entry(rival_key(peer.install_id)).or_default();
+        rival.name = crate::profile::name_from_slots(&peer.name);
+        if won {
+            rival.wins += 1;
+        } else {
+            rival.losses += 1;
+        }
+    }
+    save_career(&record);
+}
+
+/// The practice ladder: a decided bot match moves the gauntlet. Win → the
+/// tier climbs (and the best-ever remembers); lose → back to the bottom.
+fn record_gauntlet_result(
+    state: Res<MatchState>,
+    score: Res<MatchScore>,
+    practice: Res<crate::bot::PracticeMode>,
+    theater: Res<crate::theater::TheaterMode>,
+    mut record: ResMut<CareerRecord>,
+    mut prev_over: Local<bool>,
+) {
+    let over = matches!(*state, MatchState::MatchOver);
+    let entered = over && !*prev_over;
+    *prev_over = over;
+    if !entered || !practice.0 || theater.active() {
+        return;
+    }
+    // The human is always handle 0 in practice.
+    if score.p0 >= MATCH_WIN_THRESHOLD {
+        record.gauntlet_tier += 1;
+        record.gauntlet_best = record.gauntlet_best.max(record.gauntlet_tier);
+        tracing::info!(
+            target: "two_top::grudge",
+            tier = record.gauntlet_tier,
+            best = record.gauntlet_best,
+            "gauntlet tier climbed",
+        );
+    } else {
+        record.gauntlet_tier = 0;
     }
     save_career(&record);
 }
@@ -95,6 +242,77 @@ pub struct GrudgePlugin;
 impl Plugin for GrudgePlugin {
     fn build(&self, app: &mut App) {
         app.insert_resource(load_career())
-            .add_systems(Update, record_match_result);
+            .add_systems(Update, (record_match_result, record_gauntlet_result));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ordinals_speak_english() {
+        assert_eq!(ordinal(1), "1ST");
+        assert_eq!(ordinal(2), "2ND");
+        assert_eq!(ordinal(3), "3RD");
+        assert_eq!(ordinal(4), "4TH");
+        assert_eq!(ordinal(11), "11TH");
+        assert_eq!(ordinal(12), "12TH");
+        assert_eq!(ordinal(13), "13TH");
+        assert_eq!(ordinal(21), "21ST");
+        assert_eq!(ordinal(102), "102ND");
+    }
+
+    #[test]
+    fn earned_scores_beat_forfeit_reasoning() {
+        // Threshold reached: the score is the verdict, absence irrelevant.
+        assert!(match_won(MATCH_WIN_THRESHOLD, 3, true, true));
+        assert!(!match_won(2, MATCH_WIN_THRESHOLD, true, false));
+    }
+
+    #[test]
+    fn forfeits_go_to_whoever_stayed() {
+        // The v1 bug: the survivor of a fled match must record a WIN.
+        assert!(match_won(2, 1, true, false));
+        // The one whose phone went away owns the loss.
+        assert!(!match_won(2, 1, true, true));
+        // No forfeit and no threshold: not a win (shouldn't happen online).
+        assert!(!match_won(2, 1, false, false));
+    }
+
+    #[test]
+    fn v1_career_files_still_load() {
+        let v1 = r#"{ "wins": 7, "losses": 4 }"#;
+        let career: CareerRecord = serde_json::from_str(v1).unwrap();
+        assert_eq!(career.wins, 7);
+        assert_eq!(career.losses, 4);
+        assert_eq!(career.gauntlet_tier, 0);
+        assert!(career.rivals.is_empty());
+    }
+
+    #[test]
+    fn rivalry_line_counts_the_current_meeting() {
+        let mut career = CareerRecord::default();
+        let peer = net::ProfileData {
+            install_id: 0xabc,
+            name: [4, 5, 6, 0], // TAGC
+        };
+        assert_eq!(
+            career.rivalry_line(Some(peer)).unwrap(),
+            "FIRST MEETING with TAGC"
+        );
+        career.rivals.insert(
+            rival_key(0xabc),
+            RivalRecord {
+                name: "TAGC".into(),
+                wins: 2,
+                losses: 1,
+            },
+        );
+        assert_eq!(
+            career.rivalry_line(Some(peer)).unwrap(),
+            "4TH MEETING with TAGC - you lead 2-1"
+        );
+        assert_eq!(career.rivalry_line(None), None);
     }
 }

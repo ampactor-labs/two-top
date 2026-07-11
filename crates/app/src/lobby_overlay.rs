@@ -57,14 +57,26 @@ fn spawn_summoning(mut commands: Commands) {
     ));
 }
 
+/// Seconds in one waiting state before the overlay starts diagnosing out
+/// loud. STUN-only pairs behind carrier NAT fail ICE *silently* — the
+/// only observable is "we can see each other on signaling and never
+/// connect" — so past this threshold the wait names its likely cause
+/// instead of breathing dots forever.
+const STALL_DIAGNOSIS_SECS: f32 = 15.0;
+
 /// While in-match but pre-peer, the wait is a *ceremony*, not a debug
 /// string: SUMMONING with a breathing ellipsis and the dialed room. The
-/// bad states (reconnecting / forfeit) speak plainly and large.
+/// bad states (away / forfeit) speak plainly and large, and a stalled
+/// connection eventually says what is actually wrong.
+#[allow(clippy::too_many_arguments)]
 fn update_summoning(
     time: Res<Time<Real>>,
     screen: Res<State<AppScreen>>,
     state: Res<LobbyState>,
     room: Res<RoomCode>,
+    peer_profile: Res<net::PeerProfile>,
+    absence: Res<crate::netplay::RecentAbsence>,
+    mut stall: Local<Option<(std::mem::Discriminant<LobbyState>, f32)>>,
     mut q: Query<(&mut Text2d, &mut Visibility), With<SummoningText>>,
 ) {
     let Ok((mut text, mut vis)) = q.single_mut() else {
@@ -72,23 +84,61 @@ fn update_summoning(
     };
     if *screen.get() != AppScreen::InMatch {
         *vis = Visibility::Hidden;
+        *stall = None;
         return;
     }
-    let dots = [".", "..", "...", ".."][(time.elapsed_secs() * 2.0) as usize % 4];
+    let now = time.elapsed_secs();
+    // Time-in-state: reset the stall clock whenever the state changes.
+    let disc = std::mem::discriminant(&*state);
+    let since = match *stall {
+        Some((d, at)) if d == disc => now - at,
+        _ => {
+            *stall = Some((disc, now));
+            0.0
+        }
+    };
+
+    let dots = [".", "..", "...", ".."][(now * 2.0) as usize % 4];
     let room_line = if room.custom {
         format!("room {}", code_spaced(&room.code_string()))
     } else {
         "quick match".to_string()
     };
+    let challenger = peer_profile
+        .0
+        .map(|p| crate::profile::name_from_slots(&p.name))
+        .unwrap_or_else(|| "OPPONENT".to_string());
     let msg = match &*state {
-        LobbyState::Connecting => Some(format!("SUMMONING{dots}\n\n{room_line}")),
-        LobbyState::WaitingForPeer { .. } => Some(format!(
-            "AWAITING A CHALLENGER{dots}\n\n{room_line}\ndial the same code over there"
-        )),
-        LobbyState::Disconnected { .. } => {
-            Some(format!("OPPONENT LOST{dots}\nholding the field"))
+        LobbyState::Connecting => {
+            let mut m = format!("SUMMONING{dots}\n\n{room_line}");
+            if since > STALL_DIAGNOSIS_SECS {
+                m.push_str("\n\nstill reaching the room server\ncheck this phone's connection");
+            }
+            Some(m)
         }
-        LobbyState::Forfeited { .. } => Some("OPPONENT FLED\nthe field is yours".to_string()),
+        LobbyState::WaitingForPeer { .. } => {
+            let mut m = format!(
+                "AWAITING A CHALLENGER{dots}\n\n{room_line}\ndial the same code over there"
+            );
+            if since > STALL_DIAGNOSIS_SECS {
+                m.push_str(
+                    "\n\nif the other phone shows this too,\nthe networks may need the relay (TURN)",
+                );
+            }
+            Some(m)
+        }
+        LobbyState::Disconnected { .. } => Some(format!(
+            "{challenger} AWAY{dots}\nhold the field - forfeit soon"
+        )),
+        LobbyState::Forfeited { .. } => {
+            // If OUR phone went away just before the forfeit, we are the
+            // one who fled — say so instead of gaslighting the player.
+            if absence.within(now, crate::netplay::RecentAbsence::FORFEIT_BLAME_SECS) {
+                Some("MATCH ABANDONED\nyou left the duel".to_string())
+            } else {
+                Some(format!("{challenger} FLED\nthe field is yours"))
+            }
+        }
         LobbyState::Idle | LobbyState::Connected { .. } => None,
     };
     match msg {

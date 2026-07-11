@@ -110,6 +110,11 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 dirs = "5"
 
+# The install identity (profile.rs) mints one random u128 per install.
+# uuid v4 is the tree's existing randomness-with-no-ceremony source —
+# matchbox already pulls uuid; net uses it for the PeerId bijection.
+uuid = { version = "1", features = ["v4"] }
+
 # Phase 18 Task 5.4 — Android haptics. JNI hop to the platform `Vibrator`
 # via the activity handle from `ndk-context`. Android-only target deps so the
 # desktop build never pulls them; on desktop `vibrate` is a no-op. Versions
