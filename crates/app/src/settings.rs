@@ -137,10 +137,12 @@ fn push_deadzone(
 /// Any change re-clamps, pushes the input mirrors to `input_touch`, and
 /// saves to disk.
 /// Title settings rows: window-fraction band (y-down, like `Touches`).
-/// Five rows from 0.42 at a 0.029 pitch → band 0.42–0.565, sitting above
-/// the practice button (0.575) in the title's bottom-menu budget.
-const ROWS_TOP: f32 = 0.42;
-const ROW_PITCH: f32 = 0.029;
+/// Five rows from 0.40 at a 0.034 pitch → band 0.40–0.57, sitting above
+/// the practice/replays row (0.575). The pitch is the device-validated
+/// thumb size (the on-device pass widened it from 0.026 for a reason) —
+/// REPLAYS moved out of this band rather than the rows shrinking.
+const ROWS_TOP: f32 = 0.40;
+const ROW_PITCH: f32 = 0.034;
 const ROW_COUNT: usize = 5;
 
 /// One tappable settings row (0 haptics, 1 sfx, 2 music, 3 deadzone,

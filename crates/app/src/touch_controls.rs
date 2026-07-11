@@ -171,12 +171,13 @@ fn spawn_controls(
         Visibility::Hidden,
     ));
     // Zone hints for first-time thumbs — quiet, mid-low on each half where
-    // the eye lands but the thumb won't cover them. The taunt hint sits in
-    // its own strip at the top (where the tap goes).
+    // the eye lands but the thumb won't cover them. The taunt hint hangs
+    // BELOW the standing taunt mark (never on top of it — they stacked
+    // into text soup) and points up at it.
     for (zone, fx, fy, text) in [
         (HintZone::Move, -0.5, -0.38, "MOVE\ndrag anywhere here"),
         (HintZone::Throw, 0.5, -0.38, "THROW\nhold to charge, stick aims"),
-        (HintZone::Taunt, 0.0, 0.56, "TAUNT\ntap up here: finish the flex, tier up"),
+        (HintZone::Taunt, 0.0, 0.44, "tap the ring above to flex\nfinish it: tier up"),
     ] {
         commands.spawn((
             zone,

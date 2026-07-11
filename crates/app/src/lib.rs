@@ -267,6 +267,7 @@ pub fn run() {
     app.add_systems(
         bevy_ggrs::prelude::ReadInputs,
         (
+            screen::inject_ui_throw,
             netplay::gate_rematch_inputs,
             replay::playback_inputs_system.run_if(resource_exists::<replay::ReplayPlayback>),
         )
@@ -645,10 +646,16 @@ fn grow_boomerang_sprites(
 /// Unset → the resource is never inserted and the system never registered, so a
 /// normal `cargo run -p app` pays nothing. `TWOTOP_CAPTURE_FRAMES` overrides the
 /// settle window (default 90 ≈ 1.5 s at 60 Hz).
+///
+/// `TWOTOP_CAPTURE_ON=matchover` gates the settle countdown on the sim
+/// reaching `MatchState::MatchOver` first — the fps-independent way to grab
+/// an endgame screen (the summary card + buttons) under a software renderer,
+/// where a fixed render-frame target maps to an unknowable wall-clock time.
 #[derive(Resource)]
 struct CaptureConfig {
     path: String,
     settle_frames: u32,
+    wait_matchover: bool,
 }
 
 fn capture_config_from_env() -> Option<CaptureConfig> {
@@ -659,23 +666,36 @@ fn capture_config_from_env() -> Option<CaptureConfig> {
         .ok()
         .and_then(|s| s.parse().ok())
         .unwrap_or(90);
+    let wait_matchover =
+        std::env::var("TWOTOP_CAPTURE_ON").is_ok_and(|v| v == "matchover");
     Some(CaptureConfig {
         path,
         settle_frames,
+        wait_matchover,
     })
 }
 
-/// `Last`-schedule capture driver: count frames, fire one screenshot at the
-/// settle mark, then quit a few frames later so the async GPU readback + file
-/// write have flushed. The `save_to_disk` observer owns the actual encode.
+/// `Last`-schedule capture driver: (optionally wait for a gate, then) count
+/// settle frames, fire one screenshot at the mark, and quit a few frames
+/// later so the async GPU readback + file write have flushed. The
+/// `save_to_disk` observer owns the actual encode.
 fn capture_frame(
     mut commands: Commands,
     cfg: Res<CaptureConfig>,
+    match_state: Res<sim::MatchState>,
     mut frame: Local<u32>,
     mut fired: Local<bool>,
     mut exit: MessageWriter<AppExit>,
 ) {
     use bevy::render::view::screenshot::{Screenshot, save_to_disk};
+    // Hold the settle counter at zero until the gate opens (if any), so
+    // `settle_frames` is a delay measured from MatchOver, not app start.
+    if cfg.wait_matchover
+        && *frame == 0
+        && !matches!(*match_state, sim::MatchState::MatchOver)
+    {
+        return;
+    }
     *frame += 1;
     if !*fired {
         if *frame >= cfg.settle_frames {

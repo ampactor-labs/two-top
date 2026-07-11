@@ -46,8 +46,9 @@ const LIST_TOP: f32 = 0.20;
 const LIST_PITCH: f32 = 0.07;
 /// Replays list: the BACK band at the bottom.
 const BACK_BAND: (f32, f32) = (0.86, 0.96);
-/// Theater: tap the top strip to exit back to the list.
-const EXIT_BAND: (f32, f32) = (0.02, 0.14);
+/// Theater: the app-wide top-exit strip (`screen::TOP_EXIT_BAND`) leaves
+/// the tape — one gesture, one meaning, every screen.
+const EXIT_BAND: (f32, f32) = crate::screen::TOP_EXIT_BAND;
 /// Theater: speed pips row.
 const SPEED_BAND: (f32, f32) = (0.76, 0.84);
 /// Theater: scrub strip along the bottom.
@@ -274,16 +275,38 @@ fn enter_replays(mut commands: Commands, mut list: ResMut<TapeList>) {
             Transform::from_xyz(0.0, 0.0, 210.0),
         ));
     }
+    // BACK wears the same bordered-box language as every other button.
+    let back_anchor_y = 1.0 - (BACK_BAND.0 + BACK_BAND.1);
+    commands.spawn((
+        ReplayScreenText,
+        Sprite {
+            color: render::palette::HOT_BONE,
+            custom_size: Some(Vec2::new(362.0, 98.0)),
+            ..default()
+        },
+        ScreenAnchor::new(0.0, back_anchor_y, 0.0, 0.0),
+        Transform::from_xyz(0.0, 0.0, 209.0),
+    ));
+    commands.spawn((
+        ReplayScreenText,
+        Sprite {
+            color: render::palette::DEEP_ASH,
+            custom_size: Some(Vec2::new(340.0, 76.0)),
+            ..default()
+        },
+        ScreenAnchor::new(0.0, back_anchor_y, 0.0, 0.0),
+        Transform::from_xyz(0.0, 0.0, 209.5),
+    ));
     commands.spawn((
         ReplayScreenText,
         Text2d::new("BACK"),
         TextFont {
-            font_size: 48.0,
+            font_size: 40.0,
             ..default()
         },
         TextColor(render::palette::HOT_BONE),
         TextLayout::new_with_justify(Justify::Center),
-        ScreenAnchor::new(0.0, 1.0 - (BACK_BAND.0 + BACK_BAND.1), 0.0, 0.0),
+        ScreenAnchor::new(0.0, back_anchor_y, 0.0, 0.0),
         Transform::from_xyz(0.0, 0.0, 210.0),
     ));
 }
@@ -429,19 +452,20 @@ fn spawn_theater_ui(mut commands: Commands, theater: Res<TheaterMode>) {
     if !theater.active {
         return;
     }
-    // Marquee: who's on the card.
+    // Marquee: who's on the card. It sits IN the exit band and names the
+    // gesture, so the label and the tap target are one thing.
     let a = theater.names[0].clone().unwrap_or_else(|| "CUR".into());
     let b = theater.names[1].clone().unwrap_or_else(|| "STAG".into());
     commands.spawn((
         TheaterMarquee,
-        Text2d::new(format!("{a} vs {b} - tap top edge to exit")),
+        Text2d::new(format!("{a} vs {b}  -  tap here to exit")),
         TextFont {
-            font_size: 30.0,
+            font_size: 34.0,
             ..default()
         },
-        TextColor(render::palette::BONE.with_alpha(0.75)),
+        TextColor(render::palette::BONE.with_alpha(0.8)),
         TextLayout::new_with_justify(Justify::Center),
-        ScreenAnchor::new(0.0, 1.0 - (EXIT_BAND.0 + EXIT_BAND.1), 0.0, 0.0),
+        ScreenAnchor::new(0.0, crate::screen::TOP_EXIT_ANCHOR_Y, 0.0, 0.0),
         Transform::from_xyz(0.0, 0.0, 210.0),
     ));
     // Scrub track + fill (sized per-frame against the live view rect).

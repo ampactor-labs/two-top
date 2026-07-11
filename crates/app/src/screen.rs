@@ -91,6 +91,7 @@ impl Plugin for ScreenPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<AwaitingPeer>()
             .init_resource::<VictoryPose>()
+            .init_resource::<PendingUiThrow>()
             .add_systems(Startup, spawn_overlays)
             .add_systems(OnEnter(AppScreen::InMatch), spawn_match)
             .add_systems(OnExit(AppScreen::InMatch), despawn_match)
@@ -102,11 +103,13 @@ impl Plugin for ScreenPlugin {
                     title_buttons_input.run_if(in_state(AppScreen::Title)),
                     back_to_lobby.run_if(in_state(AppScreen::InMatch)),
                     online_leave_input.run_if(in_state(AppScreen::InMatch)),
+                    summary_buttons_input.run_if(in_state(AppScreen::InMatch)),
                     update_victory_pose,
                     hide_absent_challenger,
                     update_title_overlay,
                     update_title_buttons,
                     update_summary_overlay,
+                    update_summary_buttons,
                 )
                     .chain(),
             );
@@ -396,20 +399,30 @@ const TITLE_BODY_WIDTH: f32 = 1080.0;
 // ---- Title menu layout (window-fraction, y-down for taps) ----
 // Every interactive band lives below the notch/status-bar strip and inside
 // the thumb zone. Bands never overlap (settings.rs, room_code.rs and
-// profile.rs share this budget): name/arena 0.24–0.36 · replays 0.365–0.415
-// · settings 0.42–0.565 · practice 0.575–0.655 · room 0.68–0.78 · play
+// profile.rs share this budget): name/arena 0.24–0.36 · settings 0.40–0.57
+// · practice + replays (side by side) 0.575–0.655 · room 0.68–0.78 · play
 // 0.80–0.92.
 const PRACTICE_BTN_RECT: (f32, f32) = (0.575, 0.655);
 // PLAY sits clear of the bottom nav-bar/gesture strip (~last 6% of a phone).
 const PLAY_BTN_RECT: (f32, f32) = (0.80, 0.92);
-/// The thin REPLAYS band between the arena/name row and the settings rows.
-const REPLAYS_BTN_RECT: (f32, f32) = (0.365, 0.415);
+/// PRACTICE and REPLAYS share their band, split at this window-x fraction:
+/// practice left of it, replays right. Keeping them one row returns the
+/// vertical space to the settings rows (whose tap pitch the device pass
+/// sized for thumbs — see settings.rs).
+const PRACTICE_REPLAYS_SPLIT_X: f32 = 0.64;
 /// Couch-only: tapping the arena-name band cycles the arena.
 const ARENA_TAP_RECT: (f32, f32) = (0.24, 0.36);
 /// Screen-anchor Y (y-up, [-1,1]) for each button's center = 1 − 2·y_down.
 const PLAY_ANCHOR_Y: f32 = 1.0 - 2.0 * 0.855;
 const PRACTICE_ANCHOR_Y: f32 = 1.0 - 2.0 * 0.615;
-const REPLAYS_ANCHOR_Y: f32 = 1.0 - 2.0 * 0.39;
+
+/// One top strip, one meaning, every screen: tapping it goes BACK — leave
+/// the online match, back to the couch lobby, exit the tape. Starts below
+/// any camera cutout/status bar (the v9 device pass moved every target off
+/// the notch; keep it that way).
+pub const TOP_EXIT_BAND: (f32, f32) = (0.05, 0.16);
+/// Screen-anchor Y for whatever labels the top-exit strip.
+pub const TOP_EXIT_ANCHOR_Y: f32 = 1.0 - (TOP_EXIT_BAND.0 + TOP_EXIT_BAND.1);
 
 /// Which title action a button fires.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -439,63 +452,71 @@ fn in_band(y_down: f32, band: (f32, f32)) -> bool {
     y_down >= band.0 && y_down < band.1
 }
 
-/// Spawn a bordered button (three anchored entities) centered at `anchor_y`.
+/// Spawn one piece of a bordered box button. `insert_marker` stamps the
+/// screen-specific marker (title vs summary) so each screen's update
+/// system finds only its own buttons.
+fn spawn_button_part(
+    commands: &mut Commands,
+    role: BtnRole,
+    anchor: Vec2,
+    fill: Vec2,
+    font: f32,
+    insert_marker: &mut impl FnMut(&mut bevy::ecs::system::EntityCommands, BtnRole),
+) {
+    let mut ec = match role {
+        BtnRole::Border => commands.spawn((
+            Sprite {
+                color: render::palette::HOT_BONE,
+                custom_size: Some(fill + Vec2::splat(22.0)),
+                ..default()
+            },
+            ScreenAnchor::new(anchor.x, anchor.y, 0.0, 0.0),
+            Transform::from_xyz(0.0, 0.0, 199.0),
+            Visibility::Hidden,
+        )),
+        BtnRole::Fill => commands.spawn((
+            Sprite {
+                color: render::palette::DEEP_ASH,
+                custom_size: Some(fill),
+                ..default()
+            },
+            ScreenAnchor::new(anchor.x, anchor.y, 0.0, 0.0),
+            Transform::from_xyz(0.0, 0.0, 199.5),
+            Visibility::Hidden,
+        )),
+        BtnRole::Label => commands.spawn((
+            Text2d::new(String::new()),
+            TextFont {
+                font_size: font,
+                ..default()
+            },
+            TextColor(render::palette::HOT_BONE),
+            // Never wrap a button label onto two lines — keep it on the box.
+            TextLayout {
+                justify: Justify::Center,
+                linebreak: bevy::text::LineBreak::NoWrap,
+            },
+            ScreenAnchor::new(anchor.x, anchor.y, 0.0, 0.0),
+            Transform::from_xyz(0.0, 0.0, 200.0),
+            Visibility::Hidden,
+        )),
+    };
+    insert_marker(&mut ec, role);
+}
+
+/// Spawn a bordered button (three anchored entities) centered at `anchor`.
 fn spawn_title_button(
     commands: &mut Commands,
     action: TitleAction,
-    anchor_y: f32,
+    anchor: Vec2,
     fill: Vec2,
     font: f32,
 ) {
-    let border = fill + Vec2::splat(22.0);
-    commands.spawn((
-        TitleButton {
-            action,
-            role: BtnRole::Border,
-        },
-        Sprite {
-            color: render::palette::HOT_BONE,
-            custom_size: Some(border),
-            ..default()
-        },
-        ScreenAnchor::new(0.0, anchor_y, 0.0, 0.0),
-        Transform::from_xyz(0.0, 0.0, 199.0),
-        Visibility::Hidden,
-    ));
-    commands.spawn((
-        TitleButton {
-            action,
-            role: BtnRole::Fill,
-        },
-        Sprite {
-            color: render::palette::DEEP_ASH,
-            custom_size: Some(fill),
-            ..default()
-        },
-        ScreenAnchor::new(0.0, anchor_y, 0.0, 0.0),
-        Transform::from_xyz(0.0, 0.0, 199.5),
-        Visibility::Hidden,
-    ));
-    commands.spawn((
-        TitleButton {
-            action,
-            role: BtnRole::Label,
-        },
-        Text2d::new(String::new()),
-        TextFont {
-            font_size: font,
-            ..default()
-        },
-        TextColor(render::palette::HOT_BONE),
-        // Never wrap a button label onto two lines — keep it on the box.
-        TextLayout {
-            justify: Justify::Center,
-            linebreak: bevy::text::LineBreak::NoWrap,
-        },
-        ScreenAnchor::new(0.0, anchor_y, 0.0, 0.0),
-        Transform::from_xyz(0.0, 0.0, 200.0),
-        Visibility::Hidden,
-    ));
+    for role in [BtnRole::Border, BtnRole::Fill, BtnRole::Label] {
+        spawn_button_part(commands, role, anchor, fill, font, &mut |ec, role| {
+            ec.insert(TitleButton { action, role });
+        });
+    }
 }
 
 fn spawn_overlays(mut commands: Commands) {
@@ -542,29 +563,30 @@ fn spawn_overlays(mut commands: Commands) {
     spawn_title_button(
         &mut commands,
         TitleAction::Play,
-        PLAY_ANCHOR_Y,
+        Vec2::new(0.0, PLAY_ANCHOR_Y),
         Vec2::new(760.0, 172.0),
         60.0,
     );
+    // PRACTICE and REPLAYS share one row (split at PRACTICE_REPLAYS_SPLIT_X)
+    // so the settings rows above keep their thumb-sized tap pitch.
     spawn_title_button(
         &mut commands,
         TitleAction::Practice,
-        PRACTICE_ANCHOR_Y,
-        Vec2::new(640.0, 104.0),
-        34.0,
+        Vec2::new(-0.34, PRACTICE_ANCHOR_Y),
+        Vec2::new(490.0, 104.0),
+        30.0,
     );
-    // REPLAYS — a slimmer tertiary button; the tape list is a den, not a
-    // destination you sprint to.
     spawn_title_button(
         &mut commands,
         TitleAction::Replays,
-        REPLAYS_ANCHOR_Y,
-        Vec2::new(420.0, 74.0),
-        28.0,
+        Vec2::new(0.60, PRACTICE_ANCHOR_Y),
+        Vec2::new(280.0, 104.0),
+        30.0,
     );
     // Summary overlay — screen-centered (the kill-cam holds zoomed-in on
     // MatchOver, so a world-parked summary would sit off-center), shown only
-    // on MatchOver.
+    // on MatchOver. Sits above the primary button's band, which reuses the
+    // PLAY slot below.
     commands.spawn((
         SummaryOverlay,
         Text2d::new(String::new()),
@@ -574,10 +596,11 @@ fn spawn_overlays(mut commands: Commands) {
         },
         TextColor(render::palette::HOT_BONE),
         TextLayout::new_with_justify(Justify::Center),
-        ScreenAnchor::new(0.0, 0.0, 0.0, 0.0),
+        ScreenAnchor::new(0.0, 0.12, 0.0, 0.0),
         Transform::from_xyz(0.0, 0.0, 200.0),
         Visibility::Hidden,
     ));
+    spawn_summary_buttons(&mut commands);
 }
 
 /// Next arena in the picker cycle (Anchor → Crossing → Reliquary → Anchor).
@@ -671,15 +694,16 @@ fn title_buttons_input(
     }
     for t in touches.iter_just_pressed() {
         let yd = t.position().y / win.y;
+        let xd = t.position().x / win.x;
         if in_band(yd, PLAY_BTN_RECT) {
             next.set(AppScreen::InMatch);
             return;
         }
-        if in_band(yd, REPLAYS_BTN_RECT) {
-            next.set(AppScreen::Replays);
-            return;
-        }
         if in_band(yd, PRACTICE_BTN_RECT) {
+            if xd >= PRACTICE_REPLAYS_SPLIT_X {
+                next.set(AppScreen::Replays);
+                return;
+            }
             practice.0 = !practice.0;
         }
     }
@@ -790,13 +814,13 @@ fn back_to_lobby(
     if !matches!(*state, MatchState::MatchOver) {
         return;
     }
-    // Escape (desktop) or a tap in the upper area, clear of the notch, is the
-    // no-keyboard way home from a decided practice/couch match.
+    // Escape (desktop) or the labeled LOBBY strip — the one universal
+    // top-exit band every screen shares.
     let win = window.0;
     let tapped = win.y > 0.0
         && touches
             .iter_just_pressed()
-            .any(|t| in_band(t.position().y / win.y, (0.12, 0.30)));
+            .any(|t| in_band(t.position().y / win.y, TOP_EXIT_BAND));
     if keys.just_pressed(KeyCode::Escape) || tapped {
         next.set(AppScreen::Title);
     }
@@ -894,11 +918,10 @@ fn update_title_overlay(
     }
 }
 
-/// Compose the MatchOver summary. Couch keeps its classic card; online adds
-/// names, the rivalry standing, and the RUN IT BACK handshake state; the
-/// theater says what a finished tape needs to say. Pure so the copy has
-/// tests (the RUN IT BACK state machine reads better in assertions than on
-/// two phones).
+/// Compose the MatchOver summary CARD — the facts only (winner, score,
+/// rivalry, the fled note, the saved-tape note). The ACTIONS live on real
+/// buttons now (`update_summary_buttons`): the card never again instructs
+/// a phone player to "press ESC" or tap an invisible zone. Pure for tests.
 #[allow(clippy::too_many_arguments)]
 fn summary_text(
     score: MatchScore,
@@ -909,19 +932,19 @@ fn summary_text(
     local_name: &str,
     peer: Option<net::ProfileData>,
     rivalry: Option<String>,
-    consent: net::RematchConsent,
     opponent_gone: bool,
     saved: bool,
 ) -> String {
     let p0_won = score.p0 >= MATCH_WIN_THRESHOLD;
 
-    // Theater: the tape ran out — say who won it and how to leave.
+    // Theater: the tape ran out — say who won it; the marquee up top is
+    // already the way out.
     if let Some(names) = theater_names {
         let idx = if p0_won { 0 } else { 1 };
         let fallback = if p0_won { "CUR" } else { "STAG" };
         let who = names[idx].clone().unwrap_or_else(|| fallback.to_string());
         return format!(
-            "{who} WINS\n\n{}  -  {}\n\nTAPE ENDS\ntap top edge for the list",
+            "{who} WINS\n\n{}  -  {}\n\nTAPE ENDS",
             score.p0, score.p1
         );
     }
@@ -933,10 +956,7 @@ fn summary_text(
         } else {
             ""
         };
-        return format!(
-            "{winner}\n\n{}  -  {}\n\npress THROW to play again\npress ESC for lobby{replay_line}",
-            score.p0, score.p1
-        );
+        return format!("{winner}\n\n{}  -  {}{replay_line}", score.p0, score.p1);
     }
 
     // Online: name the winner by who they ARE when we know it.
@@ -951,15 +971,10 @@ fn summary_text(
         format!("{peer_name} WINS")
     };
     let rivalry_line = rivalry.map(|r| format!("\n{r}")).unwrap_or_default();
-    let handshake = if opponent_gone {
-        "the field is yours".to_string()
+    let gone_line = if opponent_gone {
+        "\n\nthe field is yours"
     } else {
-        match (consent.local, consent.peer) {
-            (false, false) => "tap THROW to run it back".to_string(),
-            (true, false) => format!("waiting on {peer_name}..."),
-            (false, true) => format!("{peer_name} WANTS TO RUN IT BACK\ntap THROW"),
-            (true, true) => "running it back...".to_string(),
-        }
+        ""
     };
     let replay_line = if saved {
         "\nmatch replay saved - share the .bmrg"
@@ -967,9 +982,33 @@ fn summary_text(
         ""
     };
     format!(
-        "{winner}\n\n{}  -  {}{rivalry_line}\n\n{handshake}\ntap top edge to leave{replay_line}",
+        "{winner}\n\n{}  -  {}{rivalry_line}{gone_line}{replay_line}",
         score.p0, score.p1
     )
+}
+
+/// The primary summary button's label — the RUN IT BACK handshake as a
+/// state machine the thumb can read. `None` hides the button (opponent
+/// gone, or a tape playing). Pure for tests.
+pub fn primary_label(
+    online: bool,
+    practice: bool,
+    consent: net::RematchConsent,
+    peer_name: &str,
+    opponent_gone: bool,
+) -> Option<String> {
+    if !online || practice {
+        return Some("PLAY AGAIN".to_string());
+    }
+    if opponent_gone {
+        return None;
+    }
+    Some(match (consent.local, consent.peer) {
+        (false, false) => "RUN IT BACK".to_string(),
+        (true, false) => format!("WAITING ON {peer_name}..."),
+        (false, true) => format!("{peer_name} IS IN - RUN IT BACK"),
+        (true, true) => "RUNNING IT BACK...".to_string(),
+    })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -983,7 +1022,6 @@ fn update_summary_overlay(
     profile: Res<crate::profile::LocalProfile>,
     peer: Res<net::PeerProfile>,
     career: Res<crate::grudge::CareerRecord>,
-    consent: Res<net::RematchConsent>,
     lobby: Res<net::LobbyState>,
     saved: Res<crate::recorder::LastSavedReplay>,
     mut q: Query<(&mut Text2d, &mut Visibility), With<SummaryOverlay>>,
@@ -1003,12 +1041,242 @@ fn update_summary_overlay(
             &profile.name_string(),
             peer.0,
             career.rivalry_line(peer.0),
-            *consent,
             opponent_gone,
             saved.0.is_some(),
         );
     } else {
         *vis = Visibility::Hidden;
+    }
+}
+
+// ---- Summary action buttons ----
+// The endgame's actions are BUTTONS, not instructions: the touch controls
+// hide at MatchOver, so "tap THROW" pointed at an invisible zone, and
+// "press ESC" pointed at a key the phone doesn't have. The primary button
+// carries the whole RUN IT BACK handshake state; the top strip is the one
+// universal BACK gesture, labeled.
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SummaryAction {
+    /// PLAY AGAIN (couch/practice) / the RUN IT BACK handshake (online).
+    Primary,
+    /// The labeled top-exit strip: LOBBY (couch/practice) / LEAVE (online).
+    Exit,
+}
+
+#[derive(Component)]
+struct SummaryButton {
+    action: SummaryAction,
+    role: BtnRole,
+}
+
+/// A tap on PLAY AGAIN must become a real THROW input so the in-sim
+/// `apply_rematch` restarts the match the rollback-correct way. The tap
+/// arms this counter; `inject_ui_throw` (ReadInputs) ORs THROW_DOWN into
+/// the local player's input while it runs down — a held press with a clean
+/// rising edge, exactly as if the thumb had pressed the throw zone.
+#[derive(Resource, Default)]
+pub struct PendingUiThrow(pub u8);
+
+/// Frames the injected press holds. A few ticks survive the forgiveness
+/// window and any same-frame ordering; release follows for a clean edge
+/// next time.
+const UI_THROW_FRAMES: u8 = 4;
+
+pub fn inject_ui_throw(
+    mut pending: ResMut<PendingUiThrow>,
+    local_players: Res<bevy_ggrs::LocalPlayers>,
+    inputs: Option<ResMut<bevy_ggrs::LocalInputs<sim::GgrsCfg>>>,
+) {
+    if pending.0 == 0 {
+        return;
+    }
+    let Some(mut inputs) = inputs else {
+        return;
+    };
+    pending.0 -= 1;
+    // Couch has two local handles; P0's press restarts for everyone
+    // (apply_rematch fires on either player's edge).
+    if let Some(&handle) = local_players.0.first()
+        && let Some(input) = inputs.0.get_mut(&handle)
+    {
+        input.buttons |= sim::PlayerInput::THROW_DOWN;
+    }
+}
+
+fn spawn_summary_buttons(commands: &mut Commands) {
+    // Primary sits in the PLAY slot — the same thumb position that started
+    // the match offers to restart it.
+    for role in [BtnRole::Border, BtnRole::Fill, BtnRole::Label] {
+        spawn_button_part(
+            commands,
+            role,
+            Vec2::new(0.0, PLAY_ANCHOR_Y),
+            Vec2::new(760.0, 150.0),
+            44.0,
+            &mut |ec, role| {
+                ec.insert(SummaryButton {
+                    action: SummaryAction::Primary,
+                    role,
+                });
+            },
+        );
+    }
+    for role in [BtnRole::Border, BtnRole::Fill, BtnRole::Label] {
+        spawn_button_part(
+            commands,
+            role,
+            Vec2::new(0.0, TOP_EXIT_ANCHOR_Y),
+            Vec2::new(340.0, 76.0),
+            30.0,
+            &mut |ec, role| {
+                ec.insert(SummaryButton {
+                    action: SummaryAction::Exit,
+                    role,
+                });
+            },
+        );
+    }
+}
+
+type SummaryButtonQuery<'w, 's> = Query<
+    'w,
+    's,
+    (
+        &'static SummaryButton,
+        &'static mut Visibility,
+        Option<&'static mut Sprite>,
+        Option<&'static mut Text2d>,
+        Option<&'static mut TextColor>,
+    ),
+>;
+
+#[allow(clippy::too_many_arguments)]
+fn update_summary_buttons(
+    screen: Res<State<AppScreen>>,
+    state: Res<MatchState>,
+    netplay: Res<NetplayConfig>,
+    practice: Res<crate::bot::PracticeMode>,
+    theater: Res<crate::theater::TheaterMode>,
+    peer: Res<net::PeerProfile>,
+    consent: Res<net::RematchConsent>,
+    lobby: Res<net::LobbyState>,
+    mut q: SummaryButtonQuery,
+) {
+    let over = *screen.get() == AppScreen::InMatch
+        && matches!(*state, MatchState::MatchOver)
+        // The theater's marquee owns the top strip and a tape needs no
+        // rematch button — the summary card alone says TAPE ENDS.
+        && !theater.active();
+    let online = netplay.room_url.is_some();
+    let opponent_gone = matches!(*lobby, net::LobbyState::Forfeited { .. });
+    let peer_name = peer
+        .0
+        .map(|p| crate::profile::name_from_slots(&p.name))
+        .unwrap_or_else(|| "THE CHALLENGER".to_string());
+    let primary = primary_label(online, practice.0, *consent, &peer_name, opponent_gone);
+    // Local consent shows as a pressed/armed button: inverted fill.
+    let armed = online && !practice.0 && consent.local && !consent.peer;
+
+    for (btn, mut vis, sprite, text, color) in &mut q {
+        let shown = over
+            && match btn.action {
+                SummaryAction::Primary => primary.is_some(),
+                SummaryAction::Exit => true,
+            };
+        *vis = if shown {
+            Visibility::Visible
+        } else {
+            Visibility::Hidden
+        };
+        if !shown {
+            continue;
+        }
+        let inverted = btn.action == SummaryAction::Primary && armed;
+        match btn.role {
+            BtnRole::Border => {
+                if let Some(mut s) = sprite {
+                    s.color = render::palette::HOT_BONE;
+                }
+            }
+            BtnRole::Fill => {
+                if let Some(mut s) = sprite {
+                    s.color = if inverted {
+                        render::palette::HOT_BONE
+                    } else {
+                        render::palette::DEEP_ASH
+                    };
+                }
+            }
+            BtnRole::Label => {
+                if let Some(mut t) = text {
+                    t.0 = match btn.action {
+                        SummaryAction::Primary => primary.clone().unwrap_or_default(),
+                        SummaryAction::Exit => if online && !practice.0 {
+                            "LEAVE"
+                        } else {
+                            "LOBBY"
+                        }
+                        .to_string(),
+                    };
+                }
+                if let Some(mut c) = color {
+                    c.0 = if inverted {
+                        render::palette::VOID
+                    } else {
+                        render::palette::HOT_BONE
+                    };
+                }
+            }
+        }
+    }
+}
+
+/// Taps on the summary's PRIMARY button. Couch/practice: arm the injected
+/// THROW (the input-driven rematch). Online: give consent — the same thing
+/// a raw THROW press means at MatchOver (`netplay::gate_rematch_inputs`
+/// converts those), so both paths converge on one handshake.
+#[allow(clippy::too_many_arguments)]
+fn summary_buttons_input(
+    screen: Res<State<AppScreen>>,
+    state: Res<MatchState>,
+    netplay: Res<NetplayConfig>,
+    practice: Res<crate::bot::PracticeMode>,
+    theater: Res<crate::theater::TheaterMode>,
+    touches: Res<Touches>,
+    window: Res<WindowSize>,
+    lobby: Res<net::LobbyState>,
+    mut consent: ResMut<net::RematchConsent>,
+    mut queue: ResMut<net::NetSendQueue>,
+    mut pending: ResMut<PendingUiThrow>,
+) {
+    if *screen.get() != AppScreen::InMatch
+        || !matches!(*state, MatchState::MatchOver)
+        || theater.active()
+    {
+        return;
+    }
+    let win = window.0;
+    if win.y <= 0.0 {
+        return;
+    }
+    let tapped_primary = touches
+        .iter_just_pressed()
+        .any(|t| in_band(t.position().y / win.y, PLAY_BTN_RECT));
+    if !tapped_primary {
+        return;
+    }
+    let online = netplay.room_url.is_some() && !practice.0;
+    if !online {
+        pending.0 = UI_THROW_FRAMES;
+        return;
+    }
+    if matches!(*lobby, net::LobbyState::Forfeited { .. }) {
+        return; // nobody left to run it back with
+    }
+    if !consent.local {
+        consent.local = true;
+        queue.0.push(net::NetMsg::RematchWant);
     }
 }
 
@@ -1033,7 +1301,7 @@ fn online_leave_input(world: &mut World) {
         && world
             .resource::<Touches>()
             .iter_just_pressed()
-            .any(|t| in_band(t.position().y / win.y, (0.02, 0.18)));
+            .any(|t| in_band(t.position().y / win.y, TOP_EXIT_BAND));
     if !(esc || tapped) {
         return;
     }
@@ -1107,9 +1375,9 @@ mod tests {
         assert_eq!(id, sim::ArenaId::Anchor, "wraps back to the start");
     }
 
-    // ---- The online summary's RUN IT BACK state machine ----
+    // ---- The summary card + the RUN IT BACK button's state machine ----
 
-    fn online_summary(consent: net::RematchConsent, gone: bool) -> String {
+    fn online_summary(gone: bool) -> String {
         let peer = net::ProfileData {
             install_id: 7,
             name: [4, 5, 6, 0], // TAGC
@@ -1126,52 +1394,59 @@ mod tests {
             "CURS",
             Some(peer),
             Some("2ND MEETING with TAGC - tied 1-1".into()),
-            consent,
             gone,
             true,
         )
     }
 
     #[test]
-    fn summary_walks_the_handshake_states() {
-        let idle = online_summary(net::RematchConsent::default(), false);
-        assert!(idle.contains("CURS WINS"), "{idle}");
-        assert!(idle.contains("tap THROW to run it back"), "{idle}");
-        assert!(idle.contains("2ND MEETING"), "{idle}");
-
-        let waiting = online_summary(
-            net::RematchConsent {
-                local: true,
-                peer: false,
-            },
-            false,
-        );
-        assert!(waiting.contains("waiting on TAGC"), "{waiting}");
-
-        let asked = online_summary(
-            net::RematchConsent {
-                local: false,
-                peer: true,
-            },
-            false,
-        );
-        assert!(asked.contains("TAGC WANTS TO RUN IT BACK"), "{asked}");
-
-        let both = online_summary(
-            net::RematchConsent {
-                local: true,
-                peer: true,
-            },
-            false,
-        );
-        assert!(both.contains("running it back"), "{both}");
+    fn summary_card_carries_facts_not_instructions() {
+        let card = online_summary(false);
+        assert!(card.contains("CURS WINS"), "{card}");
+        assert!(card.contains("2ND MEETING"), "{card}");
+        assert!(card.contains("replay saved"), "{card}");
+        // Actions live on buttons now — the card never instructs.
+        assert!(!card.contains("THROW"), "{card}");
+        assert!(!card.contains("ESC"), "{card}");
+        assert!(!card.contains("tap top edge"), "{card}");
     }
 
     #[test]
-    fn summary_with_a_fled_opponent_offers_no_handshake() {
-        let fled = online_summary(net::RematchConsent::default(), true);
+    fn summary_with_a_fled_opponent_says_so() {
+        let fled = online_summary(true);
         assert!(fled.contains("the field is yours"), "{fled}");
-        assert!(!fled.contains("run it back"), "{fled}");
+    }
+
+    #[test]
+    fn primary_button_walks_the_handshake_states() {
+        let c = |local, peer| net::RematchConsent { local, peer };
+        assert_eq!(
+            primary_label(true, false, c(false, false), "TAGC", false).unwrap(),
+            "RUN IT BACK"
+        );
+        assert_eq!(
+            primary_label(true, false, c(true, false), "TAGC", false).unwrap(),
+            "WAITING ON TAGC..."
+        );
+        assert_eq!(
+            primary_label(true, false, c(false, true), "TAGC", false).unwrap(),
+            "TAGC IS IN - RUN IT BACK"
+        );
+        assert_eq!(
+            primary_label(true, false, c(true, true), "TAGC", false).unwrap(),
+            "RUNNING IT BACK..."
+        );
+        // Nobody left to run it back with: the button hides.
+        assert_eq!(primary_label(true, false, c(false, false), "TAGC", true), None);
+        // Couch and practice keep the plain restart.
+        assert_eq!(
+            primary_label(false, false, c(false, false), "", false).unwrap(),
+            "PLAY AGAIN"
+        );
+        assert_eq!(
+            primary_label(true, true, c(false, false), "", false).unwrap(),
+            "PLAY AGAIN"
+        );
     }
 
     #[test]
@@ -1188,7 +1463,6 @@ mod tests {
             "",
             None,
             None,
-            net::RematchConsent::default(),
             false,
             false,
         );
@@ -1211,12 +1485,10 @@ mod tests {
             "",
             None,
             None,
-            net::RematchConsent::default(),
             false,
             true,
         );
         assert!(text.contains("CUR WINS"), "{text}");
-        assert!(text.contains("press THROW to play again"), "{text}");
         assert!(text.contains("replay saved"), "{text}");
     }
 }
