@@ -35,6 +35,7 @@
 use bevy::prelude::*;
 use ggrs::{Message, NonBlockingSocket};
 use matchbox_socket::{Packet, PeerId, WebRtcChannel};
+use serde::{Deserialize, Serialize};
 use sim::NetAddr;
 use uuid::Uuid;
 
@@ -45,8 +46,8 @@ use uuid::Uuid;
 // `bevy_ggrs::Session`, and `net` deliberately depends only on raw `ggrs`
 // (no bevy_ggrs) to stay headless.
 pub use matchbox_socket::{
-    ChannelConfig, MessageLoopFuture, PeerId as MatchboxPeerId, PeerState, WebRtcSocket,
-    WebRtcSocketBuilder,
+    ChannelConfig, MessageLoopFuture, PeerId as MatchboxPeerId, PeerState, RtcIceServerConfig,
+    WebRtcSocket, WebRtcSocketBuilder,
 };
 
 /// Convert a matchbox `PeerId` to the neutral `sim::NetAddr` used at the
@@ -138,6 +139,88 @@ impl NonBlockingSocket<NetAddr> for MatchboxBridge {
             .collect()
     }
 }
+
+// ---------------------------------------------------------------------------
+// The reliable side-channel: everything the duel needs that is NOT sim input.
+//
+// ggrs owns matchbox channel 0 (unreliable — it has its own reliability
+// layer). Channel 1 is a RELIABLE matchbox channel carrying small postcard
+// messages: the identity handshake (install-id + name, the thing the grudge
+// ledger's per-opponent rivalry has been parked on), rematch consent, and a
+// clean goodbye so the peer never has to wait out the silence grace to learn
+// we left. None of this ever enters the sim — the messages change what a
+// client SHOWS and when it chooses to emit its own inputs, never how a tick
+// resolves.
+// ---------------------------------------------------------------------------
+
+/// Glyph slots in a duelist name (indices into the app's CURSTAG alphabet).
+pub const NAME_LEN: usize = 4;
+
+/// A peer's shareable identity. `install_id` is a random u128 minted once
+/// per install and persisted — matchbox `PeerId`s are ephemeral per
+/// connection, so this is the durable key the rivalry ledger files a peer
+/// under. `name` is opaque glyph indices; the app clamps them into its
+/// alphabet at render time, so a malicious value can at worst display a
+/// wrong letter.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub struct ProfileData {
+    pub install_id: u128,
+    pub name: [u8; NAME_LEN],
+}
+
+/// Messages on the reliable side-channel. postcard-encoded (the project's
+/// serialization convention; the bincode above exists only to mirror
+/// matchbox's ggrs reference codec byte-for-byte).
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub enum NetMsg {
+    /// Identity handshake, sent once right after the P2P session swap.
+    Profile(ProfileData),
+    /// "I want to run it back." The receiving client surfaces it on the
+    /// summary; when both sides have consented, each client emits its own
+    /// THROW input and the in-sim `apply_rematch` restarts the match the
+    /// same rollback-correct way it always has.
+    RematchWant,
+    /// Clean goodbye: the peer is leaving on purpose. The receiver forfeits
+    /// immediately instead of waiting out the disconnect grace.
+    Bye,
+}
+
+/// Encode a side-channel message. Infallible for these types (postcard on
+/// plain enums/structs cannot fail without allocation failure).
+pub fn encode_net_msg(msg: &NetMsg) -> Packet {
+    postcard::to_allocvec(msg)
+        .expect("NetMsg postcard encoding cannot fail")
+        .into_boxed_slice()
+}
+
+/// Decode a side-channel message. Unlike the ggrs channel (where malformed
+/// bytes mean an incompatible build and panicking is honest), the side
+/// channel tolerates strangers: a peer running a newer protocol just has
+/// its unknown messages ignored.
+pub fn decode_net_msg(bytes: &[u8]) -> Option<NetMsg> {
+    postcard::from_bytes(bytes).ok()
+}
+
+/// The connected peer's identity, once its `Profile` message arrives.
+/// Cleared on session teardown.
+#[derive(Resource, Default, Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PeerProfile(pub Option<ProfileData>);
+
+/// Rematch consent state for the current summary screen. `local` flips when
+/// this player asks to run it back (their THROW press is converted into
+/// consent while online), `peer` when the side-channel says the opponent
+/// did. Both true → each client emits the real THROW input and the sim
+/// restarts. Reset whenever the sim leaves `MatchOver`.
+#[derive(Resource, Default, Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RematchConsent {
+    pub local: bool,
+    pub peer: bool,
+}
+
+/// Outbound side-channel queue. App systems push; the matchbox driver
+/// drains it into channel 1 each frame (it owns the non-send socket).
+#[derive(Resource, Default, Debug)]
+pub struct NetSendQueue(pub Vec<NetMsg>);
 
 /// Phase 12 cycle 2: lobby state machine.
 ///
@@ -298,10 +381,14 @@ pub struct LastPeerMessageFrame(pub u32);
 pub const DISCONNECT_AFTER_FRAMES: u32 = 60;
 
 /// Frames of peer silence that trigger `Disconnected -> Forfeited`.
-/// 180 = 3 s @ 60 Hz, per BUILD_PLAN § Phase 12 disconnection
-/// handling. The `Forfeited` transition also sets
+/// 600 = 10 s @ 60 Hz — the grace window that lets a phone survive a
+/// notification-shade peek or a short call screen without losing the
+/// match. ggrs's own disconnect (9 s, `app::netplay::DISCONNECT_TIMEOUT`)
+/// is the authoritative trigger and fires just before this; the silence
+/// FSM here is the fallback for the pre-swap window and for anything
+/// ggrs misses. The `Forfeited` transition also sets
 /// `sim::MatchState::MatchOver`, ending the round in the sim layer.
-pub const FORFEIT_AFTER_FRAMES: u32 = 180;
+pub const FORFEIT_AFTER_FRAMES: u32 = 600;
 
 /// Pure helper: given the current lobby state, the current frame,
 /// and the last-message frame, return the next lobby state if a
@@ -395,6 +482,9 @@ impl Plugin for NetPlugin {
             .init_resource::<LobbyState>()
             .init_resource::<PendingP2PSwap>()
             .init_resource::<LastPeerMessageFrame>()
+            .init_resource::<PeerProfile>()
+            .init_resource::<RematchConsent>()
+            .init_resource::<NetSendQueue>()
             .add_systems(
                 Update,
                 (detect_peer_connection_edge, tick_disconnection_grace),
@@ -457,6 +547,30 @@ mod tests {
         // The compile-fence above is the load-bearing test.
         let dummy_peer = PeerId(uuid::Uuid::from_u128(0xdead_beef));
         assert_eq!(dummy_peer.0, uuid::Uuid::from_u128(0xdead_beef));
+    }
+
+    // ---- Side-channel codec ----
+
+    #[test]
+    fn net_msgs_round_trip_through_postcard() {
+        let msgs = [
+            NetMsg::Profile(ProfileData {
+                install_id: 0xdead_beef_cafe_f00d_1122_3344_5566_7788,
+                name: [2, 6, 0, 4],
+            }),
+            NetMsg::RematchWant,
+            NetMsg::Bye,
+        ];
+        for msg in msgs {
+            let bytes = encode_net_msg(&msg);
+            assert_eq!(decode_net_msg(&bytes), Some(msg));
+        }
+    }
+
+    #[test]
+    fn malformed_side_channel_bytes_are_ignored_not_fatal() {
+        assert_eq!(decode_net_msg(&[]), None);
+        assert_eq!(decode_net_msg(&[0xff, 0xff, 0xff, 0xff]), None);
     }
 
     // ---- Cycle 2: LobbyState ----

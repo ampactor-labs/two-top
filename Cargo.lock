@@ -199,6 +199,7 @@ dependencies = [
  "tracing",
  "tracing-appender",
  "tracing-subscriber",
+ "uuid",
 ]
 
 [[package]]
@@ -4003,6 +4004,8 @@ dependencies = [
  "bincode 2.0.1",
  "ggrs",
  "matchbox_socket",
+ "postcard",
+ "serde",
  "sim",
  "tracing",
  "uuid",

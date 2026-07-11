@@ -19,6 +19,13 @@ bincode = { version = "2.0", default-features = false, features = [
     "serde",
     "alloc",
 ] }
+# The reliable side-channel (channel 1: identity handshake, rematch
+# consent, clean goodbye) speaks postcard — the project's serialization
+# convention (MORGAN_NOTES § postcard over bincode). The bincode above
+# exists only to mirror matchbox's ggrs reference codec byte-for-byte
+# on channel 0.
+postcard = { version = "1", default-features = false, features = ["alloc"] }
+serde = { version = "1", default-features = false, features = ["derive"] }
 # Phase 13: tracing replaces the prior `log` crate dependency. bevy_log
 # (already enabled below) routes `tracing` events through whatever
 # subscriber the app crate installs; here we just emit. Default-features
