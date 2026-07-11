@@ -243,3 +243,71 @@ LShift dash; P1 = arrows / RShift throw / RCtrl dash.
       intensity, kill-cam pacing, deadzone, readability under effect-heavy moments —
       back into issues. This is the subjective "does it feel like a shipping title"
       gate that no automated check can replace.
+
+---
+
+## F. Social batch — two-phone verification (2026-07-10 batch)
+
+Everything here rides the 2026-07-10 social batch (side-channel identity,
+RUN IT BACK, away grace, theater, gauntlet, southpaw). Flash BOTH phones
+from the same commit first: `scripts/phone.sh` per phone (bakes the Railway
+room by default). The old APK predates the batch.
+
+### F.1 Solo smoke (one phone)
+
+- [ ] **Title additions:** NAME row dials glyphs and persists across relaunch;
+      REPLAYS button present; five settings rows ending in `southpaw off`;
+      all bands tappable without hitting the notch or each other.
+- [ ] **Gauntlet:** fresh install's bot is a passive dummy; beat it and the
+      practice button reads GAUNTLET TIER 1; the tier-1 bot visibly attacks
+      sooner. Lose on purpose — the tier resets, the button reverts.
+- [ ] **Taunt mark:** the ring + TAUNT label sits top-center in a live match,
+      dim; tapping the strip fires the flex and the mark lights.
+- [ ] **Theater:** after a decided match, REPLAYS lists the tape with the right
+      winner/arena/duration/date; it plays back with HUD + audio + kill-cam;
+      tap pauses, dragging the bottom strip scrubs (backward too), speeds
+      switch, top edge exits, BACK returns to Title.
+- [ ] **Southpaw:** toggle on — dash ring moves bottom-LEFT, move stick lives on
+      the right half, throw on the left, hints mirrored; toggle off restores.
+
+### F.2 Two phones, same room
+
+- [ ] **Names exchange:** pair via quick match; after the match each summary
+      names the winner by its dialed name and shows FIRST MEETING with the
+      other's name. The tape header carries both names (check in the theater).
+- [ ] **Pip slam + victory pose:** every kill slams its pip; the decided match's
+      winner stands in the charge pose through the summary.
+- [ ] **RUN IT BACK, both directions:** A presses THROW → A shows `waiting on
+      <B>...`, B shows `<A> WANTS TO RUN IT BACK`; B taps THROW → both restart
+      in lockstep, 0-0, no desync. Repeat with B initiating.
+- [ ] **Rivalry counts:** the rematch's summary reads 2ND MEETING with the
+      standing; career W-L on the title moves.
+- [ ] **Away grace:** mid-round, pull the notification shade on A ~4 s → B shows
+      `<A> AWAY`, sim frozen under it → release → the round RESUMES, no desync,
+      no forfeit.
+- [ ] **Abandonment:** A locks its screen 15+ s → B gets `<A> FLED — the field
+      is yours` + a career WIN; A on waking sees `MATCH ABANDONED — you left
+      the duel` + a career LOSS. Both leave via the top band and can
+      FIND OPPONENT again on a fresh socket.
+- [ ] **Clean leave:** at any online summary, A taps the top band → B flips to
+      FLED *immediately* (the goodbye message, not the 9 s grace).
+- [ ] **Private room:** both dial the same 4 glyphs → they pair; one on QUICK and
+      one on a code → they never meet.
+
+### F.3 Cross-network (the Rung 5 gate)
+
+- [ ] One phone on cellular, one on wifi, both at the Railway room: they pair
+      and complete a match. **If both sit at AWAITING >15 s** and the overlay
+      shows the relay hint, ICE is failing behind the carrier NAT — stand up a
+      TURN relay and rebuild with `TWOTOP_TURN_URL/_USER/_PASS`
+      (SIGNALING.md § NAT traversal), then re-run this gate.
+
+### F.4 Tuning notes (collect, don't fix live)
+
+- [ ] Audio mix on the phone speaker: cue trims vs music beds
+      (`scripts/generate_audio.py` constants).
+- [ ] Perspective: focal + UI reserve, spawn spread — do the duelists open too
+      close to center?
+- [ ] Anything the 30-minute feel session (section E) surfaces, now including
+      the social loop: does RUN IT BACK feel faster than re-queueing? Does the
+      AWAY overlay read at a glance?
