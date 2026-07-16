@@ -41,6 +41,10 @@ jobs:
   apk:
     name: build + publish APK
     runs-on: ubuntu-latest
+    env:
+      # Secrets are not readable inside step `if:` expressions directly;
+      # surface the presence check through job env.
+      HAS_APK_KEYSTORE: ${{ secrets.APK_KEYSTORE != '' }}
     steps:
       - uses: actions/checkout@v5
       # Free disk like the determinism matrix does — but KEEP the Android
@@ -57,16 +61,26 @@ jobs:
           shared-key: apk-aarch64-linux-android
       - name: Install cargo-apk
         run: cargo install cargo-apk --locked || cargo install cargo-apk
-      # One debug keystore, cached across runs so every APK shares a
-      # signing key (see the header comment for the upgrade path).
-      - name: Restore signing keystore
+      # Signing key, in priority order: the APK_KEYSTORE secret (base64 of
+      # the dev box's debug keystore, storepass "android") so CI releases
+      # install OVER phone.sh sideloads without an uninstall; else a
+      # keystore cached across runs; else generate fresh. Android refuses
+      # an update signed with a different key and reports the refusal as a
+      # bare "App not installed" — one key everywhere ends that class.
+      - name: Materialize signing keystore (secret)
+        if: env.HAS_APK_KEYSTORE == 'true'
+        env:
+          APK_KEYSTORE_B64: ${{ secrets.APK_KEYSTORE }}
+        run: printf '%s' "$APK_KEYSTORE_B64" | base64 -d > debug.keystore
+      - name: Restore signing keystore (cache fallback)
         id: keystore
+        if: env.HAS_APK_KEYSTORE != 'true'
         uses: actions/cache@v4
         with:
           path: debug.keystore
           key: apk-debug-keystore-v1
       - name: Generate signing keystore (cache miss)
-        if: steps.keystore.outputs.cache-hit != 'true'
+        if: env.HAS_APK_KEYSTORE != 'true' && steps.keystore.outputs.cache-hit != 'true'
         run: |
           keytool -genkeypair -keystore debug.keystore \
             -storepass android -keypass android -alias androiddebugkey \
@@ -100,6 +114,13 @@ jobs:
           # 0x4000 (16 KB) or 0x10000 (64 KB) pass; anything else regressed.
           readelf -lW apk-check/lib/arm64-v8a/libapp.so \
             | awk '/LOAD/ {print; if ($NF != "0x4000" && $NF != "0x10000") bad=1} END {exit bad}'
+      # The alignment check reads the ELF; nothing was reading the
+      # SIGNATURE, which is how a wrong-key build shipped silently once.
+      # Print the cert so every run's log shows who signed it.
+      - name: Verify APK signature
+        run: |
+          APKSIGNER=$(ls "$ANDROID_HOME"/build-tools/*/apksigner | tail -1)
+          "$APKSIGNER" verify --print-certs two-top.apk
       - name: Upload per-run artifact
         uses: actions/upload-artifact@v4
         with:
