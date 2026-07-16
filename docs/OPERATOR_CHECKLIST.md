@@ -306,6 +306,43 @@ room by default). The old APK predates the batch.
 
 - [ ] Audio mix on the phone speaker: cue trims vs music beds
       (`scripts/generate_audio.py` constants).
+
+### F.5 UX batch (2026-07-16): follow stick, QUIT chip, endgame card
+
+- [ ] **Follow stick:** press the left half and drag a long swipe right —
+      the base ring gets towed once the thumb passes its edge and the
+      character keeps full speed; reversing direction responds within a
+      thumb-width instead of a dead swim back. Same behavior mid-aim.
+- [ ] **QUIT chip:** visible top-right during live play (top-left with
+      southpaw on); first tap arms it to SURE?, second tap exits to Title;
+      letting it sit ~3 s disarms. Tapping the taunt strip just LEFT of
+      the chip still flexes — the corner never taunts.
+- [ ] **Online quit honesty:** quitting a live duel from phone A → B flips
+      to FLED with the career win; A's career shows the loss.
+- [ ] **Summoning escape:** in an empty room the chip reads CANCEL and one
+      tap returns to Title (no more being stuck at SUMMONING).
+- [ ] **Endgame card:** WINNER and score render on single lines (no
+      mid-phrase wrapping); when an opponent flees mid-match the card names
+      YOU the winner and no big AWAY/FLED text stacks over it.
+- [ ] **Replay actually saves:** finish one practice match and check
+      REPLAYS lists it (the per-tick recorder must survive the match-start
+      hitch that used to poison every tape).
+- [ ] **New arenas:** cycle the picker to The Pit / The Vigil / The
+      Gallery. Pit: a thrown fang ricochets off the outer wall and stays
+      live (two bounces, then drops); walking into the edge never starts
+      the void timer; the floor never crumbles. Vigil: play a full
+      killless round — it expires scoreless with the island intact.
+      Gallery: corridors read clearly and no spawn sits against a block.
+- [ ] **Feel tune v10:** movement/dash/fangs noticeably calmer; dash
+      travels half as far; the dash corner button is visibly bigger and
+      easier to hit blind.
+- [ ] **The Forest:** trees block walking and ricochet fangs; two plain
+      hits fell one (a Heavy fells in one); a FIRE fang sets a tree
+      alight — it kills on touch, the fire jumps to clustered neighbors
+      within a second, and burnt trees stay down as stumps until the
+      rematch regrows them. The two lone center trees never catch from
+      a neighbor. Scrub a Forest tape backward in the theater — felled
+      trees stand back up.
 - [ ] Perspective: focal + UI reserve, spawn spread — do the duelists open too
       close to center?
 - [ ] Anything the 30-minute feel session (section E) surfaces, now including

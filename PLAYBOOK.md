@@ -39,7 +39,14 @@ The fastest "is it alive" check. Two players share one keyboard.
 cargo run -p app
 ```
 
-- Boots to the **Title / lobby** screen with an arena picker.
+- Boots to the **Title / lobby** screen with an arena picker. Seven arenas
+  (2026-07-16 roster): Anchor, Crossing, Reliquary, **The Pit** (walled-in —
+  no void, the boundary ricochets fangs, no storm), **The Vigil** (the storm
+  never comes; a killless round expires scoreless), **The Gallery** (dense
+  corridor maze), **The Forest** (bone trees block and ricochet; two chips
+  fell one, a Heavy fells in one — and FIRE spreads tree to tree, burning
+  the cover down for the rest of the match). Keys 1-3 pick the classics;
+  tapping/cycling reaches all seven. Online rooms hash across the roster.
 - Start a match. **Player 0 = WASD**, **Player 1 = arrow keys**.
 - Throw is the boomerang button (see the on-screen prompts); dash gives
   i-frames; one hit kills; first to 5 wins the match.
@@ -487,6 +494,13 @@ and the match survives interruptions up to ~9 s; past that it forfeits,
 the survivor records the win, and the leaver's own screen says MATCH
 ABANDONED.
 
+**Quitting mid-match.** The QUIT chip lives in the top-right corner during
+live play (top-left for southpaw; Esc on desktop). First tap arms it
+(`SURE?`), a second tap within 2.5 s quits. Walking out of a live online
+duel records the loss on your ledger — same honesty as the away-grace
+forfeit. While waiting alone in an online room the chip reads CANCEL and
+needs no confirmation; it's also the way out of a stuck SUMMONING wait.
+
 Settings (haptics, sfx, music, deadzone, southpaw) are the five tappable
 rows on the Title — left half of a row lowers/toggles, right half raises.
 **Southpaw** mirrors the whole touch layout left-for-right: move stick on
@@ -505,13 +519,15 @@ the right half, throw on the left, dash bottom-LEFT.
 - **Cross-platform determinism is CI-only.** You verify single-machine
   determinism locally (SyncTest); the four-platform byte-identical matrix
   runs in CI.
-- **A cold `TWOTOP_AUTOSTART=1` desktop match can poison its replay tape**
-  (the first-throw shader compile stalls a frame past the 8-tick harvest
-  ring; the recorder refuses to write the corrupt tape, by design). The
-  normal flow — title screen first — warms the pipelines; the phone holds
-  60 fps and is unaffected.
+- **Replay tapes survive frame hitches now.** The recorder captures both
+  players' inputs per sim tick inside the rollback schedule (corrected on
+  resimulation), so match-start shader-compile stalls no longer poison the
+  tape — every decided match saves its `.bmrg`. The old harvest design
+  lost the whole tape to any >8-tick hitch, which on desktop was nearly
+  every autostart match.
 - **Taunt is live on every input path.** Touch: tap the top strip of the
-  screen (top 24%). Desktop: `T` (P0) / `Enter` (P1); gamepad: North. The
+  screen (top 24%, minus the QUIT corner top-right — mirrored for
+  southpaw). Desktop: `T` (P0) / `Enter` (P1); gamepad: North. The
   flex roots you for 0.7 s, cancels on dash or throw with no reward, and
   completing it feeds the perfect-catch streak one tier. The bot taunts
   your corpse once it has sharpened up — punish it on your next life.
