@@ -1,10 +1,6 @@
 {
   "$schema": "https://railway.com/railway.schema.json",
-  "build": {
-    "buildCommand": "cargo build -p ice_vendor --release --locked"
-  },
   "deploy": {
-    "startCommand": "./target/release/ice_vendor",
     "healthcheckPath": "/healthz",
     "restartPolicyType": "ALWAYS"
   }

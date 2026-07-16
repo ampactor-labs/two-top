@@ -1,0 +1,10 @@
+# Keep the vendor's build context lean: the Dockerfile compiles only
+# crates/ice_vendor, which needs sources + lockfile + toolchain pin —
+# never build artifacts, game assets, or repo history.
+target/
+.git/
+assets/
+docs/
+tests/demos/
+*.png
+*.md
