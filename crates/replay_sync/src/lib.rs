@@ -262,8 +262,17 @@ pub fn build_app_configurable(replay: Replay, check_distance: usize, input_delay
     for wall in arena_walls() {
         app.world_mut().spawn(wall);
     }
+    // Per-arena obstacle cover, same fixed order as the live spawn. Without
+    // these the fuzz/matrix never exercised obstacle ricochets at all — a
+    // hole the obstacle-dense Gallery would have sailed straight through.
+    for wall in sim::arena_obstacles_for(arena) {
+        app.world_mut().spawn(wall);
+    }
     for pyre in sim::arena_pyres_for(arena) {
         app.world_mut().spawn(pyre);
+    }
+    for tree in sim::arena_trees_for(arena) {
+        app.world_mut().spawn(tree);
     }
 
     app.insert_resource(ReplayPlayback::new(replay));

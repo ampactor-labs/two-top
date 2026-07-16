@@ -80,11 +80,15 @@ pub fn fuzz_replay(seed: u64) -> Replay {
             recorded_at: 0,
             winner: None,
             player_handles: [None, None],
-            // Spread fuzz coverage across all three arenas by seed, so the
-            // nightly 100-seed sweep exercises Anchor / Crossing / Reliquary
-            // determinism with no extra CLI plumbing. Deterministic per seed,
-            // so the seed stays a complete reproduction recipe.
-            arena_id: (seed % 3) as u8,
+            // Spread fuzz coverage across the whole arena roster by seed, so
+            // the nightly 100-seed sweep exercises every arena's determinism
+            // (including the Pit's boundary ricochets) with no extra CLI
+            // plumbing. Deterministic per seed, so the seed stays a complete
+            // reproduction recipe. NOTE: a seed's arena therefore changes
+            // when the roster grows — historical seed numbers reproduce the
+            // same INPUT tape but may land on a different arena than they
+            // did under an older roster.
+            arena_id: (seed % sim::ALL_ARENAS.len() as u64) as u8,
         },
         inputs,
     }
