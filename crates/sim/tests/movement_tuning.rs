@@ -93,8 +93,8 @@ fn arena_crosses_in_target_two_second_window() {
         aim_angle: 0,
         buttons: 0,
     };
-    // Without a wall in the way, 1500 cm / 13 cm/tick = ~116 ticks (~1.9 s
-    // after the 2026-07-02 feel-tune walk bump). Stopping at the half-height.
+    // Without a wall in the way, 1500 cm / 11 cm/tick = ~136 ticks (~2.3 s
+    // after the 2026-07-16 feel-tune walk trim). Stopping at the half-height.
     let mut ticks = 0;
     while player_pos(&mut app).y < Fix::const_from_int(ARENA_HALF_HEIGHT_CM) {
         app.update();
@@ -103,11 +103,11 @@ fn arena_crosses_in_target_two_second_window() {
             panic!("never crossed arena half-height in 240 ticks");
         }
     }
-    // Crossing the half-height (750 cm) at 13 cm/tick = ~58 ticks.
+    // Crossing the half-height (750 cm) at 11 cm/tick = ~68 ticks.
     // ±10 ticks of fixed-point slop.
     assert!(
-        (48..=68).contains(&ticks),
-        "crossed half-arena in {ticks} ticks (target ~58)",
+        (58..=78).contains(&ticks),
+        "crossed half-arena in {ticks} ticks (target ~68)",
     );
 }
 

@@ -1048,14 +1048,12 @@ fn catch_frees_owner_to_throw_again() {
 fn cannot_throw_again_while_boomerang_in_flight() {
     let mut app = build_app();
     app.update();
-    // First throw: hold + release.
-    app.world_mut().resource_mut::<SynthesizedInputs>().0 = PlayerInput {
-        stick_x: 127,
-        stick_y: 0,
-        aim_angle: 0,
-        buttons: PlayerInput::THROW_DOWN,
-    };
-    app.update();
+    // First throw: FULL charge + release, so the fang's reach is the whole
+    // board and it is genuinely still in flight when the second press
+    // lands. (A tap throw's tiny reach had it turn around and get caught
+    // within the test window, which made this assert time-sensitive to
+    // speed tuning instead of testing the duplicate block.)
+    hold_full_charge(&mut app);
     app.world_mut().resource_mut::<SynthesizedInputs>().0 = PlayerInput {
         stick_x: 127,
         stick_y: 0,

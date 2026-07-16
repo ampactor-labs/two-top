@@ -70,7 +70,19 @@ pub const TICK_DT: Fix = Fix::lit("0.01666666666");
 /// perfect-catch streak) consumes the previously-dead `TAUNT_DOWN` wire
 /// bit, and respawns get a [`SpawnGuard`] window that breaks on the
 /// first offensive act. Two new registered/checksummed components.
-pub const SIM_VERSION: u32 = 9;
+///
+/// `10` = the 2026-07-16 feel tune: movement a step slower (WALK 13→11,
+/// DASH 46→42), every fang speed trimmed (THROW 34→32, RECALL 40→37,
+/// EMPOWERED 44→41, BOUNCY_MAX 56→52), and dash travel halved
+/// (DASH_DURATION 10→5 ticks). Constants only, no new state.
+///
+/// `11` = the arena-roster expansion: Pit/Vigil/Gallery rule arenas
+/// (walled boundary ricochets + `boundary_bounces` on `BoomerangMods`,
+/// no-storm gating) and the FOREST — [`BoneTree`] (new registered +
+/// checksummed component), fang-chip felling, and spreading fire. A tape
+/// stamped 11 needs a Forest-aware binary (an older `from_u8` would
+/// silently fall an unknown arena back to Anchor).
+pub const SIM_VERSION: u32 = 11;
 
 // ---- Components ----
 
@@ -162,7 +174,7 @@ pub const PERFECT_CATCH_WINDOW_FRAMES: u32 = 10;
 /// Full-charge throw speed of an empowered (perfect-catch) throw. 31 vs the
 /// base 24 (~1.3×): a clearly faster, harder-to-react-to fang. Charge scales
 /// this down for a partial draw just like the base (see [`aimed_throw_speed`]).
-pub const EMPOWERED_THROW_SPEED_CM_PER_TICK: i32 = 44;
+pub const EMPOWERED_THROW_SPEED_CM_PER_TICK: i32 = 41;
 
 /// Throw speed (cm/tick) for a throw, empowered or not. The single place
 /// the perfect-catch speed bonus is applied.
@@ -312,7 +324,19 @@ pub struct BoomerangMods {
     /// hit a wall (a backstop for fangs that fly through a gap). `None` for
     /// primaries and non-multishot fangs — they live until recalled/caught.
     pub despawn_at_frame: Option<u32>,
+    /// Boundary ricochets taken in a WALLED arena (the Pit). The reach cap
+    /// is displacement-from-origin, which a fang ping-ponging inside a
+    /// 1000×1500 box may never hit — so the ring only gives a fang
+    /// [`PIT_MAX_BOUNDARY_BOUNCES`] free angles before knocking it Loose.
+    /// Unused (stays 0) everywhere else.
+    pub boundary_bounces: u8,
 }
+
+/// Boundary ricochets a Flying fang gets in a walled arena before it is
+/// knocked Loose. Two free wall angles per throw; the third drops it.
+/// Bouncy fangs are exempt — endless ricochet IS that pickup's identity
+/// (the owner can always hold recall to pull it home).
+pub const PIT_MAX_BOUNDARY_BOUNCES: u8 = 2;
 
 /// Throw origin of a recallable primary boomerang — the thrower's
 /// position at launch. A primary auto-recalls once it has travelled
@@ -384,7 +408,7 @@ pub const BOOMERANG_MAX_THROW_DISTANCE_CM: i32 = 1000;
 /// runs slower/floatier and the DASH gains value by contrast. A partial charge
 /// scales this down toward `THROW_SPEED × MIN_THROW_POWER_FRAC` (see
 /// [`aimed_throw_speed`]). 24 × 60 = 1440 cm/sec at full draw.
-pub const THROW_SPEED_CM_PER_TICK: i32 = 34;
+pub const THROW_SPEED_CM_PER_TICK: i32 = 32;
 
 /// Floor of the charge→speed ramp: a zero-charge (instant tap) throw launches
 /// at `base × MIN_THROW_POWER_FRAC`, a full charge at `base × 1.0`. 0.35 makes a
@@ -434,7 +458,7 @@ pub const BOOMERANG_HALF_EXTENT_CM: i32 = 10;
 /// boomerang catches up to a player who's moved forward since the
 /// throw — recall reads as "reeling in" rather than "drifting back".
 /// A touch above the full-charge throw speed (26 vs 24) so recall still reels in.
-pub const RECALL_SPEED_CM_PER_TICK: i32 = 40;
+pub const RECALL_SPEED_CM_PER_TICK: i32 = 37;
 
 /// Distance from the world origin at which a boomerang is despawned.
 /// Generously outside the arena (1000 cm half-extent of the visible
@@ -600,7 +624,11 @@ pub fn try_throw_direction(
     Some(stick.normalize())
 }
 
-pub const DASH_DURATION_FRAMES: u32 = 10;
+/// 5 ticks × 42 cm = 210 cm of travel — half the previous reach (2026-07-16
+/// tune: "dash distance cut in half"). The i-frame window rides the Dashing
+/// state, so it halves with it: the dash is an escape hatch and a scalpel,
+/// not a free half-arena teleport.
+pub const DASH_DURATION_FRAMES: u32 = 5;
 pub const DASH_COOLDOWN_FRAMES: u32 = 20;
 
 /// Dash input buffer: a DASH press up to this many ticks back still counts
@@ -616,7 +644,7 @@ pub const DASH_BUFFER_TICKS: usize = 7;
 /// distinctly impulsive without crossing more than a fifth of the
 /// arena per dash (10 ticks × 30 cm = 300 cm of travel; arena width is
 /// 1000 cm).
-pub const DASH_SPEED_CM_PER_TICK: i32 = 46;
+pub const DASH_SPEED_CM_PER_TICK: i32 = 42;
 /// Minimum stick magnitude required to start a dash. Without this, a
 /// barely-deflected stick would commit to a near-random dash direction
 /// after the deadzone-collapse rounding.
@@ -725,37 +753,69 @@ pub fn arena_walls() -> [Wall; 4] {
     ]
 }
 
+/// Clearance every arena must keep between a spawn point's player rect and
+/// any obstacle — room to step off the spawn in any direction before
+/// touching cover. Enforced by `sim/tests/arena_layout.rs` for every
+/// `ArenaId`, so a future layout can't quietly bury a spawn again.
+pub const SPAWN_CLEARANCE_CM: i32 = 60;
+
 /// Inner `Obstacle` cover per arena — paintball-style crates/pillars that block
 /// players AND ricochet boomerangs (a fang that clips one is knocked Loose).
-/// Symmetric about both axes, clear of the player spawns (±100, 0/±60) and the
-/// per-arena props. Spawned in a fixed order so rollback entity ids stay
-/// bit-identical across hosts (same discipline as `arena_walls`).
-pub fn arena_obstacles_for(arena: ArenaId) -> [Wall; 4] {
+/// Symmetric about both axes, clear of the player spawns at (0, ±300) by at
+/// least [`SPAWN_CLEARANCE_CM`], and clear of the per-arena props. Spawned in
+/// a fixed order so rollback entity ids stay bit-identical across hosts (same
+/// discipline as `arena_walls`).
+pub fn arena_obstacles_for(arena: ArenaId) -> Vec<Wall> {
     let block = |cx: i32, cy: i32, hw: i32, hh: i32| Wall {
         kind: WallKind::Obstacle,
         rect: RectF::from_center_half_extents(Vec2F::from_cm(cx, cy), Vec2F::from_cm(hw, hh)),
     };
     match arena {
         // Anchor: four crates boxing the central pyre — cover to juke around.
-        ArenaId::Anchor => [
+        ArenaId::Anchor => vec![
             block(-280, 300, 38, 38),
             block(280, 300, 38, 38),
             block(-280, -300, 38, 38),
             block(280, -300, 38, 38),
         ],
         // Crossing: tall pillars flanking the central chasm.
-        ArenaId::Crossing => [
+        ArenaId::Crossing => vec![
             block(-300, 210, 30, 72),
             block(300, 210, 30, 72),
             block(-300, -210, 30, 72),
             block(300, -210, 30, 72),
         ],
-        // Reliquary: bars guarding the chain pyres + sigil doors.
-        ArenaId::Reliquary => [
-            block(0, 330, 64, 30),
-            block(0, -330, 64, 30),
+        // Reliquary: bars screening the pyre lane. These sat at (0, ±330)
+        // originally — flush against the spawns at (0, ±300), so a fresh
+        // duelist materialized wedged into (and half-hidden behind) a bar.
+        // Pulled inward: same screening read, spawns breathe.
+        ArenaId::Reliquary => vec![
+            block(0, 180, 64, 30),
+            block(0, -180, 64, 30),
             block(-330, 0, 30, 64),
             block(330, 0, 30, 64),
+        ],
+        // The Pit: two chunky mid-field blocks — everything else is the
+        // ricochet ring itself. Angles are the arena.
+        ArenaId::Pit => vec![
+            block(-160, 0, 40, 40),
+            block(160, 0, 40, 40),
+        ],
+        // The Vigil: open sightlines — the two pyres (arena_pyres_for) are
+        // the only structure. Patience is the cover. The Forest's cover is
+        // its TREES (`arena_trees_for`), not dead blocks.
+        ArenaId::Vigil | ArenaId::Forest => Vec::new(),
+        // The Gallery: rails + bars + corner pockets carve tight corridors.
+        // Point-symmetric; every lane stays comfortably wider than a dash.
+        ArenaId::Gallery => vec![
+            block(-240, 0, 28, 190),
+            block(240, 0, 28, 190),
+            block(0, 180, 120, 26),
+            block(0, -180, 120, 26),
+            block(-330, 480, 44, 44),
+            block(330, 480, 44, 44),
+            block(-330, -480, 44, 44),
+            block(330, -480, 44, 44),
         ],
     }
 }
@@ -1115,7 +1175,7 @@ pub fn read_local_inputs(
 /// Walk speed in cm/tick. Brought down to 8 (2026-06-30 charge pass) so the
 /// DASH (30 cm/tick, unchanged) reads as a big, valuable burst by contrast —
 /// ~3.75× walk. Slower, more deliberate spacing pairs with the charged fang.
-pub const WALK_SPEED_CM_PER_TICK: i32 = 13;
+pub const WALK_SPEED_CM_PER_TICK: i32 = 11;
 
 /// Decode the wire-format stick into a Fix-space vector with
 /// magnitude clamped to ≤ 1. Independent-axis i8 quantization means a
@@ -2025,6 +2085,7 @@ pub fn throw_boomerangs(
                 modifier,
                 is_secondary: false,
                 despawn_at_frame: None,
+                boundary_bounces: 0,
             },
             ThrowOrigin(pos.0),
             ThrowReach(reach),
@@ -2048,6 +2109,7 @@ pub fn throw_boomerangs(
                         modifier,
                         is_secondary: true,
                         despawn_at_frame: Some(expire),
+                        boundary_bounces: 0,
                     },
                     PositionF(pos.0),
                     PreviousPositionF(pos.0),
@@ -2076,17 +2138,19 @@ pub fn throw_boomerangs(
 /// recompute would override any reflection on the next tick anyway.
 pub fn boomerang_wall_collision(
     mut commands: Commands,
+    selected: Res<SelectedArena>,
     walls: Query<&Wall>,
     mut boomerangs: Query<(
         Entity,
         &mut Boomerang,
-        &BoomerangMods,
+        &mut BoomerangMods,
         &PreviousPositionF,
         &mut PositionF,
         &mut VelocityF,
     )>,
 ) {
-    for (entity, mut boom, mods, prev, mut pos, mut vel) in &mut boomerangs {
+    let walled = selected.0.walled();
+    for (entity, mut boom, mut mods, prev, mut pos, mut vel) in &mut boomerangs {
         if matches!(boom.state, BoomerangState::Returning { .. }) {
             continue;
         }
@@ -2123,7 +2187,27 @@ pub fn boomerang_wall_collision(
                 // stay contained by the boundary in wall_collision. `continue`
                 // (not `break`) keeps checking the remaining obstacle walls so
                 // inner-cover ricochet on the same tick is unaffected.
-                WallKind::Boundary => continue,
+                //
+                // In a WALLED arena (the Pit) the ring is a live cushion
+                // instead: the fang reflects and KEEPS FLYING — the angle
+                // game is the arena — for a bounded number of kisses
+                // (`PIT_MAX_BOUNDARY_BOUNCES`), after which it's knocked
+                // Loose like any cover hit. Bouncy rides the ring forever.
+                WallKind::Boundary => {
+                    if !walled {
+                        continue;
+                    }
+                    pos.0 = contact + push;
+                    vel.0 = reflect_velocity_for_push(vel.0, push);
+                    if bouncy {
+                        vel.0 = bouncy_accelerate(vel.0);
+                    } else if matches!(boom.state, BoomerangState::Flying) {
+                        mods.boundary_bounces += 1;
+                        if mods.boundary_bounces > PIT_MAX_BOUNDARY_BOUNCES {
+                            boom.state = BoomerangState::Loose;
+                        }
+                    }
+                }
                 // Inner cover ricochets the fang — and knocks a Flying fang
                 // LOOSE, so after the bounce it loses momentum and settles to
                 // rest instead of pinballing forever (Boomerang-Fu drop). A
@@ -2201,7 +2285,7 @@ fn bouncy_accelerate(vel: Vec2F) -> Vec2F {
 /// Bouncy speed ceiling — fast enough to be scary, bounded so it can't run
 /// away past the despawn radius in a single tick. Halved with the rest of the
 /// boomerang speeds (still 1.6× the base throw, as before).
-pub const BOUNCY_MAX_SPEED_CM_PER_TICK: i32 = 56;
+pub const BOUNCY_MAX_SPEED_CM_PER_TICK: i32 = 52;
 
 /// Curve's turn rate while flying: 1.5° per tick (≈90°/sec) in radians.
 pub const CURVE_RAD_PER_TICK: Fix = Fix::lit("0.0261799");
@@ -2639,13 +2723,20 @@ pub fn reflect_velocity_for_push(vel: Vec2F, push: Vec2F) -> Vec2F {
 /// over-correcting. Order-stability comes from Bevy's deterministic
 /// query iteration over the wall entities (spawned in fixed order in
 /// `app::setup`).
-pub fn wall_collision(walls: Query<&Wall>, mut players: Query<&mut PositionF, With<Player>>) {
+pub fn wall_collision(
+    selected: Res<SelectedArena>,
+    walls: Query<&Wall>,
+    mut players: Query<&mut PositionF, With<Player>>,
+) {
+    // Open arenas: the outer ring doesn't contain players — they can run
+    // off the field into the out-of-bounds death zone (see `oob_death`),
+    // the Boomerang-Fu open-field model. A WALLED arena (the Pit) has no
+    // void, so there the boundary is a real wall again: without this a
+    // player could stroll off the field into a void that never kills.
+    let contain = selected.0.walled();
     for mut pos in &mut players {
         for wall in &walls {
-            // The outer ring no longer contains players — they can run off the
-            // field into the out-of-bounds death zone (see `oob_death`), the
-            // Boomerang-Fu open-field model. Only inner Obstacle cover blocks.
-            if matches!(wall.kind, WallKind::Boundary) {
+            if matches!(wall.kind, WallKind::Boundary) && !contain {
                 continue;
             }
             let player = player_rect(pos.0);
@@ -2664,6 +2755,7 @@ pub fn wall_collision(walls: Query<&Wall>, mut players: Query<&mut PositionF, Wi
 pub fn oob_death(
     frame: Res<FrameCount>,
     match_state: Res<MatchState>,
+    selected: Res<SelectedArena>,
     mut score: ResMut<MatchScore>,
     mut q: Query<(
         &Player,
@@ -2676,18 +2768,30 @@ pub fn oob_death(
     if !match_state.is_in_round() {
         return;
     }
+    // A walled arena has no void — containment is the boundary's job and
+    // nobody ever leaves the field.
+    if selected.0.walled() {
+        return;
+    }
     // SUDDEN-DEATH CRUMBLE: over the round's final seconds the safe island
     // shrinks toward the centre (deterministic — pure frame arithmetic) and
     // the OOB grace tightens, physically squeezing the duel together so no
     // round peters out at range. Render mirrors the factor on the floor art.
+    // No-storm arenas (Vigil) keep the full island for the whole round: a
+    // killless round simply expires scoreless in `tick_match_state`.
     let remaining = match *match_state {
         MatchState::InRound { expires_at_frame } => {
             expires_at_frame.saturating_sub(frame.0)
         }
         _ => u32::MAX,
     };
-    let factor = sudden_death_factor(remaining);
-    let grace = if remaining < SUDDEN_DEATH_FRAMES {
+    let crumbling = selected.0.crumbles() && remaining < SUDDEN_DEATH_FRAMES;
+    let factor = if crumbling {
+        sudden_death_factor(remaining)
+    } else {
+        Fix::const_from_int(1)
+    };
+    let grace = if crumbling {
         SUDDEN_DEATH_OOB_GRACE_FRAMES
     } else {
         OOB_GRACE_FRAMES
@@ -2934,6 +3038,7 @@ pub fn apply_rematch(
     pickups: Query<Entity, With<Pickup>>,
     fire_cells: Query<Entity, With<FireTrailCell>>,
     mut pyres: Query<&mut BonePyre>,
+    mut trees: Query<&mut BoneTree>,
 ) {
     if !matches!(*state, MatchState::MatchOver) {
         return;
@@ -2994,6 +3099,13 @@ pub fn apply_rematch(
         pyre.chain_delay = None;
         pyre.lit_until_frame = None;
         pyre.lit_by = 0;
+    }
+    // The forest regrows for the rematch, same clean slate as the pyres.
+    for mut tree in &mut trees {
+        tree.hp = TREE_HP;
+        tree.felled = false;
+        tree.lit_until_frame = None;
+        tree.lit_by = 0;
     }
     *bridge = BridgeState::default();
     *door = DoorCooldown::default();
@@ -3185,6 +3297,7 @@ impl Plugin for SimPlugin {
             .rollback_component_with_copy::<Pickup>()
             .rollback_component_with_copy::<FireTrailCell>()
             .rollback_component_with_copy::<BonePyre>()
+            .rollback_component_with_copy::<BoneTree>()
             .rollback_resource_with_copy::<FrameCount>()
             .rollback_resource_with_copy::<MatchScore>()
             .rollback_resource_with_copy::<MatchState>()
@@ -3221,6 +3334,7 @@ impl Plugin for SimPlugin {
             .checksum_component_with_hash::<Pickup>()
             .checksum_component_with_hash::<FireTrailCell>()
             .checksum_component_with_hash::<BonePyre>()
+            .checksum_component_with_hash::<BoneTree>()
             .checksum_resource_with_hash::<FrameCount>()
             .checksum_resource_with_hash::<MatchScore>()
             .checksum_resource_with_hash::<MatchState>()
@@ -3252,7 +3366,10 @@ impl Plugin for SimPlugin {
                 reset_round_state,
                 (start_dash, start_taunt).chain(),
                 player_movement,
-                wall_collision,
+                // Trees resolve right after walls so the position coming out
+                // of the tick is fully pushed-out (folded into one chained
+                // element to stay under the outer tuple's arity limit).
+                (wall_collision, tree_collision).chain(),
                 oob_death,
                 dash_melee_kill,
                 graze_empower,
@@ -3265,11 +3382,13 @@ impl Plugin for SimPlugin {
                     expire_secondary_boomerangs,
                     drop_fire_trail,
                     boomerang_pyre_collision,
+                    boomerang_tree_collision,
                     chain_ignition.run_if(arena_is(ArenaId::Reliquary)),
                     boomerang_sigil_collision.run_if(arena_is(ArenaId::Crossing)),
                     hit_boomerang_player,
                     fire_trail_kills,
                     pyre_burn_kills,
+                    (tree_fire, tree_burn_kills).chain(),
                     chasm_kills.run_if(arena_is(ArenaId::Crossing)),
                     sigil_door_teleport.run_if(arena_is(ArenaId::Reliquary)),
                     catch_boomerangs,
@@ -3413,7 +3532,36 @@ pub enum ArenaId {
     /// Cycle 4: paired sigil-door teleporters + chain-linked bone pyres.
     /// Empty until then.
     Reliquary,
+    /// 2026-07-16 roster: the walled-in box. No void, no out-of-bounds
+    /// death, no crumble — the boundary RICOCHETS fangs instead of letting
+    /// them fly out, so spacing flips from edge-fear to angle-fear.
+    Pit,
+    /// 2026-07-16 roster: the storm never comes. No crumble; a round with
+    /// no kill simply expires scoreless. Open sightlines, two unlinked
+    /// pyres for zone control — the patient duel.
+    Vigil,
+    /// 2026-07-16 roster: the dense corridor maze. Rails, bars, and corner
+    /// pockets; Phantom and Curve finally get their arena.
+    Gallery,
+    /// 2026-07-16 roster: the burning grove. Bone trees block movement and
+    /// ricochet fangs; two chips fell one — but FIRE is the real tool: an
+    /// ignited tree burns lethal, spreads to its neighbors, and burns DOWN,
+    /// rewriting the arena's cover for the rest of the match (BFu's fire).
+    Forest,
 }
+
+/// Every arena, in wire order — extend when the roster grows (the
+/// spawn-clearance test, the pickers, the room hash, and the fuzz arena
+/// spread all iterate this).
+pub const ALL_ARENAS: [ArenaId; 7] = [
+    ArenaId::Anchor,
+    ArenaId::Crossing,
+    ArenaId::Reliquary,
+    ArenaId::Pit,
+    ArenaId::Vigil,
+    ArenaId::Gallery,
+    ArenaId::Forest,
+];
 
 impl ArenaId {
     /// Stable wire encoding for the replay header. Do not renumber —
@@ -3423,6 +3571,10 @@ impl ArenaId {
             ArenaId::Anchor => 0,
             ArenaId::Crossing => 1,
             ArenaId::Reliquary => 2,
+            ArenaId::Pit => 3,
+            ArenaId::Vigil => 4,
+            ArenaId::Gallery => 5,
+            ArenaId::Forest => 6,
         }
     }
 
@@ -3432,8 +3584,25 @@ impl ArenaId {
         match v {
             1 => ArenaId::Crossing,
             2 => ArenaId::Reliquary,
+            3 => ArenaId::Pit,
+            4 => ArenaId::Vigil,
+            5 => ArenaId::Gallery,
+            6 => ArenaId::Forest,
             _ => ArenaId::Anchor,
         }
+    }
+
+    /// Walled-in: the boundary ricochets fangs and there is no void — the
+    /// out-of-bounds death system stands down entirely.
+    pub fn walled(self) -> bool {
+        matches!(self, ArenaId::Pit)
+    }
+
+    /// Whether the sudden-death crumble shrinks the island at the end of a
+    /// round. The Pit has walls instead of a void; the Vigil is the
+    /// no-storm arena by request — its rounds may expire scoreless.
+    pub fn crumbles(self) -> bool {
+        !matches!(self, ArenaId::Pit | ArenaId::Vigil)
     }
 }
 
@@ -3523,6 +3692,15 @@ pub fn arena_pyres_for(arena: ArenaId) -> Vec<BonePyre> {
                 chain_group: 1,
                 ..BonePyre::intact(square(200, 0))
             },
+        ],
+        // The Pit and the Gallery are pure geometry; the Forest's cover is
+        // its trees (`arena_trees_for`).
+        ArenaId::Pit | ArenaId::Gallery | ArenaId::Forest => Vec::new(),
+        // The Vigil: two UNLINKED pyres flanking the centre — burn one for
+        // zone control without the Reliquary's chain gamble.
+        ArenaId::Vigil => vec![
+            BonePyre::intact(square(-220, 0)),
+            BonePyre::intact(square(220, 0)),
         ],
     }
 }
@@ -3769,6 +3947,290 @@ pub fn arena_is(id: ArenaId) -> impl Fn(Res<SelectedArena>) -> bool + Clone {
     move |selected: Res<SelectedArena>| selected.0 == id
 }
 
+// ---- The Forest: bone trees + spreading fire (2026-07-16 roster) ----
+
+/// Half-extent of a bone tree's trunk footprint. Slightly bigger than a
+/// pyre — a tree is cover you commit to.
+pub const TREE_HALF_EXTENT_CM: i32 = 26;
+
+/// Fang hits a standing tree absorbs before it falls. Heavy fells in one;
+/// fire doesn't chip — it burns the whole tree down instead.
+pub const TREE_HP: u8 = 2;
+
+/// How long an ignited tree burns (and kills on touch) before collapsing.
+pub const TREE_BURN_FRAMES: u32 = 240;
+
+/// Ticks after ignition before a burning tree starts igniting neighbors.
+pub const TREE_SPREAD_DELAY_FRAMES: u32 = 45;
+
+/// Center-to-center reach of tree-to-tree fire spread. Grove clusters are
+/// laid out inside this radius so one fire fang can take a whole cluster;
+/// isolated singles stay safe.
+pub const TREE_SPREAD_RADIUS_CM: i32 = 150;
+
+/// A bone tree — the Forest's living cover. Blocks players and ricochets
+/// fangs while standing; two fang chips (or one Heavy) fell it. FIRE is
+/// the real forester: an ignited tree burns lethal for
+/// [`TREE_BURN_FRAMES`], spreads to standing neighbors within
+/// [`TREE_SPREAD_RADIUS_CM`] after [`TREE_SPREAD_DELAY_FRAMES`], then
+/// falls — permanently opening the sightline. Felled trees keep their
+/// entity (`felled` flips in place, the pyre pattern) so bevy_ggrs
+/// Rollback ids never churn. Rolled back + checksummed.
+#[derive(Component, Clone, Copy, PartialEq, Eq, Hash, Debug)]
+#[require(Rollback)]
+pub struct BoneTree {
+    pub rect: RectF,
+    /// Fang chips remaining before the tree falls.
+    pub hp: u8,
+    /// Fallen: no longer blocks, ricochets, burns, or spreads.
+    pub felled: bool,
+    /// Burning until this frame (kills on touch, then the tree falls).
+    /// `None` = not burning.
+    pub lit_until_frame: Option<u32>,
+    /// Handle of the player whose fire lit it (kill credit). Meaningless
+    /// while `lit_until_frame` is `None`.
+    pub lit_by: usize,
+}
+
+impl BoneTree {
+    /// A fresh standing tree at the given footprint.
+    pub fn standing(rect: RectF) -> Self {
+        Self {
+            rect,
+            hp: TREE_HP,
+            felled: false,
+            lit_until_frame: None,
+            lit_by: 0,
+        }
+    }
+
+    /// True iff the tree is burning (lethal) at `frame`.
+    pub fn is_burning(&self, frame: u32) -> bool {
+        !self.felled && self.lit_until_frame.is_some_and(|until| frame < until)
+    }
+
+    /// True iff the tree still blocks movement / ricochets fangs.
+    pub fn blocks(&self) -> bool {
+        !self.felled
+    }
+}
+
+/// Footprint midpoint (RectF carries min/max only). ×0.5 is a power of
+/// two — exact in I16F16, no floor asymmetry to worry about.
+fn tree_center(rect: RectF) -> Vec2F {
+    Vec2F::new(
+        (rect.min.x + rect.max.x) * Fix::lit("0.5"),
+        (rect.min.y + rect.max.y) * Fix::lit("0.5"),
+    )
+}
+
+/// Per-arena tree placements, fixed deterministic order (entity ids stay
+/// byte-identical across hosts). The Forest grove is point-symmetric about
+/// the origin: two three-tree clusters (chained by the spread radius — one
+/// fire fang can take the whole cluster), two two-tree pairs, and two
+/// isolated center singles that never catch from a neighbor.
+pub fn arena_trees_for(arena: ArenaId) -> Vec<BoneTree> {
+    if arena != ArenaId::Forest {
+        return Vec::new();
+    }
+    let half = Fix::const_from_int(TREE_HALF_EXTENT_CM);
+    let tree = |cx: i32, cy: i32| {
+        BoneTree::standing(RectF::from_center_half_extents(
+            Vec2F::from_cm(cx, cy),
+            Vec2F::new(half, half),
+        ))
+    };
+    vec![
+        // Cluster A (upper-left) — pairwise inside the spread radius.
+        tree(-340, 500),
+        tree(-220, 460),
+        tree(-300, 360),
+        // Cluster B — A mirrored through the origin.
+        tree(340, -500),
+        tree(220, -460),
+        tree(300, -360),
+        // Pair C (right-mid) and its mirror D.
+        tree(380, 120),
+        tree(430, -10),
+        tree(-380, -120),
+        tree(-430, 10),
+        // Isolated singles near center — fang cover, fire-safe.
+        tree(-90, 40),
+        tree(90, -40),
+    ]
+}
+
+/// `GgrsSchedule` system, chained right after `wall_collision`: standing
+/// trees block players exactly like Obstacle cover. Felled trees are open
+/// ground.
+pub fn tree_collision(trees: Query<&BoneTree>, mut players: Query<&mut PositionF, With<Player>>) {
+    for mut pos in &mut players {
+        for tree in &trees {
+            if !tree.blocks() {
+                continue;
+            }
+            let player = player_rect(pos.0);
+            if let Some(push) = resolve_collision(player, tree.rect) {
+                pos.0 = pos.0 + push;
+            }
+        }
+    }
+}
+
+/// `GgrsSchedule` system, after `boomerang_pyre_collision`: fang vs
+/// standing tree. Normal fangs ricochet (knocked Loose, cover semantics)
+/// and CHIP the tree — two chips fell it. Heavy plows through and fells in
+/// one. A FIRE fang doesn't chip: it IGNITES the tree and ricochets away —
+/// the burn does the felling. Returning fangs and Phantom phase through.
+pub fn boomerang_tree_collision(
+    frame: Res<FrameCount>,
+    mut trees: Query<&mut BoneTree>,
+    mut boomerangs: Query<(&mut Boomerang, &BoomerangMods, &mut PositionF, &mut VelocityF)>,
+) {
+    for (mut boom, mods, mut pos, mut vel) in &mut boomerangs {
+        if matches!(boom.state, BoomerangState::Returning { .. }) {
+            continue;
+        }
+        if matches!(mods.modifier, Some(PickupKind::Phantom)) {
+            continue;
+        }
+        let heavy = matches!(mods.modifier, Some(PickupKind::Heavy));
+        let fire = matches!(mods.modifier, Some(PickupKind::Fire));
+        let bouncy = matches!(mods.modifier, Some(PickupKind::Bouncy));
+        for mut tree in &mut trees {
+            if !tree.blocks() {
+                continue;
+            }
+            let bb = boomerang_rect(pos.0);
+            let Some(push) = resolve_collision(bb, tree.rect) else {
+                continue;
+            };
+            if heavy {
+                // One-hit fell, no ricochet — the log truck.
+                tree.hp = 0;
+                tree.felled = true;
+                continue;
+            }
+            pos.0 = pos.0 + push;
+            vel.0 = reflect_velocity_for_push(vel.0, push);
+            if bouncy {
+                vel.0 = bouncy_accelerate(vel.0);
+            }
+            if fire {
+                // Ignite (once) instead of chipping; the fang stays live
+                // exactly like a pyre lighting.
+                if tree.lit_until_frame.is_none() {
+                    tree.lit_until_frame = Some(frame.0 + TREE_BURN_FRAMES);
+                    tree.lit_by = boom.owner_handle;
+                }
+                continue;
+            }
+            tree.hp = tree.hp.saturating_sub(1);
+            if tree.hp == 0 {
+                tree.felled = true;
+            }
+            // Cover semantics: the bounce knocks a Flying fang Loose so it
+            // settles instead of grinding the same trunk tick after tick.
+            if matches!(boom.state, BoomerangState::Flying) {
+                boom.state = BoomerangState::Loose;
+            }
+        }
+    }
+}
+
+/// `GgrsSchedule` system, after `pyre_burn_kills`: the fire's life cycle.
+/// Burned-out trees fall; live fire cells ignite standing trees they
+/// touch; burning trees ignite standing neighbors within the spread
+/// radius once their spread delay has passed. When several sources could
+/// light the same tree on the same tick, the LOWEST igniter handle takes
+/// the credit — a pure min(), so entity iteration order can never desync
+/// the outcome (the boomerang-clash lesson).
+pub fn tree_fire(
+    frame: Res<FrameCount>,
+    cells: Query<(&FireTrailCell, &PositionF)>,
+    mut trees: Query<&mut BoneTree>,
+) {
+    // 1. Burn-outs fall (and stop spreading/killing).
+    for mut tree in &mut trees {
+        if !tree.felled
+            && let Some(until) = tree.lit_until_frame
+            && frame.0 >= until
+        {
+            tree.felled = true;
+            tree.lit_until_frame = None;
+        }
+    }
+
+    // 2. Collect this tick's ignition sources: burning trees past their
+    //    spread delay, and live fire cells. (Read-only snapshot first so
+    //    the mutation pass below can't observe its own writes.)
+    let spreaders: Vec<(Vec2F, usize)> = trees
+        .iter()
+        .filter(|t| {
+            t.is_burning(frame.0)
+                && t.lit_until_frame.is_some_and(|until| {
+                    let ignited_at = until.saturating_sub(TREE_BURN_FRAMES);
+                    frame.0 >= ignited_at + TREE_SPREAD_DELAY_FRAMES
+                })
+        })
+        .map(|t| (tree_center(t.rect), t.lit_by))
+        .collect();
+    let radius = Fix::const_from_int(TREE_SPREAD_RADIUS_CM);
+
+    // 3. Ignite standing, unlit trees: fire cells on contact, spreaders by
+    //    proximity. min() over candidate handles keeps it order-free.
+    for mut tree in &mut trees {
+        if tree.felled || tree.lit_until_frame.is_some() {
+            continue;
+        }
+        let mut igniter: Option<usize> = None;
+        for (cell, pos) in &cells {
+            if frame.0 < cell.expires_at_frame && fire_trail_rect(pos.0).overlaps(tree.rect) {
+                igniter = Some(igniter.map_or(cell.owner_handle, |h| h.min(cell.owner_handle)));
+            }
+        }
+        let center = tree_center(tree.rect);
+        for (src, lit_by) in &spreaders {
+            if (*src - center).length() <= radius {
+                igniter = Some(igniter.map_or(*lit_by, |h| h.min(*lit_by)));
+            }
+        }
+        if let Some(handle) = igniter {
+            tree.lit_until_frame = Some(frame.0 + TREE_BURN_FRAMES);
+            tree.lit_by = handle;
+        }
+    }
+}
+
+/// `GgrsSchedule` system, after `tree_fire`: a burning tree kills on touch
+/// — credited to the igniter, and a self-burn credits the opponent (the
+/// pyre rule: your own fire is never a free out).
+pub fn tree_burn_kills(
+    frame: Res<FrameCount>,
+    mut score: ResMut<MatchScore>,
+    trees: Query<&BoneTree>,
+    mut players: Query<(&Player, &PositionF, &mut Dead, &StunFrames, &SpawnGuard)>,
+) {
+    for tree in &trees {
+        if !tree.is_burning(frame.0) {
+            continue;
+        }
+        for (player, pos, mut dead, stun, guard) in &mut players {
+            if dead.is_dying() || stun.0 > 0 || guard.0 > 0 {
+                continue;
+            }
+            if player_rect(pos.0).overlaps(tree.rect) {
+                let credit = if player.handle == tree.lit_by {
+                    1 - player.handle
+                } else {
+                    tree.lit_by
+                };
+                award_kill(&mut dead, credit, frame.0, &mut score);
+            }
+        }
+    }
+}
+
 // ---- Phase 17: pickups ----
 
 /// Rolled-back deterministic RNG for gameplay randomness (pickup spawns).
@@ -3997,6 +4459,9 @@ pub struct SimSnapshot {
     /// restore order. Captures the shatter state so a backward scrub past
     /// a shatter event correctly un-shatters the pyre.
     pub pyres: Vec<BonePyreSnap>,
+    /// One per BoneTree entity, sorted by rect-min like the pyres — a
+    /// backward scrub past a fell/ignition restores the standing grove.
+    pub trees: Vec<BoneTreeSnap>,
     pub frame_count: FrameCount,
     pub match_state: MatchState,
     pub match_score: MatchScore,
@@ -4067,6 +4532,12 @@ pub struct FireTrailSnap {
 #[derive(Clone, Copy, Debug)]
 pub struct BonePyreSnap {
     pub pyre: BonePyre,
+}
+
+/// One captured [`BoneTree`] (the Forest's cover — hp, felled, burn state).
+#[derive(Clone, Copy, Debug)]
+pub struct BoneTreeSnap {
+    pub tree: BoneTree,
 }
 
 impl SimSnapshot {
@@ -4200,11 +4671,19 @@ impl SimSnapshot {
         // are unique per arena, so this is a stable total ordering.
         pyres.sort_by_key(|s| (s.pyre.rect.min.x.to_bits(), s.pyre.rect.min.y.to_bits()));
 
+        let mut trees: Vec<BoneTreeSnap> = world
+            .query::<&BoneTree>()
+            .iter(world)
+            .map(|t| BoneTreeSnap { tree: *t })
+            .collect();
+        trees.sort_by_key(|s| (s.tree.rect.min.x.to_bits(), s.tree.rect.min.y.to_bits()));
+
         Self {
             frame: frame_count.0,
             players,
             boomerangs,
             pyres,
+            trees,
             frame_count,
             match_state,
             match_score,
@@ -4419,6 +4898,43 @@ impl SimSnapshot {
                 }
             } else {
                 world.spawn(snap.pyre);
+            }
+        }
+
+        // ---- Bone trees: mutate in place by rect key (the pyre pattern —
+        // count + positions are fixed per arena, only hp/felled/burn mutate).
+        let tree_keys: BTreeSet<(i32, i32)> = self
+            .trees
+            .iter()
+            .map(|s| (s.tree.rect.min.x.to_bits(), s.tree.rect.min.y.to_bits()))
+            .collect();
+        let extra_trees: Vec<Entity> = world
+            .query::<(Entity, &BoneTree)>()
+            .iter(world)
+            .filter(|(_, t)| {
+                !tree_keys.contains(&(t.rect.min.x.to_bits(), t.rect.min.y.to_bits()))
+            })
+            .map(|(e, _)| e)
+            .collect();
+        for e in extra_trees {
+            world.despawn(e);
+        }
+        for snap in &self.trees {
+            let key = (
+                snap.tree.rect.min.x.to_bits(),
+                snap.tree.rect.min.y.to_bits(),
+            );
+            let target_entity = world
+                .query::<(Entity, &BoneTree)>()
+                .iter(world)
+                .find(|(_, t)| (t.rect.min.x.to_bits(), t.rect.min.y.to_bits()) == key)
+                .map(|(e, _)| e);
+            if let Some(e) = target_entity {
+                if let Some(mut c) = world.entity_mut(e).get_mut::<BoneTree>() {
+                    *c = snap.tree;
+                }
+            } else {
+                world.spawn(snap.tree);
             }
         }
 

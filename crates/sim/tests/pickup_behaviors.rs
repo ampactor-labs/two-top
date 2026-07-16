@@ -52,6 +52,7 @@ fn spawn_mod(app: &mut App, modifier: PickupKind, pos: Vec2F, vel: Vec2F) -> Ent
                 modifier: Some(modifier),
                 is_secondary: false,
                 despawn_at_frame: None,
+                boundary_bounces: 0,
             },
             PositionF(pos),
             PreviousPositionF(pos),
@@ -77,16 +78,16 @@ fn fire_throws_faster_heavy_slower() {
     );
     assert_eq!(
         modified_throw_speed(false, Some(PickupKind::Fire)),
-        Fix::const_from_int(42) // base 34 + 8
+        Fix::const_from_int(40) // base 32 + 8
     );
     assert_eq!(
         modified_throw_speed(false, Some(PickupKind::Heavy)),
-        Fix::const_from_int(27) // base 34 × 4/5
+        Fix::const_from_int(25) // base 32 × 4/5
     );
     // Modifiers compose with the perfect-catch empowerment.
     assert_eq!(
         modified_throw_speed(true, Some(PickupKind::Fire)),
-        Fix::const_from_int(52) // empowered 44 + 8
+        Fix::const_from_int(49) // empowered 41 + 8
     );
 }
 
@@ -263,6 +264,7 @@ fn spawn_fang(app: &mut App, is_secondary: bool, pos: Vec2F) -> Entity {
                 modifier: Some(PickupKind::Multishot),
                 is_secondary,
                 despawn_at_frame: if is_secondary { Some(120) } else { None },
+                boundary_bounces: 0,
             },
             PositionF(pos),
             PreviousPositionF(pos),
@@ -433,6 +435,7 @@ fn multishot_secondary_expires_at_backstop_but_primary_persists() {
             modifier: Some(PickupKind::Multishot),
             is_secondary: true,
             despawn_at_frame: Some(200),
+            boundary_bounces: 0,
         },
         PositionF(Vec2F::ZERO),
         PreviousPositionF(Vec2F::ZERO),
@@ -546,6 +549,7 @@ fn fire_boomerang_drops_cells_on_the_interval_only() {
             modifier: Some(PickupKind::Fire),
             is_secondary: false,
             despawn_at_frame: None,
+            boundary_bounces: 0,
         },
         PositionF(Vec2F::from_cm(100, 50)),
         PreviousPositionF(Vec2F::from_cm(100, 50)),

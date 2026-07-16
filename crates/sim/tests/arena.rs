@@ -474,3 +474,208 @@ fn chain_delay_survives_snapshot_restore() {
         "restore brings back the armed fuse"
     );
 }
+
+// ---- Spawn clearance: no arena may bury a spawn point under cover ----
+
+/// Every arena must keep BOTH spawn/respawn points clear of solid geometry
+/// (obstacles and pyres) by at least `SPAWN_CLEARANCE_CM` beyond the player
+/// rect — a fresh duelist steps off the spawn in any direction without
+/// touching cover, and no structure ever hides the spawn. Reliquary
+/// violated this before 2026-07-16 (bars at (0, ±330) flush against the
+/// (0, ±300) spawns). Extend the arena list when new arenas land.
+#[test]
+fn every_arena_keeps_its_spawns_clear() {
+    use sim::{
+        ALL_ARENAS, PLAYER_HALF_EXTENT_CM, SPAWN_CLEARANCE_CM, arena_obstacles_for,
+        respawn_position,
+    };
+    let half = Fix::const_from_int(PLAYER_HALF_EXTENT_CM + SPAWN_CLEARANCE_CM);
+    for arena in ALL_ARENAS {
+        for handle in 0..2usize {
+            let spawn = respawn_position(handle);
+            let clear = RectF::from_center_half_extents(spawn, Vec2F::new(half, half));
+            for wall in arena_obstacles_for(arena) {
+                assert!(
+                    !wall.rect.overlaps(clear),
+                    "{arena:?} obstacle {:?} crowds the handle-{handle} spawn at {spawn:?}",
+                    wall.rect,
+                );
+            }
+            for pyre in arena_pyres_for(arena) {
+                assert!(
+                    !pyre.rect.overlaps(clear),
+                    "{arena:?} pyre {:?} crowds the handle-{handle} spawn at {spawn:?}",
+                    pyre.rect,
+                );
+            }
+            for t in sim::arena_trees_for(arena) {
+                assert!(
+                    !t.rect.overlaps(clear),
+                    "{arena:?} tree {:?} crowds the handle-{handle} spawn at {spawn:?}",
+                    t.rect,
+                );
+            }
+        }
+    }
+}
+
+/// The Pit's boundary is a real wall for PLAYERS too — with the void
+/// disabled, a player pressed into the ring must be pushed back inside
+/// (everywhere else the boundary is permeable and the void does the work).
+#[test]
+fn walled_arena_boundary_contains_players() {
+    use sim::wall_collision;
+    let overlap = Vec2F::from_cm(510, 0); // inside the east boundary wall
+    let run = |arena: ArenaId| -> Vec2F {
+        let mut app = bare_app();
+        app.world_mut().resource_mut::<SelectedArena>().0 = arena;
+        for wall in sim::arena_walls() {
+            app.world_mut().spawn(wall);
+        }
+        let p = app
+            .world_mut()
+            .spawn((
+                Player { handle: 0 },
+                PositionF(overlap),
+                PreviousPositionF(overlap),
+            ))
+            .id();
+        app.world_mut().run_system_once(wall_collision).unwrap();
+        app.world().entity(p).get::<PositionF>().unwrap().0
+    };
+    assert_ne!(run(ArenaId::Pit), overlap, "the ring pushes the player in");
+    assert_eq!(
+        run(ArenaId::Anchor),
+        overlap,
+        "open arenas stay permeable (the void handles it)"
+    );
+}
+
+// ---- 2026-07-16 roster rules: the Pit's ring + the no-storm arenas ----
+
+/// In the Pit the boundary reflects a Flying fang and KEEPS it flying —
+/// for two free bounces; the third knocks it Loose like any cover hit.
+#[test]
+fn pit_boundary_ricochets_then_drops_on_the_third_kiss() {
+    use sim::{BoomerangMods, PIT_MAX_BOUNDARY_BOUNCES, boomerang_wall_collision};
+    let mut app = bare_app();
+    app.world_mut().resource_mut::<SelectedArena>().0 = ArenaId::Pit;
+    for wall in sim::arena_walls() {
+        app.world_mut().spawn(wall);
+    }
+    // A fang overlapping the east boundary, flying east.
+    let x = Fix::const_from_int(505);
+    let fang = app
+        .world_mut()
+        .spawn((
+            Boomerang {
+                owner_handle: 0,
+                state: BoomerangState::Flying,
+            },
+            PositionF(Vec2F::new(x, Fix::ZERO)),
+            PreviousPositionF(Vec2F::new(x, Fix::ZERO)),
+            VelocityF(Vec2F::new(Fix::const_from_int(20), Fix::ZERO)),
+        ))
+        .id();
+    for bounce in 1..=PIT_MAX_BOUNDARY_BOUNCES {
+        app.world_mut()
+            .run_system_once(boomerang_wall_collision)
+            .unwrap();
+        let (boom, mods, vel) = {
+            let e = app.world().entity(fang);
+            (
+                *e.get::<Boomerang>().unwrap(),
+                *e.get::<BoomerangMods>().unwrap(),
+                e.get::<VelocityF>().unwrap().0,
+            )
+        };
+        assert!(
+            matches!(boom.state, BoomerangState::Flying),
+            "bounce {bounce}: the ring keeps the fang alive"
+        );
+        assert_eq!(mods.boundary_bounces, bounce);
+        assert!(vel.x < Fix::ZERO, "bounce {bounce}: velocity reflected");
+        // Shove it back into the wall flying east for the next kiss.
+        let mut e = app.world_mut().entity_mut(fang);
+        e.get_mut::<PositionF>().unwrap().0 = Vec2F::new(x, Fix::ZERO);
+        e.get_mut::<PreviousPositionF>().unwrap().0 = Vec2F::new(x, Fix::ZERO);
+        e.get_mut::<VelocityF>().unwrap().0 = Vec2F::new(Fix::const_from_int(20), Fix::ZERO);
+    }
+    app.world_mut()
+        .run_system_once(boomerang_wall_collision)
+        .unwrap();
+    let boom = *app.world().entity(fang).get::<Boomerang>().unwrap();
+    assert!(
+        matches!(boom.state, BoomerangState::Loose),
+        "the kiss past the limit knocks it Loose, got {:?}",
+        boom.state
+    );
+}
+
+/// Everywhere else the boundary stays permeable: a fang overlapping it
+/// flies straight through, untouched.
+#[test]
+fn open_arenas_keep_the_boundary_permeable_to_fangs() {
+    use sim::boomerang_wall_collision;
+    let mut app = bare_app();
+    for wall in sim::arena_walls() {
+        app.world_mut().spawn(wall);
+    }
+    let x = Fix::const_from_int(505);
+    let vel = Vec2F::new(Fix::const_from_int(20), Fix::ZERO);
+    let fang = app
+        .world_mut()
+        .spawn((
+            Boomerang {
+                owner_handle: 0,
+                state: BoomerangState::Flying,
+            },
+            PositionF(Vec2F::new(x, Fix::ZERO)),
+            PreviousPositionF(Vec2F::new(x, Fix::ZERO)),
+            VelocityF(vel),
+        ))
+        .id();
+    app.world_mut()
+        .run_system_once(boomerang_wall_collision)
+        .unwrap();
+    let e = app.world().entity(fang);
+    assert!(matches!(
+        e.get::<Boomerang>().unwrap().state,
+        BoomerangState::Flying
+    ));
+    assert_eq!(e.get::<VelocityF>().unwrap().0, vel, "untouched");
+}
+
+/// The Pit has no void: a player parked far outside the (wall-contained)
+/// bounds never accrues out-of-bounds time. The Vigil keeps the FULL
+/// island through what would be the sudden-death window elsewhere.
+#[test]
+fn walled_and_no_storm_arenas_gate_the_void() {
+    use sim::{OobTimer, oob_death};
+    // Deep in what sudden death would have crumbled away: inside the full
+    // bounds, far outside the shrunken ones.
+    let edge = Vec2F::from_cm(480, 0);
+    // Remaining round time near zero => max crumble everywhere it applies.
+    let expiring = MatchState::InRound { expires_at_frame: 1 };
+    let run = |arena: ArenaId| -> u32 {
+        let mut app = bare_app();
+        app.world_mut().resource_mut::<SelectedArena>().0 = arena;
+        *app.world_mut().resource_mut::<MatchState>() = expiring;
+        let p = app
+            .world_mut()
+            .spawn((
+                Player { handle: 0 },
+                PositionF(edge),
+                PreviousPositionF(edge),
+            ))
+            .id();
+        app.world_mut().run_system_once(oob_death).unwrap();
+        app.world().entity(p).get::<OobTimer>().unwrap().0
+    };
+    assert_eq!(run(ArenaId::Pit), 0, "the Pit has no void at all");
+    assert_eq!(run(ArenaId::Vigil), 0, "the Vigil never crumbles");
+    assert!(
+        run(ArenaId::Anchor) > 0,
+        "Anchor's sudden death still bites the same spot"
+    );
+}
