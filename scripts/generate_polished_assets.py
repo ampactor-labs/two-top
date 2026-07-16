@@ -2519,6 +2519,18 @@ _ARENA_FLOOR_SWAPS = {
     # Reliquary — warm-dead: deep-ash field shifts to bruise shadow, warm-bone
     # accents glow deep teal (sealed-temple light).
     "reliquary": {"deep_ash": "bruise_shadow", "warm_bone_shade": "deep_teal"},
+    # The Pit — the walled box reads bruised and closed-in: the field drops a
+    # register and the old-blood details run hotter (the ring remembers).
+    "pit": {"deep_ash": "bruise_shadow", "blood_dark": "ember"},
+    # The Vigil — the no-storm arena is the coldest room in the cathedral:
+    # patient teal light, stone accents.
+    "vigil": {"deep_ash": "deep_teal", "warm_bone_shade": "cold_stone"},
+    # The Gallery — corridors of charcoal: the grout lines dominate and the
+    # accents go bone-pale (a museum of angles).
+    "gallery": {"deep_ash": "charcoal_line", "blood_dark": "bruise_shadow"},
+    # The Forest — the grove floor runs mossy: old blood veins read as
+    # deep-teal undergrowth beneath the bone trees.
+    "forest": {"blood_dark": "deep_teal"},
 }
 
 
@@ -2589,6 +2601,74 @@ def bone_pyre_sheet() -> Canvas:
     c = Canvas(96, 32)
     for i in range(3):
         c.blit(_pyre_cell(i), i * 32, 0, 1)
+    return c
+
+
+# ===========================================================================
+# Bone tree — the Forest's living cover. 3 cells @ 32x32: standing /
+# burning / felled stump. A gnarled dead tree whose branches fork like
+# antlers (the Cur/Stag motif grown into flora). Muted bone over dark so
+# players + fangs stay the readable foreground; the burning cell carries
+# ember tips that the render layer overdrives into the bloom.
+# ===========================================================================
+
+def _tree_cell(stage: int) -> Canvas:
+    c = Canvas(32, 32)
+    bone = PALETTE["bone"]
+    wbs = PALETTE["warm_bone_shade"]
+    void = PALETTE["void"]
+    char = PALETTE["charcoal_line"]
+    ember = PALETTE["ember"]
+    dark = PALETTE["bruise_shadow"]
+    cx = 16
+
+    # Root flare — the tree stands ON the floor band.
+    c.rect(cx - 8, 27, 16, 4, dark)
+    c.rect(cx - 7, 26, 14, 2, wbs)
+
+    if stage == 2:
+        # Felled: a broken shin of trunk + splinters where the crown fell.
+        c.rect(cx - 3, 20, 6, 7, wbs)
+        c.rect(cx - 3, 20, 2, 7, bone)
+        c.line(cx - 3, 20, cx + 2, 18, char)
+        for (sx, sy) in [(cx - 7, 25), (cx + 4, 24), (cx + 6, 26)]:
+            c.rect(sx, sy, 3, 2, wbs)
+        c.set(cx, 22, void)
+    else:
+        trunk_dark = char if stage == 1 else wbs
+        trunk_lit = wbs if stage == 1 else bone
+        # Trunk, lit up its left edge.
+        c.rect(cx - 2, 12, 5, 15, trunk_dark)
+        c.rect(cx - 2, 12, 2, 15, trunk_lit)
+        # Antler branches.
+        c.line(cx, 12, cx - 7, 4, trunk_dark)
+        c.line(cx - 7, 4, cx - 10, 6, trunk_dark)
+        c.line(cx, 12, cx + 6, 3, trunk_dark)
+        c.line(cx + 6, 3, cx + 10, 5, trunk_dark)
+        c.line(cx - 1, 16, cx - 9, 12, trunk_dark)
+        c.line(cx + 2, 15, cx + 10, 11, trunk_dark)
+        # Knot hollow.
+        c.set(cx, 19, void)
+        c.set(cx + 1, 19, void)
+        if stage == 1:
+            # Alight: ember tips on every branch + a lick up the trunk.
+            for (fx, fy) in [
+                (cx - 10, 5), (cx + 10, 4), (cx - 9, 11),
+                (cx + 10, 10), (cx - 7, 3), (cx + 6, 2),
+            ]:
+                c.set(fx, fy, ember)
+                c.set(fx, fy + 1, ember)
+            c.line(cx - 1, 26, cx - 1, 20, ember)
+            c.set(cx + 1, 23, ember)
+    _ramp_shade(c)
+    return c
+
+
+def bone_tree_sheet() -> Canvas:
+    """3-cell strip: standing / burning / felled stump (32x32 each)."""
+    c = Canvas(96, 32)
+    for i in range(3):
+        c.blit(_tree_cell(i), i * 32, 0, 1)
     return c
 
 
@@ -3417,8 +3497,13 @@ def main() -> None:
         ("assets/arenas/anchor_floor.png", arena_floor("anchor")),
         ("assets/arenas/crossing_floor.png", arena_floor("crossing")),
         ("assets/arenas/reliquary_floor.png", arena_floor("reliquary")),
+        ("assets/arenas/pit_floor.png", arena_floor("pit")),
+        ("assets/arenas/vigil_floor.png", arena_floor("vigil")),
+        ("assets/arenas/gallery_floor.png", arena_floor("gallery")),
+        ("assets/arenas/forest_floor.png", arena_floor("forest")),
         ("assets/arenas/tile_sheet.png", arena_tile_sheet()),
         ("assets/sprites/arena/bone_pyre_sheet.png", bone_pyre_sheet()),
+        ("assets/sprites/arena/bone_tree_sheet.png", bone_tree_sheet()),
         ("assets/sprites/arena/chasm_strip.png", chasm_strip()),
         ("assets/sprites/arena/altar_sigil_sheet.png", altar_sigil_sheet()),
         ("assets/sprites/arena/bone_bridge_tile.png", bone_bridge_tile()),
