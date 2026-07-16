@@ -396,9 +396,11 @@ impl Plugin for RenderSyncPlugin {
             (
                 sync_transforms_from_sim,
                 sync_pyre_visuals,
+                sync_tree_visuals,
                 sync_crossing_visuals,
                 sync_reliquary_visuals,
                 ensure_pickup_visuals,
+                sync_pickup_auras.after(ensure_pickup_visuals),
                 tint_boomerangs_by_modifier,
                 // Depth pass: z from the foot line + shadows, after x/y is set.
                 apply_ground_ysort.after(sync_transforms_from_sim),
@@ -723,10 +725,12 @@ pub fn ensure_pickup_visuals(
         })
         .clone();
     let image = asset_server.load("sprites/pickups/pickup_sheet.png");
+    let ring = asset_server.load("sprites/fx/charge_ring.png");
     // Render a touch larger than the 32 cm hitbox so it pops on the floor.
     let size = (sim::PICKUP_HALF_EXTENT_CM * 2) as f32 * 1.8;
     for (entity, pickup, pos) in &q {
         let (x, y) = pos.0.to_f32();
+        let ty = tilt_y(y * flip.0);
         commands.entity(entity).insert((
             Sprite {
                 image: image.clone(),
@@ -739,8 +743,79 @@ pub fn ensure_pickup_visuals(
             },
             // On the floor (below the ground-actor y-sort band) so a duelist
             // always steps cleanly *over* a pickup, above stains/props.
-            Transform::from_xyz(x, tilt_y(y * flip.0), -0.45),
+            Transform::from_xyz(x, ty, -0.45),
         ));
+        // The effect halo: same color the fang wears once this is taken,
+        // animated per kind by `sync_pickup_auras`. A tracked cosmetic (the
+        // pickup is a rollback entity — children don't survive restore).
+        let aura_size = size * depth_scale(y * flip.0) * 1.75;
+        commands.spawn((
+            PickupAura {
+                target: entity,
+                kind: pickup.kind,
+                base_size: aura_size,
+            },
+            Sprite {
+                image: ring.clone(),
+                color: boomerang_tint(Some(pickup.kind)).with_alpha(0.5),
+                custom_size: Some(Vec2::splat(aura_size)),
+                ..default()
+            },
+            Transform::from_xyz(x, ty, -0.46),
+        ));
+    }
+}
+
+/// The per-kind halo under a floor pickup. `boomerang_tint` gives it the
+/// exact color the empowered fang will fly with, so the floor telegraphs
+/// the effect in the same language the weapon speaks. Self-cleans when its
+/// pickup despawns (collected / expired / rolled back), like ground shadows.
+#[derive(Component)]
+pub struct PickupAura {
+    pub target: Entity,
+    pub kind: sim::PickupKind,
+    pub base_size: f32,
+}
+
+/// Animate each pickup halo with a motion signature that acts out the
+/// effect: Fire flickers fast, Bouncy visibly bounces its size, Heavy
+/// breathes slow and ponderous, Curve spins, Multishot strobes, Phantom
+/// barely-is, Swap alternates the two duelists' colors (a trade, telegraphed).
+pub fn sync_pickup_auras(
+    mut commands: Commands,
+    time: Res<Time<Real>>,
+    targets: Query<(), With<sim::Pickup>>,
+    mut auras: Query<(Entity, &PickupAura, &mut Sprite, &mut Transform)>,
+) {
+    use core::f32::consts::TAU;
+    let t = time.elapsed_secs();
+    for (entity, aura, mut sprite, mut tx) in &mut auras {
+        if targets.get(aura.target).is_err() {
+            commands.entity(entity).despawn();
+            continue;
+        }
+        use sim::PickupKind::*;
+        // Per-kind signature: (pulse hz, base alpha, size wobble, spin rad/s).
+        let (hz, alpha, wobble, spin) = match aura.kind {
+            Fire => (7.0, 0.55, 0.06, 0.8),
+            Bouncy => (3.2, 0.50, 0.20, 0.0),
+            Heavy => (1.1, 0.45, 0.04, 0.0),
+            Curve => (2.2, 0.50, 0.05, 2.4),
+            Multishot => (4.5, 0.50, 0.08, 0.0),
+            Phantom => (0.7, 0.30, 0.04, 0.0),
+            Swap => (2.0, 0.50, 0.06, -1.2),
+        };
+        let pulse = (t * hz * TAU).sin();
+        let base = if matches!(aura.kind, Swap) && pulse < 0.0 {
+            palette::P0_BLOOD
+        } else {
+            boomerang_tint(Some(aura.kind))
+        };
+        sprite.color = base.with_alpha(alpha * (0.7 + 0.3 * pulse.abs()));
+        sprite.custom_size = Some(Vec2::splat(aura.base_size * (1.0 + wobble * pulse)));
+        if spin != 0.0 {
+            tx.rotation = Quat::from_rotation_z(t * spin);
+        }
     }
 }
 
@@ -776,7 +851,83 @@ pub fn spawn_arena_props(
     match selected.0 {
         sim::ArenaId::Crossing => spawn_crossing(commands, asset_server, atlases, flip),
         sim::ArenaId::Reliquary => spawn_reliquary(commands, asset_server, atlases, flip),
-        sim::ArenaId::Anchor => {}
+        sim::ArenaId::Forest => spawn_trees(commands, asset_server, atlases, selected, flip),
+        // Anchor's pyre comes from spawn_pyres above; the 2026-07-16 roster
+        // (Pit / Vigil / Gallery) is rules + geometry — no bespoke props.
+        sim::ArenaId::Anchor | sim::ArenaId::Pit | sim::ArenaId::Vigil | sim::ArenaId::Gallery => {}
+    }
+}
+
+/// Spawn the Forest's bone trees: the sim [`sim::BoneTree`] rollback
+/// component rides the sprite entity exactly like pyres do. Trees are TALL
+/// cover, so unlike the flat pyres they carry [`YSorted`] — a duelist in
+/// front draws over the trunk, one behind is occluded by the canopy.
+fn spawn_trees(
+    commands: &mut Commands,
+    asset_server: &AssetServer,
+    atlases: &mut Assets<TextureAtlasLayout>,
+    selected: &sim::SelectedArena,
+    flip: f32,
+) {
+    let layout = atlases.add(TextureAtlasLayout::from_grid(
+        UVec2::splat(32),
+        3,
+        1,
+        None,
+        None,
+    ));
+    let image = asset_server.load("sprites/arena/bone_tree_sheet.png");
+    for tree in sim::arena_trees_for(selected.0) {
+        let (center, size) = rect_center_size(tree.rect, flip);
+        // The trunk footprint is the collision truth; the canopy rises off
+        // it, scaled by the footprint row's table depth like obstacle rise.
+        let (_, base_y) = tree.rect.min.to_f32();
+        let rise = size.x * 2.1 * depth_scale(base_y * flip);
+        let center_y = center.y + (rise - size.y) * 0.5;
+        commands.spawn((
+            ArenaProp,
+            tree,
+            Sprite {
+                image: image.clone(),
+                texture_atlas: Some(TextureAtlas {
+                    layout: layout.clone(),
+                    index: 0,
+                }),
+                custom_size: Some(Vec2::new(size.x * 1.5, rise)),
+                ..default()
+            },
+            YSorted {
+                foot_offset: rise * 0.5,
+            },
+            Transform::from_xyz(center.x, center_y, 0.0),
+        ));
+    }
+}
+
+/// Drive each tree sprite from its sim state: standing / burning / stump
+/// atlas cells, with the pyre's ember flicker while the fire is live.
+pub fn sync_tree_visuals(
+    frame: Res<sim::FrameCount>,
+    time: Res<Time<Real>>,
+    mut q: Query<(&sim::BoneTree, &mut Sprite)>,
+) {
+    for (tree, mut sprite) in &mut q {
+        let burning = tree.is_burning(frame.0);
+        if let Some(atlas) = sprite.texture_atlas.as_mut() {
+            atlas.index = if tree.felled {
+                2
+            } else if burning {
+                1
+            } else {
+                0
+            };
+        }
+        sprite.color = if burning {
+            let flicker = 1.35 + 0.35 * (time.elapsed_secs() * 11.0).sin();
+            scale_color(palette::EMBER, flicker)
+        } else {
+            Color::WHITE
+        };
     }
 }
 
