@@ -82,7 +82,9 @@ jobs:
           # expression-time `env:` context — resolve it in the shell.
           export ANDROID_NDK_ROOT="$ANDROID_NDK_LATEST_HOME"
           echo "NDK: $ANDROID_NDK_ROOT"
-          cargo apk build -p app --lib --target aarch64-linux-android --release --locked
+          # cargo-apk's CLI doesn't pass --locked through; the committed
+          # Cargo.lock still pins the graph (same invocation as phone.sh).
+          cargo apk build -p app --lib --target aarch64-linux-android --release
           cp target/release/apk/app.apk two-top.apk
           ls -la two-top.apk
       # 16 KB ELF page alignment is load-bearing on Android 15 phones
