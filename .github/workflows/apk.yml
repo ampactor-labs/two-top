@@ -8,8 +8,11 @@
 # The build mirrors scripts/phone.sh: cargo-apk, release profile, the
 # public Railway quick-match room baked via TWOTOP_ROOM (a repo/org
 # variable overrides it; it is not a secret — the same URL ships in
-# phone.sh). TURN credentials come from repo secrets when configured and
-# stay STUN-only otherwise (empty env reads as unset in netplay.rs).
+# phone.sh). The public APK is deliberately STUN-only: TWOTOP_TURN_*
+# credentials are compile-time-baked and trivially extractable from any
+# distributed binary, so they must NEVER enter a publicly downloadable
+# build. TURN-enabled builds stay local (scripts/phone.sh with the env
+# set) or move to short-lived credentials before they ever ship.
 #
 # Signing: sideload builds are debug-key signed. The keystore is kept in
 # the actions cache so consecutive builds share a key (Android refuses an
@@ -74,9 +77,6 @@ jobs:
           CARGO_APK_RELEASE_KEYSTORE: ${{ github.workspace }}/debug.keystore
           CARGO_APK_RELEASE_KEYSTORE_PASSWORD: android
           TWOTOP_ROOM: ${{ vars.TWOTOP_ROOM || 'wss://two-top-matchbox-production.up.railway.app/two-top?next=2' }}
-          TWOTOP_TURN_URL: ${{ secrets.TWOTOP_TURN_URL }}
-          TWOTOP_TURN_USER: ${{ secrets.TWOTOP_TURN_USER }}
-          TWOTOP_TURN_PASS: ${{ secrets.TWOTOP_TURN_PASS }}
         run: |
           # Runner-image env (ANDROID_NDK_LATEST_HOME) is process env, not
           # expression-time `env:` context — resolve it in the shell.
