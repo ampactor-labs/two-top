@@ -343,6 +343,12 @@ room by default). The old APK predates the batch.
       rematch regrows them. The two lone center trees never catch from
       a neighbor. Scrub a Forest tape backward in the theater — felled
       trees stand back up.
+- [ ] **Ephemeral ICE (once a vendor is deployed):** with
+      `TWOTOP_ICE_URL` baked, match entry logs `fetching ephemeral ICE
+      credentials` then `ice config resolved fetched=true`, and a
+      cellular-vs-wifi pair connects through the relay. Kill the vendor
+      and re-enter — the fetch times out within ~2.5 s and the match
+      still works STUN-only on wifi.
 - [ ] Perspective: focal + UI reserve, spawn spread — do the duelists open too
       close to center?
 - [ ] Anything the 30-minute feel session (section E) surfaces, now including

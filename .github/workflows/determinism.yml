@@ -29,11 +29,11 @@ jobs:
           # Layer Rules). Linux-x64 still builds the full workspace.
           - target: aarch64-unknown-linux-gnu
             runs-on: ubuntu-latest
-            pkg-args: --workspace --exclude app
+            pkg-args: --workspace --exclude app --exclude ice_vendor
             replay-sync: true
           - target: aarch64-apple-darwin
             runs-on: macos-14
-            pkg-args: --workspace --exclude app
+            pkg-args: --workspace --exclude app --exclude ice_vendor
             replay-sync: true
           # aarch64-linux-android: Phase 7.5 expanded scope from
           # `-p fixed_math` to `--workspace --exclude app`. The sim/replay/
@@ -45,7 +45,7 @@ jobs:
           # the NDK and cargo-apk are installed (see SIDELOAD.md).
           - target: aarch64-linux-android
             runs-on: ubuntu-latest
-            pkg-args: --workspace --exclude app
+            pkg-args: --workspace --exclude app --exclude ice_vendor
             replay-sync: false
     steps:
       - uses: actions/checkout@v5

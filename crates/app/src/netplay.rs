@@ -73,6 +73,12 @@ const SIDE_CHANNEL: usize = 1;
 #[derive(Resource, Clone, Debug, Default)]
 pub struct NetplayConfig {
     pub room_url: Option<String>,
+    /// The ephemeral-ICE credential vendor (`ice_vendor`'s `GET /ice`).
+    /// When set, match entry fetches short-lived TURN credentials from it
+    /// instead of using anything compiled into the binary — the public APK
+    /// carries a URL, never a secret. `None` ⇒ the baked/STUN-only
+    /// [`ice_server_config`] path, unchanged.
+    pub ice_url: Option<String>,
 }
 
 /// Which player handle is *this* device's local player, once a P2P session is
@@ -103,16 +109,28 @@ impl NetplayConfig {
     /// Desktop builds left without `TWOTOP_ROOM` at compile time and without
     /// `--room`/`MATCHBOX_ROOM` at runtime behave exactly as before.
     pub fn from_env_and_args() -> Self {
+        // Runtime env first, then the compile-time bake (the APK path —
+        // note it is a URL, never a credential; see `ice_vendor`).
+        let ice_url = std::env::var("TWOTOP_ICE_URL")
+            .ok()
+            .filter(|s| !s.is_empty())
+            .or_else(|| {
+                option_env!("TWOTOP_ICE_URL")
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_string)
+            });
         let mut args = std::env::args().skip(1);
         while let Some(arg) = args.next() {
             if arg == "--room" {
                 return Self {
                     room_url: args.next(),
+                    ice_url,
                 };
             }
             if let Some(url) = arg.strip_prefix("--room=") {
                 return Self {
                     room_url: Some(url.to_string()),
+                    ice_url,
                 };
             }
         }
@@ -127,16 +145,21 @@ impl NetplayConfig {
                     .filter(|s| !s.is_empty())
                     .map(str::to_string)
             });
-        Self { room_url }
+        Self { room_url, ice_url }
     }
 }
 
 /// TURN relay config, resolved like the room URL: runtime env first
 /// (`TWOTOP_TURN_URL` / `TWOTOP_TURN_USER` / `TWOTOP_TURN_PASS`), then the
-/// compile-time bake (the Android APK path). Returns the matchbox default
-/// (Google STUN only) when unset — same behavior as before this existed.
+/// compile-time bake. Returns the matchbox default (Google STUN only)
+/// when unset — same behavior as before this existed.
 ///
-/// Why this matters: STUN-only traversal fails for phone pairs behind
+/// This is the LOCAL/testing path and the fallback when the ephemeral
+/// vendor is unreachable. Public builds must never bake `TWOTOP_TURN_*`
+/// (extractable from any distributed binary) — they carry `TWOTOP_ICE_URL`
+/// instead and fetch throwaway credentials at match entry.
+///
+/// Why TURN matters: STUN-only traversal fails for phone pairs behind
 /// carrier-grade NAT (very common on cellular). A TURN relay is the
 /// fallback path that makes "two strangers on two networks" reliable.
 /// The STUN urls stay in the list either way; WebRTC only applies the
@@ -185,13 +208,92 @@ pub struct MatchboxPlugin;
 impl Plugin for MatchboxPlugin {
     fn build(&self, app: &mut App) {
         app.add_systems(OnEnter(crate::screen::AppScreen::InMatch), start_matchbox)
-            .add_systems(Update, (drive_netplay, track_absence, reset_rematch_consent));
+            .add_systems(
+                OnExit(crate::screen::AppScreen::InMatch),
+                |world: &mut World| {
+                    // A quit/cancel during a pending credential fetch must
+                    // not open a socket after we've left the screen.
+                    world.remove_resource::<PendingIce>();
+                },
+            )
+            .add_systems(
+                Update,
+                (
+                    finish_ice_fetch,
+                    drive_netplay,
+                    track_absence,
+                    reset_rematch_consent,
+                ),
+            );
     }
+}
+
+/// Seconds the credential fetch may hold up the connection before we fall
+/// back to the baked/STUN-only config. The fetch rides the SUMMONING wait,
+/// so its only visible cost is when the vendor is down — and then it's this.
+const ICE_FETCH_TIMEOUT_SECS: f32 = 2.5;
+
+/// An in-flight ephemeral-credential fetch (`NetplayConfig::ice_url`).
+/// The task thread reports through the channel; `finish_ice_fetch` opens
+/// the socket with whatever arrives — or with the fallback on
+/// timeout/error. `Mutex` because `mpsc::Receiver` is `Send` but not
+/// `Sync` and resources must be both.
+#[derive(Resource)]
+struct PendingIce {
+    rx: std::sync::Mutex<std::sync::mpsc::Receiver<Option<RtcIceServerConfig>>>,
+    started_at: f32,
+}
+
+/// The vendor's `GET /ice` contract — field names in lockstep with
+/// `ice_vendor::IceResponse`.
+#[derive(serde::Deserialize)]
+struct IceResponse {
+    urls: Vec<String>,
+    username: Option<String>,
+    credential: Option<String>,
+}
+
+/// Parse a vendor response body into matchbox's ICE config. `None` for
+/// anything malformed or empty — the caller falls back to the baked path.
+/// Pure for tests.
+pub(crate) fn parse_ice_response(body: &str) -> Option<RtcIceServerConfig> {
+    let parsed: IceResponse = serde_json::from_str(body).ok()?;
+    if parsed.urls.is_empty() {
+        return None;
+    }
+    Some(RtcIceServerConfig {
+        urls: parsed.urls,
+        username: parsed.username,
+        credential: parsed.credential,
+    })
+}
+
+/// Blocking fetch of the vendor's ICE config (runs on the IO task pool —
+/// never the main thread). Tight timeout: the fallback exists.
+fn fetch_ice(url: &str) -> Option<RtcIceServerConfig> {
+    let response = ureq::get(url)
+        .timeout(Duration::from_secs(2))
+        .call()
+        .map_err(|e| {
+            tracing::warn!(target: "two_top::net", error = %e, "ice vendor unreachable");
+            e
+        })
+        .ok()?;
+    let body = response.into_string().ok()?;
+    let config = parse_ice_response(&body);
+    if config.is_none() {
+        tracing::warn!(target: "two_top::net", "ice vendor response unusable — falling back");
+    }
+    config
 }
 
 /// Startup: build the socket + spawn its message loop. Runs after Bevy's
 /// `TaskPoolPlugin` has initialized `IoTaskPool`, so the spawn is safe here
 /// (it would not be in `run()` before `App::run`).
+///
+/// With an ice vendor configured, the socket build waits (bounded) for the
+/// ephemeral-credential fetch — `finish_ice_fetch` completes it. Without
+/// one, the socket opens immediately on the baked/STUN-only config.
 fn start_matchbox(world: &mut World) {
     // Practice mode runs a local session against the bot — no socket, even
     // on an online build. The replay theater replays a tape the same way.
@@ -200,11 +302,71 @@ fn start_matchbox(world: &mut World) {
     {
         return;
     }
-    let Some(url) = world.resource::<NetplayConfig>().room_url.clone() else {
+    let config = world.resource::<NetplayConfig>().clone();
+    let Some(url) = config.room_url else {
         return;
     };
 
-    let ice = ice_server_config();
+    if let Some(ice_url) = config.ice_url {
+        let (tx, rx) = std::sync::mpsc::channel();
+        bevy::tasks::IoTaskPool::get()
+            .spawn(async move {
+                let _ = tx.send(fetch_ice(&ice_url));
+            })
+            .detach();
+        let started_at = world.resource::<Time<Real>>().elapsed_secs();
+        world.insert_resource(PendingIce {
+            rx: std::sync::Mutex::new(rx),
+            started_at,
+        });
+        // SUMMONING goes up now; the socket follows within the timeout.
+        *world.resource_mut::<LobbyState>() = LobbyState::Connecting;
+        tracing::info!(target: "two_top::net", "fetching ephemeral ICE credentials");
+        return;
+    }
+    open_socket(world, url, ice_server_config());
+}
+
+/// Complete a pending credential fetch: open the socket with the fetched
+/// config the moment it lands, or with the baked/STUN-only fallback on
+/// error or timeout. Exclusive-world (socket is non-send).
+fn finish_ice_fetch(world: &mut World) {
+    if world.get_resource::<PendingIce>().is_none() {
+        return;
+    }
+    let now = world.resource::<Time<Real>>().elapsed_secs();
+    let outcome = {
+        let pending = world.resource::<PendingIce>();
+        match pending.rx.lock().expect("fetch thread never panics holding it").try_recv() {
+            Ok(result) => Some(result),
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => Some(None),
+            Err(std::sync::mpsc::TryRecvError::Empty) => {
+                if now - pending.started_at > ICE_FETCH_TIMEOUT_SECS {
+                    tracing::warn!(target: "two_top::net", "ice vendor timed out — falling back");
+                    Some(None)
+                } else {
+                    None
+                }
+            }
+        }
+    };
+    let Some(result) = outcome else {
+        return; // still in flight, within budget
+    };
+    world.remove_resource::<PendingIce>();
+    let Some(url) = world.resource::<NetplayConfig>().room_url.clone() else {
+        return;
+    };
+    let fetched = result.is_some();
+    let ice = result.unwrap_or_else(ice_server_config);
+    tracing::info!(target: "two_top::net", fetched, "ice config resolved");
+    open_socket(world, url, ice);
+}
+
+/// Build the matchbox socket with the given ICE config and hand its
+/// message loop to the IO pool — the tail of the old `start_matchbox`,
+/// shared by the immediate and fetched paths.
+fn open_socket(world: &mut World, url: String, ice: RtcIceServerConfig) {
     let has_turn = ice.urls.iter().any(|u| u.starts_with("turn"));
     let (socket, message_loop) = WebRtcSocketBuilder::new(url.clone())
         .ice_server(ice)
@@ -637,4 +799,35 @@ pub fn leave_online_match(world: &mut World) {
     world.resource_mut::<LocalPlayerHandle>().0 = None;
     world.resource_mut::<render::PerspectiveFlip>().0 = 1.0;
     tracing::info!(target: "two_top::net", "left the online match — lobby reset");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ice_response_parses_into_matchbox_config() {
+        let body = r#"{"urls":["stun:stun.l.google.com:19302","turn:relay.example.com:3478?transport=udp"],"username":"1700000000:twotop","credential":"5qrcx5XkYi6dvbeiSMJF7UgDbag=","ttl_secs":14400}"#;
+        let config = parse_ice_response(body).expect("valid vendor response parses");
+        assert_eq!(config.urls.len(), 2);
+        assert!(config.urls[1].starts_with("turn:"));
+        assert_eq!(config.username.as_deref(), Some("1700000000:twotop"));
+        assert!(config.credential.is_some());
+    }
+
+    #[test]
+    fn stun_only_vendor_answers_parse_without_credentials() {
+        let body = r#"{"urls":["stun:stun.l.google.com:19302"],"username":null,"credential":null,"ttl_secs":60}"#;
+        let config = parse_ice_response(body).expect("stun-only is a valid answer");
+        assert!(config.username.is_none() && config.credential.is_none());
+    }
+
+    #[test]
+    fn garbage_and_empty_responses_fall_back() {
+        // Malformed JSON, wrong shape, and an empty url list all read as
+        // "vendor unusable" — the caller takes the baked/STUN-only path.
+        assert!(parse_ice_response("not json").is_none());
+        assert!(parse_ice_response(r#"{"nope":true}"#).is_none());
+        assert!(parse_ice_response(r#"{"urls":[],"username":null,"credential":null,"ttl_secs":9}"#).is_none());
+    }
 }

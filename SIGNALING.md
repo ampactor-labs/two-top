@@ -68,17 +68,49 @@ All three unset ⇒ STUN-only, exactly the pre-TURN behavior. The STUN
 urls stay in the ICE list either way; WebRTC applies the credentials
 only to the `turn:` entry.
 
-Server options, in order of effort:
+**The baked env vars are for LOCAL testing only.** Anything compiled
+into a distributed APK is one `strings` away from public, and a leaked
+TURN credential spends your relay bandwidth. Public builds use the
+ephemeral vendor below instead; the APK CI workflow refuses to carry
+`TWOTOP_TURN_*` by design.
 
-* **Managed TURN** (Twilio NTS, Metered, Cloudflare Calls): zero ops,
-  metered pricing; static-credential offerings drop straight into the
-  three env vars above.
-* **Self-hosted coturn** beside the signaling server:
-  `turnserver --lt-cred-mech --user twotop:<secret> --realm two-top`.
-  Note TURN wants UDP ingress (3478 + a relay port range) — hosts that
-  only proxy HTTP/TCP (Railway's proxy model, for one) can't carry it;
-  a plain VPS can. TURN traffic is only used when STUN fails, so a
-  small box covers a lot of matches.
+### Ephemeral credentials: the ice_vendor service
+
+`crates/ice_vendor` is a tiny HTTP service that holds the relay secret
+server-side and answers `GET /ice` with a THROWAWAY credential pair the
+TURN server refuses once its embedded timestamp expires (the TURN REST
+API convention, draft-uberti-behave-turn-rest). The app fetches it at
+match entry when `TWOTOP_ICE_URL` is set — a URL, not a secret, so it
+is safe to bake into public builds — with a 2.5 s timeout falling back
+to the baked/STUN-only config. The fetch rides the SUMMONING wait, so
+it costs nothing visible.
+
+Two backends, picked by env:
+
+* **Cloudflare TURN** (recommended): set `CF_TURN_KEY_ID` +
+  `CF_TURN_API_TOKEN` (create a TURN key in the Cloudflare dashboard
+  under Realtime). The vendor proxies Cloudflare's short-lived
+  credential generator; the relay is their anycast network, with a
+  large free monthly tier (verify current terms). Override the
+  endpoint with `CF_TURN_API_URL` if their API moves.
+* **Self-hosted coturn**: run coturn with
+  `--use-auth-secret --static-auth-secret=<secret>` on a VPS (TURN
+  wants UDP ingress — Railway's HTTP proxy can't carry it) and give
+  the vendor `ICE_STATIC_AUTH_SECRET=<same secret>` +
+  `ICE_TURN_URLS=turn:relay.example.net:3478?transport=udp`. The
+  vendor computes `expiry:twotop` / base64(HMAC-SHA1) pairs coturn
+  verifies offline.
+
+Neither set ⇒ the vendor answers STUN-only, which still exercises the
+whole fetch path. `ICE_TTL_SECS` tunes the credential lifetime
+(default 4 h). Deploy the vendor anywhere HTTPS lives — a second
+Railway service off this repo with start command
+`cargo run -p ice_vendor --release` works — then bake its URL:
+
+```bash
+TWOTOP_ICE_URL="https://<vendor-host>/ice" scripts/phone.sh
+# or set the TWOTOP_ICE_URL repo variable so CI bakes it into apk-latest
+```
 
 ---
 

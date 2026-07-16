@@ -77,6 +77,9 @@ jobs:
           CARGO_APK_RELEASE_KEYSTORE: ${{ github.workspace }}/debug.keystore
           CARGO_APK_RELEASE_KEYSTORE_PASSWORD: android
           TWOTOP_ROOM: ${{ vars.TWOTOP_ROOM || 'wss://two-top-matchbox-production.up.railway.app/two-top?next=2' }}
+          # The ephemeral-ICE vendor URL (crates/ice_vendor). A URL, not a
+          # credential — safe in a public binary. Unset ⇒ STUN-only, as now.
+          TWOTOP_ICE_URL: ${{ vars.TWOTOP_ICE_URL }}
         run: |
           # Runner-image env (ANDROID_NDK_LATEST_HOME) is process env, not
           # expression-time `env:` context — resolve it in the shell.

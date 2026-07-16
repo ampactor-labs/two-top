@@ -14,4 +14,5 @@ ROOM="${TWOTOP_ROOM:-wss://two-top-matchbox-production.up.railway.app/two-top?ne
 CARGO_APK_RELEASE_KEYSTORE="${CARGO_APK_RELEASE_KEYSTORE:-$HOME/.android/debug.keystore}" \
 CARGO_APK_RELEASE_KEYSTORE_PASSWORD="${CARGO_APK_RELEASE_KEYSTORE_PASSWORD:-android}" \
 TWOTOP_ROOM="$ROOM" \
+TWOTOP_ICE_URL="${TWOTOP_ICE_URL:-}" \
   cargo apk run -p app --lib --target aarch64-linux-android --release

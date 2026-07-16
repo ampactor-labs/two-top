@@ -1,0 +1,19 @@
+[package]
+name = "ice_vendor"
+version = "0.0.0"
+edition.workspace = true
+publish = false
+
+# The ephemeral-ICE credential vendor — a deploy-side HTTP service, never
+# part of the game binaries. Deliberately runtime-free (tiny_http, sync):
+# it answers two GETs for a two-player game. Excluded from the
+# determinism-matrix cross builds (it never runs on a phone).
+
+[dependencies]
+tiny_http = "0.12"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+hmac = "0.12"
+sha1 = "0.10"
+base64 = "0.22"
+ureq = { version = "2", default-features = false, features = ["tls", "json"] }

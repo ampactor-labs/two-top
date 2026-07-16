@@ -173,3 +173,9 @@ orientation = "portrait"
 config_changes = "orientation|keyboardHidden|screenSize"
 launch_mode = "singleTask"
 exported = true
+
+# Ephemeral-ICE credential fetch (netplay.rs): one HTTPS GET at match
+# entry, on the IO task pool. rustls via ureq's tls feature — no OS cert
+# store dependency, which matters on Android.
+[target.'cfg(not(target_family = "wasm"))'.dependencies]
+ureq = { version = "2", default-features = false, features = ["tls", "json"] }
