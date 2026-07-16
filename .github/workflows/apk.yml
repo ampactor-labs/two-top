@@ -1,0 +1,112 @@
+# Build the sideloadable Android APK on every push to main and publish it
+# two ways: as a per-run artifact (audit trail, 90-day retention) and as
+# the rolling `apk-latest` GitHub release, so the newest build is always
+# one stable URL away:
+#
+#   https://github.com/ampactor-labs/two-top/releases/download/apk-latest/two-top.apk
+#
+# The build mirrors scripts/phone.sh: cargo-apk, release profile, the
+# public Railway quick-match room baked via TWOTOP_ROOM (a repo/org
+# variable overrides it; it is not a secret — the same URL ships in
+# phone.sh). TURN credentials come from repo secrets when configured and
+# stay STUN-only otherwise (empty env reads as unset in netplay.rs).
+#
+# Signing: sideload builds are debug-key signed. The keystore is kept in
+# the actions cache so consecutive builds share a key (Android refuses an
+# update signed by a different key — a cache miss means one manual
+# uninstall/reinstall on the phone). For a permanently stable key, set a
+# base64 `APK_KEYSTORE` secret and swap the generate step for a decode.
+
+name: APK
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: apk-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  apk:
+    name: build + publish APK
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      # Free disk like the determinism matrix does — but KEEP the Android
+      # SDK/NDK (this is the one workflow that needs it). The webrtc tree +
+      # cross-target artifacts are what blow the disk ceiling.
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/.ghcup /opt/hostedtoolcache/CodeQL
+          df -h /
+      - name: Add Android target
+        run: rustup target add aarch64-linux-android
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: apk-aarch64-linux-android
+      - name: Install cargo-apk
+        run: cargo install cargo-apk --locked || cargo install cargo-apk
+      # One debug keystore, cached across runs so every APK shares a
+      # signing key (see the header comment for the upgrade path).
+      - name: Restore signing keystore
+        id: keystore
+        uses: actions/cache@v4
+        with:
+          path: debug.keystore
+          key: apk-debug-keystore-v1
+      - name: Generate signing keystore (cache miss)
+        if: steps.keystore.outputs.cache-hit != 'true'
+        run: |
+          keytool -genkeypair -keystore debug.keystore \
+            -storepass android -keypass android -alias androiddebugkey \
+            -dname "CN=Android Debug,O=Android,C=US" \
+            -keyalg RSA -keysize 2048 -validity 10000
+      - name: Build release APK
+        env:
+          CARGO_APK_RELEASE_KEYSTORE: ${{ github.workspace }}/debug.keystore
+          CARGO_APK_RELEASE_KEYSTORE_PASSWORD: android
+          TWOTOP_ROOM: ${{ vars.TWOTOP_ROOM || 'wss://two-top-matchbox-production.up.railway.app/two-top?next=2' }}
+          TWOTOP_TURN_URL: ${{ secrets.TWOTOP_TURN_URL }}
+          TWOTOP_TURN_USER: ${{ secrets.TWOTOP_TURN_USER }}
+          TWOTOP_TURN_PASS: ${{ secrets.TWOTOP_TURN_PASS }}
+        run: |
+          # Runner-image env (ANDROID_NDK_LATEST_HOME) is process env, not
+          # expression-time `env:` context — resolve it in the shell.
+          export ANDROID_NDK_ROOT="$ANDROID_NDK_LATEST_HOME"
+          echo "NDK: $ANDROID_NDK_ROOT"
+          cargo apk build -p app --lib --target aarch64-linux-android --release --locked
+          cp target/release/apk/app.apk two-top.apk
+          ls -la two-top.apk
+      # 16 KB ELF page alignment is load-bearing on Android 15 phones
+      # (crates/app/build.rs). Fail the workflow if it ever regresses —
+      # a misaligned APK installs but crashes at launch.
+      - name: Verify 16 KB page alignment
+        run: |
+          unzip -o two-top.apk "lib/arm64-v8a/libapp.so" -d apk-check
+          # String-compare the LOAD align field (mawk has no strtonum):
+          # 0x4000 (16 KB) or 0x10000 (64 KB) pass; anything else regressed.
+          readelf -lW apk-check/lib/arm64-v8a/libapp.so \
+            | awk '/LOAD/ {print; if ($NF != "0x4000" && $NF != "0x10000") bad=1} END {exit bad}'
+      - name: Upload per-run artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: two-top-apk-${{ github.sha }}
+          path: two-top.apk
+          if-no-files-found: error
+      - name: Publish rolling apk-latest release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release delete apk-latest --yes --cleanup-tag || true
+          gh release create apk-latest two-top.apk \
+            --title "Latest APK (${GITHUB_SHA::7})" \
+            --notes "Sideloadable release build of commit ${GITHUB_SHA}. Install per SIDELOAD.md; pairs on the public quick-match room by default." \
+            --prerelease
