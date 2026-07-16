@@ -8,7 +8,9 @@
 //!   * cycle 2: floating virtual stick + radial deadzone, output as a
 //!     normalized [-1, 1]^2 vector in `TouchState.stick`. Quantization
 //!     to wire-format i8 happens at the boundary in cycle 5's
-//!     `read_local_inputs` system.
+//!     `read_local_inputs` system. The stick's anchor FOLLOWS a thumb
+//!     that runs past the ring's edge (`STICK_FOLLOW_RADIUS_PX`), so a
+//!     long swipe tows the stick instead of pinning it to the landing.
 //!   * cycle 3: throw interaction state machine. Any right-half touch
 //!     is the throw BUTTON (`throw_held`); while it's held, the LEFT
 //!     stick aims — `aim_active` tracks its deflection and
@@ -47,6 +49,15 @@ pub const STICK_DEADZONE_SATURATION: f32 = 0.75;
 /// extended. ~80px is standard for mobile thumb sticks; smaller feels
 /// twitchy, larger forces the user to stretch.
 pub const STICK_MAX_RADIUS_PX: f32 = 80.0;
+
+/// The follow radius: how far the thumb may sit from the stick's anchor
+/// before the anchor gets dragged along behind it. This is the saturation
+/// circle — the ring the control layer actually draws — so the base starts
+/// following at the exact moment the thumb collides with its visible edge.
+/// Deflection therefore never exceeds saturation, which keeps a followed
+/// stick pinned at full push, and reversing direction responds immediately
+/// instead of asking the thumb to swim back across a dead 2×radius span.
+pub const STICK_FOLLOW_RADIUS_PX: f32 = STICK_MAX_RADIUS_PX * STICK_DEADZONE_SATURATION;
 
 /// Window size in logical pixels. Populated by the app each frame
 /// (cycle 5 wires it up from `Single<&Window>`); kept as a resource so
@@ -98,6 +109,14 @@ pub struct TrackedTouch {
     pub id: u64,
     pub start_pos: Vec2,
     pub current_pos: Vec2,
+    /// Where the virtual stick is anchored NOW. Starts at `start_pos` and
+    /// gets dragged along whenever the thumb pulls more than
+    /// [`STICK_FOLLOW_RADIUS_PX`] away — the stick base follows the thumb
+    /// across the screen instead of pinning the input to the landing spot.
+    /// Zone tests keep probing the immutable `start_pos`, so a dragged
+    /// anchor can never re-classify the touch (e.g. a move stick crossing
+    /// the centerline never becomes a throw candidate).
+    pub anchor_pos: Vec2,
     pub start_frame: u64,
 }
 
@@ -173,7 +192,7 @@ pub fn apply_radial_deadzone(magnitude: f32, inner: f32, saturation: f32) -> f32
     }
 }
 
-/// Resolve a (start, current) drag into a stick vector. Output
+/// Resolve an (anchor, current) drag into a stick vector. Output
 /// magnitude is in [0, 1] after the deadzone curve; direction is the
 /// drag's. (0, 0) means "stick centered" (drag too small or zero).
 pub fn compute_stick(
@@ -199,9 +218,29 @@ pub fn compute_stick(
 /// is carved OUT of the move/throw zones so it can never steal a stick.
 pub const TAUNT_ZONE_Y_FRAC: f32 = 0.24;
 
-/// The TAUNT strip: the top of the screen, full width.
+/// Fraction of the window width where the QUIT corner begins (mirrors the
+/// dash corner's X so the two reserved corners rhyme).
+pub const QUIT_ZONE_X_FRAC: f32 = 0.78;
+
+/// Fraction of the window height where the QUIT corner ends.
+pub const QUIT_ZONE_Y_FRAC: f32 = 0.16;
+
+/// The QUIT corner: a small rectangle in the top-right, reserved for the
+/// app's in-match QUIT button. Carved out of the taunt strip (and dead to
+/// every other zone), so a tap there reaches the app's button handler
+/// without flexing a taunt on the way through. Southpaw mirrors it to the
+/// top-left along with every other zone probe.
+pub fn is_quit_zone(pos: Vec2, window: Vec2) -> bool {
+    window.x > 0.0
+        && pos.x >= window.x * QUIT_ZONE_X_FRAC
+        && pos.y < window.y * QUIT_ZONE_Y_FRAC
+}
+
+/// The TAUNT strip: the top of the screen, full width minus the QUIT corner.
 pub fn is_taunt_zone(pos: Vec2, window: Vec2) -> bool {
-    window.x > 0.0 && pos.y < window.y * TAUNT_ZONE_Y_FRAC
+    window.x > 0.0
+        && pos.y < window.y * TAUNT_ZONE_Y_FRAC
+        && !is_quit_zone(pos, window)
 }
 
 /// Bevy's window coords are top-left origin, y-down. The match screen is
@@ -212,11 +251,13 @@ pub fn is_move_zone(pos: Vec2, window: Vec2) -> bool {
     window.x > 0.0 && pos.x < window.x * 0.5 && !is_taunt_zone(pos, window)
 }
 
-/// Fraction of the window width where the DASH corner begins.
-pub const DASH_ZONE_X_FRAC: f32 = 0.78;
+/// Fraction of the window width where the DASH corner begins. The corner
+/// was 0.78/0.86 originally; the 2026-07-16 pass doubled its AREA (each
+/// span × √2) — dash is the one control that must never be missed blind.
+pub const DASH_ZONE_X_FRAC: f32 = 0.69;
 
 /// Fraction of the window height where the DASH corner begins.
-pub const DASH_ZONE_Y_FRAC: f32 = 0.86;
+pub const DASH_ZONE_Y_FRAC: f32 = 0.80;
 
 /// The DASH button: a fixed thumb-sized rectangle in the BOTTOM-RIGHT
 /// corner. The only fixed control on the screen — both sticks float, so
@@ -227,14 +268,15 @@ pub fn is_dash_zone(pos: Vec2, window: Vec2) -> bool {
         && pos.y >= window.y * DASH_ZONE_Y_FRAC
 }
 
-/// The throw/aim zone: the whole right half, MINUS the dash corner and
-/// the taunt strip. Floats like the move stick — hold to charge, drag to
-/// aim, wherever the thumb lands.
+/// The throw/aim zone: the whole right half, MINUS the dash corner, the
+/// taunt strip, and the QUIT corner. Floats like the move stick — hold to
+/// charge, drag to aim, wherever the thumb lands.
 pub fn is_throw_zone(pos: Vec2, window: Vec2) -> bool {
     window.x > 0.0
         && pos.x >= window.x * 0.5
         && !is_dash_zone(pos, window)
         && !is_taunt_zone(pos, window)
+        && !is_quit_zone(pos, window)
 }
 
 /// A touch's zone-probe position: the raw start position, or its mirror
@@ -363,6 +405,7 @@ pub fn apply_touch_events(
             id,
             start_pos: pos,
             current_pos: pos,
+            anchor_pos: pos,
             start_frame: frame,
         });
     }
@@ -370,6 +413,18 @@ pub fn apply_touch_events(
     for (id, pos) in active {
         if let Some(tracked) = state.touches.iter_mut().find(|tracked| tracked.id == id) {
             tracked.current_pos = pos;
+        }
+    }
+
+    // Anchor follow: once the thumb is past the follow radius, the anchor
+    // trails it at exactly that radius — the base ring is "dragged along by
+    // the edge the thumb collided with". Applied to every touch uniformly;
+    // only the stick math consumes `anchor_pos`.
+    for tracked in &mut state.touches {
+        let delta = tracked.current_pos - tracked.anchor_pos;
+        let len = delta.length();
+        if len > STICK_FOLLOW_RADIUS_PX {
+            tracked.anchor_pos = tracked.current_pos - delta * (STICK_FOLLOW_RADIUS_PX / len);
         }
     }
 }
@@ -440,7 +495,7 @@ pub fn update_virtual_stick(
     state.stick = state.stick_touch.and_then(|id| {
         state.find(id).map(|t| {
             compute_stick(
-                t.start_pos,
+                t.anchor_pos,
                 t.current_pos,
                 STICK_MAX_RADIUS_PX,
                 inner,
@@ -925,6 +980,107 @@ mod tests {
         assert!((v.x - v.y).abs() < 1e-5);
     }
 
+    // ---- Anchor follow: the stick base trails a runaway thumb ----
+
+    /// Drive one touch through press + a sequence of moves, returning the
+    /// final state. Each move is one frame's active update.
+    fn drag(start: Vec2, moves: &[Vec2]) -> TouchState {
+        let mut s = TouchState::default();
+        apply_touch_events(
+            &mut s,
+            1,
+            vec![(1u64, start)],
+            empty_id(),
+            empty_canceled_helper(),
+            vec![(1u64, start)],
+        );
+        for (i, pos) in moves.iter().enumerate() {
+            apply_touch_events(
+                &mut s,
+                2 + i as u64,
+                empty_pressed(),
+                empty_id(),
+                empty_canceled_helper(),
+                vec![(1u64, *pos)],
+            );
+        }
+        s
+    }
+
+    #[test]
+    fn anchor_starts_at_the_landing_spot() {
+        let start = Vec2::new(200.0, 1800.0);
+        let s = drag(start, &[]);
+        assert_eq!(s.touches[0].anchor_pos, start);
+    }
+
+    #[test]
+    fn anchor_stays_put_inside_the_follow_radius() {
+        let start = Vec2::new(200.0, 1800.0);
+        // 59px < the 60px follow radius: classic floating stick, no drag.
+        let s = drag(start, &[start + Vec2::new(59.0, 0.0)]);
+        assert_eq!(s.touches[0].anchor_pos, start);
+    }
+
+    #[test]
+    fn anchor_gets_dragged_along_by_the_edge() {
+        let start = Vec2::new(200.0, 1800.0);
+        // Thumb runs 200px right: the anchor trails it at exactly the
+        // follow radius, along the drag direction.
+        let end = start + Vec2::new(200.0, 0.0);
+        let s = drag(start, &[end]);
+        let anchor = s.touches[0].anchor_pos;
+        assert_eq!(anchor, end - Vec2::new(STICK_FOLLOW_RADIUS_PX, 0.0));
+        // And the resolved deflection sits at saturation = full push.
+        let stick = compute_stick(
+            anchor,
+            end,
+            STICK_MAX_RADIUS_PX,
+            STICK_DEADZONE_INNER,
+            STICK_DEADZONE_SATURATION,
+        );
+        assert!((stick.length() - 1.0).abs() < 1e-5, "followed stick stays saturated");
+        assert!(stick.x > 0.99);
+    }
+
+    #[test]
+    fn followed_stick_reverses_quickly() {
+        let start = Vec2::new(400.0, 1800.0);
+        let far_right = start + Vec2::new(300.0, 0.0);
+        // Run far right (anchor follows at 60px), then pull 90px back left:
+        // the thumb crosses the trailing anchor and the deflection flips.
+        // Without follow the anchor would still sit 300px away and the same
+        // 90px of return would read as a hard-right push.
+        let back = far_right - Vec2::new(90.0, 0.0);
+        let s = drag(start, &[far_right, back]);
+        let t = &s.touches[0];
+        let stick = compute_stick(
+            t.anchor_pos,
+            t.current_pos,
+            STICK_MAX_RADIUS_PX,
+            STICK_DEADZONE_INNER,
+            STICK_DEADZONE_SATURATION,
+        );
+        assert!(stick.x < 0.0, "reversal reads within one radius, got {stick:?}");
+    }
+
+    #[test]
+    fn follow_preserves_direction_changes() {
+        let start = Vec2::new(400.0, 1800.0);
+        // Sweep right then straight up well past the radius: the anchor
+        // ends trailing directly BELOW the thumb.
+        let s = drag(
+            start,
+            &[start + Vec2::new(200.0, 0.0), start + Vec2::new(200.0, -300.0)],
+        );
+        let t = &s.touches[0];
+        let delta = t.current_pos - t.anchor_pos;
+        assert!((delta.length() - STICK_FOLLOW_RADIUS_PX).abs() < 1e-3);
+        assert!(delta.y < 0.0 && delta.x.abs() < delta.y.abs() * 0.5, "anchor trails the new heading, delta {delta:?}");
+        // start_pos never moved — zone semantics stay pinned to the landing.
+        assert_eq!(t.start_pos, start);
+    }
+
     // ---- Cycle 2: move-zone gate (the left half below the taunt strip) ----
 
     #[test]
@@ -957,6 +1113,7 @@ mod tests {
             id,
             start_pos: start,
             current_pos: start,
+            anchor_pos: start,
             start_frame: 0,
         }
     }
@@ -1014,14 +1171,35 @@ mod tests {
     // ---- Taunt strip: the top of the screen, exclusive ----
 
     #[test]
-    fn taunt_zone_is_the_top_strip_and_nothing_else() {
+    fn taunt_zone_is_the_top_strip_minus_the_quit_corner() {
         let win = Vec2::new(1080.0, 2400.0);
         assert!(is_taunt_zone(Vec2::new(100.0, 100.0), win)); // top-left
-        assert!(is_taunt_zone(Vec2::new(900.0, 100.0), win)); // top-right
+        assert!(is_taunt_zone(Vec2::new(800.0, 100.0), win)); // top, left of the quit corner
         assert!(is_taunt_zone(Vec2::new(540.0, 575.0), win)); // just inside
+        assert!(!is_taunt_zone(Vec2::new(900.0, 100.0), win)); // quit corner
         assert!(!is_taunt_zone(Vec2::new(540.0, 576.0), win)); // at the boundary
         assert!(!is_taunt_zone(Vec2::new(100.0, 2000.0), win)); // thumb country
         assert!(!is_taunt_zone(Vec2::new(50.0, 50.0), Vec2::ZERO)); // zero window
+    }
+
+    #[test]
+    fn quit_corner_is_reserved_and_dead_to_every_stick_zone() {
+        let win = Vec2::new(1080.0, 2400.0);
+        // Corner starts at x >= 0.78 * 1080 = 842.4, ends at y < 0.16 * 2400 = 384.
+        for p in [
+            Vec2::new(900.0, 100.0),
+            Vec2::new(843.0, 383.0),  // just inside
+            Vec2::new(1079.0, 10.0),  // corner pixel
+        ] {
+            assert!(is_quit_zone(p, win), "{p:?} is the quit corner");
+            assert!(!is_taunt_zone(p, win));
+            assert!(!is_throw_zone(p, win));
+            assert!(!is_move_zone(p, win));
+            assert!(!is_dash_zone(p, win));
+        }
+        assert!(!is_quit_zone(Vec2::new(800.0, 100.0), win)); // left of it = taunt
+        assert!(!is_quit_zone(Vec2::new(900.0, 400.0), win)); // below it = throw
+        assert!(!is_quit_zone(Vec2::new(50.0, 50.0), Vec2::ZERO)); // zero window
     }
 
     #[test]
@@ -1055,9 +1233,9 @@ mod tests {
     #[test]
     fn throw_zone_is_the_right_half_minus_the_dash_corner() {
         let win = Vec2::new(1080.0, 2400.0);
-        // Dash corner starts at x >= 842.4, y >= 2064.
+        // Dash corner starts at x >= 745.2, y >= 1920.
         assert!(is_throw_zone(Vec2::new(540.0, 1201.0), win)); // center line
-        assert!(!is_throw_zone(Vec2::new(900.0, 100.0), win)); // top-right = taunt strip
+        assert!(!is_throw_zone(Vec2::new(900.0, 100.0), win)); // top-right = quit corner
         assert!(is_throw_zone(Vec2::new(1079.0, 1500.0), win));
         assert!(is_throw_zone(Vec2::new(700.0, 2300.0), win)); // left of the dash corner
         assert!(is_throw_zone(Vec2::new(900.0, 1900.0), win)); // above the dash corner
@@ -1074,9 +1252,9 @@ mod tests {
     #[test]
     fn dash_zone_recognizes_the_bottom_right_corner() {
         let win = Vec2::new(1080.0, 2400.0);
-        // Corner starts at x >= 0.78 * 1080 = 842.4, y >= 0.86 * 2400 = 2064.
+        // Corner starts at x >= 0.69 * 1080 = 745.2, y >= 0.80 * 2400 = 1920.
         assert!(is_dash_zone(Vec2::new(900.0, 2100.0), win));
-        assert!(is_dash_zone(Vec2::new(843.0, 2065.0), win)); // just inside
+        assert!(is_dash_zone(Vec2::new(746.0, 1921.0), win)); // just inside
         assert!(is_dash_zone(Vec2::new(1079.0, 2399.0), win)); // corner pixel
     }
 
