@@ -92,9 +92,14 @@ impl Plugin for ScreenPlugin {
         app.init_resource::<AwaitingPeer>()
             .init_resource::<VictoryPose>()
             .init_resource::<PendingUiThrow>()
+            .init_resource::<QuitArm>()
             .add_systems(Startup, spawn_overlays)
             .add_systems(OnEnter(AppScreen::InMatch), spawn_match)
             .add_systems(OnExit(AppScreen::InMatch), despawn_match)
+            .add_systems(
+                Update,
+                quit_button_input.run_if(in_state(AppScreen::InMatch)),
+            )
             .add_systems(
                 Update,
                 (
@@ -110,6 +115,7 @@ impl Plugin for ScreenPlugin {
                     update_title_buttons,
                     update_summary_overlay,
                     update_summary_buttons,
+                    update_quit_button,
                 )
                     .chain(),
             );
@@ -382,6 +388,7 @@ fn despawn_match(
             With<render::EffectSprite>,
             With<render::TrailGhost>,
             With<render::GroundShadow>,
+            With<render::PickupAura>,
         )>,
     >,
 ) {
@@ -591,25 +598,31 @@ fn spawn_overlays(mut commands: Commands) {
         SummaryOverlay,
         Text2d::new(String::new()),
         TextFont {
-            font_size: 72.0,
+            // 56, not 72: the card carries full sentences (rivalry line,
+            // replay note) and they must fit the bounds below unwrapped.
+            font_size: 56.0,
             ..default()
         },
         TextColor(render::palette::HOT_BONE),
         TextLayout::new_with_justify(Justify::Center),
+        // Wide explicit bounds — without them Bevy wraps Text2d at awkward
+        // widths ("STAG WINS" became STAG/WINS, "2 - 5" split mid-score).
+        // Same fix the summoning overlay needed (lobby_overlay.rs).
+        TextBounds::new_horizontal(TITLE_BODY_WIDTH),
         ScreenAnchor::new(0.0, 0.12, 0.0, 0.0),
         Transform::from_xyz(0.0, 0.0, 200.0),
         Visibility::Hidden,
     ));
     spawn_summary_buttons(&mut commands);
+    spawn_quit_button(&mut commands);
 }
 
-/// Next arena in the picker cycle (Anchor → Crossing → Reliquary → Anchor).
+/// Next arena in the picker cycle — walks [`sim::ALL_ARENAS`] in wire
+/// order and wraps, so a roster change never needs this touched.
 fn next_arena(id: sim::ArenaId) -> sim::ArenaId {
-    match id {
-        sim::ArenaId::Anchor => sim::ArenaId::Crossing,
-        sim::ArenaId::Crossing => sim::ArenaId::Reliquary,
-        sim::ArenaId::Reliquary => sim::ArenaId::Anchor,
-    }
+    let all = sim::ALL_ARENAS;
+    let idx = all.iter().position(|a| *a == id).unwrap_or(0);
+    all[(idx + 1) % all.len()]
 }
 
 /// Title-screen arena picker. Desktop: 1/2/3 pick directly. Touch: a tap in the
@@ -933,6 +946,7 @@ fn summary_text(
     peer: Option<net::ProfileData>,
     rivalry: Option<String>,
     opponent_gone: bool,
+    we_fled: bool,
     saved: bool,
 ) -> String {
     let p0_won = score.p0 >= MATCH_WIN_THRESHOLD;
@@ -952,19 +966,27 @@ fn summary_text(
     if !online || practice {
         let winner = winner_label(score);
         let replay_line = if saved {
-            "\n\nmatch replay saved - share the .bmrg"
+            "\n\nreplay saved - share the .bmrg"
         } else {
             ""
         };
         return format!("{winner}\n\n{}  -  {}{replay_line}", score.p0, score.p1);
     }
 
-    // Online: name the winner by who they ARE when we know it.
+    // Online: name the winner by who they ARE when we know it. An earned
+    // score is the verdict; a forfeit goes to whoever stayed at the table
+    // (same rule the grudge ledger scores by) — the old score-only check
+    // crowned the FLED player whenever nobody had reached the threshold.
     let me = local_handle.unwrap_or(0);
     let peer_name = peer
         .map(|p| crate::profile::name_from_slots(&p.name))
         .unwrap_or_else(|| "THE CHALLENGER".to_string());
-    let i_won = if me == 0 { p0_won } else { !p0_won };
+    let threshold_hit = score.p0 >= MATCH_WIN_THRESHOLD || score.p1 >= MATCH_WIN_THRESHOLD;
+    let i_won = if threshold_hit {
+        if me == 0 { p0_won } else { !p0_won }
+    } else {
+        opponent_gone && !we_fled
+    };
     let winner = if i_won {
         format!("{local_name} WINS")
     } else {
@@ -972,12 +994,16 @@ fn summary_text(
     };
     let rivalry_line = rivalry.map(|r| format!("\n{r}")).unwrap_or_default();
     let gone_line = if opponent_gone {
-        "\n\nthe field is yours"
+        if we_fled {
+            "\n\nmatch abandoned - you left the duel"
+        } else {
+            "\n\nthe field is yours"
+        }
     } else {
         ""
     };
     let replay_line = if saved {
-        "\nmatch replay saved - share the .bmrg"
+        "\nreplay saved - share the .bmrg"
     } else {
         ""
     };
@@ -1024,6 +1050,8 @@ fn update_summary_overlay(
     career: Res<crate::grudge::CareerRecord>,
     lobby: Res<net::LobbyState>,
     saved: Res<crate::recorder::LastSavedReplay>,
+    absence: Res<crate::netplay::RecentAbsence>,
+    time: Res<Time<Real>>,
     mut q: Query<(&mut Text2d, &mut Visibility), With<SummaryOverlay>>,
 ) {
     let Ok((mut text, mut vis)) = q.single_mut() else {
@@ -1032,6 +1060,14 @@ fn update_summary_overlay(
     if matches!(*state, MatchState::MatchOver) {
         *vis = Visibility::Visible;
         let opponent_gone = matches!(*lobby, net::LobbyState::Forfeited { .. });
+        // If OUR phone went away just before the forfeit, the walk-out is
+        // ours — the card owns the blame line (the summoning overlay that
+        // used to carry it stands down at MatchOver).
+        let we_fled = opponent_gone
+            && absence.within(
+                time.elapsed_secs(),
+                crate::netplay::RecentAbsence::FORFEIT_BLAME_SECS,
+            );
         text.0 = summary_text(
             *score,
             netplay.room_url.is_some(),
@@ -1042,6 +1078,7 @@ fn update_summary_overlay(
             peer.0,
             career.rivalry_line(peer.0),
             opponent_gone,
+            we_fled,
             saved.0.is_some(),
         );
     } else {
@@ -1136,6 +1173,207 @@ fn spawn_summary_buttons(commands: &mut Commands) {
                 });
             },
         );
+    }
+}
+
+// ---- The in-match QUIT button ----
+// Live play had no exit at all: the top strip is the TAUNT zone, Escape and
+// the top-exit band only work at MatchOver, and the online SUMMONING wait
+// could hold a player hostage forever. A small corner rect (the quit zone,
+// carved out of the taunt strip in `input_touch` so a tap there never
+// flexes) carries a bordered QUIT chip: first tap arms it (SURE?), second
+// tap within the window quits. Quitting a live online duel records an
+// honest loss first — same blame the away-grace forfeit assigns.
+
+/// Armed-confirm state: `Some(elapsed_secs)` while the first tap waits for
+/// its confirmation.
+#[derive(Resource, Default)]
+pub struct QuitArm(pub Option<f32>);
+
+/// Seconds the armed state waits for the confirming tap.
+const QUIT_CONFIRM_SECS: f32 = 2.5;
+
+/// Screen-anchor X of the quit chip: the center of the quit-zone rect
+/// ([QUIT_ZONE_X_FRAC, 1.0] in window fractions, mapped to [-1, 1]).
+const QUIT_BTN_ANCHOR_X: f32 = input_touch::QUIT_ZONE_X_FRAC;
+
+#[derive(Component)]
+struct QuitButton {
+    role: BtnRole,
+}
+
+fn spawn_quit_button(commands: &mut Commands) {
+    for role in [BtnRole::Border, BtnRole::Fill, BtnRole::Label] {
+        spawn_button_part(
+            commands,
+            role,
+            Vec2::new(QUIT_BTN_ANCHOR_X, TOP_EXIT_ANCHOR_Y),
+            Vec2::new(190.0, 62.0),
+            24.0,
+            &mut |ec, role| {
+                ec.insert(QuitButton { role });
+            },
+        );
+    }
+}
+
+/// The quit label states, pure for tests: the summoning wait needs no
+/// confirmation (nothing at stake yet), a live match asks twice.
+pub fn quit_label(awaiting: bool, armed: bool) -> &'static str {
+    if awaiting {
+        "CANCEL"
+    } else if armed {
+        "SURE?"
+    } else {
+        "QUIT"
+    }
+}
+
+/// Taps on the quit corner (and Escape on desktop) — the arm/confirm state
+/// machine plus the actual teardown. Exclusive-world because the online
+/// leave touches the non-send socket.
+fn quit_button_input(world: &mut World) {
+    if world.resource::<crate::theater::TheaterMode>().active() {
+        return; // the theater's marquee owns the exit gesture
+    }
+    if matches!(*world.resource::<MatchState>(), MatchState::MatchOver) {
+        // The summary's LEAVE/LOBBY buttons own the endgame; a stale arm
+        // must not leak into the next match.
+        world.resource_mut::<QuitArm>().0 = None;
+        return;
+    }
+    let now = world.resource::<Time<Real>>().elapsed_secs();
+    {
+        let mut arm = world.resource_mut::<QuitArm>();
+        if let Some(at) = arm.0
+            && now - at > QUIT_CONFIRM_SECS
+        {
+            arm.0 = None;
+        }
+    }
+
+    let esc = world
+        .resource::<ButtonInput<KeyCode>>()
+        .just_pressed(KeyCode::Escape);
+    let win = world.resource::<WindowSize>().0;
+    let southpaw = world.resource::<input_touch::Southpaw>().0;
+    let tapped = win.y > 0.0
+        && world.resource::<Touches>().iter_just_pressed().any(|t| {
+            let p = if southpaw {
+                input_touch::mirror_x(t.position(), win)
+            } else {
+                t.position()
+            };
+            input_touch::is_quit_zone(p, win)
+        });
+    if !(esc || tapped) {
+        return;
+    }
+
+    // Waiting alone in an online room stakes nothing — one tap cancels.
+    let awaiting = world.resource::<AwaitingPeer>().0;
+    if !awaiting && world.resource::<QuitArm>().0.is_none() {
+        world.resource_mut::<QuitArm>().0 = Some(now);
+        return;
+    }
+    world.resource_mut::<QuitArm>().0 = None;
+
+    let online = world.resource::<NetplayConfig>().room_url.is_some()
+        && !world.resource::<crate::bot::PracticeMode>().0;
+    if online {
+        // Abandoning a live duel is a loss, filed before the goodbye. A
+        // pre-swap wait (no session yet) or a peer who already fled stakes
+        // no result.
+        let established = world
+            .resource::<crate::netplay::LocalPlayerHandle>()
+            .0
+            .is_some();
+        let peer_fled = matches!(
+            *world.resource::<net::LobbyState>(),
+            net::LobbyState::Forfeited { .. }
+        );
+        if established && !peer_fled {
+            let peer = world.resource::<net::PeerProfile>().0;
+            let mut record = world.resource_mut::<crate::grudge::CareerRecord>();
+            crate::grudge::record_abandoned_loss(&mut record, peer);
+        }
+        crate::netplay::leave_online_match(world);
+    }
+    world
+        .resource_mut::<NextState<AppScreen>>()
+        .set(AppScreen::Title);
+}
+
+type QuitButtonQuery<'w, 's> = Query<
+    'w,
+    's,
+    (
+        &'static QuitButton,
+        &'static mut Visibility,
+        &'static mut ScreenAnchor,
+        Option<&'static mut Sprite>,
+        Option<&'static mut Text2d>,
+        Option<&'static mut TextColor>,
+    ),
+>;
+
+fn update_quit_button(
+    screen: Res<State<AppScreen>>,
+    state: Res<MatchState>,
+    theater: Res<crate::theater::TheaterMode>,
+    awaiting: Res<AwaitingPeer>,
+    arm: Res<QuitArm>,
+    southpaw: Res<input_touch::Southpaw>,
+    mut q: QuitButtonQuery,
+) {
+    let shown = *screen.get() == AppScreen::InMatch
+        && !matches!(*state, MatchState::MatchOver)
+        && !theater.active();
+    let armed = arm.0.is_some();
+    // Southpaw mirrors the quit corner to the top-left with the other zones.
+    let anchor_x = if southpaw.0 {
+        -QUIT_BTN_ANCHOR_X
+    } else {
+        QUIT_BTN_ANCHOR_X
+    };
+    for (btn, mut vis, mut anchor, sprite, text, color) in &mut q {
+        *vis = if shown {
+            Visibility::Visible
+        } else {
+            Visibility::Hidden
+        };
+        if !shown {
+            continue;
+        }
+        anchor.frac.x = anchor_x;
+        match btn.role {
+            BtnRole::Border => {
+                if let Some(mut s) = sprite {
+                    s.color = render::palette::HOT_BONE.with_alpha(if armed { 1.0 } else { 0.55 });
+                }
+            }
+            BtnRole::Fill => {
+                if let Some(mut s) = sprite {
+                    s.color = if armed {
+                        render::palette::HOT_BONE
+                    } else {
+                        render::palette::DEEP_ASH.with_alpha(0.75)
+                    };
+                }
+            }
+            BtnRole::Label => {
+                if let Some(mut t) = text {
+                    t.0 = quit_label(awaiting.0, armed).to_string();
+                }
+                if let Some(mut c) = color {
+                    c.0 = if armed {
+                        render::palette::VOID
+                    } else {
+                        render::palette::HOT_BONE.with_alpha(0.75)
+                    };
+                }
+            }
+        }
     }
 }
 
@@ -1316,6 +1554,10 @@ fn arena_name(id: sim::ArenaId) -> &'static str {
         sim::ArenaId::Anchor => "Anchor",
         sim::ArenaId::Crossing => "Crossing",
         sim::ArenaId::Reliquary => "Reliquary",
+        sim::ArenaId::Pit => "The Pit",
+        sim::ArenaId::Vigil => "The Vigil",
+        sim::ArenaId::Gallery => "The Gallery",
+        sim::ArenaId::Forest => "The Forest",
     }
 }
 
@@ -1359,20 +1601,28 @@ mod tests {
 
     #[test]
     fn arena_names_cover_every_variant() {
+        for arena in sim::ALL_ARENAS {
+            assert!(!arena_name(arena).is_empty());
+        }
         assert_eq!(arena_name(sim::ArenaId::Anchor), "Anchor");
-        assert_eq!(arena_name(sim::ArenaId::Crossing), "Crossing");
-        assert_eq!(arena_name(sim::ArenaId::Reliquary), "Reliquary");
+        assert_eq!(arena_name(sim::ArenaId::Pit), "The Pit");
     }
 
     #[test]
-    fn next_arena_cycles_through_all_three() {
+    fn next_arena_cycles_through_the_whole_roster() {
         let mut id = sim::ArenaId::Anchor;
-        id = next_arena(id);
-        assert_eq!(id, sim::ArenaId::Crossing);
-        id = next_arena(id);
-        assert_eq!(id, sim::ArenaId::Reliquary);
-        id = next_arena(id);
-        assert_eq!(id, sim::ArenaId::Anchor, "wraps back to the start");
+        let mut seen = vec![id];
+        for _ in 0..sim::ALL_ARENAS.len() - 1 {
+            id = next_arena(id);
+            assert!(!seen.contains(&id), "cycle revisited {id:?} early");
+            seen.push(id);
+        }
+        assert_eq!(seen.len(), sim::ALL_ARENAS.len(), "cycle covers the roster");
+        assert_eq!(
+            next_arena(id),
+            sim::ArenaId::Anchor,
+            "wraps back to the start"
+        );
     }
 
     // ---- The summary card + the RUN IT BACK button's state machine ----
@@ -1395,8 +1645,42 @@ mod tests {
             Some(peer),
             Some("2ND MEETING with TAGC - tied 1-1".into()),
             gone,
+            false, // we_fled
             true,
         )
+    }
+
+    /// A mid-match forfeit: nobody reached the threshold; blame decides.
+    fn forfeit_summary(we_fled: bool) -> String {
+        let peer = net::ProfileData {
+            install_id: 7,
+            name: [4, 5, 6, 0], // TAGC
+        };
+        summary_text(
+            MatchScore { p0: 2, p1: 1 },
+            true,
+            false,
+            None,
+            Some(0),
+            "CURS",
+            Some(peer),
+            None,
+            true, // opponent_gone
+            we_fled,
+            false,
+        )
+    }
+
+    #[test]
+    fn forfeit_winner_is_whoever_stayed() {
+        // The peer fled at 2-1: WE win, whatever the raw score says.
+        let stayed = forfeit_summary(false);
+        assert!(stayed.contains("CURS WINS"), "{stayed}");
+        assert!(stayed.contains("the field is yours"), "{stayed}");
+        // We walked out: the peer takes it and the card owns the blame.
+        let fled = forfeit_summary(true);
+        assert!(fled.contains("TAGC WINS"), "{fled}");
+        assert!(fled.contains("you left the duel"), "{fled}");
     }
 
     #[test]
@@ -1450,6 +1734,15 @@ mod tests {
     }
 
     #[test]
+    fn quit_label_walks_its_states() {
+        assert_eq!(quit_label(false, false), "QUIT");
+        assert_eq!(quit_label(false, true), "SURE?");
+        // The summoning wait cancels in one tap — no arming, no SURE?.
+        assert_eq!(quit_label(true, false), "CANCEL");
+        assert_eq!(quit_label(true, true), "CANCEL");
+    }
+
+    #[test]
     fn theater_summary_says_tape_ends() {
         let text = summary_text(
             MatchScore {
@@ -1463,6 +1756,7 @@ mod tests {
             "",
             None,
             None,
+            false,
             false,
             false,
         );
@@ -1485,6 +1779,7 @@ mod tests {
             "",
             None,
             None,
+            false,
             false,
             true,
         );

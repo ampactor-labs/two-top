@@ -63,8 +63,9 @@ struct HintsUsed {
 #[derive(Resource)]
 struct TouchControlsShown(bool);
 
-/// Fixed dash ring diameter in world units.
-const DASH_RING_SIZE: f32 = 150.0;
+/// Fixed dash ring diameter in world units. Doubled in area (×√2) with the
+/// 2026-07-16 zone growth so the picture keeps matching the tap target.
+const DASH_RING_SIZE: f32 = 210.0;
 
 /// Knob diameter as a fraction of the move base ring's.
 const KNOB_FRAC: f32 = 0.45;
@@ -133,7 +134,7 @@ fn spawn_controls(
         DashLabel,
         Text2d::new("DASH"),
         TextFont {
-            font_size: 30.0,
+            font_size: 40.0,
             ..default()
         },
         TextColor(dash_idle()),
@@ -341,21 +342,24 @@ fn update_controls(
 
     // Move stick pose: (base, knob) world positions. The base ring is drawn
     // at the SATURATION circle — the knob rides its rim at full deflection,
-    // so the picture tells the truth about the input.
+    // so the picture tells the truth about the input. The base sits on the
+    // touch's ANCHOR, which the input layer drags along whenever the thumb
+    // runs past the ring's edge (input_touch's follow behavior) — so the
+    // ring visibly gets towed across the screen by a runaway thumb.
     let sat_px = STICK_MAX_RADIUS_PX * STICK_DEADZONE_SATURATION;
     let move_pose = ready
         .then(|| touch.stick_touch.and_then(|id| touch.find(id)))
         .flatten()
         .map(|t| {
-            let delta = t.current_pos - t.start_pos;
+            let delta = t.current_pos - t.anchor_pos;
             let clamped = if delta.length() > sat_px {
                 delta * (sat_px / delta.length())
             } else {
                 delta
             };
             (
-                screen_to_world(t.start_pos, win, &rect),
-                screen_to_world(t.start_pos + clamped, win, &rect),
+                screen_to_world(t.anchor_pos, win, &rect),
+                screen_to_world(t.anchor_pos + clamped, win, &rect),
             )
         });
     // Throw button pose: a ring tracking the right thumb (no drag mechanics

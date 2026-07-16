@@ -6,44 +6,50 @@
 //! `replay_viewer`). This module writes that tape to a plain file the
 //! player can share however they like.
 //!
-//! ## Why harvest from `InputHistory` (not `LocalInputs`)
+//! ## Why capture per tick inside `GgrsSchedule` (not `LocalInputs`)
 //!
 //! `replay::RecordPlugin` captures `LocalInputs` in `ReadInputs` — complete
 //! for couch (both players local), but an ONLINE recording would miss the
-//! peer's half entirely. The one place both players' inputs exist in their
-//! final form is the sim's own rolled-back [`sim::InputHistory`] ring: it
-//! converges to the confirmed values, and the sim itself derives gameplay
-//! edges from it — so an input that has aged out of the rollback window in
-//! that ring is exactly as "confirmed" as the game state itself. We harvest
-//! each tick's inputs once it is `INPUT_HISTORY_LEN` ticks old (the ring's
-//! full depth ≥ the max rollback the game tolerates by construction).
+//! peer's half entirely. Inside the rollback schedule, `PlayerInputs`
+//! carries BOTH players' inputs for the tick being simulated — including
+//! every re-simulated tick, whose corrected inputs simply overwrite their
+//! slot in the tape. Last write wins, so the tape converges to the
+//! confirmed inputs exactly as the game state itself does, and because the
+//! schedule runs once per tick there is no window a frame hitch can gap.
+//! (The previous design harvested from the 8-tick `InputHistory` ring once
+//! per render frame and had to poison the tape on any >8-tick hitch — which
+//! match-start shader compiles hit almost every time, so tapes essentially
+//! never saved. That surrender path is gone, not tuned.)
 //!
-//! A frame hitch that advances the sim more than the ring depth in one
-//! render frame would lose ticks from the ring; the recorder detects the
-//! gap and poisons the tape (logged) rather than writing a corrupt replay.
+//! The capture only READS rollback state and writes this render-side tape;
+//! nothing feeds back into sim, so determinism is untouched.
 
 use bevy::prelude::*;
+use bevy_ggrs::{GgrsSchedule, PlayerInputs};
 use replay::{FORMAT_VERSION, MAGIC, Replay, ReplayHeader, encode};
 use sim::{
-    FrameCount, INPUT_HISTORY_LEN, InputHistory, MATCH_WIN_THRESHOLD, MatchScore, MatchState,
-    PlayerInput, SelectedArena, TICK_HZ,
+    FrameCount, GgrsCfg, MATCH_WIN_THRESHOLD, MatchScore, MatchState, PlayerInput, SelectedArena,
+    TICK_HZ,
 };
 use std::path::PathBuf;
 
-/// Render-frames to keep harvesting after `MatchOver` before writing the
-/// file, so the tape safely covers the deciding kill (the harvest trails
-/// the sim by `INPUT_HISTORY_LEN` ticks; the sim keeps ticking through the
-/// summary screen, so this catches up within a few frames).
+/// Render-frames to wait after `MatchOver` before writing the file. The
+/// tape already holds the deciding kill the moment it lands; the delay
+/// lets the last few PREDICTED online ticks get resim-corrected (rollback
+/// overwrites their tape slots) before the bytes are frozen.
 const SAVE_DELAY_FRAMES: u8 = 30;
 
-/// The in-progress tape plus harvest bookkeeping.
+/// A tick-0 write against a tape longer than this is a fresh session (new
+/// match from the title / an online re-pair), never a rollback — ggrs can
+/// only rewind a handful of ticks (prediction window ≤ 8, SyncTest
+/// check-distance ≤ 7), so a genuine resim of tick 0 can only happen while
+/// the tape is still shorter than this.
+const SESSION_RESTART_SLACK: usize = 32;
+
+/// The in-progress tape plus save bookkeeping.
 #[derive(Resource, Default)]
 pub struct MatchRecorder {
     frames: Vec<replay::FrameInputs>,
-    /// Next tick index to harvest.
-    next: u32,
-    /// A gap ate part of the tape — don't write a corrupt replay.
-    poisoned: bool,
     /// Countdown to the post-`MatchOver` write (None = not pending).
     save_in: Option<u8>,
     /// Latch so one MatchOver writes exactly one file.
@@ -61,56 +67,49 @@ impl MatchRecorder {
 #[derive(Resource, Default)]
 pub struct LastSavedReplay(pub Option<PathBuf>);
 
-/// Harvest confirmed ticks out of the rolled-back input ring. Runs in
-/// `Update` (post-rollback), catching up on every tick that has aged past
-/// the ring's rollback depth since the last render frame.
-fn harvest_confirmed_inputs(
+/// `GgrsSchedule`, after the whole sim chain: record the tick that was just
+/// simulated. Runs for every tick INCLUDING resimulations — a resimulated
+/// tick overwrites its slot with the corrected inputs, so the tape
+/// converges to confirmed values by construction.
+pub fn capture_tick_inputs(
     frame: Res<FrameCount>,
-    history: Res<InputHistory>,
+    inputs: Res<PlayerInputs<GgrsCfg>>,
     theater: Res<crate::theater::TheaterMode>,
     mut rec: ResMut<MatchRecorder>,
 ) {
     // A replay being WATCHED must not re-record itself into a copy tape.
     if theater.active() {
-        if !rec.frames.is_empty() || rec.next != 0 {
+        if !rec.frames.is_empty() {
             rec.reset();
         }
         return;
     }
-    let f = frame.0;
-    let len = INPUT_HISTORY_LEN as u32;
-    if f < rec.next {
-        // The rollback frame counter restarted: a fresh session (new match
-        // from the title / a reconnect). Start a fresh tape.
+    // Ordered after `advance_frame_count`, so the tick just simulated with
+    // these inputs is `frame - 1`.
+    let Some(t) = frame.0.checked_sub(1) else {
+        return;
+    };
+    let t = t as usize;
+    if t == 0 && rec.frames.len() > SESSION_RESTART_SLACK {
+        // A fresh session always restarts at tick 0; start a fresh tape.
         rec.reset();
     }
-    while rec.next + len <= f {
-        let t = rec.next;
-        let back = (f - 1 - t) as usize;
-        if back >= INPUT_HISTORY_LEN {
-            if !rec.poisoned {
-                tracing::warn!(
-                    target: "two_top::recorder",
-                    tick = t,
-                    frame = f,
-                    "input ring gap (frame hitch) — replay tape poisoned",
-                );
-            }
-            rec.poisoned = true;
-            // Skip to what's still recoverable so bookkeeping stays sane
-            // (the tape is already marked unusable).
-            rec.next = f - len;
-            break;
+    let pair = [inputs[0].0, inputs[1].0];
+    match t.cmp(&rec.frames.len()) {
+        std::cmp::Ordering::Less => rec.frames[t] = pair,
+        std::cmp::Ordering::Equal => rec.frames.push(pair),
+        std::cmp::Ordering::Greater => {
+            // Unreachable by construction (the schedule runs every tick from
+            // 0) — but a tape must never be silently holey, so pad loudly.
+            tracing::warn!(
+                target: "two_top::recorder",
+                tick = t,
+                have = rec.frames.len(),
+                "tick capture gap — padding with neutral inputs",
+            );
+            rec.frames.resize(t, [PlayerInput::default(); 2]);
+            rec.frames.push(pair);
         }
-        let idx = INPUT_HISTORY_LEN - 1 - back;
-        let mut inputs = [PlayerInput::default(); 2];
-        for (handle, slot) in inputs.iter_mut().enumerate() {
-            if let Some(ring) = history.0.get(&handle) {
-                *slot = ring[idx];
-            }
-        }
-        rec.frames.push(inputs);
-        rec.next += 1;
     }
 }
 
@@ -161,7 +160,7 @@ fn save_replay_on_match_over(
         rec.saved = false;
         return;
     }
-    if rec.saved || rec.poisoned || rec.frames.is_empty() {
+    if rec.saved || rec.frames.is_empty() {
         return;
     }
     match rec.save_in {
@@ -268,10 +267,14 @@ impl Plugin for MatchRecorderPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<MatchRecorder>()
             .init_resource::<LastSavedReplay>()
+            // After the ENTIRE sim chain (CONVENTIONS: explicit ordering in
+            // GgrsSchedule) — the frame counter and input history have both
+            // advanced, so the tick just simulated is `FrameCount - 1`.
             .add_systems(
-                Update,
-                (harvest_confirmed_inputs, save_replay_on_match_over).chain(),
-            );
+                GgrsSchedule,
+                capture_tick_inputs.after(sim::advance_input_history),
+            )
+            .add_systems(Update, save_replay_on_match_over);
     }
 }
 
@@ -292,23 +295,21 @@ mod tests {
     fn recorder_reset_clears_everything() {
         let mut rec = MatchRecorder {
             frames: vec![[PlayerInput::default(); 2]],
-            next: 5,
-            poisoned: true,
             save_in: Some(3),
             saved: true,
         };
         rec.reset();
         assert!(rec.frames.is_empty());
-        assert_eq!(rec.next, 0);
-        assert!(!rec.poisoned && !rec.saved && rec.save_in.is_none());
+        assert!(!rec.saved && rec.save_in.is_none());
     }
 
-    /// Drive a real SyncTest session (rollback active, check_distance 2)
-    /// through a constant-then-flipped input schedule and assert the
-    /// harvested tape reproduces it: one clean transition, correct values,
-    /// both handles, no gaps, trailing the sim by the ring depth.
+    /// Drive a real SyncTest session (rollback ACTIVE — check_distance 2
+    /// re-simulates the last two ticks every frame, so the overwrite path
+    /// runs constantly) through a constant-then-flipped input schedule and
+    /// assert the captured tape reproduces it exactly: no trailing lag, one
+    /// clean transition at the exact tick, both handles, no gaps.
     #[test]
-    fn recorder_harvests_a_faithful_tape() {
+    fn recorder_captures_a_faithful_tape() {
         let mut sb = SessionBuilder::<GgrsCfg>::new()
             .with_num_players(2)
             .unwrap()
@@ -330,7 +331,10 @@ mod tests {
         app.insert_resource(Session::SyncTest(session));
         app.init_resource::<MatchRecorder>();
         app.init_resource::<crate::theater::TheaterMode>();
-        app.add_systems(Update, harvest_confirmed_inputs);
+        app.add_systems(
+            GgrsSchedule,
+            capture_tick_inputs.after(sim::advance_input_history),
+        );
         for handle in 0..2usize {
             app.world_mut().spawn((
                 Player { handle },
@@ -352,6 +356,10 @@ mod tests {
             aim_angle: 0,
             buttons: PlayerInput::DASH_DOWN,
         };
+        // Prime once: the first update warms the session without simulating
+        // a tick (same as every sim test harness), so tick k below is fed
+        // exactly at iteration k.
+        app.update();
         for tick in 0..120u32 {
             app.world_mut().resource_mut::<SynthesizedInputs>().0 =
                 if tick < 60 { a } else { b };
@@ -359,23 +367,22 @@ mod tests {
         }
 
         let rec = app.world().resource::<MatchRecorder>();
-        assert!(!rec.poisoned, "no ring gaps at one tick per update");
-        // The tape trails the sim by the ring depth: the newest harvested
-        // tick is `frame - LEN`, so the next to harvest is one past it.
+        // No trailing lag: every simulated tick is on the tape already.
         let frame = app.world().resource::<sim::FrameCount>().0;
-        assert_eq!(rec.next, frame - (INPUT_HISTORY_LEN as u32 - 1));
-        assert!(rec.frames.len() as u32 == rec.next);
+        assert_eq!(rec.frames.len() as u32, frame);
         // Both handles recorded identically (couch: shared SynthesizedInputs),
-        // and the stream is A* then B* with exactly one transition.
-        let mut transitions = 0;
-        for pair in rec.frames.windows(2) {
-            assert_eq!(pair[0][0], pair[0][1], "both handles share the tape");
-            if pair[0][0] != pair[1][0] {
-                transitions += 1;
-            }
+        // and the flip lands on the exact tick it was fed.
+        for pair in &rec.frames {
+            assert_eq!(pair[0], pair[1], "both handles share the tape");
         }
+        assert_eq!(rec.frames[59][0], a, "tick 59 is the last A");
+        assert_eq!(rec.frames[60][0], b, "tick 60 is the first B");
+        let transitions = rec
+            .frames
+            .windows(2)
+            .filter(|w| w[0][0] != w[1][0])
+            .count();
         assert_eq!(transitions, 1, "one clean A→B flip, no glitch frames");
-        assert_eq!(rec.frames.first().unwrap()[0], a);
-        assert_eq!(rec.frames.last().unwrap()[0], b);
     }
+
 }

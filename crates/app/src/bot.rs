@@ -304,8 +304,11 @@ pub fn drive_bot(world: &mut World) {
         difficulty,
         ..default()
     };
-    // Sudden-death crumble awareness.
-    if let MatchState::InRound { expires_at_frame } = *world.resource::<MatchState>() {
+    // Sudden-death crumble awareness — only where the storm exists (the
+    // Pit and the Vigil never shrink; the bot shouldn't hug center there).
+    if world.resource::<sim::SelectedArena>().0.crumbles()
+        && let MatchState::InRound { expires_at_frame } = *world.resource::<MatchState>()
+    {
         let remaining = expires_at_frame.saturating_sub(frame);
         view.bounds *= sudden_death_factor(remaining).to_num::<f32>();
     }

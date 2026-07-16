@@ -194,6 +194,10 @@ fn arena_label(id: u8) -> &'static str {
         sim::ArenaId::Anchor => "ANCHOR",
         sim::ArenaId::Crossing => "CROSSING",
         sim::ArenaId::Reliquary => "RELIQUARY",
+        sim::ArenaId::Pit => "PIT",
+        sim::ArenaId::Vigil => "VIGIL",
+        sim::ArenaId::Gallery => "GALLERY",
+        sim::ArenaId::Forest => "FOREST",
     }
 }
 
@@ -829,5 +833,10 @@ mod tests {
         assert_eq!(arena_label(0), "ANCHOR");
         assert_eq!(arena_label(1), "CROSSING");
         assert_eq!(arena_label(2), "RELIQUARY");
+        assert_eq!(arena_label(3), "PIT");
+        assert_eq!(arena_label(4), "VIGIL");
+        assert_eq!(arena_label(5), "GALLERY");
+        assert_eq!(arena_label(6), "FOREST");
+        assert_eq!(arena_label(99), "ANCHOR", "unknown ids fall back");
     }
 }

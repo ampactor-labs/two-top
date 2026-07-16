@@ -91,6 +91,22 @@ pub fn rival_key(install_id: u128) -> String {
     format!("{install_id:032x}")
 }
 
+/// Quitting a live online duel is a loss, recorded on the spot — the same
+/// honesty the away-grace forfeit applies to a phone that wandered off.
+/// Called by the in-match QUIT path right before the socket teardown
+/// (`record_match_result` can't cover it: the quitter leaves the screen
+/// before any `MatchOver` tick happens on their side).
+pub fn record_abandoned_loss(record: &mut CareerRecord, peer: Option<net::ProfileData>) {
+    record.losses += 1;
+    if let Some(peer) = peer {
+        let rival = record.rivals.entry(rival_key(peer.install_id)).or_default();
+        rival.name = crate::profile::name_from_slots(&peer.name);
+        rival.losses += 1;
+    }
+    save_career(record);
+    tracing::info!(target: "two_top::grudge", "abandoned duel recorded as a loss");
+}
+
 /// 1 → 1ST, 2 → 2ND, 3 → 3RD, 4 → 4TH, 11-13 → TH (the English trap).
 pub fn ordinal(n: u32) -> String {
     let suffix = match (n % 10, n % 100) {

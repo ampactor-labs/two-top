@@ -71,6 +71,10 @@ fn arena_from_env(room_url: Option<&str>) -> SelectedArena {
         Ok("anchor") => sim::ArenaId::Anchor,
         Ok("crossing") => sim::ArenaId::Crossing,
         Ok("reliquary") => sim::ArenaId::Reliquary,
+        Ok("pit") => sim::ArenaId::Pit,
+        Ok("vigil") => sim::ArenaId::Vigil,
+        Ok("gallery") => sim::ArenaId::Gallery,
+        Ok("forest") => sim::ArenaId::Forest,
         Ok("random") | Ok("shuffle") => room_url
             .map(arena_from_room)
             .unwrap_or(sim::ArenaId::Anchor),
@@ -98,7 +102,7 @@ fn arena_from_room(room_url: &str) -> sim::ArenaId {
     let hash = room_url.as_bytes().iter().fold(FNV_OFFSET, |acc, byte| {
         (acc ^ u64::from(*byte)).wrapping_mul(FNV_PRIME)
     });
-    sim::ArenaId::from_u8((hash % 3) as u8)
+    sim::ArenaId::from_u8((hash % sim::ALL_ARENAS.len() as u64) as u8)
 }
 
 pub fn run() {
@@ -437,6 +441,10 @@ fn arena_floor_asset(id: sim::ArenaId) -> &'static str {
         sim::ArenaId::Anchor => "arenas/anchor_floor.png",
         sim::ArenaId::Crossing => "arenas/crossing_floor.png",
         sim::ArenaId::Reliquary => "arenas/reliquary_floor.png",
+        sim::ArenaId::Pit => "arenas/pit_floor.png",
+        sim::ArenaId::Vigil => "arenas/vigil_floor.png",
+        sim::ArenaId::Gallery => "arenas/gallery_floor.png",
+        sim::ArenaId::Forest => "arenas/forest_floor.png",
     }
 }
 
@@ -477,19 +485,90 @@ fn publish_depth_projection(window: Res<WindowSize>) {
     render::publish_depth_projection(span, render::DEPTH_FOCAL_DEFAULT);
 }
 
+/// Squash/stretch multipliers (x, y) for a duelist — the exaggeration layer
+/// over the flat atlas poses. Cartoon rules: stretch INTO the motion axis
+/// with a counter-squash on the other (roughly area-preserving), a hard
+/// overstretch on dash, a coiled-wide anticipation stance while winding up a
+/// throw or a taunt, and a flattened pop during hit-stop. `gait` is a free
+/// phase for the run bounce. Pure for tests; render-only.
+fn actor_pose(
+    speed_frac: f32,
+    horizontal: bool,
+    dashing: bool,
+    winding_up: bool,
+    stunned: bool,
+    gait: f32,
+) -> Vec2 {
+    if stunned {
+        return Vec2::new(1.14, 0.88);
+    }
+    if dashing {
+        return if horizontal {
+            Vec2::new(1.22, 0.85)
+        } else {
+            Vec2::new(0.88, 1.18)
+        };
+    }
+    if winding_up {
+        return Vec2::new(1.08, 0.93);
+    }
+    let run = speed_frac.min(1.0);
+    if run > 0.05 {
+        // Stretch along the motion + a gait-synced hop that scales with speed.
+        let k = 0.09 * run;
+        let bounce = 1.0 + 0.05 * run * gait.sin().abs();
+        return if horizontal {
+            Vec2::new(1.0 + k, (1.0 - 0.6 * k) * bounce)
+        } else {
+            Vec2::new(1.0 - 0.6 * k, (1.0 + k) * bounce)
+        };
+    }
+    Vec2::ONE
+}
+
 /// Scale ground actors by their table depth so the perspective read is
 /// carried by the bodies, not just the row spacing: your duelist looms,
 /// the far one recedes. Fangs get theirs inside `grow_boomerang_sprites`.
+/// The duelists also wear [`actor_pose`]'s squash/stretch on top, so the
+/// bodies telegraph what they're doing (run, dash, wind-up, hit-stop) —
+/// the exaggeration composes with (never replaces) the depth scale.
 #[allow(clippy::type_complexity)]
 fn scale_actors_by_depth(
+    time: Res<Time<Real>>,
     flip: Res<render::PerspectiveFlip>,
-    mut players: Query<(&PositionF, &mut Sprite), (With<Player>, Without<sim::Pickup>)>,
+    mut players: Query<
+        (
+            &Player,
+            &PositionF,
+            &VelocityF,
+            &sim::DashState,
+            &sim::ThrowCharge,
+            &sim::Taunt,
+            &sim::StunFrames,
+            &mut Sprite,
+        ),
+        Without<sim::Pickup>,
+    >,
     mut pickups: Query<(&PositionF, &mut Sprite), (With<sim::Pickup>, Without<Player>)>,
 ) {
-    for (pos, mut sprite) in &mut players {
+    for (player, pos, vel, dash, charge, taunt, stun, mut sprite) in &mut players {
         let (_, y) = pos.0.to_f32();
         let s = render::depth_scale(y * flip.0);
-        sprite.custom_size = Some(Vec2::splat(render::PLAYER_RENDER_SIZE * s));
+        let (vx, vy) = vel.0.to_f32();
+        let speed_frac =
+            (vx.abs().max(vy.abs())) / sim::WALK_SPEED_CM_PER_TICK as f32;
+        // Per-player gait phase offset so the two never hop in sync.
+        let gait = time.elapsed_secs() * 11.0 + player.handle as f32 * 1.7;
+        let pose = actor_pose(
+            speed_frac,
+            vx.abs() >= vy.abs(),
+            matches!(dash, sim::DashState::Dashing { .. }),
+            charge.0 > 0 || taunt.0 > 0,
+            stun.0 > 0,
+            gait,
+        );
+        sprite.custom_size =
+            Some(Vec2::new(render::PLAYER_RENDER_SIZE * s * pose.x, render::PLAYER_RENDER_SIZE * s * pose.y));
     }
     for (pos, mut sprite) in &mut pickups {
         let (_, y) = pos.0.to_f32();
@@ -581,10 +660,15 @@ fn animate_ritual_wash(
 fn crumble_arena_floor(
     state: Res<sim::MatchState>,
     frame: Res<sim::FrameCount>,
+    selected: Res<SelectedArena>,
     mut q: Query<(&FloorStrip, &mut Sprite, &mut Transform), With<ArenaFloor>>,
 ) {
+    // No-storm arenas (Pit / Vigil) never shrink — mirror the sim's rule
+    // exactly or the art would lie about the lethal bounds.
     let remaining = match *state {
-        sim::MatchState::InRound { expires_at_frame } => expires_at_frame.saturating_sub(frame.0),
+        sim::MatchState::InRound { expires_at_frame } if selected.0.crumbles() => {
+            expires_at_frame.saturating_sub(frame.0)
+        }
         _ => u32::MAX,
     };
     // Sudden-death crumble scales the island in WORLD space; the projection
@@ -774,7 +858,8 @@ fn setup(mut commands: Commands, asset_server: Res<AssetServer>, selected: Res<S
         // Couch-play control legend (desktop only — touch needs none).
         // World-space Text2d (the app has no bevy_ui), pinned to the bottom
         // of the *screen* so it stays clear of the top-edge HUD (pips +
-        // round clock) on any window aspect.
+        // round clock) on any window aspect. Bounded so a narrow window
+        // wraps the long lines instead of clipping them off both edges.
         commands.spawn((
             Text2d::new(
                 "P0: WASD  -  Space throw  -  LShift dash  -  T taunt\n\
@@ -786,7 +871,8 @@ fn setup(mut commands: Commands, asset_server: Res<AssetServer>, selected: Res<S
                 ..default()
             },
             TextColor(render::palette::BONE.with_alpha(0.55)),
-            anchor::ScreenAnchor::new(0.0, -1.0, 0.0, 70.0),
+            bevy::text::TextBounds::new_horizontal(1080.0),
+            anchor::ScreenAnchor::new(0.0, -1.0, 0.0, 90.0),
             Transform::from_xyz(0.0, -(sim::ARENA_HALF_HEIGHT_CM as f32) + 44.0, 100.0),
         ));
     }
@@ -1034,5 +1120,35 @@ fn update_window_metrics(
     window_size.0 = Vec2::new(w.width(), w.height());
     if let Some(pos) = w.cursor_position() {
         cursor_pos.0 = pos;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn actor_pose_idle_is_neutral() {
+        assert_eq!(actor_pose(0.0, true, false, false, false, 0.0), Vec2::ONE);
+    }
+
+    #[test]
+    fn actor_pose_stretches_into_the_motion_axis() {
+        let h = actor_pose(1.0, true, false, false, false, 0.0);
+        assert!(h.x > 1.0 && h.y < 1.0, "horizontal run stretches x: {h:?}");
+        let v = actor_pose(1.0, false, false, false, false, 0.0);
+        assert!(v.y > 1.0 && v.x < 1.0, "vertical run stretches y: {v:?}");
+    }
+
+    #[test]
+    fn actor_pose_states_rank_by_intensity() {
+        let dash = actor_pose(2.0, true, true, false, false, 0.0);
+        let run = actor_pose(1.0, true, false, false, false, 0.0);
+        assert!(dash.x > run.x, "dash overstretches past a full run");
+        // Wind-up coils wide; hit-stop pops flat; both beat the run states.
+        let coil = actor_pose(0.0, true, false, true, false, 0.0);
+        assert!(coil.x > 1.0 && coil.y < 1.0);
+        let pop = actor_pose(0.0, true, false, false, true, 0.0);
+        assert!(pop.x > 1.1 && pop.y < 0.9);
     }
 }

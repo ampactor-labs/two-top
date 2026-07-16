@@ -73,6 +73,7 @@ fn update_summoning(
     time: Res<Time<Real>>,
     screen: Res<State<AppScreen>>,
     state: Res<LobbyState>,
+    match_state: Res<sim::MatchState>,
     room: Res<RoomCode>,
     peer_profile: Res<net::PeerProfile>,
     absence: Res<crate::netplay::RecentAbsence>,
@@ -82,7 +83,11 @@ fn update_summoning(
     let Ok((mut text, mut vis)) = q.single_mut() else {
         return;
     };
-    if *screen.get() != AppScreen::InMatch {
+    // At MatchOver the summary card owns the screen — it carries the fled /
+    // abandoned facts itself, and this text was stacking straight into it.
+    if *screen.get() != AppScreen::InMatch
+        || matches!(*match_state, sim::MatchState::MatchOver)
+    {
         *vis = Visibility::Hidden;
         *stall = None;
         return;

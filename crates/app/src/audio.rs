@@ -636,10 +636,12 @@ fn play_sudden_death_sfx(
     settings: Res<Settings>,
     state: Res<MatchState>,
     frame: Res<FrameCount>,
+    selected: Res<sim::SelectedArena>,
     mut was_crumbling: Local<bool>,
 ) {
+    // No-storm arenas (Pit / Vigil) never crumble — no dread drone either.
     let crumbling = match *state {
-        MatchState::InRound { expires_at_frame } => {
+        MatchState::InRound { expires_at_frame } if selected.0.crumbles() => {
             let remaining = expires_at_frame.saturating_sub(frame.0);
             sim::sudden_death_factor(remaining).to_num::<f32>() < 0.9995
         }
