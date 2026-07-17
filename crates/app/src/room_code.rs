@@ -95,7 +95,7 @@ pub fn room_url_with_code(base: &str, code: &str) -> String {
 }
 
 fn room_code_path() -> Option<PathBuf> {
-    dirs::config_dir().map(|d| d.join("two-top").join("room_code.json"))
+    crate::paths::config_file("room_code.json")
 }
 
 fn load_room_code() -> RoomCode {

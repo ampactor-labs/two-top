@@ -120,7 +120,7 @@ pub fn ordinal(n: u32) -> String {
 }
 
 fn career_path() -> Option<PathBuf> {
-    dirs::config_dir().map(|d| d.join("two-top").join("career.json"))
+    crate::paths::config_file("career.json")
 }
 
 fn load_career() -> CareerRecord {

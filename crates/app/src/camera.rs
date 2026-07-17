@@ -103,7 +103,7 @@ pub struct CameraBase(pub Vec2);
 /// [`KILL_CAM_MICRO_STRENGTH`] for a mid-round kill. `hold_frames` is the
 /// remaining at-peak hold for a micro beat (`INFINITY` for the full beat,
 /// which holds until the next countdown releases it).
-#[derive(Resource)]
+#[derive(Resource, Clone, Copy)]
 pub struct KillCam {
     pub blend: f32,
     pub zooming_in: bool,

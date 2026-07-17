@@ -75,7 +75,7 @@ fn clamp_finite(v: f32, lo: f32, hi: f32, default: f32) -> f32 {
 }
 
 fn settings_path() -> Option<PathBuf> {
-    dirs::config_dir().map(|d| d.join("two-top").join("settings.json"))
+    crate::paths::config_file("settings.json")
 }
 
 fn load_settings() -> Settings {

@@ -54,7 +54,41 @@ pub struct LogGuard {
 /// Build the global subscriber. Idempotency: this calls `init()` once;
 /// re-invoking it would panic on subscriber re-registration. The app
 /// crate enforces single-call by making this private to `run()`.
+/// Persist panics where a human can hand them back.
+///
+/// A panic on the phone kills the process and prints to logcat, which is a
+/// ring buffer — by the time the tester says "it crashed", the message has
+/// rolled out and there is nothing to read (Android leaves no tombstone for
+/// an unwinding Rust panic). Writing the payload + location beside the
+/// replays means the next crash survives the walk back to the desk:
+/// `adb pull /sdcard/Android/data/<pkg>/files/crash.log`.
+fn install_panic_hook() {
+    let previous = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let location = info
+            .location()
+            .map(|l| format!("{}:{}:{}", l.file(), l.line(), l.column()))
+            .unwrap_or_else(|| "unknown".to_string());
+        let payload = info
+            .payload()
+            .downcast_ref::<&str>()
+            .map(|s| (*s).to_string())
+            .or_else(|| info.payload().downcast_ref::<String>().cloned())
+            .unwrap_or_else(|| "<non-string panic>".to_string());
+        tracing::error!(target: "two_top::panic", %location, %payload, "PANIC");
+        if let Some(dir) = crate::paths::shared_dir() {
+            let _ = std::fs::create_dir_all(&dir);
+            let _ = std::fs::write(
+                dir.join("crash.log"),
+                format!("2-Top panic\n  at {location}\n  {payload}\n"),
+            );
+        }
+        previous(info);
+    }));
+}
+
 pub fn init_logging() -> LogGuard {
+    install_panic_hook();
     let filter =
         EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(DEFAULT_FILTER));
     // Compile-time sanity check: in release builds, the

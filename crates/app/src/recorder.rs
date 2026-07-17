@@ -246,19 +246,7 @@ fn write_replay(replay: &Replay, recorded_at: u64, winner: u8) -> Option<PathBuf
 /// (`Android/data/co.<...>.twotop/files/replays`), browsable with any
 /// Files app and shareable from there — no storage permission needed.
 pub fn replays_dir() -> Option<PathBuf> {
-    #[cfg(target_os = "android")]
-    {
-        bevy::android::ANDROID_APP
-            .get()
-            .and_then(|app| app.external_data_path())
-            .map(|p| p.join("replays"))
-    }
-    #[cfg(not(target_os = "android"))]
-    {
-        dirs::download_dir()
-            .or_else(dirs::data_dir)
-            .map(|d| d.join("two-top").join("replays"))
-    }
+    crate::paths::shared_dir().map(|d| d.join("replays"))
 }
 
 pub struct MatchRecorderPlugin;

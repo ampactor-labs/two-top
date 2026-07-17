@@ -386,11 +386,35 @@ fn spawn_obstacle_block(
 
 /// `OnExit(InMatch)`: tear the whole match down — every app-spawned match
 /// entity, every arena prop, and every play-spawned entity (boomerangs,
-/// pickups, stains, effect sprites) — and drop the session so bevy_ggrs idles
-/// the sim back at frame 0.
-#[allow(clippy::type_complexity)]
+/// pickups, stains, effect sprites) — drop the session, and reset the match
+/// resources to a clean slate.
+///
+/// The reset is the load-bearing half. Dropping the `Session` stops the sim
+/// dead, so whatever `MatchState` held at the moment you left is what it
+/// holds forever — and leaving a decided match means that value is
+/// `MatchOver`. Everything keyed off it then lied on the title screen: the
+/// summary card stayed up over the menu, and the kill-cam (which punches in
+/// on `MatchOver` with `hold_frames = INFINITY` and only releases on the
+/// next `Countdown`) held the camera zoomed 1.6x and parked on the last
+/// kill spot — which shrank the anchored UI's view rect until the buttons
+/// overlapped each other and the text ran off both screen edges. The next
+/// match then started at `MatchOver` too, dead until a stray THROW tripped
+/// `apply_rematch`.
+///
+/// Resetting rolled-back resources out of band is normally forbidden
+/// (CONVENTIONS § Determinism), but that rule protects transitions *inside*
+/// a session. Here the session is already gone and the next `spawn_match`
+/// builds a fresh one, so this is the same clean-slate the entity teardown
+/// below has always been.
+#[allow(clippy::type_complexity, clippy::too_many_arguments)]
 fn despawn_match(
     mut commands: Commands,
+    mut state: ResMut<MatchState>,
+    mut score: ResMut<MatchScore>,
+    mut frame: ResMut<sim::FrameCount>,
+    mut kill_cam: ResMut<crate::camera::KillCam>,
+    mut last_kill: ResMut<render::LastKillPos>,
+    mut shake: ResMut<render::ScreenShake>,
     match_entities: Query<
         Entity,
         Or<(
@@ -410,6 +434,12 @@ fn despawn_match(
         commands.entity(entity).despawn();
     }
     commands.remove_resource::<Session<GgrsCfg>>();
+    *state = MatchState::default();
+    *score = MatchScore::default();
+    *frame = sim::FrameCount::default();
+    *kill_cam = crate::camera::KillCam::default();
+    *last_kill = render::LastKillPos::default();
+    *shake = render::ScreenShake::default();
 }
 
 /// The widest title-body line at font 30 stays under this; long lines wrap
@@ -1083,6 +1113,7 @@ pub fn primary_label(
 
 #[allow(clippy::too_many_arguments)]
 fn update_summary_overlay(
+    screen: Res<State<AppScreen>>,
     state: Res<MatchState>,
     score: Res<MatchScore>,
     netplay: Res<NetplayConfig>,
@@ -1101,7 +1132,10 @@ fn update_summary_overlay(
     let Ok((mut text, mut vis)) = q.single_mut() else {
         return;
     };
-    if matches!(*state, MatchState::MatchOver) {
+    // Belt and braces with the reset in `despawn_match`: the card is a
+    // MATCH screen element, so it checks the screen too. It used to key on
+    // MatchState alone and burned itself onto the title and the replay list.
+    if *screen.get() == AppScreen::InMatch && matches!(*state, MatchState::MatchOver) {
         *vis = Visibility::Visible;
         let opponent_gone = matches!(*lobby, net::LobbyState::Forfeited { .. });
         // If OUR phone went away just before the forfeit, the walk-out is

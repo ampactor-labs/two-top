@@ -55,9 +55,13 @@ pub struct BotView {
     pub can_dash: bool,
     /// Current safe half-extents (sudden-death aware).
     pub bounds: Vec2,
-    /// Practice difficulty = how many kills the PLAYER has landed on the bot
-    /// so far this match (0..=4). 0 = passive sparring dummy; it ramps up one
-    /// notch each time the player scores.
+    /// Practice difficulty: the persistent gauntlet tier plus a gentle
+    /// in-match ramp. 0 = passive sparring dummy. The ramp used to add a
+    /// notch for EVERY kill the player landed, so the bot sharpened fastest
+    /// exactly when you were winning and a 5-kill match could walk it up
+    /// five levels — a rubber band that punished doing well. It now moves
+    /// every SECOND kill, which keeps the "it's learning you" read without
+    /// the mid-match spike.
     pub difficulty: u32,
 }
 
@@ -296,7 +300,7 @@ pub fn drive_bot(world: &mut World) {
     // gauntlet runner faces a bot that opens sharp and still sharpens as
     // it loses.
     let tier = world.resource::<crate::grudge::CareerRecord>().gauntlet_tier;
-    let difficulty = tier + world.resource::<sim::MatchScore>().p0 as u32;
+    let difficulty = tier + world.resource::<sim::MatchScore>().p0 as u32 / 2;
 
     let mut view = BotView {
         frame,

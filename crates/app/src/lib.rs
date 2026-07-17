@@ -41,6 +41,7 @@ mod hud;
 mod lobby_overlay;
 mod logging;
 mod netplay;
+mod paths;
 mod screen;
 mod settings;
 use anchor::{FullScreenSprite, ScreenAnchorPlugin};

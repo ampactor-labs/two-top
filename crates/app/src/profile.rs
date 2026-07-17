@@ -7,14 +7,18 @@
 //! alphabet indices (`NetMsg::Profile`, exchanged right after the P2P
 //! swap).
 //!
-//! The name is A-Z on a 26-key grid, entered like arcade initials: four
-//! taps, DONE. It used to tap-cycle the room code's 7-glyph wheel, which
-//! is why phones went out into the world named GSAA — nobody dials 26
-//! taps to fix a letter, and nobody should have to. A fresh install still
-//! gets a name dealt from its install-id so the wire is never empty, and
-//! first boot opens the grid once so the first thing you do is claim it.
-//! (The ROOM CODE keeps the 7-glyph wheel: a friend's code should be four
-//! quick cycles, and it is never read as a word.)
+//! The name is four letters on a QWERTY keyboard: type it, DONE. It used
+//! to tap-cycle the room code's 7-glyph wheel, which is why phones went
+//! out into the world named GSAA — nobody dials to fix a letter, so nobody
+//! did. A fresh install still gets a name dealt from its install-id so the
+//! wire is never empty, and first boot opens the keyboard once so the first
+//! thing you do is claim it. (The ROOM CODE keeps the 7-glyph wheel: a
+//! friend's code should be four quick cycles, and it is never read as a
+//! word.)
+//!
+//! The identity is only durable if it is actually written down — see
+//! `crate::paths`, which is where that went wrong for the whole life of
+//! this module on Android.
 
 use bevy::prelude::*;
 use input_touch::WindowSize;
@@ -27,10 +31,20 @@ use crate::netplay::NetplayConfig;
 use crate::screen::AppScreen;
 
 /// The name wheel: the whole alphabet, because a name is meant to be read.
+/// This is the WIRE order (a name is four indices into it) — never reorder
+/// it, or every peer's name renders wrong. The on-screen layout is a
+/// separate thing entirely; see [`KEY_ROWS`].
 pub const NAME_ALPHABET: [char; 26] = [
     'A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'J', 'K', 'L', 'M', 'N', 'O', 'P', 'Q', 'R',
     'S', 'T', 'U', 'V', 'W', 'X', 'Y', 'Z',
 ];
+
+/// The keyboard, laid out the way every phone on earth lays one out.
+/// Alphabetical order is correct for a wire format and wrong for a thumb:
+/// nobody has hunted for a letter in an A-B-C grid since the arcade, and
+/// muscle memory for QWERTY is universal. Rows are ragged (10/9/7) exactly
+/// like the real thing, so the shape itself says "keyboard".
+const KEY_ROWS: [&str; 3] = ["QWERTYUIOP", "ASDFGHJKL", "ZXCVBNM"];
 
 // ---- Title: your name over your demon's head ----
 /// Tap anywhere on your demon (or its name) to re-enter the grid.
@@ -39,18 +53,50 @@ const NAME_ANCHOR_Y: f32 = 1.0 - 2.0 * 0.335;
 
 // ---- NameEntry screen (window-fraction, y-down) ----
 /// The four big letters you're editing.
-const ENTRY_ANCHOR_Y: f32 = 1.0 - 2.0 * 0.22;
+const ENTRY_ANCHOR_Y: f32 = 1.0 - 2.0 * 0.30;
 const ENTRY_CELL_DX: f32 = 0.11;
-/// The 26-key grid + DEL + DONE: 7 columns × 4 rows.
-const GRID_TOP: f32 = 0.34;
-const GRID_LEFT: f32 = 0.06;
-const GRID_COL_W: f32 = 0.126;
-const GRID_ROW_H: f32 = 0.095;
-const GRID_COLS: usize = 7;
-const GRID_CELLS: usize = 28;
-/// Grid cell indices past the alphabet.
-const CELL_DEL: usize = 26;
-const CELL_DONE: usize = 27;
+/// The keyboard: three ragged rows low on the screen where a phone
+/// keyboard lives, plus a DEL/DONE row under it.
+const KEY_TOP: f32 = 0.50;
+const KEY_ROW_H: f32 = 0.085;
+/// A key's width, sized so the widest row (10 keys) spans the screen with
+/// a margin — every row centers itself inside this pitch.
+const KEY_W: f32 = 0.094;
+/// The action row (DEL / DONE) sits one row below the letters.
+const ACTION_ROW_Y: f32 = KEY_TOP + 3.0 * KEY_ROW_H + 0.045;
+const ACTION_BAND: (f32, f32) = (ACTION_ROW_Y - 0.045, ACTION_ROW_Y + 0.045);
+
+/// Where a key sits: its window-fraction center. Rows are centered, so a
+/// 7-key row is inset from a 10-key row exactly like a real keyboard.
+fn key_center(row: usize, col: usize) -> (f32, f32) {
+    let len = KEY_ROWS[row].chars().count() as f32;
+    let fx = 0.5 + (col as f32 - (len - 1.0) * 0.5) * KEY_W;
+    let fy = KEY_TOP + (row as f32 + 0.5) * KEY_ROW_H;
+    (fx, fy)
+}
+
+/// The letter at a (row, col), as an index into [`NAME_ALPHABET`].
+fn key_letter_index(row: usize, col: usize) -> Option<u8> {
+    let ch = KEY_ROWS.get(row)?.chars().nth(col)?;
+    NAME_ALPHABET.iter().position(|c| *c == ch).map(|i| i as u8)
+}
+
+/// Hit-test a tap against the keyboard: `Some(alphabet index)`.
+fn key_at(fx: f32, fy: f32) -> Option<u8> {
+    if fy < KEY_TOP {
+        return None;
+    }
+    let row = ((fy - KEY_TOP) / KEY_ROW_H) as usize;
+    let keys = KEY_ROWS.get(row)?;
+    let len = keys.chars().count() as f32;
+    // Invert `key_center`: the row's leftmost key starts here.
+    let left = 0.5 - len * 0.5 * KEY_W;
+    if fx < left {
+        return None;
+    }
+    let col = ((fx - left) / KEY_W) as usize;
+    key_letter_index(row, col)
+}
 
 #[derive(Resource, Serialize, Deserialize, Clone, Copy, Debug)]
 #[serde(default)]
@@ -106,7 +152,7 @@ fn default_slots(install_id: u128) -> [u8; NAME_LEN] {
 }
 
 fn profile_path() -> Option<PathBuf> {
-    dirs::config_dir().map(|d| d.join("two-top").join("profile.json"))
+    crate::paths::config_file("profile.json")
 }
 
 fn load_profile() -> LocalProfile {
@@ -156,9 +202,13 @@ struct TitleName;
 #[derive(Component)]
 struct EntryCell(usize);
 
-/// One key of the 26-letter grid (plus DEL and DONE).
-#[derive(Component)]
-struct GridKey(usize);
+/// One key of the keyboard: a letter at (row, col), or an action.
+#[derive(Component, Clone, Copy, PartialEq)]
+enum GridKey {
+    Letter { row: usize, col: usize },
+    Del,
+    Done,
+}
 
 fn spawn_name_ui(mut commands: Commands, netplay: Res<NetplayConfig>) {
     // Couch builds carry no identity to exchange; the name is online-only.
@@ -194,24 +244,35 @@ fn spawn_name_ui(mut commands: Commands, netplay: Res<NetplayConfig>) {
             Visibility::Hidden,
         ));
     }
-    for cell in 0..GRID_CELLS {
-        let (col, row) = (cell % GRID_COLS, cell / GRID_COLS);
-        let fx = GRID_LEFT + (col as f32 + 0.5) * GRID_COL_W;
-        let fy = GRID_TOP + (row as f32 + 0.5) * GRID_ROW_H;
+    let mut key = |k: GridKey, fx: f32, fy: f32, size: f32, color: Color| {
         commands.spawn((
-            GridKey(cell),
+            k,
             Text2d::new(String::new()),
             TextFont {
-                font_size: if cell >= CELL_DEL { 28.0 } else { 48.0 },
+                font_size: size,
                 ..default()
             },
-            TextColor(render::palette::BONE),
+            TextColor(color),
             TextLayout::new_with_justify(Justify::Center),
             ScreenAnchor::new(fx * 2.0 - 1.0, 1.0 - 2.0 * fy, 0.0, 0.0),
             Transform::from_xyz(0.0, 0.0, 201.0),
             Visibility::Hidden,
         ));
+    };
+    for (row, keys) in KEY_ROWS.iter().enumerate() {
+        for col in 0..keys.chars().count() {
+            let (fx, fy) = key_center(row, col);
+            key(
+                GridKey::Letter { row, col },
+                fx,
+                fy,
+                46.0,
+                render::palette::BONE,
+            );
+        }
     }
+    key(GridKey::Del, 0.28, ACTION_ROW_Y, 34.0, render::palette::COLD_STONE);
+    key(GridKey::Done, 0.72, ACTION_ROW_Y, 40.0, render::palette::SPARK);
 }
 
 /// First boot opens the grid once: the first thing you do in 2-Top is
@@ -265,28 +326,23 @@ fn name_entry_input(
     mut cursor: ResMut<NameCursor>,
     mut next: ResMut<NextState<AppScreen>>,
 ) {
-    let mut hit: Option<usize> = None;
+    let mut hit: Option<GridKey> = None;
+    let mut letter: Option<u8> = None;
     let win = window.0;
     if win.x > 0.0 && win.y > 0.0 {
         for t in touches.iter_just_pressed() {
             let p = t.position();
             let (fx, fy) = (p.x / win.x, p.y / win.y);
-            if fy < GRID_TOP || fx < GRID_LEFT {
-                continue;
-            }
-            let col = ((fx - GRID_LEFT) / GRID_COL_W) as usize;
-            let row = ((fy - GRID_TOP) / GRID_ROW_H) as usize;
-            if col < GRID_COLS {
-                let cell = row * GRID_COLS + col;
-                if cell < GRID_CELLS {
-                    hit = Some(cell);
-                }
+            if (ACTION_BAND.0..ACTION_BAND.1).contains(&fy) {
+                hit = Some(if fx < 0.5 { GridKey::Del } else { GridKey::Done });
+            } else if let Some(i) = key_at(fx, fy) {
+                letter = Some(i);
             }
         }
     }
     // Desktop: type the name, backspace, enter.
-    for (i, letter) in NAME_ALPHABET.iter().enumerate() {
-        let key = match letter {
+    for (i, ch) in NAME_ALPHABET.iter().enumerate() {
+        let key = match ch {
             'A' => KeyCode::KeyA,
             'B' => KeyCode::KeyB,
             'C' => KeyCode::KeyC,
@@ -315,32 +371,31 @@ fn name_entry_input(
             _ => KeyCode::KeyZ,
         };
         if keys.just_pressed(key) {
-            hit = Some(i);
+            letter = Some(i as u8);
         }
     }
     if keys.just_pressed(KeyCode::Backspace) {
-        hit = Some(CELL_DEL);
+        hit = Some(GridKey::Del);
     }
     if keys.just_pressed(KeyCode::Enter) || keys.just_pressed(KeyCode::Escape) {
-        hit = Some(CELL_DONE);
+        hit = Some(GridKey::Done);
     }
 
-    let Some(cell) = hit else {
+    if let Some(i) = letter {
+        let slot = cursor.0;
+        profile.slots[slot] = i;
+        cursor.0 = (slot + 1) % NAME_LEN;
         return;
-    };
-    match cell {
-        CELL_DONE => {
+    }
+    match hit {
+        Some(GridKey::Done) => {
             profile.named = true;
             save_profile(&profile);
             cursor.0 = 0;
             next.set(AppScreen::Title);
         }
-        CELL_DEL => cursor.0 = (cursor.0 + NAME_LEN - 1) % NAME_LEN,
-        letter => {
-            let slot = cursor.0;
-            profile.slots[slot] = letter as u8;
-            cursor.0 = (slot + 1) % NAME_LEN;
-        }
+        Some(GridKey::Del) => cursor.0 = (cursor.0 + NAME_LEN - 1) % NAME_LEN,
+        _ => {}
     }
 }
 
@@ -408,17 +463,21 @@ fn update_name_ui(
         if !entering {
             continue;
         }
-        match key.0 {
-            CELL_DEL => {
+        match *key {
+            GridKey::Del => {
                 text.0 = "DEL".to_string();
                 color.0 = render::palette::COLD_STONE;
             }
-            CELL_DONE => {
+            GridKey::Done => {
                 text.0 = "DONE".to_string();
                 color.0 = render::palette::SPARK;
             }
-            i => {
-                text.0 = NAME_ALPHABET[i].to_string();
+            GridKey::Letter { row, col } => {
+                text.0 = KEY_ROWS[row]
+                    .chars()
+                    .nth(col)
+                    .map(String::from)
+                    .unwrap_or_default();
                 color.0 = render::palette::BONE;
             }
         }

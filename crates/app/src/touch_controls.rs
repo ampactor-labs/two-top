@@ -63,9 +63,26 @@ struct HintsUsed {
 #[derive(Resource)]
 struct TouchControlsShown(bool);
 
-/// Fixed dash ring diameter in world units. Doubled in area (×√2) with the
-/// 2026-07-16 zone growth so the picture keeps matching the tap target.
+/// Fallback dash ring diameter (world units) for the first frames, before
+/// the view rect exists. The live size comes from [`dash_ring_size`].
 const DASH_RING_SIZE: f32 = 210.0;
+
+/// The dash ring drawn to the size of the zone it actually is. The zone is
+/// the rect [DASH_ZONE_X_FRAC, 1] x [DASH_ZONE_Y_FRAC, 1] of the window;
+/// a fixed 210-unit ring sat well inside that on a tall phone, so the
+/// button answered taps from a visibly wider area than it drew — the
+/// button lying about its own hitbox. Sizing it from the zone's narrower
+/// span keeps the picture honest on every aspect (the corners past the
+/// inscribed circle stay live, which errs the safe way: bigger target than
+/// advertised, never smaller).
+fn dash_ring_size(rect: &ViewRect) -> f32 {
+    if rect.half == Vec2::ZERO {
+        return DASH_RING_SIZE;
+    }
+    let w = (1.0 - input_touch::DASH_ZONE_X_FRAC) * rect.half.x * 2.0;
+    let h = (1.0 - input_touch::DASH_ZONE_Y_FRAC) * rect.half.y * 2.0;
+    w.min(h)
+}
 
 /// Knob diameter as a fraction of the move base ring's.
 const KNOB_FRAC: f32 = 0.45;
@@ -378,6 +395,7 @@ fn update_controls(
     };
     let base_size = 2.0 * sat_px * world_per_px;
 
+    let dash_size = dash_ring_size(&rect);
     // A slow breath on the dash ring so it draws the eye until first used.
     let pulse = 0.75 + 0.25 * (time.elapsed_secs() * 2.5).sin();
 
@@ -466,11 +484,11 @@ fn update_controls(
                             - frames_remaining as f32 / sim::DASH_COOLDOWN_FRAMES as f32;
                         sprite.color = render::palette::COLD_STONE.with_alpha(0.25 + 0.2 * f);
                         sprite.custom_size =
-                            Some(Vec2::splat(DASH_RING_SIZE * (0.7 + 0.3 * f)));
+                            Some(Vec2::splat(dash_size * (0.7 + 0.3 * f)));
                     }
                     Some(sim::DashState::Dashing { .. }) => {
                         sprite.color = dash_active();
-                        sprite.custom_size = Some(Vec2::splat(DASH_RING_SIZE * 1.12));
+                        sprite.custom_size = Some(Vec2::splat(dash_size * 1.12));
                     }
                     // Ready: the spark pulse; a tiny scale kick while held so
                     // the tap registers visually.
@@ -482,7 +500,7 @@ fn update_controls(
                             dash_idle().with_alpha(0.55 * pulse)
                         };
                         sprite.custom_size =
-                            Some(Vec2::splat(DASH_RING_SIZE * if on { 1.12 } else { 1.0 }));
+                            Some(Vec2::splat(dash_size * if on { 1.12 } else { 1.0 }));
                     }
                 }
             }
