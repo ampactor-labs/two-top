@@ -575,7 +575,7 @@ fn scale_actors_by_depth(
     for (pos, mut sprite) in &mut pickups {
         let (_, y) = pos.0.to_f32();
         let s = render::depth_scale(y * flip.0);
-        sprite.custom_size = Some(Vec2::splat(24.0 * 1.8 * s));
+        sprite.custom_size = Some(Vec2::splat(render::pickup_render_size() * s));
     }
 }
 

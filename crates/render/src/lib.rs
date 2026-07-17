@@ -41,7 +41,14 @@ pub const FACING_DIR_COUNT: u16 = 3;
 /// 48 px source bump — the drifter occupies the same gameplay footprint and
 /// just renders at finer texel density (≈1.33 world units/texel) than the old
 /// 32 px rig, per ART_DIRECTION.md v2 rationale.
-pub const PLAYER_RENDER_SIZE: f32 = 80.0;
+pub const PLAYER_RENDER_SIZE: f32 = 100.0;
+
+/// A floor pickup's sprite size: its hitbox, drawn a touch larger so it
+/// pops off the floor. Derived from the sim constant (and shared with the
+/// app's depth pass) so the picture cannot drift from what you can pick up.
+pub fn pickup_render_size() -> f32 {
+    (sim::PICKUP_HALF_EXTENT_CM * 2) as f32 * 1.35
+}
 
 /// Vertical foreshorten of the world on screen — the "camera tilt" that turns
 /// the flat top-down floor into a Boomerang-Fu/HLD tabletop you look *into*.
@@ -726,8 +733,7 @@ pub fn ensure_pickup_visuals(
         .clone();
     let image = asset_server.load("sprites/pickups/pickup_sheet.png");
     let ring = asset_server.load("sprites/fx/charge_ring.png");
-    // Render a touch larger than the 32 cm hitbox so it pops on the floor.
-    let size = (sim::PICKUP_HALF_EXTENT_CM * 2) as f32 * 1.8;
+    let size = pickup_render_size();
     for (entity, pickup, pos) in &q {
         let (x, y) = pos.0.to_f32();
         let ty = tilt_y(y * flip.0);

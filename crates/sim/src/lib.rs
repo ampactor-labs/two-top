@@ -82,7 +82,15 @@ pub const TICK_DT: Fix = Fix::lit("0.01666666666");
 /// checksummed component), fang-chip felling, and spreading fire. A tape
 /// stamped 11 needs a Forest-aware binary (an older `from_u8` would
 /// silently fall an unknown arena back to Anchor).
-pub const SIM_VERSION: u32 = 11;
+///
+/// `12` = the cast grows 25%: duelists 16→20, fangs 10→13, pickups 16→20
+/// (half-extents, cm). The arena and its cover are untouched, so the same
+/// stage now holds bigger figures — everything reads larger on a phone
+/// without zooming the camera (which would cost fairness) or inflating the
+/// sprites away from their hitboxes (which would break the what-you-see-is-
+/// what-kills law the whole render layer is built on). Every hit distance
+/// in the game moves with it.
+pub const SIM_VERSION: u32 = 12;
 
 // ---- Components ----
 
@@ -452,7 +460,7 @@ pub fn charged_reach(power: Fix) -> Fix {
 /// Boomerang collision half-extent in cm. Smaller than the player's
 /// 16 cm: ~10 cm gives a 20 cm catch/hit footprint that reads as a
 /// chunky thrown weapon without making it cheese-easy to hit with.
-pub const BOOMERANG_HALF_EXTENT_CM: i32 = 10;
+pub const BOOMERANG_HALF_EXTENT_CM: i32 = 13;
 
 /// Recall speed in cm/tick. A touch faster than `THROW_SPEED` so the
 /// boomerang catches up to a player who's moved forward since the
@@ -654,7 +662,7 @@ pub const DASH_MIN_STICK_MAG: Fix = Fix::lit("0.1");
 /// (≈12 in) square footprint — read at a glance from the camera-zoom
 /// distance we expect for a portrait phone, and small enough that the
 /// 1000×1500 cm arena gives plenty of room to dodge.
-pub const PLAYER_HALF_EXTENT_CM: i32 = 16;
+pub const PLAYER_HALF_EXTENT_CM: i32 = 20;
 
 /// Compute the player's collision AABB centered on `pos`.
 pub fn player_rect(pos: Vec2F) -> RectF {
@@ -4350,7 +4358,7 @@ impl Default for PickupSpawnTimer {
 pub const PICKUP_MIN_INTERVAL_FRAMES: u32 = 480;
 pub const PICKUP_MAX_INTERVAL_FRAMES: u32 = 720;
 pub const PICKUP_LIFETIME_FRAMES: u32 = 360;
-pub const PICKUP_HALF_EXTENT_CM: i32 = 16;
+pub const PICKUP_HALF_EXTENT_CM: i32 = 20;
 
 /// Four fixed, mirror-symmetric pickup slots (competitive fairness — neither
 /// side is closer to a spawn point).

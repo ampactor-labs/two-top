@@ -541,13 +541,14 @@ fn player_left_out_of_bounds_dies_after_grace() {
 
 #[test]
 fn swept_contact_catches_fast_tunnel_through_north_wall() {
-    // A fang at 80 cm/tick (Bouncy / Fire+empowered) phased so NEITHER
-    // endpoint AABB overlaps the 50 cm north wall: prev center y=740
-    // (rect [730,750], only touches), cur center y=820 (rect [810,830],
-    // fully past). A plain point check returns None at both ends and the
-    // fang escapes; the swept check must reflect it at the entry face.
+    // A fang at ~85 cm/tick (Bouncy / Fire+empowered) phased so NEITHER
+    // endpoint AABB overlaps the 50 cm north wall: with the v12 half-extent
+    // of 13, centers in [737, 813] overlap the wall, so prev y=735 sits
+    // just short of the band and cur y=820 just past it. A plain point
+    // check returns None at both ends and the fang escapes; the swept check
+    // must reflect it at the entry face.
     let north = RectF::from_min_max(Vec2F::from_cm(-500, 750), Vec2F::from_cm(500, 800));
-    let prev = Vec2F::from_cm(0, 740);
+    let prev = Vec2F::from_cm(0, 735);
     let cur = Vec2F::from_cm(0, 820);
     // Sanity: both endpoints are genuinely clear (so this is a true tunnel).
     assert!(sim::resolve_collision(boomerang_rect(prev), north).is_none());
@@ -1108,14 +1109,11 @@ fn leftover_recall_hold_is_inert_walks_free_and_never_charges() {
     let mut app = build_app();
     app.update();
 
-    // Quick lob out, idle a beat, then recall-press and hold to the catch.
-    app.world_mut().resource_mut::<SynthesizedInputs>().0 = PlayerInput {
-        stick_x: 0,
-        stick_y: 0,
-        aim_angle: 0,
-        buttons: PlayerInput::THROW_DOWN,
-    };
-    app.update();
+    // Throw at FULL charge (a tap lob's reach is short enough that the
+    // duelist catches it before the recall press below, which would make
+    // that press a legitimate fresh arm and test nothing), idle a beat,
+    // then recall-press and hold to the catch.
+    hold_full_charge(&mut app);
     app.world_mut().resource_mut::<SynthesizedInputs>().0 = PlayerInput {
         stick_x: 127,
         stick_y: 0,

@@ -27,10 +27,25 @@ use input_touch::WindowSize;
 use crate::camera::CameraRigSet;
 
 /// The world-space rectangle the camera shows this frame.
-#[derive(Resource, Default, Clone, Copy)]
+#[derive(Resource, Clone, Copy)]
 pub struct ViewRect {
     pub center: Vec2,
     pub half: Vec2,
+    /// The camera's orthographic scale this frame: 1.0 at rest, smaller
+    /// while the kill-cam is punched in. Anchored UI multiplies its world
+    /// size by this to hold a constant size on screen (see
+    /// [`apply_screen_anchors`]).
+    pub scale: f32,
+}
+
+impl Default for ViewRect {
+    fn default() -> Self {
+        Self {
+            center: Vec2::ZERO,
+            half: Vec2::ZERO,
+            scale: 1.0,
+        }
+    }
 }
 
 impl ViewRect {
@@ -109,8 +124,21 @@ fn compute_view_rect(
     }
     rect.center = tx.translation.truncate();
     rect.half = half;
+    rect.scale = ortho.scale;
 }
 
+/// Pin every anchored entity to its screen position AND hold its size
+/// constant on screen.
+///
+/// The scale half is not cosmetic. A world-space sprite grows on screen as
+/// the camera zooms in, and the kill-cam zooms 1.6x — *and holds there for
+/// the whole MatchOver summary, by design*. So the summary card, its
+/// buttons, and the HUD were all rendering 1.6x oversized into a view that
+/// was simultaneously 1.6x narrower: the card's text ran off both screen
+/// edges and the buttons overlapped each other, on every phone, in every
+/// correct match. Multiplying world size by the camera's own ortho scale
+/// cancels the zoom exactly, so anchored UI is finally screen-space in size
+/// as well as position — which is what this module always claimed to do.
 fn apply_screen_anchors(rect: Res<ViewRect>, mut q: Query<(&ScreenAnchor, &mut Transform)>) {
     if rect.half == Vec2::ZERO {
         return; // first frames before the rect exists: leave spawn positions
@@ -119,6 +147,7 @@ fn apply_screen_anchors(rect: Res<ViewRect>, mut q: Query<(&ScreenAnchor, &mut T
         let p = rect.anchor_pos(anchor.frac, anchor.offset);
         tx.translation.x = p.x;
         tx.translation.y = p.y;
+        tx.scale = Vec3::splat(rect.scale);
     }
 }
 
@@ -220,6 +249,7 @@ mod tests {
         let rect = ViewRect {
             center: Vec2::new(10.0, -20.0),
             half: Vec2::new(100.0, 200.0),
+            scale: 1.0,
         };
         assert_eq!(rect.anchor_pos(Vec2::ZERO, Vec2::ZERO), rect.center);
         assert_eq!(

@@ -73,7 +73,7 @@ impl AppScreen {
 /// the floor — the ground-contact point used for y-sorting and the drop shadow.
 /// The 64-unit sprite carries the figure low in the cell, so the feet sit ~26
 /// below centre.
-const PLAYER_FOOT_OFFSET: f32 = 26.0;
+const PLAYER_FOOT_OFFSET: f32 = 32.0;
 
 /// World-unit height a cover block rises off the floor in the 3/4 view.
 const OBSTACLE_RISE: f32 = 52.0;
@@ -1040,7 +1040,7 @@ fn summary_text(
     if !online || practice {
         let winner = winner_label(score);
         let replay_line = if saved {
-            "\n\nreplay saved - share the .bmrg"
+            "\n\nreplay saved"
         } else {
             ""
         };
@@ -1077,7 +1077,7 @@ fn summary_text(
         ""
     };
     let replay_line = if saved {
-        "\nreplay saved - share the .bmrg"
+        "\nreplay saved"
     } else {
         ""
     };
