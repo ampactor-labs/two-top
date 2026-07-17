@@ -12,9 +12,15 @@
 //! - **Release desktop**: `fmt` layer (no ANSI) → daily-rotated file under
 //!   `<exe-dir>/logs/two_top.log`. Writes go through `tracing-appender`'s
 //!   non-blocking writer so disk I/O never stalls the game thread.
-//! - **Release Android**: `fmt` layer (no ANSI) → stderr/logcat. NativeActivity
-//!   does not give us a stable writable cwd/exe dir, and trying to open a file
-//!   appender during startup can panic before the first frame.
+//! - **Release Android**: stderr/logcat AND a daily-rotated file beside the
+//!   replays (`crate::paths::shared_dir()/logs/`). The file half is what
+//!   makes a bug report possible: logcat is a ring buffer, so by the time a
+//!   tester walks back to a computer and says "it crashed", the panic has
+//!   long since rolled out of it — which is exactly how one on-device crash
+//!   stayed invisible through two reports. This used to be stderr-only
+//!   because NativeActivity gives no writable cwd; `paths::shared_dir()`
+//!   answers that now (the recorder has been writing tapes there all along),
+//!   and a failure to open it degrades to stderr instead of panicking.
 //!
 //! ## Filter
 //!
@@ -49,6 +55,20 @@ const DEFAULT_FILTER: &str = "info,\
 pub struct LogGuard {
     #[cfg(all(not(debug_assertions), not(target_os = "android")))]
     _appender_guard: tracing_appender::non_blocking::WorkerGuard,
+    /// `None` when the phone gave us nowhere to write (then the log is
+    /// logcat-only, exactly as it was before) — never a reason to panic.
+    #[cfg(all(not(debug_assertions), target_os = "android"))]
+    _appender_guard: Option<tracing_appender::non_blocking::WorkerGuard>,
+}
+
+/// Where the phone's log file lives: beside the replays, in the app's
+/// external files dir, so `adb pull` (or the tester's own Files app) can
+/// retrieve it with no permissions and no root.
+#[cfg(all(not(debug_assertions), target_os = "android"))]
+fn android_log_dir() -> Option<std::path::PathBuf> {
+    let dir = crate::paths::shared_dir()?.join("logs");
+    std::fs::create_dir_all(&dir).ok()?;
+    Some(dir)
 }
 
 /// Build the global subscriber. Idempotency: this calls `init()` once;
@@ -121,6 +141,21 @@ pub fn init_logging() -> LogGuard {
 
     #[cfg(all(not(debug_assertions), target_os = "android"))]
     {
+        // stderr (logcat) for live `adb logcat` monitoring, plus a file the
+        // tester can hand back after the fact. Both, because each covers the
+        // other's hole: logcat rolls, and a file cannot be watched live.
+        let file_layer = android_log_dir().map(|dir| {
+            let (writer, guard) =
+                tracing_appender::non_blocking(tracing_appender::rolling::daily(&dir, "two_top.log"));
+            let layer = tracing_subscriber::fmt::layer()
+                .with_writer(writer)
+                .with_ansi(false);
+            (layer, guard, dir)
+        });
+        let (file_layer, appender_guard, dir) = match file_layer {
+            Some((layer, guard, dir)) => (Some(layer), Some(guard), Some(dir)),
+            None => (None, None, None),
+        };
         tracing_subscriber::registry()
             .with(filter)
             .with(
@@ -128,14 +163,18 @@ pub fn init_logging() -> LogGuard {
                     .with_writer(std::io::stderr)
                     .with_ansi(false),
             )
+            .with(file_layer)
             .init();
         tracing::info!(
             target: "two_top::logging",
             static_max_level = ?static_max,
             mode = "android-release",
+            log_file = ?dir,
             "tracing subscriber installed",
         );
-        LogGuard {}
+        LogGuard {
+            _appender_guard: appender_guard,
+        }
     }
 
     #[cfg(all(not(debug_assertions), not(target_os = "android")))]
