@@ -311,7 +311,7 @@ mod tests {
         let mut career = CareerRecord::default();
         let peer = net::ProfileData {
             install_id: 0xabc,
-            name: [4, 5, 6, 0], // TAGC
+            name: [19, 0, 6, 2], // TAGC
         };
         assert_eq!(
             career.rivalry_line(Some(peer)).unwrap(),

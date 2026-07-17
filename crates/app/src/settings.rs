@@ -113,10 +113,28 @@ impl Plugin for SettingsPlugin {
             .add_systems(
                 Update,
                 (
-                    adjust_settings.run_if(in_state(AppScreen::Title)),
+                    adjust_settings.run_if(in_state(AppScreen::Settings)),
+                    settings_back.run_if(in_state(AppScreen::Settings)),
                     update_setting_rows,
                 ),
             );
+    }
+}
+
+/// BACK out of the settings screen: the bottom band, or Escape.
+fn settings_back(
+    keys: Res<ButtonInput<KeyCode>>,
+    touches: Res<Touches>,
+    window: Res<WindowSize>,
+    mut next: ResMut<NextState<AppScreen>>,
+) {
+    let win = window.0;
+    let tapped = win.y > 0.0
+        && touches
+            .iter_just_pressed()
+            .any(|t| (BACK_BAND.0..BACK_BAND.1).contains(&(t.position().y / win.y)));
+    if tapped || keys.just_pressed(KeyCode::Escape) {
+        next.set(AppScreen::Title);
     }
 }
 
@@ -136,55 +154,73 @@ fn push_deadzone(
 /// `[`/`]` the music volume, `,`/`.` the deadzone, L the southpaw layout.
 /// Any change re-clamps, pushes the input mirrors to `input_touch`, and
 /// saves to disk.
-/// Title settings rows: window-fraction band (y-down, like `Touches`).
-/// Five rows from 0.40 at a 0.034 pitch → band 0.40–0.57, sitting above
-/// the practice/replays row (0.575). The pitch is the device-validated
-/// thumb size (the on-device pass widened it from 0.026 for a reason) —
-/// REPLAYS moved out of this band rather than the rows shrinking.
-const ROWS_TOP: f32 = 0.40;
-const ROW_PITCH: f32 = 0.034;
+/// The settings screen's rows (window-fraction, y-down). They own this
+/// screen now instead of the title's middle, so the pitch can be generous
+/// — 0.07 is double the old thumb-tight 0.034, and nothing competes for
+/// the space.
+const ROWS_TOP: f32 = 0.32;
+const ROW_PITCH: f32 = 0.07;
 const ROW_COUNT: usize = 5;
+/// BACK, matching the replays screen's band exactly.
+const BACK_BAND: (f32, f32) = (0.86, 0.96);
 
 /// One tappable settings row (0 haptics, 1 sfx, 2 music, 3 deadzone,
-/// 4 southpaw).
+/// 4 southpaw). Row `ROW_COUNT` is the screen heading, `ROW_COUNT + 1`
+/// the BACK label — same component, so one system shows and hides the
+/// whole screen.
 #[derive(Component)]
 struct SettingRow(usize);
 
 fn spawn_setting_rows(mut commands: Commands) {
-    for row in 0..ROW_COUNT {
-        let fy = ROWS_TOP + (row as f32 + 0.5) * ROW_PITCH;
+    for row in 0..ROW_COUNT + 2 {
+        let (fy, size) = match row {
+            r if r < ROW_COUNT => (ROWS_TOP + (r as f32 + 0.5) * ROW_PITCH, 38.0),
+            r if r == ROW_COUNT => (0.20, 84.0),
+            _ => ((BACK_BAND.0 + BACK_BAND.1) * 0.5, 40.0),
+        };
         commands.spawn((
             SettingRow(row),
             Text2d::new(String::new()),
             TextFont {
-                font_size: 34.0,
+                font_size: size,
                 ..default()
             },
             TextColor(render::palette::BONE.with_alpha(0.8)),
             TextLayout::new_with_justify(Justify::Center),
             crate::anchor::ScreenAnchor::new(0.0, 1.0 - 2.0 * fy, 0.0, 0.0),
-            Transform::from_xyz(0.0, 0.0, 200.0),
+            Transform::from_xyz(0.0, 0.0, 210.0),
             Visibility::Hidden,
         ));
     }
 }
 
-/// Render each row with tap arrows; visible on the title only.
+/// Render each row with its tap arrows; the whole screen shows together.
 fn update_setting_rows(
     screen: Res<State<crate::screen::AppScreen>>,
     settings: Res<Settings>,
-    mut rows: Query<(&SettingRow, &mut Text2d, &mut Visibility)>,
+    mut rows: Query<(&SettingRow, &mut Text2d, &mut TextColor, &mut Visibility)>,
 ) {
-    let on_title = *screen.get() == crate::screen::AppScreen::Title;
-    for (row, mut text, mut vis) in &mut rows {
-        *vis = if on_title {
+    let open = *screen.get() == crate::screen::AppScreen::Settings;
+    for (row, mut text, mut color, mut vis) in &mut rows {
+        *vis = if open {
             Visibility::Visible
         } else {
             Visibility::Hidden
         };
-        if !on_title {
+        if !open {
             continue;
         }
+        if row.0 == ROW_COUNT {
+            text.0 = "SETTINGS".to_string();
+            color.0 = render::palette::HOT_BONE;
+            continue;
+        }
+        if row.0 == ROW_COUNT + 1 {
+            text.0 = "BACK".to_string();
+            color.0 = render::palette::HOT_BONE;
+            continue;
+        }
+        color.0 = render::palette::BONE.with_alpha(0.8);
         text.0 = match row.0 {
             0 => format!(
                 "<  haptics {}  >",

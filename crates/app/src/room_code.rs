@@ -1,15 +1,19 @@
-//! Room-code entry pad — private rooms with zero text input.
+//! How you choose your opponent: a stranger, or the person next to you.
 //!
-//! Online, the title screen grows a tap row: `QUICK  ·  C U R S`. QUICK is
-//! the default public room (the base `--room`/`MATCHBOX_ROOM`/`TWOTOP_ROOM`
-//! URL — strangers pair on `?next=2` as before). Tapping a glyph slot
-//! switches to a PRIVATE room: each tap cycles that slot through the
-//! 7-glyph alphabet (the letters of CUR + STAG), and the code is appended
-//! to the room name — only phones dialed to the same four glyphs ever
-//! meet. 7⁴ = 2401 rooms: plenty of privacy for "you and me, right now"
-//! without a keyboard, an account, or a camera.
+//! Online, the title carries a two-state toggle — QUICK MATCH or PRIVATE —
+//! sitting directly on top of the button it changes. QUICK MATCH is the
+//! public room (the base `--room`/`MATCHBOX_ROOM`/`TWOTOP_ROOM` URL, where
+//! strangers pair on `?next=2`) and the button below reads FIND OPPONENT.
+//! PRIVATE unfolds a four-glyph dial and the button relabels itself to
+//! `DUEL AT C-U-R-S`: both phones dial the same code, both press, and only
+//! those two ever meet. 7⁴ = 2401 rooms without a keyboard, an account, or
+//! a camera.
 //!
-//! Desktop (dev): keys 1-4 cycle the slots, 0 resets to QUICK.
+//! The dial keeps the 7-glyph CURSTAG wheel (tap-cycling is cheap at seven
+//! and a friend's code should be four quick taps away) — unlike the NAME,
+//! which is A-Z on a grid because a name has to be worth reading.
+//!
+//! Desktop (dev): keys 1-4 cycle the slots, 0 back to QUICK MATCH.
 //!
 //! The chosen code persists (`room_code.json` beside settings) and is
 //! applied by rewriting `NetplayConfig.room_url` — `start_matchbox` reads
@@ -22,24 +26,24 @@ use std::path::PathBuf;
 
 use crate::anchor::ScreenAnchor;
 use crate::netplay::NetplayConfig;
-use crate::screen::AppScreen;
+use crate::screen::{
+    AppScreen, BtnRole, DIAL_ANCHOR_Y, DIAL_RECT, MODE_TOGGLE_ANCHOR_Y, MODE_TOGGLE_RECT,
+    spawn_button_part,
+};
 
 /// The glyph wheel each slot cycles through — the duelists' own letters.
 pub const CODE_ALPHABET: [char; 7] = ['C', 'U', 'R', 'S', 'T', 'A', 'G'];
 pub const CODE_LEN: usize = 4;
 
-/// Tap band, in window-fraction coordinates (y-down, like `Touches`):
-/// a horizontal strip below the title body, above the start zone.
-// Between the practice button (ends 0.655) and the PLAY button (0.80).
-const BAND_TOP: f32 = 0.68;
-const BAND_BOTTOM: f32 = 0.78;
-/// The band's five cells (QUICK + four slots) span this horizontal window.
-const BAND_LEFT: f32 = 0.05;
-const CELL_W: f32 = 0.18;
+/// "CURS" → "C-U-R-S": the primary button's code reads as something you
+/// dial, not as a word.
+pub fn code_dashed(code: &str) -> String {
+    code.chars().map(String::from).collect::<Vec<_>>().join("-")
+}
 
-/// The screen-anchor row the five cells render on (anchor frac, y-up):
-/// centers of the tap cells above, converted to [-1, 1].
-const ROW_ANCHOR_Y: f32 = 1.0 - (BAND_TOP + BAND_BOTTOM);
+/// The dial's four cells, centered under the toggle (window-x fractions).
+const DIAL_LEFT: f32 = 0.18;
+const CELL_W: f32 = 0.16;
 
 #[derive(Resource, Serialize, Deserialize, Clone, Debug)]
 pub struct RoomCode {
@@ -120,28 +124,53 @@ fn save_room_code(code: &RoomCode) {
     }
 }
 
-/// One cell of the pad row. 0 = QUICK, 1..=4 = glyph slots.
+/// One glyph slot of the private dial (0..CODE_LEN).
 #[derive(Component)]
 struct CodeCell(usize);
+
+/// One piece of a mode pill. `private` picks which of the two.
+#[derive(Component)]
+struct ModePill {
+    private: bool,
+    role: BtnRole,
+}
 
 fn spawn_pad(mut commands: Commands, netplay: Res<NetplayConfig>) {
     // Couch builds have no room to dial.
     if netplay.room_url.is_none() {
         return;
     }
-    for cell in 0..=CODE_LEN {
-        // Cell centers in window fraction → anchor frac (y-up, [-1,1]).
-        let fx = BAND_LEFT + (cell as f32 + 0.5) * CELL_W;
-        let anchor_x = fx * 2.0 - 1.0;
+    // The toggle: two pills, selected one filled. Same bordered-box
+    // language as every other button on the screen.
+    // Anchors sized so the two boxes sit side by side with a real gap: a
+    // pill is 480 wide plus its 22 of border on a ~1160-unit-wide screen,
+    // so anything tighter than ±0.46 merges them into one box.
+    for (private, anchor_x) in [(false, -0.47), (true, 0.47)] {
+        for role in [BtnRole::Border, BtnRole::Fill, BtnRole::Label] {
+            spawn_button_part(
+                &mut commands,
+                role,
+                Vec2::new(anchor_x, MODE_TOGGLE_ANCHOR_Y),
+                Vec2::new(480.0, 76.0),
+                28.0,
+                &mut |ec, role| {
+                    ec.insert(ModePill { private, role });
+                },
+            );
+        }
+    }
+    // The dial, hidden until PRIVATE is selected.
+    for cell in 0..CODE_LEN {
+        let fx = DIAL_LEFT + (cell as f32 + 0.5) * CELL_W;
         commands.spawn((
             CodeCell(cell),
             Text2d::new(String::new()),
             TextFont {
-                font_size: if cell == 0 { 36.0 } else { 54.0 },
+                font_size: 54.0,
                 ..default()
             },
-            TextColor(render::palette::BONE),
-            ScreenAnchor::new(anchor_x, ROW_ANCHOR_Y, 0.0, 0.0),
+            TextColor(render::palette::P1_CYAN),
+            ScreenAnchor::new(fx * 2.0 - 1.0, DIAL_ANCHOR_Y, 0.0, 0.0),
             Transform::from_xyz(0.0, 0.0, 200.0),
             Visibility::Hidden,
         ));
@@ -168,58 +197,88 @@ fn room_code_input(
     if code.base_url.is_none() {
         return;
     }
-    let mut touched: Option<usize> = None;
+    let mut changed = false;
 
     let win = window.0;
     if win.x > 0.0 && win.y > 0.0 {
         for t in touches.iter_just_pressed() {
             let p = t.position();
             let (fx, fy) = (p.x / win.x, p.y / win.y);
-            if (BAND_TOP..BAND_BOTTOM).contains(&fy) && fx >= BAND_LEFT {
-                let cell = ((fx - BAND_LEFT) / CELL_W) as usize;
-                if cell <= CODE_LEN {
-                    touched = Some(cell);
+            if (MODE_TOGGLE_RECT.0..MODE_TOGGLE_RECT.1).contains(&fy) {
+                // Left pill quick, right pill private — the halves are the
+                // pills, so a fat-fingered tap still lands on a real mode.
+                code.custom = fx >= 0.5;
+                changed = true;
+            } else if code.custom
+                && (DIAL_RECT.0..DIAL_RECT.1).contains(&fy)
+                && fx >= DIAL_LEFT
+            {
+                let cell = ((fx - DIAL_LEFT) / CELL_W) as usize;
+                if cell < CODE_LEN {
+                    let slot = &mut code.slots[cell];
+                    *slot = (*slot + 1) % CODE_ALPHABET.len() as u8;
+                    changed = true;
                 }
             }
         }
     }
-    // Desktop dev path: 1-4 cycle the slots, 0 back to QUICK.
+    // Desktop dev path: 0 back to QUICK, 1-4 cycle a slot (and arm PRIVATE).
+    if keys.just_pressed(KeyCode::Digit0) {
+        code.custom = false;
+        changed = true;
+    }
     for (key, cell) in [
-        (KeyCode::Digit0, 0usize),
-        (KeyCode::Digit1, 1),
-        (KeyCode::Digit2, 2),
-        (KeyCode::Digit3, 3),
-        (KeyCode::Digit4, 4),
+        (KeyCode::Digit1, 0usize),
+        (KeyCode::Digit2, 1),
+        (KeyCode::Digit3, 2),
+        (KeyCode::Digit4, 3),
     ] {
         if keys.just_pressed(key) {
-            touched = Some(cell);
+            code.custom = true;
+            let slot = &mut code.slots[cell];
+            *slot = (*slot + 1) % CODE_ALPHABET.len() as u8;
+            changed = true;
         }
     }
 
-    let Some(cell) = touched else {
+    if !changed {
         return;
-    };
-    if cell == 0 {
-        code.custom = false;
-    } else {
-        code.custom = true;
-        let slot = &mut code.slots[cell - 1];
-        *slot = (*slot + 1) % CODE_ALPHABET.len() as u8;
     }
     netplay.room_url = code.room_url();
     save_room_code(&code);
 }
 
-/// Show the pad only on the online title; render the selection state.
+/// Show the toggle on the online title, and the dial only once PRIVATE is
+/// selected: the row is simply empty in QUICK MATCH, so nothing on screen
+/// asks a stranger to think about room codes.
+#[allow(clippy::type_complexity)]
 fn update_pad(
     screen: Res<State<AppScreen>>,
     netplay: Res<NetplayConfig>,
     code: Res<RoomCode>,
-    mut cells: Query<(&CodeCell, &mut Text2d, &mut TextColor, &mut Visibility)>,
+    mut cells: Query<(&CodeCell, &mut Text2d, &mut Visibility), Without<ModePill>>,
+    mut pills: Query<
+        (
+            &ModePill,
+            &mut Visibility,
+            Option<&mut Sprite>,
+            Option<&mut Text2d>,
+            Option<&mut TextColor>,
+        ),
+        Without<CodeCell>,
+    >,
 ) {
     let show = *screen.get() == AppScreen::Title && netplay.room_url.is_some();
     let glyphs = code.code_string();
-    for (cell, mut text, mut color, mut vis) in &mut cells {
+    for (cell, mut text, mut vis) in &mut cells {
+        *vis = if show && code.custom {
+            Visibility::Visible
+        } else {
+            Visibility::Hidden
+        };
+        text.0 = glyphs.chars().nth(cell.0).map(String::from).unwrap_or_default();
+    }
+    for (pill, mut vis, sprite, text, color) in &mut pills {
         *vis = if show {
             Visibility::Visible
         } else {
@@ -228,28 +287,39 @@ fn update_pad(
         if !show {
             continue;
         }
-        if cell.0 == 0 {
-            text.0 = if code.custom {
-                "QUICK".to_string()
-            } else {
-                "> QUICK <".to_string()
-            };
-            color.0 = if code.custom {
-                render::palette::BONE.with_alpha(0.45)
-            } else {
-                render::palette::HOT_BONE
-            };
-        } else {
-            text.0 = glyphs
-                .chars()
-                .nth(cell.0 - 1)
-                .map(String::from)
-                .unwrap_or_default();
-            color.0 = if code.custom {
-                render::palette::P1_CYAN
-            } else {
-                render::palette::BONE.with_alpha(0.35)
-            };
+        let selected = pill.private == code.custom;
+        match pill.role {
+            BtnRole::Border => {
+                if let Some(mut s) = sprite {
+                    s.color = render::palette::HOT_BONE
+                        .with_alpha(if selected { 1.0 } else { 0.45 });
+                }
+            }
+            BtnRole::Fill => {
+                if let Some(mut s) = sprite {
+                    s.color = if selected {
+                        render::palette::HOT_BONE
+                    } else {
+                        render::palette::DEEP_ASH
+                    };
+                }
+            }
+            BtnRole::Label => {
+                if let Some(mut t) = text {
+                    t.0 = if pill.private {
+                        "PRIVATE".to_string()
+                    } else {
+                        "QUICK MATCH".to_string()
+                    };
+                }
+                if let Some(mut c) = color {
+                    c.0 = if selected {
+                        render::palette::VOID
+                    } else {
+                        render::palette::HOT_BONE.with_alpha(0.7)
+                    };
+                }
+            }
         }
     }
 }

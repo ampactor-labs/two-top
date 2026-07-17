@@ -53,6 +53,20 @@ pub enum AppScreen {
     Title,
     InMatch,
     Replays,
+    /// The knobs, moved off the title. Haptics and deadzone get touched
+    /// once a month; they were eating the middle of the first screen a
+    /// stranger ever sees.
+    Settings,
+    /// Arcade initials. Four letters, a 26-key grid, one DONE.
+    NameEntry,
+}
+
+impl AppScreen {
+    /// True for the screens that are menus rather than the live table —
+    /// the scrim, and anything else that dims the arena, keys off this.
+    pub fn is_menu(self) -> bool {
+        !matches!(self, AppScreen::InMatch)
+    }
 }
 
 /// World units below a duelist's (centre-anchored) origin where its feet meet
@@ -403,25 +417,36 @@ fn despawn_match(
 /// camera keeps visible across the 600×900 portrait window (`setup_world`).
 const TITLE_BODY_WIDTH: f32 = 1080.0;
 
-// ---- Title menu layout (window-fraction, y-down for taps) ----
-// Every interactive band lives below the notch/status-bar strip and inside
-// the thumb zone. Bands never overlap (settings.rs, room_code.rs and
-// profile.rs share this budget): name/arena 0.24–0.36 · settings 0.40–0.57
-// · practice + replays (side by side) 0.575–0.655 · room 0.68–0.78 · play
-// 0.80–0.92.
-const PRACTICE_BTN_RECT: (f32, f32) = (0.575, 0.655);
-// PLAY sits clear of the bottom nav-bar/gesture strip (~last 6% of a phone).
-const PLAY_BTN_RECT: (f32, f32) = (0.80, 0.92);
-/// PRACTICE and REPLAYS share their band, split at this window-x fraction:
-/// practice left of it, replays right. Keeping them one row returns the
-/// vertical space to the settings rows (whose tap pitch the device pass
-/// sized for thumbs — see settings.rs).
-const PRACTICE_REPLAYS_SPLIT_X: f32 = 0.64;
-/// Couch-only: tapping the arena-name band cycles the arena.
-const ARENA_TAP_RECT: (f32, f32) = (0.24, 0.36);
-/// Screen-anchor Y (y-up, [-1,1]) for each button's center = 1 − 2·y_down.
-const PLAY_ANCHOR_Y: f32 = 1.0 - 2.0 * 0.855;
-const PRACTICE_ANCHOR_Y: f32 = 1.0 - 2.0 * 0.615;
+// ---- Title layout (window-fraction, y-down for taps) ----
+// The table is the pitch, so it owns the middle of the screen: banner,
+// then the diorama (your demon at the near seat, the far seat empty —
+// `lib.rs`), then one column of actions with the primary last and biggest.
+// A stranger reads the picture and the buttons say the rest; the screen
+// carries no instructional prose at all.
+//
+// Bands, y-down, never overlapping (room_code.rs shares this budget):
+// diorama 0.18–0.50 · subline 0.52–0.58 · secondary row 0.59–0.66 ·
+// mode toggle 0.68–0.74 · private dial 0.75–0.81 · primary 0.82–0.93,
+// which stops clear of the phone's nav-bar / gesture strip (~last 6%).
+
+/// The line under the diorama: the arena name (couch, tappable to cycle)
+/// or the career record (online).
+const SUBLINE_RECT: (f32, f32) = (0.52, 0.58);
+const SUBLINE_ANCHOR_Y: f32 = 1.0 - 2.0 * 0.55;
+/// PRACTICE · REPLAYS · SETTINGS share one row, split on window-x.
+const SECONDARY_ROW_RECT: (f32, f32) = (0.59, 0.66);
+const SECONDARY_ANCHOR_Y: f32 = 1.0 - 2.0 * 0.625;
+const SECONDARY_PRACTICE_X: f32 = 0.38;
+const SECONDARY_REPLAYS_X: f32 = 0.70;
+/// QUICK MATCH | PRIVATE, sitting directly on top of the button it
+/// relabels (room_code.rs draws it; the adjacency is the explanation).
+pub const MODE_TOGGLE_RECT: (f32, f32) = (0.68, 0.74);
+pub const MODE_TOGGLE_ANCHOR_Y: f32 = 1.0 - 2.0 * 0.71;
+/// The private dial's row — empty while QUICK MATCH is selected.
+pub const DIAL_RECT: (f32, f32) = (0.75, 0.81);
+pub const DIAL_ANCHOR_Y: f32 = 1.0 - 2.0 * 0.78;
+const PLAY_BTN_RECT: (f32, f32) = (0.82, 0.93);
+const PLAY_ANCHOR_Y: f32 = 1.0 - 2.0 * 0.875;
 
 /// One top strip, one meaning, every screen: tapping it goes BACK — leave
 /// the online match, back to the couch lobby, exit the tape. Starts below
@@ -437,6 +462,7 @@ enum TitleAction {
     Play,
     Practice,
     Replays,
+    Settings,
 }
 
 /// One piece of a title button. Border/fill are quads, label is text; all
@@ -448,7 +474,7 @@ struct TitleButton {
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum BtnRole {
+pub enum BtnRole {
     Border,
     Fill,
     Label,
@@ -460,9 +486,9 @@ fn in_band(y_down: f32, band: (f32, f32)) -> bool {
 }
 
 /// Spawn one piece of a bordered box button. `insert_marker` stamps the
-/// screen-specific marker (title vs summary) so each screen's update
-/// system finds only its own buttons.
-fn spawn_button_part(
+/// screen-specific marker (title vs summary vs the room pad) so each
+/// screen's update system finds only its own buttons.
+pub fn spawn_button_part(
     commands: &mut Commands,
     role: BtnRole,
     anchor: Vec2,
@@ -527,68 +553,68 @@ fn spawn_title_button(
 }
 
 fn spawn_overlays(mut commands: Commands) {
-    // Big static "2-TOP" banner in the upper third — clear of the notch, and
-    // high enough that the whole interactive menu lives in the bottom half
-    // where a thumb reaches. Its own entity so the tagline can move freely.
+    // The banner sits at the top and stays out of the way: the diorama
+    // below it is what actually says what this is.
     commands.spawn((
         TitleBanner,
         Text2d::new("2-TOP"),
         TextFont {
-            font_size: 150.0,
+            font_size: 110.0,
             ..default()
         },
         TextColor(render::palette::HOT_BONE),
         TextLayout::new_with_justify(Justify::Center),
-        ScreenAnchor::new(0.0, 0.62, 0.0, 0.0),
-        Transform::from_xyz(0.0, 520.0, 200.0),
+        ScreenAnchor::new(0.0, 0.80, 0.0, 0.0),
+        Transform::from_xyz(0.0, 0.0, 200.0),
         Visibility::Hidden,
     ));
-    // One short tagline (arena name for couch, room mode for online) — the
-    // menu's *actions* now live on visible buttons below, so this is a hint,
-    // not an instruction wall.
+    // The line under the table: the tappable arena name on couch, the
+    // career record online. Never an instruction.
     commands.spawn((
         TitleOverlay,
         Text2d::new(String::new()),
         TextFont {
-            font_size: 40.0,
+            font_size: 34.0,
             ..default()
         },
         TextColor(render::palette::BONE),
         TextLayout::new_with_justify(Justify::Center),
         TextBounds::new_horizontal(TITLE_BODY_WIDTH),
-        // 0.46 y-up ≈ 0.27 y-down: above the online NAME row (0.30–0.36)
-        // and still inside the couch arena-tap band (0.24–0.36, where this
-        // text IS the tappable arena name).
-        ScreenAnchor::new(0.0, 0.46, 0.0, 0.0),
+        ScreenAnchor::new(0.0, SUBLINE_ANCHOR_Y, 0.0, 0.0),
         Transform::from_xyz(0.0, 0.0, 200.0),
         Visibility::Hidden,
     ));
-    // The two primary buttons: FIND OPPONENT / PLAY (bottom, biggest) and
-    // PRACTICE VS BOT (above it). Each is a border quad + fill quad + label,
-    // sharing a screen anchor. Visible affordances replace the old invisible
-    // tap-zones + instruction text (and keep every touch target off the notch).
+    // The primary: bottom, biggest, and it always names what tapping it
+    // does right now (PLAY / FIND OPPONENT / DUEL AT C-U-R-S).
     spawn_title_button(
         &mut commands,
         TitleAction::Play,
         Vec2::new(0.0, PLAY_ANCHOR_Y),
-        Vec2::new(760.0, 172.0),
-        60.0,
+        Vec2::new(760.0, 150.0),
+        48.0,
     );
-    // PRACTICE and REPLAYS share one row (split at PRACTICE_REPLAYS_SPLIT_X)
-    // so the settings rows above keep their thumb-sized tap pitch.
+    // The secondary row: everything you reach for occasionally, in one
+    // line, out of the way of the table and the primary.
     spawn_title_button(
         &mut commands,
         TitleAction::Practice,
-        Vec2::new(-0.34, PRACTICE_ANCHOR_Y),
-        Vec2::new(490.0, 104.0),
-        30.0,
+        Vec2::new(-0.62, SECONDARY_ANCHOR_Y),
+        Vec2::new(330.0, 92.0),
+        26.0,
     );
     spawn_title_button(
         &mut commands,
         TitleAction::Replays,
-        Vec2::new(0.60, PRACTICE_ANCHOR_Y),
-        Vec2::new(280.0, 104.0),
-        30.0,
+        Vec2::new(0.08, SECONDARY_ANCHOR_Y),
+        Vec2::new(270.0, 92.0),
+        26.0,
+    );
+    spawn_title_button(
+        &mut commands,
+        TitleAction::Settings,
+        Vec2::new(0.70, SECONDARY_ANCHOR_Y),
+        Vec2::new(270.0, 92.0),
+        26.0,
     );
     // Summary overlay — screen-centered (the kill-cam holds zoomed-in on
     // MatchOver, so a world-parked summary would sit off-center), shown only
@@ -648,12 +674,12 @@ fn pick_arena(
         selected.0 = sim::ArenaId::Reliquary;
     }
     let win = window.0;
-    // Couch: tap the arena-name band to cycle (online has no picker — the
-    // room hash decides the arena so both peers agree).
+    // Couch: tap the arena-name line under the table to cycle it (online
+    // has no picker — the room hash decides the arena so both peers agree).
     if win.y > 0.0
         && touches
             .iter_just_pressed()
-            .any(|t| in_band(t.position().y / win.y, ARENA_TAP_RECT))
+            .any(|t| in_band(t.position().y / win.y, SUBLINE_RECT))
     {
         selected.0 = next_arena(selected.0);
     }
@@ -670,13 +696,15 @@ fn title_buttons_input(
     mut practice: ResMut<crate::bot::PracticeMode>,
     mut autostart: Local<Option<Option<AppScreen>>>,
 ) {
-    // TWOTOP_AUTOSTART=1 skips the gesture; =replays boots into the tape
-    // list (both for headless capture verification).
+    // TWOTOP_AUTOSTART=1 skips the gesture; =replays / =settings / =name
+    // boot straight into those screens (headless capture verification).
     let auto = *autostart.get_or_insert_with(|| {
         std::env::var("TWOTOP_AUTOSTART")
             .map(|v| match v.as_str() {
                 "1" => Some(AppScreen::InMatch),
                 "replays" => Some(AppScreen::Replays),
+                "settings" => Some(AppScreen::Settings),
+                "name" => Some(AppScreen::NameEntry),
                 _ => None,
             })
             .unwrap_or(None)
@@ -691,6 +719,10 @@ fn title_buttons_input(
     }
     if keys.just_pressed(KeyCode::KeyV) {
         next.set(AppScreen::Replays);
+        return;
+    }
+    if keys.just_pressed(KeyCode::KeyO) {
+        next.set(AppScreen::Settings);
         return;
     }
     let key_start = keys.just_pressed(KeyCode::Space)
@@ -712,12 +744,16 @@ fn title_buttons_input(
             next.set(AppScreen::InMatch);
             return;
         }
-        if in_band(yd, PRACTICE_BTN_RECT) {
-            if xd >= PRACTICE_REPLAYS_SPLIT_X {
+        if in_band(yd, SECONDARY_ROW_RECT) {
+            if xd < SECONDARY_PRACTICE_X {
+                practice.0 = !practice.0;
+            } else if xd < SECONDARY_REPLAYS_X {
                 next.set(AppScreen::Replays);
                 return;
+            } else {
+                next.set(AppScreen::Settings);
+                return;
             }
-            practice.0 = !practice.0;
         }
     }
 }
@@ -742,6 +778,7 @@ fn update_title_buttons(
     netplay: Res<NetplayConfig>,
     practice: Res<crate::bot::PracticeMode>,
     career: Res<crate::grudge::CareerRecord>,
+    room: Res<crate::room_code::RoomCode>,
     mut q: TitleButtonQuery,
 ) {
     let on_title = *screen.get() == AppScreen::Title;
@@ -774,14 +811,21 @@ fn update_title_buttons(
             BtnRole::Label => {
                 if let Some(mut t) = text {
                     t.0 = match btn.action {
-                        // The primary button says what tapping it does NOW:
-                        // practice armed → PLAY the bot match; else online →
-                        // FIND OPPONENT (matchmaking); else couch → PLAY.
+                        // The primary always names what tapping it does NOW:
+                        // practice armed → PLAY the bot; private room dialed
+                        // → DUEL AT that code (the button narrating its own
+                        // mode is what makes the dial above it explain
+                        // itself); else online → FIND OPPONENT; else PLAY.
                         TitleAction::Play => {
-                            if online && !practice.0 {
-                                "FIND OPPONENT".to_string()
-                            } else {
+                            if !online || practice.0 {
                                 "PLAY".to_string()
+                            } else if room.custom {
+                                format!(
+                                    "DUEL AT {}",
+                                    crate::room_code::code_dashed(&room.code_string())
+                                )
+                            } else {
+                                "FIND OPPONENT".to_string()
                             }
                         }
                         // The label carries the gauntlet climb once one is
@@ -789,12 +833,13 @@ fn update_title_buttons(
                         // state either way.
                         TitleAction::Practice => {
                             if career.gauntlet_tier > 0 {
-                                format!("GAUNTLET TIER {}", career.gauntlet_tier)
+                                format!("GAUNTLET {}", career.gauntlet_tier)
                             } else {
-                                "PRACTICE VS BOT".to_string()
+                                "PRACTICE".to_string()
                             }
                         }
                         TitleAction::Replays => "REPLAYS".to_string(),
+                        TitleAction::Settings => "SETTINGS".to_string(),
                     };
                 }
                 if let Some(mut c) = color {
@@ -914,14 +959,13 @@ fn update_title_overlay(
         *vis = Visibility::Visible;
         let online = netplay.room_url.is_some();
         if online {
-            // One tagline: the private-room dialer sits on its own labelled
-            // pad below; the career line rides here when there's a record.
-            let career_line = if career.total() > 0 {
-                format!("     career {}W-{}L", career.wins, career.losses)
+            // Your record under your demon, and only once you have one —
+            // a first-timer's table needs no annotation.
+            text.0 = if career.total() > 0 {
+                format!("career {}W-{}L", career.wins, career.losses)
             } else {
                 String::new()
             };
-            text.0 = format!("dial a code below for a private duel{career_line}");
         } else {
             // Couch: the tappable arena name (cycles on tap / 1-2-3).
             text.0 = format!("< {} >", arena_name(selected.0));
@@ -1630,7 +1674,7 @@ mod tests {
     fn online_summary(gone: bool) -> String {
         let peer = net::ProfileData {
             install_id: 7,
-            name: [4, 5, 6, 0], // TAGC
+            name: [19, 0, 6, 2], // TAGC
         };
         summary_text(
             MatchScore {
@@ -1654,7 +1698,7 @@ mod tests {
     fn forfeit_summary(we_fled: bool) -> String {
         let peer = net::ProfileData {
             install_id: 7,
-            name: [4, 5, 6, 0], // TAGC
+            name: [19, 0, 6, 2], // TAGC
         };
         summary_text(
             MatchScore { p0: 2, p1: 1 },

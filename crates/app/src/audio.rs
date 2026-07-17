@@ -245,7 +245,10 @@ fn mix_music(
     mut match_: Query<&mut AudioSink, (With<MatchBed>, Without<TitleBed>)>,
 ) {
     let dt = time.delta_secs();
-    let on_title = *screen.get() == AppScreen::Title;
+    // Every menu rides the title bed, not just the title itself — walking
+    // into REPLAYS or SETTINGS used to crossfade to the match track while
+    // no match was running.
+    let on_title = screen.get().is_menu();
     mix.title = approach(mix.title, if on_title { 1.0 } else { 0.0 }, dt, XFADE_TAU);
     mix.match_ = approach(mix.match_, if on_title { 0.0 } else { 1.0 }, dt, XFADE_TAU);
     mix.duck = approach(mix.duck, 1.0, dt, DUCK_RELEASE_TAU);

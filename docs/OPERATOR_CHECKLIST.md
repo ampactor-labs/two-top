@@ -343,6 +343,24 @@ room by default). The old APK predates the batch.
       rematch regrows them. The two lone center trees never catch from
       a neighbor. Scrub a Forest tape backward in the theater — felled
       trees stand back up.
+### F.6 The title redesign (2026-07-17)
+
+- [ ] **First boot claims a name:** wipe `profile.json` (or use a fresh
+      install) — the 26-key grid opens by itself, four taps fill the
+      letters, DONE lands on the Title with that name over your demon.
+      Tapping the demon reopens the grid.
+- [ ] **The table reads:** a stranger looking at the Title sees their
+      demon at the near seat, an empty ring at the far seat, and FIND
+      OPPONENT. No instruction text anywhere on the screen. Couch shows
+      both seats filled instead.
+- [ ] **The toggle explains itself:** tap PRIVATE — the dial appears and
+      the button relabels to `DUEL AT <code>`. Two phones on the same
+      code pair; one on QUICK and one on a code never meet. Tap QUICK
+      MATCH — the dial vanishes and the button reads FIND OPPONENT again.
+- [ ] **Settings moved:** the SETTINGS button opens its own screen, rows
+      have thumb-comfortable spacing, BACK returns. The title-screen
+      music bed keeps playing on every menu screen (it used to switch to
+      the match track in REPLAYS).
 - [ ] **Ephemeral ICE (once a vendor is deployed):** with
       `TWOTOP_ICE_URL` baked, match entry logs `fetching ephemeral ICE
       credentials` then `ice config resolved fetched=true`, and a

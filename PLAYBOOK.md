@@ -459,15 +459,24 @@ dummy and sharpens one notch per kill you land, so the first match is the
 tutorial. Practice results never touch the online career W-L.
 `TWOTOP_PRACTICE=1` env arms it for desktop automation.
 
-**Private rooms.** On the online Title, the glyph row under the menu dials a
-room code: tap a glyph to cycle it (letters of CUR + STAG, 2401 combinations),
-tap QUICK to go back to public matchmaking. Two phones dialed to the same four
-glyphs only ever meet each other. The code persists across launches. Desktop:
-keys 1-4 cycle the slots, 0 resets to quick.
+**The Title is a table.** Your demon stands at the near seat with your name
+over its head; online, the far seat is an empty ring — which is what the
+button at the bottom offers to fix. Couch fills both seats instead. There
+is no explanatory copy on the screen, by design: the picture and the button
+labels are the explanation.
 
-**Your name.** The online Title's NAME row dials a 4-glyph name from the
-same alphabet (desktop: keys 5-8). A fresh install gets one dealt from its
-install identity, so every phone is named before its owner touches the pad.
+**Quick match vs private rooms.** The toggle sits directly on top of the
+primary button. QUICK MATCH pairs you with whoever else is in the public
+room and the button reads FIND OPPONENT. PRIVATE unfolds a four-glyph dial
+and the button relabels itself `DUEL AT C-U-R-S`: two phones dialed to the
+same four glyphs only ever meet each other (letters of CUR + STAG, 2401
+combinations). The mode and code persist across launches. Desktop: keys 1-4
+cycle the slots (arming private), 0 back to quick.
+
+**Your name.** Four letters, A-Z, entered on a 26-key grid like arcade
+initials — first boot opens it once, and tapping your demon on the Title
+reopens it (desktop: N, then type, Backspace, Enter). A fresh install gets
+a placeholder dealt from its install identity, so the wire is never empty.
 The name rides the identity handshake to your opponent: it shows on their
 summary, in their grudge ledger ("4TH MEETING with TAGC — you lead 2-1"),
 and in the replay tape header.
@@ -501,10 +510,12 @@ duel records the loss on your ledger — same honesty as the away-grace
 forfeit. While waiting alone in an online room the chip reads CANCEL and
 needs no confirmation; it's also the way out of a stuck SUMMONING wait.
 
-Settings (haptics, sfx, music, deadzone, southpaw) are the five tappable
-rows on the Title — left half of a row lowers/toggles, right half raises.
-**Southpaw** mirrors the whole touch layout left-for-right: move stick on
-the right half, throw on the left, dash bottom-LEFT.
+Settings (haptics, sfx, music, deadzone, southpaw) live behind the SETTINGS
+button, on their own screen — left half of a row lowers/toggles, right half
+raises, BACK returns (desktop: O opens it, Escape leaves). They used to own
+the middle of the Title, which is real estate a deadzone percentage has not
+earned. **Southpaw** mirrors the whole touch layout left-for-right: move
+stick on the right half, throw on the left, dash bottom-LEFT.
 
 ## Known gaps (so you don't chase non-bugs)
 
