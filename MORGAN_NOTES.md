@@ -78,6 +78,25 @@ A finished match (`MatchOver`) restarts on a THROW rising edge from *either* pla
 
 `AppScreen` has `Title` and `InMatch`, but the sim's idle-vs-running behavior is *not* gated on that flag — it falls out of whether a ggrs `Session` resource exists. With no `Session`, `bevy_ggrs` simply idles `GgrsSchedule`, so the Title screen is literally the no-session state: the sim isn't paused, it has nothing to advance (it sits at frame 0). `start_match` inserts a fresh SyncTest `Session`; `back_to_lobby` removes it (`remove_resource::<Session<GgrsCfg>>()`). `AppScreen` only drives entity spawn/despawn and non-sim UI systems. The payoff is zero special-case pause logic — there's no "is the sim allowed to tick right now" branch to get wrong, and you *can't* accidentally tick the sim from a menu because there's no session to tick it. The arena picker lives in `Title` and only mutates `SelectedArena` *before* the session is built, so it's a safe pre-session local change.
 
+## What the no-session Title screen costs, and why `RollbackClockPlugin` exists
+
+The design above has a bill attached, and it took two crash reports to read it. `bevy_ggrs` resets `RollbackFrameCount` to 0 on any tick where no `Session` exists, which is the mechanism that makes "Title == frame 0" true for free. But `GgrsTimePlugin` derives `Time<GgrsTime>` from that same counter and advances it with `Time::advance_to`, which asserts you never move time backwards. bevy_ggrs resets the counter and not the clock. So the counter says 0 and the clock still says 4.98s, and the first tick of the *second* session in a process tries to rewind time to zero and aborts the process.
+
+The probe printed it in three lines:
+
+```
+after match 1: rollback_frame=299 ggrs_elapsed=4.983333333s
+on the menu:   rollback_frame=0   ggrs_elapsed=4.983333333s
+--- installing second session ---
+panicked at bevy_time-0.18.1/src/time.rs:245: tried to move time backwards
+```
+
+This reached me as "replay is still crashing," and I chased the theater for a while on that description. Wrong lead. Watching a tape is just the most natural way to start a second session, and I had only ever tested tapes from a fresh launch, which is the one path that cannot fail. A second *match* crashes identically with no replay anywhere near it. `theater::tests` now pins all three cases, and the fresh-launch test is there specifically because it passing while the other two failed is what located the bug.
+
+The fix mirrors bevy_ggrs's own reset condition (no session on this tick, zero the clock) instead of hooking each teardown site. I'd rather the two resets share one trigger than keep an inventory of every path that drops a session: `despawn_match`, `netplay`'s peer drop, forfeit. An inventory is a thing you forget to add to.
+
+Upstream should reset the clock where it resets the counter. Worth a PR against `bevy_ggrs` if this survives contact.
+
 ## Why a configurable deadzone is determinism-safe
 
 `Settings.stick_deadzone` is player-local and persisted to disk, which normally screams desync risk — per-machine state feeding the sim is exactly how rollback games break. It's safe here because it acts strictly *pre-wire*: it shapes the analog stick magnitude *before* quantization into the 4-byte `PlayerInput`. Two peers with different deadzones still exchange byte-identical quantized wire inputs and resimulate identically; the deadzone only changes how each player's raw touch maps into those bytes, exactly like controller sensitivity. The rule it illustrates: anything *before* wire-quantization may be local and non-deterministic; anything *consuming* the wire input must be identical everywhere. `StickDeadzone` (in `input_touch`) is read by the touch sampler before it emits `PlayerInput`, and `Settings` just mirrors the persisted value into it. (The volume, music, and haptics settings are cosmetic — they never touch the sim at all.)

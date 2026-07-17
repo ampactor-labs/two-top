@@ -108,6 +108,7 @@ impl Plugin for ScreenPlugin {
             .init_resource::<PendingUiThrow>()
             .init_resource::<QuitArm>()
             .add_systems(Startup, spawn_overlays)
+            .add_plugins(RollbackClockPlugin)
             .add_systems(OnEnter(AppScreen::InMatch), spawn_match)
             .add_systems(OnExit(AppScreen::InMatch), despawn_match)
             .add_systems(
@@ -382,6 +383,52 @@ fn spawn_obstacle_block(
         },
         Transform::from_xyz(cx + 8.0, min_y + d * 0.15, -0.45),
     ));
+}
+
+/// Zero the rollback clock on every tick with no session, which is exactly
+/// when bevy_ggrs zeroes the frame count that clock is derived from.
+///
+/// `Time<GgrsTime>` is advanced by `GgrsTimePlugin::update` to
+/// `RollbackFrameCount / RollbackFrameRate` via `Time::advance_to`, which
+/// asserts the new elapsed is not earlier than the old one and aborts the
+/// process if it is. bevy_ggrs resets `RollbackFrameCount` to 0 on any tick
+/// where no `Session` exists, but never resets the clock to match. So the
+/// first tick of the *second* session in a process advances the clock to
+/// frame 0 while it still reads ~50s from the match before, and the assert
+/// kills the app.
+///
+/// That is the replay crash: the phone died on a tape only because watching
+/// one is the common way to start a second session, and a fresh launch into
+/// a tape (which is how it was tested) never reproduces it. It is not about
+/// replays at all; a second *match* takes the same path.
+///
+/// The condition here mirrors bevy_ggrs's own reset condition rather than
+/// hooking the teardown sites, so the clock and the frame count cannot
+/// disagree no matter which path drops the session: quitting a match,
+/// `netplay`'s peer drop, or a forfeit. Ordered before `RunGgrsSystems` so
+/// the reset lands on the same tick as theirs, not one behind.
+fn reset_rollback_clock_between_sessions(
+    session: Option<Res<Session<GgrsCfg>>>,
+    mut time: ResMut<Time<bevy_ggrs::GgrsTime>>,
+) {
+    if session.is_none() && time.elapsed() != core::time::Duration::ZERO {
+        *time = Time::new_with(bevy_ggrs::GgrsTime);
+    }
+}
+
+/// Carries [`reset_rollback_clock_between_sessions`]. Split out of
+/// `ScreenPlugin` because the fix belongs to the ggrs session lifecycle
+/// rather than to screens; a headless harness that swaps sessions needs it
+/// and has no screens to speak of.
+pub struct RollbackClockPlugin;
+
+impl Plugin for RollbackClockPlugin {
+    fn build(&self, app: &mut App) {
+        app.add_systems(
+            PreUpdate,
+            reset_rollback_clock_between_sessions.before(bevy_ggrs::RunGgrsSystems),
+        );
+    }
 }
 
 /// `OnExit(InMatch)`: tear the whole match down — every app-spawned match

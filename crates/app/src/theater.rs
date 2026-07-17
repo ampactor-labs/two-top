@@ -456,6 +456,7 @@ fn spawn_theater_ui(mut commands: Commands, theater: Res<TheaterMode>) {
     if !theater.active {
         return;
     }
+    tracing::info!(target: "two_top::theater", "step: spawn_theater_ui");
     // Marquee: who's on the card. It sits IN the exit band and names the
     // gesture, so the label and the tap target are one thing.
     let a = theater.names[0].clone().unwrap_or_else(|| "CUR".into());
@@ -634,7 +635,14 @@ fn theater_capture_snapshot(world: &mut World) {
         return;
     }
     let snap = SimSnapshot::capture(world);
-    world.resource_mut::<SnapshotBuffer>().entries.push(snap);
+    let mut buf = world.resource_mut::<SnapshotBuffer>();
+    buf.entries.push(snap);
+    tracing::info!(
+        target: "two_top::theater",
+        frame,
+        snapshots = buf.entries.len(),
+        "step: snapshot captured",
+    );
 }
 
 /// The seek state machine (viewer's `drive_seek`), plus end-of-tape pause.
@@ -657,6 +665,7 @@ fn theater_drive_seek(world: &mut World) {
 
     let controls = *world.resource::<TheaterControls>();
     if let Some(target) = controls.seek_target {
+        tracing::info!(target: "two_top::theater", seek = target, current, "step: seek");
         if target < current {
             world
                 .resource_mut::<SnapshotBuffer>()
@@ -761,6 +770,7 @@ fn theater_update_ui(
 /// it was — playback resources out, virtual time back to realtime, the
 /// player's arena pick restored.
 fn theater_teardown(world: &mut World) {
+    tracing::info!(target: "two_top::theater", "step: teardown");
     let (was_active, prev_arena) = {
         let theater = world.resource::<TheaterMode>();
         (theater.active, theater.prev_arena)
@@ -813,6 +823,159 @@ impl Plugin for TheaterPlugin {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The sequence from the crash reports, which a fresh launch never
+    /// reproduces: play a match, leave it, then roll a tape — all in ONE
+    /// process. Booting straight into a tape works (verified on the phone),
+    /// so whatever breaks belongs to the *second* session, not the first.
+    ///
+    /// This drives the real ggrs session swap the screen path performs:
+    /// couch session (check_distance 2) → session removed on match exit →
+    /// menu ticks → playback session (check_distance 0) + `ReplayPlayback`.
+    /// No render, no assets: a panic in a system reproduces here anyway,
+    /// which is the failure mode a phone crash actually is.
+    #[test]
+    fn a_tape_rolls_after_a_match_in_the_same_process() {
+        let mut app = harness();
+        play_a_session(&mut app, 300); // the couch match
+        leave_the_match(&mut app);
+        roll_a_tape(&mut app);
+        assert!(
+            app.world().resource::<sim::FrameCount>().0 > 0,
+            "the tape must advance the sim in the same process as a prior match",
+        );
+    }
+
+    /// The control: a fresh launch straight into a tape. This is the path
+    /// that always worked on the phone, so it must keep working — and it
+    /// pins the failure above to the session *swap*, not to playback.
+    #[test]
+    fn a_tape_rolls_on_a_fresh_launch() {
+        let mut app = harness();
+        roll_a_tape(&mut app);
+        assert!(app.world().resource::<sim::FrameCount>().0 > 0);
+    }
+
+    /// Same swap, no theater: quit a match and start another. The ggrs clock
+    /// doesn't know what a replay is, so if the tape case breaks, this one
+    /// breaks identically — the blast radius is every second match, and the
+    /// replay was only where it got noticed.
+    #[test]
+    fn a_second_match_starts_after_the_first() {
+        let mut app = harness();
+        play_a_session(&mut app, 300);
+        leave_the_match(&mut app);
+        play_a_session(&mut app, 120);
+        assert!(app.world().resource::<sim::FrameCount>().0 > 0);
+    }
+
+    fn harness() -> App {
+        use bevy::time::TimeUpdateStrategy;
+        use bevy_ggrs::GgrsPlugin;
+        use bevy_ggrs::prelude::*;
+        use core::time::Duration;
+        use fixed_math::Vec2F;
+        use sim::{
+            DefaultInputsPlugin, GgrsCfg, Player, PositionF, PreviousPositionF, SimPlugin,
+            VelocityF,
+        };
+
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins);
+        app.insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_secs_f64(
+            1.0 / sim::TICK_HZ as f64,
+        )));
+        app.add_plugins(GgrsPlugin::<GgrsCfg>::default());
+        app.add_plugins(SimPlugin);
+        app.add_plugins(sim::InfiniteRoundPlugin);
+        app.add_plugins(DefaultInputsPlugin);
+        // The real app carries this via `ScreenPlugin`; without it every
+        // assertion below is about the crash, not about the theater.
+        app.add_plugins(crate::screen::RollbackClockPlugin);
+        // The app's real ReadInputs tail: the playback source overwrites the
+        // platform source's map, and only while a tape is loaded.
+        app.add_systems(
+            ReadInputs,
+            replay::playback_inputs_system
+                .run_if(resource_exists::<replay::ReplayPlayback>)
+                .after(sim::read_local_inputs),
+        );
+        for handle in 0..2usize {
+            app.world_mut().spawn((
+                Player { handle },
+                PositionF(Vec2F::ZERO),
+                PreviousPositionF(Vec2F::ZERO),
+                VelocityF(Vec2F::ZERO),
+            ));
+        }
+        app
+    }
+
+    /// A couch match: `screen::build_synctest_session` + `ticks` of play.
+    fn play_a_session(app: &mut App, ticks: usize) {
+        use bevy_ggrs::prelude::*;
+        use sim::GgrsCfg;
+
+        let mut sb = SessionBuilder::<GgrsCfg>::new()
+            .with_num_players(2)
+            .unwrap()
+            .with_check_distance(2)
+            .with_input_delay(0);
+        for i in 0..2 {
+            sb = sb.add_player(PlayerType::Local, i).unwrap();
+        }
+        app.insert_resource(Session::SyncTest(sb.start_synctest_session().unwrap()));
+        for _ in 0..ticks {
+            app.update();
+        }
+        assert!(
+            app.world().resource::<sim::FrameCount>().0 > 0,
+            "the session must actually advance",
+        );
+    }
+
+    /// `screen::despawn_match`, then the menu the player browses through.
+    /// Those menu ticks are load-bearing: bevy_ggrs resets its frame count
+    /// only on a tick with no session at all.
+    fn leave_the_match(app: &mut App) {
+        use bevy_ggrs::prelude::*;
+        use sim::GgrsCfg;
+
+        app.world_mut().remove_resource::<Session<GgrsCfg>>();
+        *app.world_mut().resource_mut::<sim::FrameCount>() = sim::FrameCount::default();
+        for _ in 0..5 {
+            app.update();
+        }
+    }
+
+    /// `theater::start_playback` + the playback session `spawn_match` builds.
+    fn roll_a_tape(app: &mut App) {
+        use replay::{Replay, ReplayHeader};
+        use sim::PlayerInput;
+
+        let inputs = vec![[PlayerInput::default(); 2]; 240];
+        let replay = Replay {
+            header: ReplayHeader {
+                magic: replay::MAGIC,
+                format_version: replay::FORMAT_VERSION,
+                sim_version: sim::SIM_VERSION,
+                seed: 0,
+                num_players: 2,
+                frame_rate: sim::TICK_HZ as u8,
+                frame_count: inputs.len() as u32,
+                recorded_at: 0,
+                winner: Some(0),
+                player_handles: [None, None],
+                arena_id: 0,
+            },
+            inputs,
+        };
+        app.insert_resource(replay::ReplayPlayback::new(replay));
+        app.insert_resource(build_playback_session());
+        for _ in 0..240 {
+            app.update();
+        }
+    }
 
     #[test]
     fn civil_dates_are_correct_around_epochs() {
