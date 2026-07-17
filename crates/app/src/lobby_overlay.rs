@@ -109,10 +109,7 @@ fn update_summoning(
     } else {
         "quick match".to_string()
     };
-    let challenger = peer_profile
-        .0
-        .map(|p| crate::profile::name_from_slots(&p.name))
-        .unwrap_or_else(|| "OPPONENT".to_string());
+    let challenger = crate::profile::peer_name(peer_profile.0);
     let msg = match &*state {
         LobbyState::Connecting => {
             let mut m = format!("SUMMONING{dots}\n\n{room_line}");

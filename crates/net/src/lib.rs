@@ -153,19 +153,39 @@ impl NonBlockingSocket<NetAddr> for MatchboxBridge {
 // resolves.
 // ---------------------------------------------------------------------------
 
-/// Glyph slots in a duelist name (indices into the app's CURSTAG alphabet).
-pub const NAME_LEN: usize = 4;
+/// Longest name the wire carries. 12 is the field's own answer: it is
+/// Xbox's gamertag ceiling, and 8-12 is the band that fits nearly every
+/// platform's limit — long enough to be a name people actually own,
+/// short enough to render on a phone HUD without wrapping.
+pub const NAME_MAX: usize = 12;
+
+/// Tail padding for names shorter than [`NAME_MAX`]. A fixed array keeps
+/// `ProfileData` `Copy`, allocation-free, and bounded BY CONSTRUCTION — a
+/// hostile peer cannot hand us a 10 MB name, because there is nowhere to
+/// put one.
+pub const NAME_EMPTY: u8 = 0xFF;
+
+/// Build a padded wire name from a run of glyph indices — the shape
+/// `ProfileData` wants, without spelling out the tail at every call site.
+pub fn name_slots(indices: &[u8]) -> [u8; NAME_MAX] {
+    let mut slots = [NAME_EMPTY; NAME_MAX];
+    for (slot, i) in slots.iter_mut().zip(indices) {
+        *slot = *i;
+    }
+    slots
+}
 
 /// A peer's shareable identity. `install_id` is a random u128 minted once
 /// per install and persisted — matchbox `PeerId`s are ephemeral per
 /// connection, so this is the durable key the rivalry ledger files a peer
-/// under. `name` is opaque glyph indices; the app clamps them into its
+/// under, and the only thing here that is ever trusted. `name` is opaque
+/// glyph indices padded with [`NAME_EMPTY`]; the app clamps them into its
 /// alphabet at render time, so a malicious value can at worst display a
 /// wrong letter.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct ProfileData {
     pub install_id: u128,
-    pub name: [u8; NAME_LEN],
+    pub name: [u8; NAME_MAX],
 }
 
 /// Messages on the reliable side-channel. postcard-encoded (the project's
@@ -556,7 +576,7 @@ mod tests {
         let msgs = [
             NetMsg::Profile(ProfileData {
                 install_id: 0xdead_beef_cafe_f00d_1122_3344_5566_7788,
-                name: [2, 6, 0, 4],
+                name: crate::name_slots(&[2, 6, 0, 4]),
             }),
             NetMsg::RematchWant,
             NetMsg::Bye,

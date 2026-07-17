@@ -62,13 +62,38 @@ impl CareerRecord {
         self.wins + self.losses
     }
 
+    /// What to call a peer on screen.
+    ///
+    /// Names are not unique and cannot be: there is no server here to
+    /// enforce it, and Riot's own postmortem is that hunting for an
+    /// unclaimed name is where new players quit. So the ledger keys on the
+    /// install-id (two MORGANs are already two rows, correctly) and the
+    /// DISPLAY borrows the Riot ID shape — name plus a short tag — but only
+    /// on the day it earns its keep: the tag appears when this ledger
+    /// actually holds another identity wearing the same name. Meet one
+    /// MORGAN and they are MORGAN forever; meet a second and they both
+    /// become MORGAN#XYZ, at the moment the distinction starts to matter.
+    pub fn display_name(&self, peer: net::ProfileData) -> String {
+        let name = crate::profile::peer_name(Some(peer));
+        let key = rival_key(peer.install_id);
+        let collides = self
+            .rivals
+            .iter()
+            .any(|(k, r)| *k != key && r.name == name);
+        if collides {
+            format!("{name}#{}", crate::profile::identity_tag(peer.install_id))
+        } else {
+            name
+        }
+    }
+
     /// The rivalry line for the CURRENT match against `peer` — counting
     /// this meeting. `None` when no identity arrived (offline peer build,
     /// or the handshake hasn't landed yet).
     pub fn rivalry_line(&self, peer: Option<net::ProfileData>) -> Option<String> {
         let peer = peer?;
         let key = rival_key(peer.install_id);
-        let name = crate::profile::name_from_slots(&peer.name);
+        let name = self.display_name(peer);
         let Some(rival) = self.rivals.get(&key) else {
             return Some(format!("FIRST MEETING with {name}"));
         };
@@ -100,7 +125,7 @@ pub fn record_abandoned_loss(record: &mut CareerRecord, peer: Option<net::Profil
     record.losses += 1;
     if let Some(peer) = peer {
         let rival = record.rivals.entry(rival_key(peer.install_id)).or_default();
-        rival.name = crate::profile::name_from_slots(&peer.name);
+        rival.name = crate::profile::peer_name(Some(peer));
         rival.losses += 1;
     }
     save_career(record);
@@ -211,7 +236,7 @@ fn record_match_result(
     }
     if let Some(peer) = peer.0 {
         let rival = record.rivals.entry(rival_key(peer.install_id)).or_default();
-        rival.name = crate::profile::name_from_slots(&peer.name);
+        rival.name = crate::profile::peer_name(Some(peer));
         if won {
             rival.wins += 1;
         } else {
@@ -307,11 +332,45 @@ mod tests {
     }
 
     #[test]
+    fn the_tag_appears_only_once_two_rivals_share_a_name() {
+        let mut career = CareerRecord::default();
+        let morgan_a = net::ProfileData {
+            install_id: 0xa11,
+            name: net::name_slots(&[12, 14, 17, 6, 0, 13]), // MORGAN
+        };
+        let morgan_b = net::ProfileData {
+            install_id: 0xb22,
+            name: net::name_slots(&[12, 14, 17, 6, 0, 13]), // MORGAN too
+        };
+        // One MORGAN in the ledger: they are just MORGAN.
+        career.rivals.insert(
+            rival_key(morgan_a.install_id),
+            RivalRecord { name: "MORGAN".into(), wins: 1, losses: 0 },
+        );
+        assert_eq!(career.display_name(morgan_a), "MORGAN");
+        // A second, different identity wearing the same name: now both
+        // carry the tag, and the two tags differ.
+        career.rivals.insert(
+            rival_key(morgan_b.install_id),
+            RivalRecord { name: "MORGAN".into(), wins: 0, losses: 1 },
+        );
+        let (a, b) = (career.display_name(morgan_a), career.display_name(morgan_b));
+        assert!(a.starts_with("MORGAN#") && b.starts_with("MORGAN#"), "{a} / {b}");
+        assert_ne!(a, b, "the tag is what tells them apart");
+        // An unrelated name is untouched by their collision.
+        let suds = net::ProfileData {
+            install_id: 0xc33,
+            name: net::name_slots(&[18, 20, 3, 18]), // SUDS
+        };
+        assert_eq!(career.display_name(suds), "SUDS");
+    }
+
+    #[test]
     fn rivalry_line_counts_the_current_meeting() {
         let mut career = CareerRecord::default();
         let peer = net::ProfileData {
             install_id: 0xabc,
-            name: [19, 0, 6, 2], // TAGC
+            name: net::name_slots(&[19, 0, 6, 2]), // TAGC
         };
         assert_eq!(
             career.rivalry_line(Some(peer)).unwrap(),

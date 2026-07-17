@@ -1052,9 +1052,7 @@ fn summary_text(
     // (same rule the grudge ledger scores by) — the old score-only check
     // crowned the FLED player whenever nobody had reached the threshold.
     let me = local_handle.unwrap_or(0);
-    let peer_name = peer
-        .map(|p| crate::profile::name_from_slots(&p.name))
-        .unwrap_or_else(|| "THE CHALLENGER".to_string());
+    let peer_name = crate::profile::peer_name(peer);
     let threshold_hit = score.p0 >= MATCH_WIN_THRESHOLD || score.p1 >= MATCH_WIN_THRESHOLD;
     let i_won = if threshold_hit {
         if me == 0 { p0_won } else { !p0_won }
@@ -1486,10 +1484,7 @@ fn update_summary_buttons(
         && !theater.active();
     let online = netplay.room_url.is_some();
     let opponent_gone = matches!(*lobby, net::LobbyState::Forfeited { .. });
-    let peer_name = peer
-        .0
-        .map(|p| crate::profile::name_from_slots(&p.name))
-        .unwrap_or_else(|| "THE CHALLENGER".to_string());
+    let peer_name = crate::profile::peer_name(peer.0);
     let primary = primary_label(online, practice.0, *consent, &peer_name, opponent_gone);
     // Local consent shows as a pressed/armed button: inverted fill.
     let armed = online && !practice.0 && consent.local && !consent.peer;
@@ -1708,7 +1703,7 @@ mod tests {
     fn online_summary(gone: bool) -> String {
         let peer = net::ProfileData {
             install_id: 7,
-            name: [19, 0, 6, 2], // TAGC
+            name: net::name_slots(&[19, 0, 6, 2]), // TAGC
         };
         summary_text(
             MatchScore {
@@ -1732,7 +1727,7 @@ mod tests {
     fn forfeit_summary(we_fled: bool) -> String {
         let peer = net::ProfileData {
             install_id: 7,
-            name: [19, 0, 6, 2], // TAGC
+            name: net::name_slots(&[19, 0, 6, 2]), // TAGC
         };
         summary_text(
             MatchScore { p0: 2, p1: 1 },
