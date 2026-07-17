@@ -83,6 +83,13 @@ pub struct TheaterControls {
     paused: bool,
     seek_target: Option<u32>,
     speed_idx: usize,
+    /// The last finger position a drag-scrub issued a seek for, so a held
+    /// finger issues exactly one seek. Without it, the drag re-issues every
+    /// frame, and once a seek overshoots its target the still-held finger
+    /// re-targets backward, overshoots again, and oscillates forever — the
+    /// scrub loop. Cleared when no finger is on the strip. See
+    /// [`scrub_debounce`].
+    scrub_anchor: Option<u32>,
 }
 
 impl Default for TheaterControls {
@@ -91,8 +98,35 @@ impl Default for TheaterControls {
             paused: false,
             seek_target: None,
             speed_idx: 1, // 1.0x
+            scrub_anchor: None,
         }
     }
+}
+
+/// Decide whether a drag-scrub touch at `finger_frame` should issue a new
+/// seek, debouncing a held finger. Returns `Some(target)` on the first frame
+/// the finger reaches a position and `None` while it stays there, updating
+/// `anchor`. The playhead can overshoot the target (the fast-forward bursts
+/// a chunk of ticks per frame), so the seek must not depend on the *current*
+/// frame to decide whether to re-fire — a stationary finger that got an
+/// overshoot would otherwise re-target on every frame and never settle.
+fn scrub_debounce(finger_frame: u32, anchor: &mut Option<u32>) -> Option<u32> {
+    if *anchor == Some(finger_frame) {
+        None
+    } else {
+        *anchor = Some(finger_frame);
+        Some(finger_frame)
+    }
+}
+
+/// Whether forward playback should bank a scrub snapshot on `frame`. Every
+/// `SNAPSHOT_INTERVAL` (so a backward seek restores from at most a second
+/// back), plus frame 1 so scrubbing can always reach the start of the tape —
+/// without it the earliest snapshot is a full second in and the first second
+/// is unreachable. Frame 0 is the spawn state the despawn/spawn cycle owns,
+/// never snapshotted mid-session.
+fn should_snapshot(frame: u32) -> bool {
+    frame == 1 || (frame != 0 && frame.is_multiple_of(SNAPSHOT_INTERVAL))
 }
 
 /// Scrub snapshot ring (the viewer's `SnapshotBuffer`).
@@ -457,21 +491,44 @@ fn spawn_theater_ui(mut commands: Commands, theater: Res<TheaterMode>) {
         return;
     }
     tracing::info!(target: "two_top::theater", "step: spawn_theater_ui");
-    // Marquee: who's on the card. It sits IN the exit band and names the
-    // gesture, so the label and the tap target are one thing.
-    let a = theater.names[0].clone().unwrap_or_else(|| "CUR".into());
-    let b = theater.names[1].clone().unwrap_or_else(|| "STAG".into());
+    // The exit. Every menu screen puts a bordered BACK box at the tap target;
+    // the theater used to make do with a thin line of text at the top, easy
+    // to miss when the bottom (where a menu's BACK lives) is the scrub strip.
+    // Give it the same button chrome so it reads as the exit it is. The whole
+    // top band taps to leave (`EXIT_BAND` in `theater_input`); the box just
+    // shows where. Border, fill, label, all tagged for one-shot teardown.
+    let exit_y = crate::screen::TOP_EXIT_ANCHOR_Y;
     commands.spawn((
         TheaterMarquee,
-        Text2d::new(format!("{a} vs {b}  -  tap here to exit")),
-        TextFont {
-            font_size: 34.0,
+        Sprite {
+            color: render::palette::HOT_BONE,
+            custom_size: Some(Vec2::new(322.0, 98.0)),
             ..default()
         },
-        TextColor(render::palette::BONE.with_alpha(0.8)),
-        TextLayout::new_with_justify(Justify::Center),
-        ScreenAnchor::new(0.0, crate::screen::TOP_EXIT_ANCHOR_Y, 0.0, 0.0),
+        ScreenAnchor::new(0.0, exit_y, 0.0, 0.0),
         Transform::from_xyz(0.0, 0.0, 210.0),
+    ));
+    commands.spawn((
+        TheaterMarquee,
+        Sprite {
+            color: render::palette::DEEP_ASH,
+            custom_size: Some(Vec2::new(300.0, 76.0)),
+            ..default()
+        },
+        ScreenAnchor::new(0.0, exit_y, 0.0, 0.0),
+        Transform::from_xyz(0.0, 0.0, 210.5),
+    ));
+    commands.spawn((
+        TheaterMarquee,
+        Text2d::new("BACK"),
+        TextFont {
+            font_size: 40.0,
+            ..default()
+        },
+        TextColor(render::palette::HOT_BONE),
+        TextLayout::new_with_justify(Justify::Center),
+        ScreenAnchor::new(0.0, exit_y, 0.0, 0.0),
+        Transform::from_xyz(0.0, 0.0, 211.0),
     ));
     // Scrub track + fill (sized per-frame against the live view rect).
     commands.spawn((
@@ -599,18 +656,27 @@ fn theater_input(
             controls.seek_target = None;
         }
     }
-    // Press OR drag along the scrub strip seeks (coarse live scrub).
+    // Press OR drag along the scrub strip seeks. A held finger issues ONE
+    // seek per position via `scrub_debounce`; the anchor clears the moment no
+    // finger is on the strip, so the next drag starts fresh. This is what
+    // keeps a landed (possibly overshot) playhead from being re-targeted into
+    // an oscillation.
+    let mut scrubbing = false;
     for t in touches.iter() {
         let p = t.position();
         let fy = p.y / win.y;
         if (SCRUB_BAND.0..SCRUB_BAND.1).contains(&fy) {
+            scrubbing = true;
             let progress = (p.x / win.x).clamp(0.0, 1.0);
             let target = ((progress * total as f32) as u32).clamp(1, total.saturating_sub(1));
-            if controls.seek_target != Some(target) && target != current {
+            if let Some(t) = scrub_debounce(target, &mut controls.scrub_anchor) {
                 controls.paused = true;
-                controls.seek_target = Some(target);
+                controls.seek_target = Some(t);
             }
         }
+    }
+    if !scrubbing {
+        controls.scrub_anchor = None;
     }
 }
 
@@ -623,14 +689,17 @@ fn theater_capture_snapshot(world: &mut World) {
     if world.resource::<TheaterControls>().seek_target.is_some() {
         return;
     }
-    if frame == 0 || !frame.is_multiple_of(SNAPSHOT_INTERVAL) {
+    if !should_snapshot(frame) {
         return;
     }
+    // Idempotent by frame: after a backward seek we replay frames that were
+    // already banked on the first pass, and a duplicate would bloat the ring
+    // (and, since the ring is no longer pruned, accumulate without bound).
     let already = world
         .resource::<SnapshotBuffer>()
         .entries
-        .last()
-        .is_some_and(|s| s.frame == frame);
+        .iter()
+        .any(|s| s.frame == frame);
     if already {
         return;
     }
@@ -667,10 +736,12 @@ fn theater_drive_seek(world: &mut World) {
     if let Some(target) = controls.seek_target {
         tracing::info!(target: "two_top::theater", seek = target, current, "step: seek");
         if target < current {
-            world
-                .resource_mut::<SnapshotBuffer>()
-                .entries
-                .retain(|s| s.frame < target.max(1));
+            // The snapshot ring is a monotonic read cache built during
+            // forward play; NEVER prune it on a seek. An earlier revision
+            // ran `retain(|s| s.frame < target)` here, which gutted the ring
+            // a little more on every backward scrub until nearest_before
+            // returned nothing and seeking silently died. A frame's snapshot
+            // is deterministic, so a later forward seek can still reuse it.
             let nearest = world
                 .resource::<SnapshotBuffer>()
                 .nearest_before(target)
@@ -679,10 +750,9 @@ fn theater_drive_seek(world: &mut World) {
                 snap.restore(world);
                 world.resource_mut::<ReplayPlayback>().cursor = snap.frame as usize;
             } else {
-                // Seeking earlier than the first snapshot: restart the tape
-                // is not available mid-session (world state at frame 0 is
-                // the spawn state, which despawn/spawn cycles own). Snap to
-                // the earliest snapshot instead — a one-second floor.
+                // Seeking earlier than the first snapshot (frame 1). Snap to
+                // it — the earliest playable state we hold — rather than the
+                // spawn state at frame 0, which the despawn/spawn cycle owns.
                 let earliest = world.resource::<SnapshotBuffer>().entries.first().cloned();
                 if let Some(snap) = earliest {
                     snap.restore(world);
@@ -809,11 +879,16 @@ impl Plugin for TheaterPlugin {
                 Update,
                 (
                     replays_input.run_if(in_state(AppScreen::Replays)),
-                    theater_input.run_if(in_state(AppScreen::InMatch)),
-                    theater_capture_snapshot.run_if(in_state(AppScreen::InMatch)),
-                    theater_drive_seek
-                        .run_if(in_state(AppScreen::InMatch))
-                        .after(theater_capture_snapshot),
+                    // Ordered: the seek `theater_input` issues this frame must
+                    // be consumed by `theater_drive_seek` this frame, not next,
+                    // or the transport lags a frame behind every tap.
+                    (
+                        theater_input,
+                        theater_capture_snapshot,
+                        theater_drive_seek,
+                    )
+                        .chain()
+                        .run_if(in_state(AppScreen::InMatch)),
                     theater_update_ui.after(ScreenAnchorSet),
                 ),
             );
@@ -844,6 +919,40 @@ mod tests {
             app.world().resource::<sim::FrameCount>().0 > 0,
             "the tape must advance the sim in the same process as a prior match",
         );
+    }
+
+    /// A held finger issues exactly one seek. This is the scrub-loop fix:
+    /// the finger can sit on one spot for many frames while the playhead
+    /// fast-forwards toward it (and overshoots), and none of those frames may
+    /// re-fire the seek — else the overshoot re-targets and oscillates.
+    #[test]
+    fn a_held_finger_seeks_once() {
+        let mut anchor = None;
+        // Finger lands on frame 500: one seek.
+        assert_eq!(scrub_debounce(500, &mut anchor), Some(500));
+        // Held there while the playhead chases (and would overshoot): silent.
+        assert_eq!(scrub_debounce(500, &mut anchor), None);
+        assert_eq!(scrub_debounce(500, &mut anchor), None);
+        // Finger drags to a new spot: a fresh seek.
+        assert_eq!(scrub_debounce(300, &mut anchor), Some(300));
+        assert_eq!(scrub_debounce(300, &mut anchor), None);
+        // Finger lifts (theater_input clears the anchor), then a new scrub to
+        // the same spot as before must seek again, not be swallowed.
+        anchor = None;
+        assert_eq!(scrub_debounce(300, &mut anchor), Some(300));
+    }
+
+    /// Scrub snapshots land every second AND on frame 1, so a backward seek
+    /// can always reach the start of the tape. Frame 0 is never banked.
+    #[test]
+    fn snapshots_cover_the_whole_tape() {
+        assert!(!should_snapshot(0), "frame 0 is the spawn state, never banked");
+        assert!(should_snapshot(1), "frame 1 anchors the start so scrub reaches it");
+        assert!(!should_snapshot(2));
+        assert!(!should_snapshot(59));
+        assert!(should_snapshot(60), "one-second cadence");
+        assert!(should_snapshot(600));
+        assert!(!should_snapshot(601));
     }
 
     /// The control: a fresh launch straight into a tape. This is the path
