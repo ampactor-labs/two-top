@@ -42,6 +42,15 @@ use input_touch::WindowSize;
 #[derive(Resource, Default)]
 pub struct AwaitingPeer(pub bool);
 
+/// Armed when the player converts an online state into a bot match (the
+/// hanging summons, or a fled opponent's summary). `bot_fallback_input`
+/// tears the online attempt down and bounces through Title — the
+/// sessionless frame that lets bevy_ggrs and [`RollbackClockPlugin`] zero
+/// the rollback clock, plus the full despawn/spawn — and this flag
+/// re-enters InMatch on arrival with practice armed.
+#[derive(Resource, Default)]
+pub struct PendingBotMatch(pub bool);
+
 /// Which screen the app is showing. Both local and online builds boot into
 /// [`Title`](Self::Title); online starts the netplay lifecycle only after the
 /// player enters [`InMatch`](Self::InMatch). [`Replays`](Self::Replays) is
@@ -106,6 +115,7 @@ impl Plugin for ScreenPlugin {
         app.init_resource::<AwaitingPeer>()
             .init_resource::<VictoryPose>()
             .init_resource::<PendingUiThrow>()
+            .init_resource::<PendingBotMatch>()
             .init_resource::<QuitArm>()
             .add_systems(Startup, spawn_overlays)
             .add_plugins(RollbackClockPlugin)
@@ -124,6 +134,10 @@ impl Plugin for ScreenPlugin {
                     back_to_lobby.run_if(in_state(AppScreen::InMatch)),
                     online_leave_input.run_if(in_state(AppScreen::InMatch)),
                     summary_buttons_input.run_if(in_state(AppScreen::InMatch)),
+                    // After summary_buttons_input so the same tap can't
+                    // double-fire: the summary sees the pre-practice state
+                    // and stays inert on a fled opponent.
+                    bot_fallback_input.run_if(in_state(AppScreen::InMatch)),
                     update_victory_pose,
                     hide_absent_challenger,
                     update_title_overlay,
@@ -131,6 +145,7 @@ impl Plugin for ScreenPlugin {
                     update_summary_overlay,
                     update_summary_buttons,
                     update_quit_button,
+                    update_bot_offer_button,
                 )
                     .chain(),
             );
@@ -718,6 +733,7 @@ fn spawn_overlays(mut commands: Commands) {
     ));
     spawn_summary_buttons(&mut commands);
     spawn_quit_button(&mut commands);
+    spawn_bot_offer_button(&mut commands);
 }
 
 /// Next arena in the picker cycle — walks [`sim::ALL_ARENAS`] in wire
@@ -771,8 +787,16 @@ fn title_buttons_input(
     window: Res<WindowSize>,
     mut next: ResMut<NextState<AppScreen>>,
     mut practice: ResMut<crate::bot::PracticeMode>,
+    mut pending_bot: ResMut<PendingBotMatch>,
     mut autostart: Local<Option<Option<AppScreen>>>,
 ) {
+    // A bot fallback tapped mid-wait lands on the Title for one frame:
+    // go straight back in with practice armed.
+    if pending_bot.0 {
+        pending_bot.0 = false;
+        next.set(AppScreen::InMatch);
+        return;
+    }
     // TWOTOP_AUTOSTART=1 skips the gesture; =replays / =settings / =name
     // boot straight into those screens (headless capture verification).
     let auto = *autostart.get_or_insert_with(|| {
@@ -1133,8 +1157,9 @@ fn summary_text(
 }
 
 /// The primary summary button's label — the RUN IT BACK handshake as a
-/// state machine the thumb can read. `None` hides the button (opponent
-/// gone, or a tape playing). Pure for tests.
+/// state machine the thumb can read. A gone opponent flips the slot to the
+/// bot offer (`bot_fallback_input` owns that tap); `None` is kept for any
+/// state that must hide the button outright. Pure for tests.
 pub fn primary_label(
     online: bool,
     practice: bool,
@@ -1146,7 +1171,9 @@ pub fn primary_label(
         return Some("PLAY AGAIN".to_string());
     }
     if opponent_gone {
-        return None;
+        // Nobody left to run it back with — offer the opponent who never
+        // leaves instead. `bot_fallback_input` owns the tap.
+        return Some("PLAY THE BOT".to_string());
     }
     Some(match (consent.local, consent.peer) {
         (false, false) => "RUN IT BACK".to_string(),
@@ -1500,6 +1527,103 @@ fn update_quit_button(
     }
 }
 
+// ---- The bot fallback ----
+// "Play against a bot" must stay one tap away in every state, including
+// the two online states that used to strand a player without it: the
+// waiting room (the summons can hang forever if nobody else is online) and
+// the fled-opponent summary (whose primary slot was dead). Both convert to
+// a practice match on the spot.
+
+/// The waiting room's bot offer. Shown only while [`AwaitingPeer`] is up,
+/// in the PLAY slot — the thumb that just tapped FIND OPPONENT is already
+/// there, and the touch overlays hide while awaiting so the band is free.
+#[derive(Component)]
+struct BotOfferButton {
+    role: BtnRole,
+}
+
+fn spawn_bot_offer_button(commands: &mut Commands) {
+    for role in [BtnRole::Border, BtnRole::Fill, BtnRole::Label] {
+        spawn_button_part(
+            commands,
+            role,
+            Vec2::new(0.0, PLAY_ANCHOR_Y),
+            Vec2::new(760.0, 150.0),
+            44.0,
+            &mut |ec, role| {
+                ec.insert(BotOfferButton { role });
+            },
+        );
+    }
+}
+
+/// Show the waiting room's PLAY THE BOT button while the summons hangs.
+/// The fled-opponent summary offers the same escape through the summary
+/// primary (`primary_label`), so this one keys off [`AwaitingPeer`] alone.
+fn update_bot_offer_button(
+    awaiting: Res<AwaitingPeer>,
+    mut q: Query<(&BotOfferButton, &mut Visibility, Option<&mut Text2d>)>,
+) {
+    for (btn, mut vis, text) in &mut q {
+        *vis = if awaiting.0 {
+            Visibility::Visible
+        } else {
+            Visibility::Hidden
+        };
+        if awaiting.0
+            && btn.role == BtnRole::Label
+            && let Some(mut t) = text
+        {
+            t.0 = "PLAY THE BOT".to_string();
+        }
+    }
+}
+
+/// A tap in the PLAY slot (or P) while the bot is on offer: arm practice,
+/// fold the online attempt, and bounce through Title — [`PendingBotMatch`]
+/// re-enters InMatch on arrival, so the full teardown/spawn path runs
+/// (sessionless clock reset included) instead of a hand-rolled in-place
+/// session swap. Exclusive-world because the teardown touches the
+/// non-send socket. No result is recorded: the wait staked nothing, and a
+/// fled opponent's forfeit was filed when they fled.
+fn bot_fallback_input(world: &mut World) {
+    if world.resource::<crate::theater::TheaterMode>().active() {
+        return;
+    }
+    let online = world.resource::<NetplayConfig>().room_url.is_some()
+        && !world.resource::<crate::bot::PracticeMode>().0;
+    if !online {
+        return;
+    }
+    let awaiting = world.resource::<AwaitingPeer>().0;
+    let fled_summary = matches!(*world.resource::<MatchState>(), MatchState::MatchOver)
+        && matches!(
+            *world.resource::<net::LobbyState>(),
+            net::LobbyState::Forfeited { .. }
+        );
+    if !(awaiting || fled_summary) {
+        return;
+    }
+    let key = world
+        .resource::<ButtonInput<KeyCode>>()
+        .just_pressed(KeyCode::KeyP);
+    let win = world.resource::<WindowSize>().0;
+    let tapped = win.y > 0.0
+        && world
+            .resource::<Touches>()
+            .iter_just_pressed()
+            .any(|t| in_band(t.position().y / win.y, PLAY_BTN_RECT));
+    if !(key || tapped) {
+        return;
+    }
+    world.resource_mut::<crate::bot::PracticeMode>().0 = true;
+    crate::netplay::leave_online_match(world);
+    world.resource_mut::<PendingBotMatch>().0 = true;
+    world
+        .resource_mut::<NextState<AppScreen>>()
+        .set(AppScreen::Title);
+}
+
 type SummaryButtonQuery<'w, 's> = Query<
     'w,
     's,
@@ -1533,8 +1657,10 @@ fn update_summary_buttons(
     let opponent_gone = matches!(*lobby, net::LobbyState::Forfeited { .. });
     let peer_name = crate::profile::peer_name(peer.0);
     let primary = primary_label(online, practice.0, *consent, &peer_name, opponent_gone);
-    // Local consent shows as a pressed/armed button: inverted fill.
-    let armed = online && !practice.0 && consent.local && !consent.peer;
+    // Local consent shows as a pressed/armed button: inverted fill — unless
+    // the opponent has gone, where the slot now reads PLAY THE BOT and a
+    // stale pre-flight consent must not render it pressed.
+    let armed = online && !practice.0 && consent.local && !consent.peer && !opponent_gone;
 
     for (btn, mut vis, sprite, text, color) in &mut q {
         let shown = over
@@ -1841,7 +1967,11 @@ mod tests {
             "RUNNING IT BACK..."
         );
         // Nobody left to run it back with: the button hides.
-        assert_eq!(primary_label(true, false, c(false, false), "TAGC", true), None);
+        // A fled opponent doesn't kill the slot — it offers the bot.
+        assert_eq!(
+            primary_label(true, false, c(false, false), "TAGC", true).unwrap(),
+            "PLAY THE BOT"
+        );
         // Couch and practice keep the plain restart.
         assert_eq!(
             primary_label(false, false, c(false, false), "", false).unwrap(),
