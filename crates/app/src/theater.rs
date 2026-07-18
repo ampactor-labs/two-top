@@ -83,13 +83,17 @@ pub struct TheaterControls {
     paused: bool,
     seek_target: Option<u32>,
     speed_idx: usize,
-    /// The last finger position a drag-scrub issued a seek for, so a held
-    /// finger issues exactly one seek. Without it, the drag re-issues every
-    /// frame, and once a seek overshoots its target the still-held finger
-    /// re-targets backward, overshoots again, and oscillates forever — the
-    /// scrub loop. Cleared when no finger is on the strip. See
-    /// [`scrub_debounce`].
-    scrub_anchor: Option<u32>,
+    /// Window-fraction x of the last drag-scrub seek, so a held finger
+    /// issues one seek per deliberate move. The first cut of this anchor
+    /// stored the exact target FRAME, which survives a unit test and dies
+    /// on a phone: a held finger jitters a pixel or two every report, and
+    /// on any real tape one pixel is several frames, so every report was a
+    /// "new" target — the seek re-fired every frame, each backward jitter
+    /// restored a snapshot and re-chased at 64x, and the playhead thrashed
+    /// forever. The scrub loop, again. Screen-space with a dead zone
+    /// ([`SCRUB_DEADZONE`]) is jitter-proof by construction. Cleared when
+    /// no finger is on the strip. See [`scrub_debounce`].
+    scrub_anchor: Option<f32>,
 }
 
 impl Default for TheaterControls {
@@ -103,19 +107,28 @@ impl Default for TheaterControls {
     }
 }
 
-/// Decide whether a drag-scrub touch at `finger_frame` should issue a new
-/// seek, debouncing a held finger. Returns `Some(target)` on the first frame
-/// the finger reaches a position and `None` while it stays there, updating
-/// `anchor`. The playhead can overshoot the target (the fast-forward bursts
-/// a chunk of ticks per frame), so the seek must not depend on the *current*
-/// frame to decide whether to re-fire — a stationary finger that got an
-/// overshoot would otherwise re-target on every frame and never settle.
-fn scrub_debounce(finger_frame: u32, anchor: &mut Option<u32>) -> Option<u32> {
-    if *anchor == Some(finger_frame) {
-        None
-    } else {
-        *anchor = Some(finger_frame);
-        Some(finger_frame)
+/// Fraction of the window width the scrubbing finger must move from the
+/// spot that issued the last seek before a new one fires. A held finger's
+/// touch jitter is a few device pixels — well under half a percent of the
+/// width — while a deliberate drag crosses this in one report. ~80 stops
+/// across the strip is finer than a thumb can aim anyway.
+const SCRUB_DEADZONE: f32 = 0.012;
+
+/// Decide whether a drag-scrub touch at window-fraction `finger_fx` should
+/// issue a new seek. Fires on the first touch of a scrub and again each
+/// time the finger moves [`SCRUB_DEADZONE`] past the spot that last fired;
+/// anything closer is touch jitter and must stay silent — the playhead can
+/// sit overshot past its target (the 64x chase bursts a chunk of ticks per
+/// frame), and any re-fire while the finger holds still re-targets it into
+/// the scrub loop. The anchor moves only when a seek fires, so jitter can
+/// never random-walk it across the threshold.
+fn scrub_debounce(finger_fx: f32, anchor: &mut Option<f32>) -> bool {
+    match *anchor {
+        Some(a) if (finger_fx - a).abs() < SCRUB_DEADZONE => false,
+        _ => {
+            *anchor = Some(finger_fx);
+            true
+        }
     }
 }
 
@@ -656,26 +669,26 @@ fn theater_input(
             controls.seek_target = None;
         }
     }
-    // Press OR drag along the scrub strip seeks. A held finger issues ONE
-    // seek per position via `scrub_debounce`; the anchor clears the moment no
-    // finger is on the strip, so the next drag starts fresh. This is what
-    // keeps a landed (possibly overshot) playhead from being re-targeted into
-    // an oscillation.
-    let mut scrubbing = false;
-    for t in touches.iter() {
-        let p = t.position();
-        let fy = p.y / win.y;
-        if (SCRUB_BAND.0..SCRUB_BAND.1).contains(&fy) {
-            scrubbing = true;
-            let progress = (p.x / win.x).clamp(0.0, 1.0);
-            let target = ((progress * total as f32) as u32).clamp(1, total.saturating_sub(1));
-            if let Some(t) = scrub_debounce(target, &mut controls.scrub_anchor) {
-                controls.paused = true;
-                controls.seek_target = Some(t);
-            }
+    // Press OR drag along the scrub strip seeks. ONE finger owns the scrub
+    // (lowest touch id = the finger that landed first): two touches in the
+    // band alternating positions frame-to-frame would defeat any debounce.
+    // A seek fires only when that finger has moved a real distance since
+    // the last one (`scrub_debounce`); the anchor clears the moment no
+    // finger is on the strip, so the next scrub starts fresh. This is what
+    // keeps a landed (possibly overshot) playhead from being re-targeted
+    // into an oscillation.
+    let scrub_touch = touches
+        .iter()
+        .filter(|t| (SCRUB_BAND.0..SCRUB_BAND.1).contains(&(t.position().y / win.y)))
+        .min_by_key(|t| t.id());
+    if let Some(t) = scrub_touch {
+        let fx = (t.position().x / win.x).clamp(0.0, 1.0);
+        if scrub_debounce(fx, &mut controls.scrub_anchor) {
+            let target = ((fx * total as f32) as u32).clamp(1, total.saturating_sub(1));
+            controls.paused = true;
+            controls.seek_target = Some(target);
         }
-    }
-    if !scrubbing {
+    } else {
         controls.scrub_anchor = None;
     }
 }
@@ -921,25 +934,53 @@ mod tests {
         );
     }
 
-    /// A held finger issues exactly one seek. This is the scrub-loop fix:
-    /// the finger can sit on one spot for many frames while the playhead
-    /// fast-forwards toward it (and overshoots), and none of those frames may
-    /// re-fire the seek — else the overshoot re-targets and oscillates.
+    /// A held finger issues exactly one seek, INCLUDING under touch jitter.
+    /// This is the scrub-loop fix, second cut: the first debounce keyed on
+    /// the exact target frame, and a phone finger never reports the same
+    /// position twice — on any real tape one pixel is several frames, so
+    /// sub-pixel wander re-fired the seek every report and the playhead
+    /// thrashed. Positions here are window-fraction x.
     #[test]
-    fn a_held_finger_seeks_once() {
+    fn a_jittering_held_finger_seeks_once() {
         let mut anchor = None;
-        // Finger lands on frame 500: one seek.
-        assert_eq!(scrub_debounce(500, &mut anchor), Some(500));
-        // Held there while the playhead chases (and would overshoot): silent.
-        assert_eq!(scrub_debounce(500, &mut anchor), None);
-        assert_eq!(scrub_debounce(500, &mut anchor), None);
-        // Finger drags to a new spot: a fresh seek.
-        assert_eq!(scrub_debounce(300, &mut anchor), Some(300));
-        assert_eq!(scrub_debounce(300, &mut anchor), None);
-        // Finger lifts (theater_input clears the anchor), then a new scrub to
-        // the same spot as before must seek again, not be swallowed.
+        // Finger lands mid-strip: one seek.
+        assert!(scrub_debounce(0.500, &mut anchor));
+        // Held "still" — which on a touchscreen means wandering a couple of
+        // device pixels every report: all silent.
+        assert!(!scrub_debounce(0.502, &mut anchor));
+        assert!(!scrub_debounce(0.498, &mut anchor));
+        assert!(!scrub_debounce(0.500, &mut anchor));
+        // A slow deliberate drag: sub-threshold steps stay silent but keep
+        // measuring from the spot that last FIRED (no anchor creep), so the
+        // step that crosses the zone fires.
+        assert!(!scrub_debounce(0.508, &mut anchor));
+        assert!(scrub_debounce(0.516, &mut anchor));
+        // A fast drag fires immediately.
+        assert!(scrub_debounce(0.60, &mut anchor));
+        // Finger lifts (theater_input clears the anchor); re-pressing the
+        // same spot must seek again, not be swallowed.
         anchor = None;
-        assert_eq!(scrub_debounce(300, &mut anchor), Some(300));
+        assert!(scrub_debounce(0.60, &mut anchor));
+    }
+
+    /// Six hundred frames of a finger held on the strip with realistic
+    /// sensor noise (±3 px around a fixed point on a 1080-wide screen):
+    /// exactly one seek total. This is the soak the first cut would have
+    /// failed — it fired on nearly every one of the 600 reports.
+    #[test]
+    fn six_hundred_jittery_reports_fire_one_seek() {
+        let mut anchor = None;
+        let mut fires = 0;
+        let mut lcg: u32 = 0x2b99_2ddf;
+        for _ in 0..600 {
+            lcg = lcg.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            let noise = ((lcg >> 16) % 7) as f32 - 3.0; // -3..=3 px
+            let x = 540.0 + noise;
+            if scrub_debounce(x / 1080.0, &mut anchor) {
+                fires += 1;
+            }
+        }
+        assert_eq!(fires, 1, "a held finger's jitter must never re-fire the seek");
     }
 
     /// Scrub snapshots land every second AND on frame 1, so a backward seek
