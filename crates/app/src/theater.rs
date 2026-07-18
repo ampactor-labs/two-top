@@ -980,7 +980,10 @@ mod tests {
                 fires += 1;
             }
         }
-        assert_eq!(fires, 1, "a held finger's jitter must never re-fire the seek");
+        assert_eq!(
+            fires, 1,
+            "a held finger's jitter must never re-fire the seek"
+        );
     }
 
     /// Scrub snapshots land every second AND on frame 1, so a backward seek
