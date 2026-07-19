@@ -22,7 +22,7 @@ use sim::{
     GgrsCfg, MatchScore, MatchState, Player, PositionF, PreviousPositionF, RESPAWN_FRAMES,
     SelectedArena, SimPlugin, SimSnapshot, VelocityF, arena_pyres_for, boomerang_pyre_collision,
     boomerang_sigil_collision, chain_ignition, chasm_kills, crossing_sigils, reliquary_doors,
-    sigil_door_teleport,
+    respawn_position, sigil_door_teleport,
 };
 
 fn bare_app() -> App {
@@ -233,11 +233,11 @@ fn crossing_app() -> App {
 fn crossing_chasm_kills_player_and_scores_opponent() {
     let mut app = crossing_app();
     *app.world_mut().resource_mut::<FrameCount>() = FrameCount(500);
-    // P0 stands in the central chasm (x=0); P1 is safe on its side.
+    // P0 stands in the central moat (y=0); P1 is safe on its seat's half.
     app.world_mut()
         .spawn((Player { handle: 0 }, PositionF(Vec2F::from_cm(0, 0))));
     app.world_mut()
-        .spawn((Player { handle: 1 }, PositionF(Vec2F::from_cm(100, 0))));
+        .spawn((Player { handle: 1 }, PositionF(Vec2F::from_cm(0, 200))));
 
     app.world_mut().run_system_once(chasm_kills).unwrap();
 
@@ -678,4 +678,30 @@ fn walled_and_no_storm_arenas_gate_the_void() {
         run(ArenaId::Anchor) > 0,
         "Anchor's sudden death still bites the same spot"
     );
+}
+
+/// A duelist standing on their own spawn point must survive the chasm.
+/// The chasm predates the depth-duel spawn move: it was cut as a VERTICAL
+/// band when spawns sat at (±100, 0), and the Y-axis spawns at (0, ±300)
+/// landed inside it. Worse than the round-start death: `tick_respawn` snaps
+/// a killed player straight back INTO the band and SpawnGuard deliberately
+/// leaves chasm kills lethal, so the first Crossing kill cascades — every
+/// respawn dies on arrival until the bridge happens to rise.
+#[test]
+fn crossing_spawns_survive_the_chasm() {
+    let mut app = crossing_app();
+    *app.world_mut().resource_mut::<FrameCount>() = FrameCount(500);
+    for handle in 0..2 {
+        app.world_mut()
+            .spawn((Player { handle }, PositionF(respawn_position(handle))));
+    }
+    app.world_mut().run_system_once(chasm_kills).unwrap();
+    let mut q = app.world_mut().query::<(&Player, &Dead)>();
+    for (p, d) in q.iter(app.world()) {
+        assert!(
+            !d.is_dying(),
+            "handle {} devoured by the chasm while standing on its own spawn",
+            p.handle
+        );
+    }
 }

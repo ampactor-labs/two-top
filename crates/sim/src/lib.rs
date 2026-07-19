@@ -90,7 +90,13 @@ pub const TICK_DT: Fix = Fix::lit("0.01666666666");
 /// sprites away from their hitboxes (which would break the what-you-see-is-
 /// what-kills law the whole render layer is built on). Every hit distance
 /// in the game moves with it.
-pub const SIM_VERSION: u32 = 12;
+///
+/// `13` = the Crossing chasm rotates to the depth-duel axes: a horizontal
+/// moat between the seats instead of the pre-tilt vertical band the Y-axis
+/// spawns landed inside (spawn-in-moat round-start deaths + the respawn
+/// death cascade), and the altar sigils move off the duel axis onto each
+/// seat's half.
+pub const SIM_VERSION: u32 = 13;
 
 // ---- Components ----
 
@@ -786,7 +792,7 @@ pub fn arena_obstacles_for(arena: ArenaId) -> Vec<Wall> {
             block(-280, -300, 38, 38),
             block(280, -300, 38, 38),
         ],
-        // Crossing: tall pillars flanking the central chasm.
+        // Crossing: a tall pillar on each quarter, flanking the moat's ends.
         ArenaId::Crossing => vec![
             block(-300, 210, 30, 72),
             block(300, 210, 30, 72),
@@ -3761,11 +3767,15 @@ pub fn boomerang_pyre_collision(
 
 // ---- Phase 16 cycle 3: Crossing arena (blood chasm + altar bridge) ----
 
-/// Half-width of the Crossing arena's central blood chasm. The chasm is a
-/// VERTICAL band on the x-axis (players spawn at `±100,0`, so a horizontal
-/// chasm at y=0 would kill them on spawn — the chasm separates the two
-/// sides instead). 60 cm leaves a 24 cm gap to each spawn's outer edge.
-pub const CHASM_HALF_WIDTH_CM: i32 = 60;
+/// Half-breadth of the Crossing arena's central blood chasm — a HORIZONTAL
+/// moat at y=0 between the two seats. It was cut vertical when the duel ran
+/// along the x-axis with spawns at (±100, 0); the depth-duel move put the
+/// spawns at (0, ±300) INSIDE that band, so a duelist standing on their own
+/// spawn was devoured at round start — and every respawn snapped back into
+/// the band (SpawnGuard leaves the chasm lethal by design) and died again,
+/// cascading the round after the first kill. Rotated with the duel: the
+/// moat now separates the seats and clears each spawn by 240 cm.
+pub const CHASM_HALF_BREADTH_CM: i32 = 60;
 
 /// How long an altar-sigil hit keeps the bone bridge raised (5 s at 60 Hz).
 pub const BRIDGE_DURATION_FRAMES: u32 = 300;
@@ -3787,22 +3797,24 @@ impl BridgeState {
     }
 }
 
-/// The Crossing arena's central chasm rect — a vertical band on the x-axis
-/// spanning the full arena height.
+/// The Crossing arena's central chasm rect — a horizontal moat at y=0
+/// spanning the full arena width, separating the two seats.
 pub fn crossing_chasm() -> RectF {
-    let hw = Fix::const_from_int(CHASM_HALF_WIDTH_CM);
-    let hh = Fix::const_from_int(ARENA_HALF_HEIGHT_CM);
+    let hw = Fix::const_from_int(ARENA_HALF_WIDTH_CM);
+    let hh = Fix::const_from_int(CHASM_HALF_BREADTH_CM);
     RectF::from_center_half_extents(Vec2F::ZERO, Vec2F::new(hw, hh))
 }
 
-/// The two altar sigils — one per side at `±250,0`, reachable by a thrown
-/// boomerang. Mirror-symmetric about x=0. Hitting either raises the bridge.
+/// The two altar sigils — one on each seat's half, off the duel axis so a
+/// straight throw at the opponent never clips one by accident, clear of the
+/// pillars at (±300, ±210) and of the moat, point-symmetric like every
+/// Crossing fixture. Hitting either raises the bridge.
 pub fn crossing_sigils() -> Vec<RectF> {
     let h = Fix::const_from_int(ALTAR_SIGIL_HALF_EXTENT_CM);
     let half = Vec2F::new(h, h);
     vec![
-        RectF::from_center_half_extents(Vec2F::from_cm(-250, 0), half),
-        RectF::from_center_half_extents(Vec2F::from_cm(250, 0), half),
+        RectF::from_center_half_extents(Vec2F::from_cm(-230, -150), half),
+        RectF::from_center_half_extents(Vec2F::from_cm(230, 150), half),
     ]
 }
 
