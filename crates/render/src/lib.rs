@@ -991,23 +991,28 @@ fn spawn_crossing(
     atlases: &mut Assets<TextureAtlasLayout>,
     flip: f32,
 ) {
+    // The moat runs HORIZONTALLY between the seats (SIM_VERSION 13), so the
+    // tiles lay along x. Each tile keeps the strip texture's 1:2 read by
+    // rotating the sprite a quarter turn: the texture's long axis (drawn for
+    // the old vertical band) becomes the moat's width.
     let (chasm_c, chasm_sz) = rect_center_size(sim::crossing_chasm(), flip);
-    let tile_h = chasm_sz.x * 2.0 * WORLD_TILT_Y; // 1:2 tiles, Y foreshortened to the tabletop
-    let n = (chasm_sz.y / tile_h).ceil() as i32 + 1;
+    let tile_w = chasm_sz.y * 2.0; // 2:1 tiles laid along the moat
+    let n = (chasm_sz.x / tile_w).ceil() as i32 + 1;
     let chasm_img = asset_server.load("sprites/arena/chasm_strip.png");
     let bridge_img = asset_server.load("sprites/arena/bone_bridge_tile.png");
-    let start = chasm_c.y - (n as f32 - 1.0) * tile_h * 0.5;
+    let quarter = Quat::from_rotation_z(core::f32::consts::FRAC_PI_2);
+    let start = chasm_c.x - (n as f32 - 1.0) * tile_w * 0.5;
     for i in 0..n {
-        let y = start + i as f32 * tile_h;
+        let x = start + i as f32 * tile_w;
         // Chasm pit (z=-0.9, just above floor).
         commands.spawn((
             ArenaProp,
             Sprite {
                 image: chasm_img.clone(),
-                custom_size: Some(Vec2::new(chasm_sz.x, tile_h)),
+                custom_size: Some(Vec2::new(chasm_sz.y, tile_w)),
                 ..default()
             },
-            Transform::from_xyz(chasm_c.x, y, -0.9),
+            Transform::from_xyz(x, chasm_c.y, -0.9).with_rotation(quarter),
         ));
         // Bone bridge overlay (z=-0.8), hidden until a sigil raises it.
         commands.spawn((
@@ -1015,10 +1020,10 @@ fn spawn_crossing(
             BridgeVisual,
             Sprite {
                 image: bridge_img.clone(),
-                custom_size: Some(Vec2::new(chasm_sz.x, tile_h)),
+                custom_size: Some(Vec2::new(chasm_sz.y, tile_w)),
                 ..default()
             },
-            Transform::from_xyz(chasm_c.x, y, -0.8),
+            Transform::from_xyz(x, chasm_c.y, -0.8).with_rotation(quarter),
             Visibility::Hidden,
         ));
     }
@@ -1200,15 +1205,23 @@ pub struct EffectSprite {
     pub elapsed: f32,
     /// Current frame index. Despawn fires when this hits `frames`.
     pub current: u16,
+    /// First atlas cell of the animation — nonzero when the sheet carries
+    /// several recolor rows of the same animation (the ambient motes).
+    pub first: u16,
 }
 
 impl EffectSprite {
     pub fn new(frames: u16, seconds_per_frame: f32) -> Self {
+        Self::new_from(0, frames, seconds_per_frame)
+    }
+
+    pub fn new_from(first: u16, frames: u16, seconds_per_frame: f32) -> Self {
         Self {
             frames,
             seconds_per_frame,
             elapsed: 0.0,
             current: 0,
+            first,
         }
     }
 }
@@ -1235,7 +1248,7 @@ pub fn advance_effect_sprites(
             continue;
         }
         if let Some(atlas) = sprite.texture_atlas.as_mut() {
-            atlas.index = effect.current as usize;
+            atlas.index = (effect.first + effect.current) as usize;
         }
     }
 }
@@ -1297,16 +1310,46 @@ pub fn spawn_effect(
     pixel_size: f32,
     z_layer: f32,
 ) {
+    spawn_effect_from(
+        commands,
+        image,
+        layout,
+        0,
+        frames,
+        seconds_per_frame,
+        world_pos,
+        pixel_size,
+        z_layer,
+    );
+}
+
+/// [`spawn_effect`] starting at atlas cell `first` — for sheets that carry
+/// several recolor rows of one animation (the ambient motes).
+#[allow(clippy::too_many_arguments)]
+pub fn spawn_effect_from(
+    commands: &mut Commands,
+    image: Handle<Image>,
+    layout: Handle<TextureAtlasLayout>,
+    first: u16,
+    frames: u16,
+    seconds_per_frame: f32,
+    world_pos: Vec2,
+    pixel_size: f32,
+    z_layer: f32,
+) {
     commands.spawn((
         Sprite {
             image,
-            texture_atlas: Some(TextureAtlas { layout, index: 0 }),
+            texture_atlas: Some(TextureAtlas {
+                layout,
+                index: first as usize,
+            }),
             custom_size: Some(Vec2::splat(pixel_size)),
             ..default()
         },
         Anchor::CENTER,
         Transform::from_xyz(world_pos.x, world_pos.y, z_layer),
-        EffectSprite::new(frames, seconds_per_frame),
+        EffectSprite::new_from(first, frames, seconds_per_frame),
     ));
 }
 
@@ -1360,10 +1403,12 @@ fn load_effect_assets(
         None,
         None,
     ));
+    // 3 rows: ember mote / cold dust / grove spore — one register per arena
+    // family, picked by `ambient_profile`.
     let ember_layout = atlases.add(TextureAtlasLayout::from_grid(
         UVec2::splat(8),
         4,
-        1,
+        3,
         None,
         None,
     ));
@@ -1827,28 +1872,46 @@ pub struct EmberAccumulator {
     pub elapsed: f32,
 }
 
-const EMBER_RATE_HZ: f32 = 4.0;
 const EMBER_ARENA_HALF_W: f32 = 650.0;
 const EMBER_ARENA_HALF_H: f32 = 400.0;
+
+/// The arena's ambient air: (spawn rate Hz, sheet row). Row 0 = ember mote,
+/// row 1 = cold dust, row 2 = grove spore. The Pit smolders, the Vigil is
+/// nearly still, the Forest drifts thick with spores — the air says where
+/// you are before the floor does.
+fn ambient_profile(arena: sim::ArenaId) -> (f32, u16) {
+    match arena {
+        sim::ArenaId::Anchor => (4.0, 0),
+        sim::ArenaId::Crossing => (2.5, 1),
+        sim::ArenaId::Reliquary => (3.0, 2),
+        sim::ArenaId::Pit => (8.0, 0),
+        sim::ArenaId::Vigil => (1.2, 1),
+        sim::ArenaId::Gallery => (1.8, 1),
+        sim::ArenaId::Forest => (5.0, 2),
+    }
+}
 
 pub fn spawn_ambient_embers(
     time: Res<Time<Real>>,
     mut commands: Commands,
     assets: Res<EffectAssets>,
     flip: Res<PerspectiveFlip>,
+    selected: Res<sim::SelectedArena>,
     mut rng: ResMut<CosmeticRng>,
     mut acc: ResMut<EmberAccumulator>,
 ) {
+    let (rate_hz, row) = ambient_profile(selected.0);
     acc.elapsed += time.delta_secs();
-    let interval = 1.0 / EMBER_RATE_HZ;
+    let interval = 1.0 / rate_hz;
     while acc.elapsed >= interval {
         acc.elapsed -= interval;
         let x = rng.0.gen_range(-EMBER_ARENA_HALF_W..=EMBER_ARENA_HALF_W);
         let y = rng.0.gen_range(-EMBER_ARENA_HALF_H..=EMBER_ARENA_HALF_H);
-        spawn_effect(
+        spawn_effect_from(
             &mut commands,
             assets.ambient_ember.0.clone(),
             assets.ambient_ember.1.clone(),
+            row * 4,
             4,
             0.080,
             Vec2::new(x, tilt_y(y * flip.0)),
