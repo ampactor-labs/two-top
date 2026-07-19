@@ -527,6 +527,44 @@ def _tq_shadow(g: list[list[str]], cx: int) -> None:
         _span(g, yy, x0, x1, "o")
 
 
+# --- cloak runes: the personal mark -----------------------------------------
+# Eight quiet glyphs worn on the cloak's chest — the install-id's demon made
+# visibly YOURS without touching anything readability owns: painted only
+# over pixels that are already cloth ('M'/'m'), so the silhouette, the team
+# hood, and the eye heat are untouchable by construction. Rune 0 is the
+# unmarked classic. Drawn in fold-shadow 'm' with a single lit 'L' pixel;
+# at table distance it reads as cloth detail, up close it reads as a mark.
+_RUNE_GLYPHS: "dict[int, list[str]]" = {
+    1: ["..#..", ".#.#.", "..*..", ".#.#.", "..#.."],  # the eye
+    2: ["#...#", ".#.#.", "..*..", ".#.#.", "#...#"],  # the cross
+    3: ["..#..", "..#..", ".#*#.", "..#..", "..#.."],  # the anchor
+    4: [".###.", "#...#", "#.*.#", "#...#", ".###."],  # the ring
+    5: ["#....", ".#...", "..*..", "...#.", "....#"],  # the slash
+    6: ["..#..", ".#.#.", "#.*.#", ".#.#.", "..#.."],  # the fang
+    7: [".#.#.", ".#.#.", "..*..", ".#.#.", ".#.#."],  # the gate
+}
+
+# The rune player_sheet is currently building — a module global rather than
+# a parameter threaded through 41 frames x 3 views x 3 compositors. The
+# generator is single-threaded and deterministic; player_sheet sets it and
+# restores it around each build.
+_ACTIVE_RUNE = 0
+
+
+def _paint_rune(g: list[list[str]], cx: int, sy: int) -> None:
+    glyph = _RUNE_GLYPHS.get(_ACTIVE_RUNE)
+    if glyph is None:
+        return
+    top = sy + 6  # chest rows, below the mantle, above the hem folds
+    for ry, row in enumerate(glyph):
+        for rx, ch in enumerate(row):
+            if ch == ".":
+                continue
+            x, y = cx - 2 + rx, top + ry
+            if 0 <= y < len(g) and 0 <= x < len(g[0]) and g[y][x] in ("M", "m"):
+                g[y][x] = "L" if ch == "*" else "m"
+
+
 def _tq_figure(g: list[list[str]], cx: int, dy: int, b: Build,
                hunch: int, leg: str, arm: str, spaulder: bool) -> None:
     """Compose the turned cloaked drifter. Faces right; all geometry keys off the
@@ -854,6 +892,7 @@ def _draw_duelist(
     if ground:
         _tq_shadow(g, cx)
     _tq_figure(g, cx, bob, b, hunch, leg, arm_r, spaulder)
+    _paint_rune(g, cx, 18 + bob + hunch)
     _shade(g)
     _outline(g)
     return g
@@ -877,6 +916,7 @@ def _draw_duelist_back(
     if ground:
         _tq_shadow(g, cx)
     _tq_figure_back(g, cx, bob, b, hunch, leg, arm_r, spaulder)
+    _paint_rune(g, cx, 18 + bob + hunch)
     _shade(g)
     _outline(g)
     return g
@@ -900,6 +940,7 @@ def _draw_duelist_front(
     if ground:
         _tq_shadow(g, cx)
     _tq_figure_front(g, cx, bob, b, hunch, leg, arm_r, spaulder)
+    _paint_rune(g, cx, 18 + bob + hunch)
     _shade(g)
     _outline(g)
     return g
@@ -1225,7 +1266,7 @@ _PLAYER_FRAME_CACHE: dict[str, list[list[list[str]]]] = {}
 
 def _frames_for(side: str, direction: str = "side") -> list[list[list[str]]]:
     headgear = "antlers" if side == "p1" else "horns"
-    key = f"{headgear}_{direction}"
+    key = f"{headgear}_{direction}_r{_ACTIVE_RUNE}"
     if key not in _PLAYER_FRAME_CACHE:
         if direction == "back":
             _PLAYER_FRAME_CACHE[key] = _player_frames_back(headgear)
@@ -1236,15 +1277,19 @@ def _frames_for(side: str, direction: str = "side") -> list[list[list[str]]]:
     return _PLAYER_FRAME_CACHE[key]
 
 
-def player_sheet(side: str) -> Canvas:
+def player_sheet(side: str, rune: int = 0) -> Canvas:
     """3-row × 45-column atlas (48×48 cells): row 0 = side, row 1 = back,
     row 2 = front. Each row: IDLE6 RUN6 THROW8 DASH4 HIT4 CATCH3 DEATH10 CHARGE4.
-    The engine selects the row from movement direction."""
+    The engine selects the row from movement direction. `rune` picks the
+    cloak mark (0 = unmarked; see `_RUNE_GLYPHS`) — the install-id's demon."""
+    global _ACTIVE_RUNE
+    _ACTIVE_RUNE = rune
     canvas = Canvas(PLAYER_PX * 45, PLAYER_PX * 3)
     for row_idx, direction in enumerate(("side", "back", "front")):
         frames = _frames_for(side, direction)
         for i, art in enumerate(frames):
             paint(canvas, i * PLAYER_PX, row_idx * PLAYER_PX, _grid_to_str(art), side=side)
+    _ACTIVE_RUNE = 0
     return canvas
 
 
@@ -3860,6 +3905,14 @@ def main() -> None:
     outputs = [
         ("assets/sprites/players/duelist_a_sheet.png", player_sheet("p0")),
         ("assets/sprites/players/duelist_b_sheet.png", player_sheet("p1")),
+        *[
+            (f"assets/sprites/players/duelist_a_v{n}.png", player_sheet("p0", n))
+            for n in range(1, 8)
+        ],
+        *[
+            (f"assets/sprites/players/duelist_b_v{n}.png", player_sheet("p1", n))
+            for n in range(1, 8)
+        ],
         ("assets/sprites/projectiles/bone_fang.png", boomerang(0)),
         ("assets/sprites/projectiles/bone_fang_marked_sheet.png", boomerang_sheet()),
         ("assets/sprites/projectiles/bone_fang_trail_sheet.png", trail_sheet()),
