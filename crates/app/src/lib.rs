@@ -25,6 +25,8 @@ use std::collections::HashMap;
 
 mod anchor;
 mod arena_select;
+mod intro_card;
+mod runes;
 mod audio;
 mod bot;
 mod camera;
@@ -164,6 +166,8 @@ pub fn run() {
         .add_plugins(RoomCodePlugin)
         .add_plugins(TheaterPlugin)
         .add_plugins(arena_select::ArenaSelectPlugin)
+        .add_plugins(intro_card::IntroCardPlugin)
+        .add_plugins(runes::RunesPlugin)
         .add_plugins(TouchControlsPlugin)
         .add_plugins(BotPlugin)
         .add_plugins(HudPlugin)
