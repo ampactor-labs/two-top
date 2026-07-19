@@ -294,9 +294,12 @@ For the second phone, either repeat the ADB install or send that same
 
 ### 4e. Launch both phones
 
-Both phones boot to the Title screen with **"TAP TO FIND OPPONENT"**. Pick the
-arena first if you want (tap the top area to cycle arenas), then both players
-tap the bottom half to connect.
+Both phones boot to the Title screen with **"TAP TO FIND OPPONENT"**. Tap the
+arena line under the table to open the roster (seven tables, each with its
+floor and rules) and pick one. The pick is part of the room name
+(`two-top-pit?next=2`), so **both phones must pick the same arena to meet** —
+quick match queues per-arena now, and a private code pairs with the arena the
+same way ("dial CURS, pick the Pit"). Then both players tap PLAY.
 
 ### 4f. What to verify (Phase 12, Gate 1)
 

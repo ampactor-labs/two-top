@@ -38,6 +38,9 @@ pub struct Settings {
     /// Mirror the touch zones left-for-right (move on the right, throw on
     /// the left, dash bottom-LEFT). A touch fighter owes lefties this.
     pub southpaw: bool,
+    /// The picked arena (`sim::ArenaId` wire id). The roster screen writes
+    /// it; the pick survives relaunch like every other preference.
+    pub arena: u8,
 }
 
 impl Default for Settings {
@@ -48,8 +51,15 @@ impl Default for Settings {
             sfx_volume: SFX_VOLUME_DEFAULT,
             music_volume: MUSIC_VOLUME_DEFAULT,
             southpaw: false,
+            arena: 0,
         }
     }
+}
+
+/// Persist the settings JSON — the arena roster (and anything else outside
+/// this module) saves through here.
+pub fn persist(settings: &Settings) {
+    save_settings(settings);
 }
 
 impl Settings {
@@ -326,6 +336,7 @@ mod tests {
             sfx_volume: -3.0,
             music_volume: f32::NAN,
             southpaw: true,
+            arena: 3,
         }
         .clamped();
         assert_eq!(wild.stick_deadzone, DEADZONE_MAX);

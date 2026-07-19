@@ -121,6 +121,14 @@ Auto-migration is a tar pit. Every sim change becomes a versioning project. Old 
 
 Concretely (M6): `sim::SIM_VERSION` is the value stamped into every replay header. Pre-release `main` carried the `u32::MAX` dev sentinel (`replay::DEV_SIM_VERSION`); for v1.0.0-rc1 it became `1`. The committed canonical demo is the special case — it's the one replay actually encoded to a file and verified through the *real* strict-match gate (`decode_for_sim_version` against `sim::SIM_VERSION` in `replay_sync`/`replay_viewer`), so it must stamp the real version, not the dev sentinel that the in-process struct-fed test/fuzz replays use (those never strict-decode). That's why every `SIM_VERSION` bump requires regenerating the canonical `.bmrg` (`gen_canonical --write`): forget it, and the determinism matrix rejects its own demo as a version mismatch.
 
+## Why the Crossing chasm rotated (SIM_VERSION 13)
+
+The chasm was cut as a vertical band when the duel ran along the x-axis with spawns at (±100, 0). The depth-duel change moved spawns to (0, ±300) and nobody rotated the moat, which put both spawn points inside it: stand still at round start and the chasm devours you, and — worse — `tick_respawn` snaps a killed player straight back into the band while SpawnGuard deliberately leaves chasm kills lethal, so the first kill cascades the rest of the round. Every existing chasm test hand-placed players at safe coordinates, which is why it survived 513 green tests; the regression test now stands players on `respawn_position()` itself. The sigils moved off the duel axis onto each seat's half (point-symmetric, clear of the pillars) because on the y-axis every straight throw would clip one by accident.
+
+## Why the arena pick rides the room name
+
+Online arena agreement has three possible shapes: random-by-room-hash (the old way — which also silently pinned quick match to ONE arena forever, since the public room string never changes), a host-picks handshake over the side channel (protocol work, a mid-handshake arena respawn on the joining side, and someone's pick silently loses), or making the pick part of the room name itself. The room name wins because agreement becomes structural — two peers in `two-top-CURS-pit` cannot disagree about the table, the arena is known before anything spawns, and zero new netcode ships. The cost is that quick match partitions by arena; with this game's player pool that is a feature (you queue for the table you want), and friends coordinate the same way they already coordinate codes: "dial CURS, pick the Pit."
+
 ## Rejected alternatives, briefly
 
 - **4-player FFA** — rejected for MVP. The chaos hides bad balance, the rollback CPU budget gets tight with 4 players' inputs, and the matchmaking complexity isn't worth it for a portfolio piece. 1v1 is sharper and demos better.

@@ -188,10 +188,12 @@ SyncTest couch-versus).
 Online builds still boot to the Title screen. When a room URL is present,
 the title copy changes to `TAP TO FIND OPPONENT`; tapping the lower half
 or pressing Start enters `InMatch`, and `MatchboxPlugin` opens the
-signaling connection from `OnEnter(InMatch)`. Arena selection works on
-that Title screen before connecting. `TWOTOP_ARENA=anchor|crossing|reliquary`
-is still a useful startup default for desktop automation, but it is no
-longer the only online arena selector.
+signaling connection from `OnEnter(InMatch)`. The arena pick happens on the
+Title's roster screen before connecting, and it becomes part of the room
+name — `two-top-<arena>?next=2`, or `two-top-<CODE>-<arena>?next=2` for a
+private room — so two peers in one room have structurally agreed on the
+table; there is no arena handshake to get wrong. `TWOTOP_ARENA=<name|id>`
+still seeds the pick for desktop automation.
 
 1. Start a signaling server (local dev): `matchbox_server` (defaults to
    `0.0.0.0:3536`). For a real deployment see "Choosing a signaling

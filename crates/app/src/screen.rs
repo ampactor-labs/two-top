@@ -68,6 +68,9 @@ pub enum AppScreen {
     Settings,
     /// Arcade initials. Four letters, a 26-key grid, one DONE.
     NameEntry,
+    /// The arena roster: seven tables, each shown with its floor and its
+    /// rules, tap to pick (`crate::arena_select`).
+    ArenaSelect,
 }
 
 impl AppScreen {
@@ -294,6 +297,7 @@ fn spawn_match(
         spawn_obstacle_block(
             &mut commands,
             shadow_img.clone(),
+            selected.0,
             min_x,
             min_y,
             max_x,
@@ -323,17 +327,79 @@ fn spawn_match(
     }
 }
 
+/// Per-arena cover skin: the front-face and lid colors plus which motif the
+/// lid carries. Flat quads still sell the 2.5D read (dither at this scale is
+/// noise — the validated depth mock); *identity* comes from the register and
+/// one quiet motif per arena, so a crate, a pillar, a reliquary bar, a pit
+/// stone, and a museum plinth stop being the same gray box everywhere.
+struct CoverSkin {
+    front: Color,
+    top: Color,
+    motif: CoverMotif,
+}
+
+enum CoverMotif {
+    /// Anchor: rope lashing across the crate lid (an X of thin straps).
+    Lashing,
+    /// Crossing: two vertical flutes carved into the pillar's front face.
+    Flutes,
+    /// Reliquary: the sealed teal seam along the bar's long axis.
+    Seam,
+    /// The Pit: an ember crack — the stone remembers the strikes.
+    Crack,
+    /// The Gallery: the lit bone rim on the plinth's near lid edge.
+    PlinthRim,
+}
+
+fn cover_skin(arena: sim::ArenaId) -> CoverSkin {
+    use render::palette as pal;
+    match arena {
+        sim::ArenaId::Anchor => CoverSkin {
+            front: pal::BRUISE_SHADOW,
+            top: pal::WARM_BONE_SHADE,
+            motif: CoverMotif::Lashing,
+        },
+        sim::ArenaId::Crossing => CoverSkin {
+            front: pal::DEEP_ASH,
+            top: pal::COLD_STONE,
+            motif: CoverMotif::Flutes,
+        },
+        sim::ArenaId::Reliquary => CoverSkin {
+            front: pal::BRUISE_SHADOW,
+            top: pal::WARM_BONE_SHADE,
+            motif: CoverMotif::Seam,
+        },
+        sim::ArenaId::Pit => CoverSkin {
+            front: pal::CHARCOAL_LINE,
+            top: pal::BRUISE_SHADOW,
+            motif: CoverMotif::Crack,
+        },
+        sim::ArenaId::Gallery => CoverSkin {
+            front: pal::DEEP_ASH,
+            top: pal::COLD_STONE,
+            motif: CoverMotif::PlinthRim,
+        },
+        // No obstacles on these rosters today; a sane default if one lands.
+        sim::ArenaId::Vigil | sim::ArenaId::Forest => CoverSkin {
+            front: pal::CHARCOAL_LINE,
+            top: pal::COLD_STONE,
+            motif: CoverMotif::PlinthRim,
+        },
+    }
+}
+
 /// Spawn the raised-cover composite for one obstacle footprint: a cast shadow,
 /// a void silhouette, a shaded front face, a contact/AO band, and the lit top
-/// face. Flat-color quads — at this scale the dither/seams read as noise (this
-/// matches the validated depth mock); the *height* + outline + shadow are what
-/// sell the 2.5D read. Sorted by the front (nearest) base via
-/// [`render::ground_z`] so a duelist behind the block is occluded and one in
-/// front draws over it. All quads are tagged `MatchEntity` for teardown and
-/// carry no rollback components.
+/// face — colored and marked per arena via [`cover_skin`]. Flat-color quads;
+/// the *height* + outline + shadow are what sell the 2.5D read. Sorted by the
+/// front (nearest) base via [`render::ground_z`] so a duelist behind the block
+/// is occluded and one in front draws over it. All quads are tagged
+/// `MatchEntity` for teardown and carry no rollback components.
+#[allow(clippy::too_many_arguments)]
 fn spawn_obstacle_block(
     commands: &mut Commands,
     shadow_img: Handle<Image>,
+    arena: sim::ArenaId,
     min_x: f32,
     min_y: f32,
     max_x: f32,
@@ -345,8 +411,9 @@ fn spawn_obstacle_block(
     let cx = (min_x + max_x) * 0.5;
     let total_h = rise + d;
     let z = render::ground_z(min_y);
+    let skin = cover_skin(arena);
 
-    let mut quad = |color: Color, size: Vec2, center: Vec2, zz: f32| {
+    let mut quad = |color: Color, size: Vec2, center: Vec2, zz: f32, angle: f32| {
         commands.spawn((
             MatchEntity,
             Sprite {
@@ -354,35 +421,94 @@ fn spawn_obstacle_block(
                 custom_size: Some(size),
                 ..default()
             },
-            Transform::from_xyz(center.x, center.y, zz),
+            Transform::from_xyz(center.x, center.y, zz)
+                .with_rotation(Quat::from_rotation_z(angle)),
         ));
     };
-    // Lit top face (drawn first so the closures above it layer cleanly is moot —
-    // explicit z does the ordering). Void silhouette → front → contact → top.
+    // Void silhouette → front → contact → top → motif; explicit z orders it.
     quad(
         render::palette::VOID,
         Vec2::new(w + 6.0, total_h + 6.0),
         Vec2::new(cx, min_y + total_h * 0.5),
         z - 0.002,
+        0.0,
     );
     quad(
-        render::palette::CHARCOAL_LINE,
+        skin.front,
         Vec2::new(w, rise),
         Vec2::new(cx, min_y + rise * 0.5),
         z,
+        0.0,
     );
     quad(
         render::palette::BRUISE_SHADOW,
         Vec2::new(w, 4.0),
         Vec2::new(cx, min_y + 2.0),
         z + 0.001,
+        0.0,
     );
-    quad(
-        render::palette::COLD_STONE,
-        Vec2::new(w, d),
-        Vec2::new(cx, min_y + rise + d * 0.5),
-        z + 0.001,
-    );
+    let lid_c = Vec2::new(cx, min_y + rise + d * 0.5);
+    quad(skin.top, Vec2::new(w, d), lid_c, z + 0.001, 0.0);
+    // The motif rides just above the lid (and the flutes above the front).
+    let mz = z + 0.0015;
+    match skin.motif {
+        CoverMotif::Lashing => {
+            let len = (w * w + d * d).sqrt() - 6.0;
+            let angle = (d / w).atan();
+            quad(
+                render::palette::CHARCOAL_LINE,
+                Vec2::new(len, 3.0),
+                lid_c,
+                mz,
+                angle,
+            );
+            quad(
+                render::palette::CHARCOAL_LINE,
+                Vec2::new(len, 3.0),
+                lid_c,
+                mz,
+                -angle,
+            );
+        }
+        CoverMotif::Flutes => {
+            for side in [-1.0f32, 1.0] {
+                quad(
+                    render::palette::BRUISE_SHADOW,
+                    Vec2::new((w / 6.0).max(2.0), rise - 4.0),
+                    Vec2::new(cx + side * w * 0.25, min_y + rise * 0.5),
+                    mz,
+                    0.0,
+                );
+            }
+        }
+        CoverMotif::Seam => {
+            let along_x = w >= d;
+            let size = if along_x {
+                Vec2::new(w - 6.0, 2.0)
+            } else {
+                Vec2::new(2.0, d - 6.0)
+            };
+            quad(render::palette::DEEP_TEAL, size, lid_c, mz, 0.0);
+        }
+        CoverMotif::Crack => {
+            quad(
+                render::palette::EMBER,
+                Vec2::new(w.min(d) * 0.9, 2.0),
+                lid_c,
+                mz,
+                0.6,
+            );
+        }
+        CoverMotif::PlinthRim => {
+            quad(
+                render::palette::BONE,
+                Vec2::new(w, 2.0),
+                Vec2::new(cx, min_y + rise + 1.0),
+                mz,
+                0.0,
+            );
+        }
+    }
 
     // Cast shadow on the floor, nudged toward the bottom-right (light top-left),
     // below the ground-actor band so a duelist in front steps over it.
@@ -736,45 +862,53 @@ fn spawn_overlays(mut commands: Commands) {
     spawn_bot_offer_button(&mut commands);
 }
 
-/// Next arena in the picker cycle — walks [`sim::ALL_ARENAS`] in wire
-/// order and wraps, so a roster change never needs this touched.
-fn next_arena(id: sim::ArenaId) -> sim::ArenaId {
-    let all = sim::ALL_ARENAS;
-    let idx = all.iter().position(|a| *a == id).unwrap_or(0);
-    all[(idx + 1) % all.len()]
-}
-
-/// Title-screen arena picker. Desktop: 1/2/3 pick directly. Touch: a tap in the
-/// *upper* half cycles to the next arena (the lower half is the start zone, so
-/// the two gestures never collide). Mutates [`SelectedArena`] — safe here
-/// because there's no session (the sim is idle) and `spawn_match` only reads it
-/// on match start.
+/// Title-screen arena entry. Desktop: 1-7 pick directly. Touch: a tap on the
+/// arena line opens the roster screen (`crate::arena_select`) — couch AND
+/// online, since the pick now rides the room name (`room_code`) and both
+/// peers structurally agree. Mutating [`SelectedArena`] is safe here because
+/// there's no session (the sim is idle) and `spawn_match` only reads it on
+/// match start.
 fn pick_arena(
     keys: Res<ButtonInput<KeyCode>>,
     touches: Res<Touches>,
     window: Res<WindowSize>,
     netplay: Res<NetplayConfig>,
     mut selected: ResMut<SelectedArena>,
+    mut settings: ResMut<crate::settings::Settings>,
+    mut next: ResMut<NextState<AppScreen>>,
 ) {
-    if netplay.room_url.is_some() {
+    // Couch only for the digit shortcuts — the ONLINE title's digits belong
+    // to the room pad (1-4) and the name dial (5-8). Online desktop opens
+    // the roster with A instead.
+    if netplay.room_url.is_none() {
+        const DIGITS: [(KeyCode, KeyCode); 7] = [
+            (KeyCode::Digit1, KeyCode::Numpad1),
+            (KeyCode::Digit2, KeyCode::Numpad2),
+            (KeyCode::Digit3, KeyCode::Numpad3),
+            (KeyCode::Digit4, KeyCode::Numpad4),
+            (KeyCode::Digit5, KeyCode::Numpad5),
+            (KeyCode::Digit6, KeyCode::Numpad6),
+            (KeyCode::Digit7, KeyCode::Numpad7),
+        ];
+        for (i, (a, b)) in DIGITS.into_iter().enumerate() {
+            if keys.just_pressed(a) || keys.just_pressed(b) {
+                selected.0 = sim::ALL_ARENAS[i];
+                settings.arena = selected.0.as_u8();
+                crate::settings::persist(&settings);
+            }
+        }
+    }
+    if keys.just_pressed(KeyCode::KeyA) {
+        next.set(AppScreen::ArenaSelect);
         return;
     }
-    if keys.just_pressed(KeyCode::Digit1) || keys.just_pressed(KeyCode::Numpad1) {
-        selected.0 = sim::ArenaId::Anchor;
-    } else if keys.just_pressed(KeyCode::Digit2) || keys.just_pressed(KeyCode::Numpad2) {
-        selected.0 = sim::ArenaId::Crossing;
-    } else if keys.just_pressed(KeyCode::Digit3) || keys.just_pressed(KeyCode::Numpad3) {
-        selected.0 = sim::ArenaId::Reliquary;
-    }
     let win = window.0;
-    // Couch: tap the arena-name line under the table to cycle it (online
-    // has no picker — the room hash decides the arena so both peers agree).
     if win.y > 0.0
         && touches
             .iter_just_pressed()
             .any(|t| in_band(t.position().y / win.y, SUBLINE_RECT))
     {
-        selected.0 = next_arena(selected.0);
+        next.set(AppScreen::ArenaSelect);
     }
 }
 
@@ -806,6 +940,7 @@ fn title_buttons_input(
                 "replays" => Some(AppScreen::Replays),
                 "settings" => Some(AppScreen::Settings),
                 "name" => Some(AppScreen::NameEntry),
+                "arenas" => Some(AppScreen::ArenaSelect),
                 _ => None,
             })
             .unwrap_or(None)
@@ -1058,19 +1193,16 @@ fn update_title_overlay(
     let _ = &practice; // practice state now reads on its own button
     if on_title {
         *vis = Visibility::Visible;
+        // The tappable arena line shows on BOTH modes now — the pick rides
+        // the room name online, so it's no longer couch-only. The career
+        // record joins it once there is one.
         let online = netplay.room_url.is_some();
-        if online {
-            // Your record under your demon, and only once you have one —
-            // a first-timer's table needs no annotation.
-            text.0 = if career.total() > 0 {
-                format!("career {}W-{}L", career.wins, career.losses)
-            } else {
-                String::new()
-            };
+        let arena_line = format!("< {} >", arena_name(selected.0));
+        text.0 = if online && career.total() > 0 {
+            format!("{arena_line}\ncareer {}W-{}L", career.wins, career.losses)
         } else {
-            // Couch: the tappable arena name (cycles on tap / 1-2-3).
-            text.0 = format!("< {} >", arena_name(selected.0));
-        }
+            arena_line
+        };
     } else {
         *vis = Visibility::Hidden;
     }
@@ -1854,24 +1986,6 @@ mod tests {
         assert_eq!(arena_name(sim::ArenaId::Pit), "The Pit");
     }
 
-    #[test]
-    fn next_arena_cycles_through_the_whole_roster() {
-        let mut id = sim::ArenaId::Anchor;
-        let mut seen = vec![id];
-        for _ in 0..sim::ALL_ARENAS.len() - 1 {
-            id = next_arena(id);
-            assert!(!seen.contains(&id), "cycle revisited {id:?} early");
-            seen.push(id);
-        }
-        assert_eq!(seen.len(), sim::ALL_ARENAS.len(), "cycle covers the roster");
-        assert_eq!(
-            next_arena(id),
-            sim::ArenaId::Anchor,
-            "wraps back to the start"
-        );
-    }
-
-    // ---- The summary card + the RUN IT BACK button's state machine ----
 
     fn online_summary(gone: bool) -> String {
         let peer = net::ProfileData {

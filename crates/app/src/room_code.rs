@@ -72,25 +72,47 @@ impl RoomCode {
             .collect()
     }
 
-    /// The room URL this code selects: the base for QUICK, the code-suffixed
-    /// room for a private match.
-    pub fn room_url(&self) -> Option<String> {
+    /// The room URL this code + arena pick selects. The arena tag is part
+    /// of the room NAME on every path (quick and private), so two peers in
+    /// one room have structurally agreed on the table — no handshake, no
+    /// authority, no way to disagree. Friends coordinate out loud: "dial
+    /// CURS, pick the Pit."
+    pub fn room_url(&self, arena: sim::ArenaId) -> Option<String> {
         let base = self.base_url.as_ref()?;
-        Some(if self.custom {
-            room_url_with_code(base, &self.code_string())
-        } else {
-            base.clone()
-        })
+        let code = self.custom.then(|| self.code_string());
+        Some(room_url_with_parts(
+            base,
+            code.as_deref(),
+            arena_room_tag(arena),
+        ))
     }
 }
 
-/// Append the code to the room *name*, preserving any query string:
-/// `ws://host/two-top?next=2` + `CURS` → `ws://host/two-top-CURS?next=2`.
-/// Pure for testing.
-pub fn room_url_with_code(base: &str, code: &str) -> String {
+/// The arena's room-name token. Lowercase so the room name reads as one
+/// path segment: `two-top-CURS-pit?next=2`.
+pub fn arena_room_tag(arena: sim::ArenaId) -> &'static str {
+    match arena {
+        sim::ArenaId::Anchor => "anchor",
+        sim::ArenaId::Crossing => "crossing",
+        sim::ArenaId::Reliquary => "reliquary",
+        sim::ArenaId::Pit => "pit",
+        sim::ArenaId::Vigil => "vigil",
+        sim::ArenaId::Gallery => "gallery",
+        sim::ArenaId::Forest => "forest",
+    }
+}
+
+/// Append the (optional) code and the arena tag to the room *name*,
+/// preserving any query string: `ws://host/two-top?next=2` + `CURS` + `pit`
+/// → `ws://host/two-top-CURS-pit?next=2`. Pure for testing.
+pub fn room_url_with_parts(base: &str, code: Option<&str>, tag: &str) -> String {
+    let suffix = match code {
+        Some(c) => format!("-{c}-{tag}"),
+        None => format!("-{tag}"),
+    };
     match base.split_once('?') {
-        Some((path, query)) => format!("{path}-{code}?{query}"),
-        None => format!("{base}-{code}"),
+        Some((path, query)) => format!("{path}{suffix}?{query}"),
+        None => format!("{base}{suffix}"),
     }
 }
 
@@ -177,12 +199,31 @@ fn spawn_pad(mut commands: Commands, netplay: Res<NetplayConfig>) {
     }
 }
 
-/// Boot: capture the quickmatch base URL and apply any persisted code.
-fn init_room_code(mut code: ResMut<RoomCode>, mut netplay: ResMut<NetplayConfig>) {
+/// Boot: capture the quickmatch base URL. Composition happens in
+/// [`sync_room_url`] — it needs the arena pick, which the roster restore
+/// (`arena_select`) may still be applying this Startup.
+fn init_room_code(mut code: ResMut<RoomCode>, netplay: Res<NetplayConfig>) {
     code.base_url = netplay.room_url.clone();
-    if let Some(url) = code.room_url() {
-        netplay.room_url = Some(url);
+}
+
+/// Recompose the live room URL whenever the dialed code OR the arena pick
+/// changes — the arena tag rides the room name, so the pick is part of
+/// where you summon. Change-detection gates the work; the theater's
+/// transient `SelectedArena` stomp during playback recomposes harmlessly
+/// (nothing reads the URL mid-tape — `start_matchbox` stands down for the
+/// theater — and the teardown's restore recomposes it back).
+fn sync_room_url(
+    code: Res<RoomCode>,
+    selected: Res<sim::SelectedArena>,
+    mut netplay: ResMut<NetplayConfig>,
+) {
+    if code.base_url.is_none() {
+        return;
     }
+    if !(code.is_changed() || selected.is_changed()) {
+        return;
+    }
+    netplay.room_url = code.room_url(selected.0);
 }
 
 /// Title-screen taps/keys on the pad. Any change rewrites the live
@@ -192,7 +233,6 @@ fn room_code_input(
     touches: Res<Touches>,
     window: Res<WindowSize>,
     mut code: ResMut<RoomCode>,
-    mut netplay: ResMut<NetplayConfig>,
 ) {
     if code.base_url.is_none() {
         return;
@@ -244,7 +284,7 @@ fn room_code_input(
     if !changed {
         return;
     }
-    netplay.room_url = code.room_url();
+    // `sync_room_url` sees the change and recomposes the live URL.
     save_room_code(&code);
 }
 
@@ -334,8 +374,11 @@ impl Plugin for RoomCodePlugin {
                 Update,
                 (
                     room_code_input.run_if(in_state(AppScreen::Title)),
+                    // After the input so a dial tap recomposes the same frame.
+                    sync_room_url,
                     update_pad,
-                ),
+                )
+                    .chain(),
             );
     }
 }
@@ -345,12 +388,15 @@ mod tests {
     use super::*;
 
     #[test]
-    fn code_suffixes_the_room_name_not_the_query() {
+    fn code_and_arena_suffix_the_room_name_not_the_query() {
         assert_eq!(
-            room_url_with_code("ws://h:3536/two-top?next=2", "CURS"),
-            "ws://h:3536/two-top-CURS?next=2"
+            room_url_with_parts("ws://h:3536/two-top?next=2", Some("CURS"), "pit"),
+            "ws://h:3536/two-top-CURS-pit?next=2"
         );
-        assert_eq!(room_url_with_code("ws://h/two-top", "TAGS"), "ws://h/two-top-TAGS");
+        assert_eq!(
+            room_url_with_parts("ws://h/two-top", None, "forest"),
+            "ws://h/two-top-forest"
+        );
     }
 
     #[test]
@@ -364,25 +410,43 @@ mod tests {
     }
 
     #[test]
-    fn quick_room_is_the_untouched_base() {
+    fn quick_room_carries_the_arena_tag() {
+        // The tag is what un-sticks quick match: the old hash of a FIXED
+        // base room string landed every quick match on the same arena
+        // forever. Now you queue for the table you picked.
         let code = RoomCode {
             slots: [1, 2, 3, 4],
             custom: false,
             base_url: Some("ws://h/two-top?next=2".into()),
         };
-        assert_eq!(code.room_url().as_deref(), Some("ws://h/two-top?next=2"));
+        assert_eq!(
+            code.room_url(sim::ArenaId::Vigil).as_deref(),
+            Some("ws://h/two-top-vigil?next=2")
+        );
     }
 
     #[test]
-    fn custom_room_carries_the_code() {
+    fn custom_room_carries_the_code_and_the_arena() {
         let code = RoomCode {
             slots: [0, 1, 2, 3],
             custom: true,
             base_url: Some("ws://h/two-top?next=2".into()),
         };
         assert_eq!(
-            code.room_url().as_deref(),
-            Some("ws://h/two-top-CURS?next=2")
+            code.room_url(sim::ArenaId::Pit).as_deref(),
+            Some("ws://h/two-top-CURS-pit?next=2")
         );
+    }
+
+    #[test]
+    fn every_arena_tag_is_a_clean_path_token() {
+        for &a in sim::ALL_ARENAS.iter() {
+            let tag = arena_room_tag(a);
+            assert!(!tag.is_empty());
+            assert!(
+                tag.chars().all(|c| c.is_ascii_lowercase()),
+                "tag {tag:?} must stay a lowercase path segment"
+            );
+        }
     }
 }

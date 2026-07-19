@@ -24,6 +24,7 @@ use sim::{
 use std::collections::HashMap;
 
 mod anchor;
+mod arena_select;
 mod audio;
 mod bot;
 mod camera;
@@ -64,28 +65,6 @@ use netplay::{MatchboxPlugin, NetplayConfig};
 use screen::{AppScreen, ScreenPlugin};
 use settings::SettingsPlugin;
 
-/// Pick the arena from `TWOTOP_ARENA` for desktop automation. Online phone
-/// builds default to a deterministic room-derived arena so both peers agree
-/// without exposing a map picker in the app.
-fn arena_from_env(room_url: Option<&str>) -> SelectedArena {
-    let id = match std::env::var("TWOTOP_ARENA").as_deref() {
-        Ok("anchor") => sim::ArenaId::Anchor,
-        Ok("crossing") => sim::ArenaId::Crossing,
-        Ok("reliquary") => sim::ArenaId::Reliquary,
-        Ok("pit") => sim::ArenaId::Pit,
-        Ok("vigil") => sim::ArenaId::Vigil,
-        Ok("gallery") => sim::ArenaId::Gallery,
-        Ok("forest") => sim::ArenaId::Forest,
-        Ok("random") | Ok("shuffle") => room_url
-            .map(arena_from_room)
-            .unwrap_or(sim::ArenaId::Anchor),
-        _ => room_url
-            .map(arena_from_room)
-            .unwrap_or(sim::ArenaId::Anchor),
-    };
-    SelectedArena(id)
-}
-
 /// Desktop window size, overridable via `TWOTOP_WINDOW=WxH` (e.g. `540x1200`
 /// to preview a tall-phone aspect). Defaults to the 2:3 portrait that frames
 /// the 1000×1500 cm arena. Android ignores this entirely.
@@ -95,15 +74,6 @@ fn window_resolution_from_env() -> (u32, u32) {
         Some((w.trim().parse().ok()?, h.trim().parse().ok()?))
     });
     parsed.unwrap_or((600, 900))
-}
-
-fn arena_from_room(room_url: &str) -> sim::ArenaId {
-    const FNV_OFFSET: u64 = 0xcbf29ce484222325;
-    const FNV_PRIME: u64 = 0x100000001b3;
-    let hash = room_url.as_bytes().iter().fold(FNV_OFFSET, |acc, byte| {
-        (acc ^ u64::from(*byte)).wrapping_mul(FNV_PRIME)
-    });
-    sim::ArenaId::from_u8((hash % sim::ALL_ARENAS.len() as u64) as u8)
 }
 
 pub fn run() {
@@ -165,11 +135,9 @@ pub fn run() {
         })
         .add_plugins(GgrsPlugin::<GgrsCfg>::default())
         .add_plugins(SimPlugin)
-        // Arena selection. TWOTOP_ARENA=anchor|crossing|reliquary can seed
-        // desktop automation; the Title picker may overwrite it before
-        // `screen::spawn_match` reads the resource. Must be inserted AFTER
-        // SimPlugin (which defaults it to Anchor).
-        .insert_resource(arena_from_env(netplay.room_url.as_deref()))
+        // Arena selection lives in `arena_select`: the persisted pick (or
+        // TWOTOP_ARENA for automation) restores at Startup over SimPlugin's
+        // Anchor default, and the roster screen owns changes from there.
         // Phase 13: edge-detect MatchState/MatchScore transitions in
         // Update so the diagnostic log captures round flow without
         // duplicating events on each rollback resimulation. Headless
@@ -195,6 +163,7 @@ pub fn run() {
         .add_plugins(MatchRecorderPlugin)
         .add_plugins(RoomCodePlugin)
         .add_plugins(TheaterPlugin)
+        .add_plugins(arena_select::ArenaSelectPlugin)
         .add_plugins(TouchControlsPlugin)
         .add_plugins(BotPlugin)
         .add_plugins(HudPlugin)
