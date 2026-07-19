@@ -127,6 +127,9 @@ pub struct AudioAssets {
     pub taunt: Handle<AudioSource>,
     pub title_loop: Handle<AudioSource>,
     pub match_loop: Handle<AudioSource>,
+    /// Seven per-arena ambience beds, indexed by `ArenaId::as_u8` — the
+    /// arena's air, layered under the match groove (`arena_air_bed`).
+    pub arena_air: [Handle<AudioSource>; 7],
     pub heartbeat_loop: Handle<AudioSource>,
 }
 
@@ -166,6 +169,10 @@ struct MatchBed;
 /// Marker on the looping heartbeat entity (match-point ritual bed).
 #[derive(Component)]
 struct HeartbeatLoop;
+
+/// Marker on the looping arena-air entity (`arena_air_bed`).
+#[derive(Component)]
+struct ArenaAir(Handle<AudioSource>);
 
 /// Live music-mix state: the two bed levels chase their screen-state targets
 /// ([`XFADE_TAU`]); `duck` snaps down on kills and releases back to 1.
@@ -216,6 +223,15 @@ fn load_audio_and_start_music(
         taunt: asset_server.load("audio/taunt.wav"),
         title_loop: asset_server.load("audio/title_loop.wav"),
         match_loop: asset_server.load("audio/match_loop.wav"),
+        arena_air: [
+            asset_server.load("audio/air_anchor.wav"),
+            asset_server.load("audio/air_crossing.wav"),
+            asset_server.load("audio/air_reliquary.wav"),
+            asset_server.load("audio/air_pit.wav"),
+            asset_server.load("audio/air_vigil.wav"),
+            asset_server.load("audio/air_gallery.wav"),
+            asset_server.load("audio/air_forest.wav"),
+        ],
         heartbeat_loop: asset_server.load("audio/heartbeat_loop.wav"),
     };
     commands.spawn((
@@ -234,7 +250,7 @@ fn load_audio_and_start_music(
 /// Per-frame music mixer: chase the screen-state crossfade targets, release
 /// the kill duck, apply the ritual duck, and write the resulting bus volumes
 /// into both bed sinks.
-#[allow(clippy::type_complexity)]
+#[allow(clippy::type_complexity, clippy::too_many_arguments)]
 fn mix_music(
     time: Res<Time>,
     settings: Res<Settings>,
@@ -243,6 +259,7 @@ fn mix_music(
     mut mix: ResMut<MusicMix>,
     mut title: Query<&mut AudioSink, (With<TitleBed>, Without<MatchBed>)>,
     mut match_: Query<&mut AudioSink, (With<MatchBed>, Without<TitleBed>)>,
+    mut air: Query<&mut AudioSink, (With<ArenaAir>, Without<TitleBed>, Without<MatchBed>)>,
 ) {
     let dt = time.delta_secs();
     // Every menu rides the title bed, not just the title itself — walking
@@ -260,6 +277,51 @@ fn mix_music(
     }
     for mut sink in &mut match_ {
         sink.set_volume(Volume::Linear(bus * mix.match_ * ritual_duck));
+    }
+    // The arena's air rides the match side of the fade (and the ritual
+    // hush) — the room exhales when the table empties.
+    for mut sink in &mut air {
+        sink.set_volume(Volume::Linear(bus * mix.match_ * ritual_duck));
+    }
+}
+
+/// Keep exactly the right arena-air bed alive: the selected arena's while a
+/// match (or a tape — `SelectedArena` follows the tape) is on screen, none
+/// otherwise. Spawned at zero volume; `mix_music` fades it with the match
+/// bed, so entering and leaving the table breathes instead of clicking.
+fn arena_air_bed(
+    mut commands: Commands,
+    screen: Res<State<AppScreen>>,
+    selected: Res<sim::SelectedArena>,
+    assets: Option<Res<AudioAssets>>,
+    existing: Query<(Entity, &ArenaAir)>,
+) {
+    let Some(assets) = assets else {
+        return;
+    };
+    let desired = (*screen.get() == AppScreen::InMatch)
+        .then(|| assets.arena_air[selected.0.as_u8() as usize].clone());
+    let current = existing.iter().next();
+    match (current, desired) {
+        (Some((entity, have)), Some(want)) if have.0 != want => {
+            commands.entity(entity).despawn();
+            commands.spawn((
+                ArenaAir(want.clone()),
+                AudioPlayer::new(want),
+                PlaybackSettings::LOOP.with_volume(Volume::Linear(0.0)),
+            ));
+        }
+        (None, Some(want)) => {
+            commands.spawn((
+                ArenaAir(want.clone()),
+                AudioPlayer::new(want),
+                PlaybackSettings::LOOP.with_volume(Volume::Linear(0.0)),
+            ));
+        }
+        (Some((entity, _)), None) => {
+            commands.entity(entity).despawn();
+        }
+        _ => {}
     }
 }
 
@@ -784,6 +846,9 @@ impl Plugin for GameAudioPlugin {
                     // lands the same frame the hit does.
                     mix_music.after(play_kill_sfx),
                     match_point_heartbeat,
+                    // Before the mixer, so a fresh bed's zero volume is
+                    // raised the same frame it spawns.
+                    arena_air_bed.before(mix_music),
                 ),
             );
     }

@@ -881,6 +881,116 @@ def music_match(rng: random.Random) -> list[float]:
 # perturbs the others' noise.
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# Arena air — seven short seamless ambience beds, one register per table,
+# layered UNDER the match groove at a bus level of its own. The rule is the
+# floor rule again: the air only sets place; the cues stay the loudest
+# thing that ever happens. The Vigil is deliberately the quietest asset in
+# the game.
+# ---------------------------------------------------------------------------
+
+AMBIENCE_PEAK = 10.0 ** (-18.0 / 20.0)  # ~0.126 — beds under the bed
+
+AIR_LOOP_S = 8.0
+
+
+def _air_ticks(sig: list[float], rng: random.Random, per_sec: float,
+               dur_s: float, lp: float, level: float) -> None:
+    """Sparse filtered-noise blips — crackle, settling stone, candle spit.
+    Density is Poisson-ish via a fixed per-second budget with jittered
+    placement, so a loop never develops an audible grid."""
+    total_s = len(sig) / SR
+    count = max(1, int(total_s * per_sec))
+    for _ in range(count):
+        at = rng.random() * total_s
+        n = n_samples(dur_s)
+        blip = mul(one_pole_lp(noise(dur_s, rng), lp), exp_env(dur_s, dur_s * 0.25))
+        place(sig, at, blip, level * (0.5 + rng.random() * 0.5))
+
+
+def air_anchor(rng: random.Random) -> list[float]:
+    """The first table: warm ash-room tone, a breath-slow swell, a few
+    ember spits from the central pyre."""
+    n = n_samples(AIR_LOOP_S)
+    bed = one_pole_lp(noise(AIR_LOOP_S, rng), 240.0)
+    swell = [0.72 + 0.28 * math.sin(2.0 * math.pi * 0.125 * i / SR) for i in range(n)]
+    sig = mul(bed, swell)
+    _air_ticks(sig, rng, 1.2, 0.05, 1400.0, 0.5)
+    return fold_loop(sig, n)
+
+
+def air_crossing(rng: random.Random) -> list[float]:
+    """Cold wind over the moat: band-shaped noise swells + a deep drone
+    breathing far below it."""
+    n = n_samples(AIR_LOOP_S)
+    wind = one_pole_hp(one_pole_lp(noise(AIR_LOOP_S, rng), 520.0), 130.0)
+    gusts = [0.55 + 0.45 * math.sin(2.0 * math.pi * 0.185 * i / SR + 1.1) for i in range(n)]
+    moat = gain(sine(55.0, AIR_LOOP_S), 0.22)
+    sig = mix(mul(wind, gusts), moat)
+    return fold_loop(sig, n)
+
+
+def air_reliquary(rng: random.Random) -> list[float]:
+    """The sealed temple: two detuned low drones and a gated whisper that
+    never resolves into words."""
+    n = n_samples(AIR_LOOP_S)
+    drone = mix(gain(sine(41.2, AIR_LOOP_S), 0.5), gain(sine(82.9, AIR_LOOP_S), 0.28))
+    whisper = mul(
+        one_pole_hp(one_pole_lp(noise(AIR_LOOP_S, rng), 2600.0), 900.0),
+        [0.5 + 0.5 * math.sin(2.0 * math.pi * 0.09 * i / SR) for i in range(n)],
+    )
+    sig = mix(drone, gain(gated_verb(whisper, rng, room_s=0.16), 0.16))
+    return fold_loop(sig, n)
+
+
+def air_pit(rng: random.Random) -> list[float]:
+    """The fight ring: a crowdless rumble and constant ember crackle — the
+    ring smolders whether anyone is bleeding or not."""
+    n = n_samples(AIR_LOOP_S)
+    rumble = one_pole_lp(noise(AIR_LOOP_S, rng), 110.0)
+    sig = gain(rumble, 1.1)
+    _air_ticks(sig, rng, 5.0, 0.04, 1800.0, 0.55)
+    _air_ticks(sig, rng, 1.0, 0.09, 700.0, 0.4)
+    return fold_loop(sig, n)
+
+
+def air_vigil(rng: random.Random) -> list[float]:
+    """The patient room. Nearly nothing: a sub you feel more than hear and
+    a candle that spits perhaps once a loop. Quietest asset in the game —
+    the silence IS the identity, so it still normalizes to its own floor."""
+    n = n_samples(AIR_LOOP_S)
+    room = gain(one_pole_lp(noise(AIR_LOOP_S, rng), 160.0), 0.35)
+    sub = gain(sine(33.0, AIR_LOOP_S), 0.3)
+    sig = mix(room, sub)
+    _air_ticks(sig, rng, 0.15, 0.03, 2400.0, 0.5)
+    return fold_loop(sig, n)
+
+
+def air_gallery(rng: random.Random) -> list[float]:
+    """The museum: high thin air, long empty echo, stone settling somewhere
+    down a corridor you cannot see."""
+    n = n_samples(AIR_LOOP_S)
+    airy = gain(one_pole_hp(noise(AIR_LOOP_S, rng), 1800.0), 0.4)
+    sig = airy
+    _air_ticks(sig, rng, 0.5, 0.05, 900.0, 0.6)
+    sig = echo(sig, 0.61, 0.35, 0.5)
+    return fold_loop(sig, n)
+
+
+def air_forest(rng: random.Random) -> list[float]:
+    """The grove: dry wood ticking everywhere, a low wind through dead
+    branches. The busiest air — the arena whose cover burns should sound
+    flammable."""
+    n = n_samples(AIR_LOOP_S)
+    wind = mul(
+        one_pole_hp(one_pole_lp(noise(AIR_LOOP_S, rng), 800.0), 200.0),
+        [0.5 + 0.5 * math.sin(2.0 * math.pi * 0.155 * i / SR + 0.4) for i in range(n)],
+    )
+    sig = gain(wind, 0.7)
+    _air_ticks(sig, rng, 7.0, 0.025, 3200.0, 0.5)
+    return fold_loop(sig, n)
+
+
 CUES = [
     ("throw.wav", cue_throw, SFX_PEAK),
     ("throw_empowered.wav", cue_throw_empowered, SFX_PEAK),
@@ -904,6 +1014,13 @@ CUES = [
     ("title_loop.wav", music_title, MUSIC_PEAK),
     ("match_loop.wav", music_match, MUSIC_PEAK),
     ("heartbeat_loop.wav", cue_heartbeat_loop, MUSIC_PEAK),
+    ("air_anchor.wav", air_anchor, AMBIENCE_PEAK),
+    ("air_crossing.wav", air_crossing, AMBIENCE_PEAK),
+    ("air_reliquary.wav", air_reliquary, AMBIENCE_PEAK),
+    ("air_pit.wav", air_pit, AMBIENCE_PEAK),
+    ("air_vigil.wav", air_vigil, AMBIENCE_PEAK),
+    ("air_gallery.wav", air_gallery, AMBIENCE_PEAK),
+    ("air_forest.wav", air_forest, AMBIENCE_PEAK),
 ]
 
 
