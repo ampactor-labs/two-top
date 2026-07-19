@@ -290,11 +290,14 @@ fn compose_camera(
     kc: Res<KillCam>,
     mut shake: ResMut<ScreenShake>,
     mut rng: ResMut<CosmeticRng>,
+    settings: Res<crate::settings::Settings>,
     mut camera: Query<(&mut Transform, &mut Projection), With<Camera2d>>,
 ) {
     shake.trauma = decay_trauma(shake.trauma, time.delta_secs());
     let angle = rng.0.gen_range(0.0..std::f32::consts::TAU);
-    let offset = shake_offset(shake.trauma, SHAKE_MAX_OFFSET, angle);
+    // The settings knob scales the OFFSET ceiling, not the trauma — decay
+    // timing and every trauma edge stay identical at any intensity.
+    let offset = shake_offset(shake.trauma, SHAKE_MAX_OFFSET * settings.shake, angle);
 
     let eased = smoothstep(kc.blend);
     let pos = base.0.lerp(kc.target, eased);

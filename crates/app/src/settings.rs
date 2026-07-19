@@ -41,6 +41,10 @@ pub struct Settings {
     /// The picked arena (`sim::ArenaId` wire id). The roster screen writes
     /// it; the pick survives relaunch like every other preference.
     pub arena: u8,
+    /// Screen-shake intensity, 0..1 scaling the trauma offset. The feel
+    /// layer hits hard by design; this is the kindness knob for anyone it
+    /// hits too hard. Kill flash and haptics are separate.
+    pub shake: f32,
 }
 
 impl Default for Settings {
@@ -52,6 +56,7 @@ impl Default for Settings {
             music_volume: MUSIC_VOLUME_DEFAULT,
             southpaw: false,
             arena: 0,
+            shake: 1.0,
         }
     }
 }
@@ -71,6 +76,7 @@ impl Settings {
             clamp_finite(self.stick_deadzone, 0.0, DEADZONE_MAX, DEADZONE_DEFAULT);
         self.sfx_volume = clamp_finite(self.sfx_volume, 0.0, 1.0, SFX_VOLUME_DEFAULT);
         self.music_volume = clamp_finite(self.music_volume, 0.0, 1.0, MUSIC_VOLUME_DEFAULT);
+        self.shake = clamp_finite(self.shake, 0.0, 1.0, 1.0);
         self
     }
 }
@@ -161,7 +167,8 @@ fn push_deadzone(
 
 /// Title-screen settings adjustment. Keys chosen to avoid the arena picker
 /// (1/2/3) and start (Space/Enter): H toggles haptics, −/= the SFX volume,
-/// `[`/`]` the music volume, `,`/`.` the deadzone, L the southpaw layout.
+/// `[`/`]` the music volume, `,`/`.` the deadzone, L the southpaw layout,
+/// `;`/`'` the screen shake.
 /// Any change re-clamps, pushes the input mirrors to `input_touch`, and
 /// saves to disk.
 /// The settings screen's rows (window-fraction, y-down). They own this
@@ -170,12 +177,12 @@ fn push_deadzone(
 /// the space.
 const ROWS_TOP: f32 = 0.32;
 const ROW_PITCH: f32 = 0.07;
-const ROW_COUNT: usize = 5;
+const ROW_COUNT: usize = 6;
 /// BACK, matching the replays screen's band exactly.
 const BACK_BAND: (f32, f32) = (0.86, 0.96);
 
 /// One tappable settings row (0 haptics, 1 sfx, 2 music, 3 deadzone,
-/// 4 southpaw). Row `ROW_COUNT` is the screen heading, `ROW_COUNT + 1`
+/// 4 southpaw, 5 shake). Row `ROW_COUNT` is the screen heading, `ROW_COUNT + 1`
 /// the BACK label — same component, so one system shows and hides the
 /// whole screen.
 #[derive(Component)]
@@ -239,10 +246,11 @@ fn update_setting_rows(
             1 => format!("<  sfx {:.0}%  >", settings.sfx_volume * 100.0),
             2 => format!("<  music {:.0}%  >", settings.music_volume * 100.0),
             3 => format!("<  deadzone {:.0}%  >", settings.stick_deadzone * 100.0),
-            _ => format!(
+            4 => format!(
                 "<  southpaw {}  >",
                 if settings.southpaw { "on" } else { "off" }
             ),
+            _ => format!("<  shake {:.0}%  >", settings.shake * 100.0),
         };
     }
 }
@@ -285,6 +293,12 @@ fn adjust_settings(
     if keys.just_pressed(KeyCode::Period) {
         s.stick_deadzone += 0.02;
     }
+    if keys.just_pressed(KeyCode::Semicolon) {
+        s.shake -= 0.25;
+    }
+    if keys.just_pressed(KeyCode::Quote) {
+        s.shake += 0.25;
+    }
 
     let win = window.0;
     if win.x > 0.0 && win.y > 0.0 {
@@ -301,7 +315,8 @@ fn adjust_settings(
                 1 => s.sfx_volume += 0.1 * sign,
                 2 => s.music_volume += 0.1 * sign,
                 3 => s.stick_deadzone += 0.02 * sign,
-                _ => s.southpaw = !s.southpaw,
+                4 => s.southpaw = !s.southpaw,
+                _ => s.shake += 0.25 * sign,
             }
         }
     }
@@ -337,10 +352,12 @@ mod tests {
             music_volume: f32::NAN,
             southpaw: true,
             arena: 3,
+            shake: -2.0,
         }
         .clamped();
         assert_eq!(wild.stick_deadzone, DEADZONE_MAX);
         assert_eq!(wild.sfx_volume, 0.0);
+        assert_eq!(wild.shake, 0.0, "negative shake pins to zero");
         assert_eq!(
             wild.music_volume, MUSIC_VOLUME_DEFAULT,
             "NaN falls back to default"
