@@ -1930,9 +1930,21 @@ EMBER_F3 = """
 
 
 def ember_sheet() -> Canvas:
-    c = Canvas(8 * 4, 8)
+    """3 rows x 4 frames @ 8x8: row 0 the ember mote (Anchor / the Pit),
+    row 1 cold dust (Crossing / Vigil / Gallery), row 2 the grove spore
+    (Reliquary / Forest). Rows 1-2 are exact recolors of row 0 so the
+    drift/flicker animation reads identically in every register."""
+    c = Canvas(8 * 4, 8 * 3)
     for i, art in enumerate([EMBER_F0, EMBER_F1, EMBER_F2, EMBER_F3]):
         paint(c, i * 8, 0, art, side="p0")
+    cold = {PALETTE["ember"]: PALETTE["cold_stone"], PALETTE["spark"]: PALETTE["bone"]}
+    spore = {PALETTE["ember"]: PALETTE["deep_teal"], PALETTE["spark"]: PALETTE["bone"]}
+    w = 8 * 4
+    for y in range(8):
+        for x in range(w):
+            px = c.pixels[y * w + x]
+            c.pixels[(y + 8) * w + x] = cold.get(px, px)
+            c.pixels[(y + 16) * w + x] = spore.get(px, px)
     return c
 
 
@@ -2379,139 +2391,10 @@ def _ramp_shade(c: Canvas) -> None:
     c.pixels = out
 
 
-def training_floor() -> Canvas:
-    """Moody Bone Cathedral floor — the 1000x1500 cm Anchor arena at 320x480
-    source (rendered at fixed world size, so higher res is free detail).
-
-    Deliberately dark and low-contrast: dark mottled stone, faint tile grout,
-    old blood, a subdued central occult duel-sigil, and a bone-crenellated
-    wall band under an edge vignette. The players + boomerang stay the
-    readable foreground; the floor only sets mood.
-    """
-    W, H = 320, 480
-    void = PALETTE["void"]
-    ash = PALETTE["deep_ash"]
-    bruise = PALETTE["bruise_shadow"]
-    char = PALETTE["charcoal_line"]
-    wbs = PALETTE["warm_bone_shade"]
-    bone = PALETTE["bone"]
-    teal = PALETTE["deep_teal"]
-    blood = PALETTE["blood_dark"]
-    c = Canvas(W, H, ash)
-    cold = PALETTE["cold_stone"]
-
-    def dhash(x: int, y: int) -> int:
-        return ((x * 73856093) ^ (y * 19349663)) & 0xFF
-
-    # HLD atmosphere base: a dithered vertical gradient (deep indigo -> violet)
-    # with a soft cool light-pool over the central duel stage, so the floor
-    # reads as a LIT surface with depth instead of a flat grey field. A truly
-    # smooth gradient can't live in 16 colors, so we ordered-dither across the
-    # dark tones — which reads as intentional pixel texture, not banding.
-    bayer = [[0, 8, 2, 10], [12, 4, 14, 6], [3, 11, 1, 9], [15, 7, 13, 5]]
-    cx0, cy0 = W // 2, H // 2
-    for y in range(H):
-        t = y / H
-        if t < 0.55:
-            a, b, f = void, ash, t / 0.55
-        else:
-            a, b, f = ash, bruise, (t - 0.55) / 0.45
-        for x in range(W):
-            col = [a[i] + (b[i] - a[i]) * f for i in range(3)]
-            # cool light-pool over the central stage
-            d = math.hypot(x - cx0, y - cy0) / 175.0
-            if d < 1.0:
-                g = (1.0 - d) * 0.22
-                col = [col[i] + (cold[i] - col[i]) * g for i in range(3)]
-            # sparse dark grain so the stone still has texture (kept subtle)
-            if dhash(x // 4, y // 4) < 9:
-                col = [col[i] * 0.84 for i in range(3)]
-            thr = (bayer[y & 3][x & 3] - 7.5) * 1.9
-            c.pixels[y * W + x] = _nearest_palette(
-                (int(col[0] + thr), int(col[1] + thr), int(col[2] + thr), 255)
-            )
-
-    # Tile grout grid every 32px — dropped from the bright `char` to a quiet
-    # `bruise` so the slabs still read but the grid stops competing for the eye.
-    for gx in range(0, W, 32):
-        for y in range(H):
-            c.set(gx, y, bruise)
-    for gy in range(0, H, 32):
-        for x in range(W):
-            c.set(x, gy, bruise)
-
-    # Hairline cracks across the slabs.
-    for (x0, y0, x1, y1) in [(48, 60, 78, 128), (250, 392, 226, 452), (150, 300, 168, 358)]:
-        c.line(x0, y0, x1, y1, char)
-
-    # Old dried blood soaked into the stone — just two, desaturated to a faint
-    # bruise smudge so they read as grime, not the bright red rings that were
-    # pulling the eye off the duelists.
-    for (sx, sy, rad) in [(72, 150, 10), (250, 330, 12)]:
-        for a in range(0, 360, 18):
-            for rr in range(rad):
-                if (a + rr) % 3:
-                    continue
-                c.set(round(sx + rr * math.cos(math.radians(a))),
-                      round(sy + rr * 0.7 * math.sin(math.radians(a))), bruise)
-
-    # Central occult duel-sigil (subdued — teal ring + warm-bone diamond).
-    cx, cy = W // 2, H // 2
-    for a in range(0, 360, 5):
-        c.set(round(cx + 42 * math.cos(math.radians(a))),
-              round(cy + 42 * math.sin(math.radians(a))), teal)
-        c.set(round(cx + 30 * math.cos(math.radians(a))),
-              round(cy + 30 * math.sin(math.radians(a))), wbs)
-    for r in range(36):
-        for (sx, sy) in [(cx - r, cy - 36 + r), (cx + r, cy - 36 + r),
-                         (cx - r, cy + 36 - r), (cx + r, cy + 36 - r)]:
-            c.set(sx, sy, wbs)
-    c.line(cx - 16, cy, cx + 16, cy, wbs)
-    c.line(cx, cy - 16, cx, cy + 16, wbs)
-
-    # Spawn sigils at the left/right mid duel positions.
-    for sx in (48, W - 48):
-        for a in range(0, 360, 24):
-            c.set(round(sx + 9 * math.cos(math.radians(a))),
-                  round(cy + 9 * math.sin(math.radians(a))), wbs)
-
-    # Ledge edge over the void — the open-island read (Boomerang-Fu: you can run
-    # OFF the floor; safe ground simply ENDS here with the out-of-bounds void
-    # beyond, NOT an enclosing wall). A dark drop face rings the slab and the
-    # vignette fades the stone into it; a lit lip then marks the floor's edge so
-    # the boundary reads as "step past this and you're over the void."
-    drop = 10
-    c.rect(0, 0, W, drop, void)
-    c.rect(0, H - drop, W, drop, void)
-    c.rect(0, 0, drop, H, void)
-    c.rect(W - drop, 0, drop, H, void)
-
-    # Edge vignette toward void (the ground darkens as it nears the drop).
-    for y in range(H):
-        for x in range(W):
-            edge = min(x, W - 1 - x, y, H - 1 - y)
-            if edge < 30:
-                px = c.pixels[y * W + x]
-                f = (30 - edge) / 30 * 0.8
-                blended = tuple(round(px[i] * (1 - f) + void[i] * f) for i in range(4))
-                c.pixels[y * W + x] = _nearest_palette(blended)
-
-    # Lit ledge lip — drawn LAST so the vignette doesn't dim it: the top edge of
-    # the safe floor catching the key light. Brighter on the bottom (front,
-    # nearest the camera in the 3/4 tilt), cooler/dim on the far + side edges.
-    for x in range(drop, W - drop):
-        c.set(x, drop, wbs)             # top (far) lip — dim
-        c.set(x, H - drop - 1, bone)    # bottom (front) lip — lit
-    for y in range(drop, H - drop):
-        c.set(drop, y, wbs)             # left lip
-        c.set(W - drop - 1, y, wbs)     # right lip
-    return c
-
-
-# Per-arena floor tints. One shared composition (DESIGN_DIRECTION § 4): the
-# floor stays tier-6 quiet and the props carry identity, so each arena only
-# gets a restrained palette swap into a distinct dark hue register. Anchor is
-# the base `training_floor`, unchanged.
+# Per-arena hue registers. The base atmosphere + grout shifts into a
+# distinct dark register per arena; the compositions then paint their
+# features on top. (In the retint era this swap WAS the whole visual
+# difference between arena floors.)
 _ARENA_FLOOR_SWAPS = {
     "anchor": {},
     # Crossing — colder: warm-bone accents + wall band shift to cold stone.
@@ -2524,25 +2407,518 @@ _ARENA_FLOOR_SWAPS = {
     "pit": {"deep_ash": "bruise_shadow", "blood_dark": "ember"},
     # The Vigil — the no-storm arena is the coldest room in the cathedral:
     # patient teal light, stone accents.
-    "vigil": {"deep_ash": "deep_teal", "warm_bone_shade": "cold_stone"},
+    "vigil": {"warm_bone_shade": "cold_stone", "blood_dark": "deep_teal"},
     # The Gallery — corridors of charcoal: the grout lines dominate and the
     # accents go bone-pale (a museum of angles).
-    "gallery": {"deep_ash": "charcoal_line", "blood_dark": "bruise_shadow"},
+    "gallery": {"blood_dark": "bruise_shadow"},
     # The Forest — the grove floor runs mossy: old blood veins read as
     # deep-teal undergrowth beneath the bone trees.
     "forest": {"blood_dark": "deep_teal"},
 }
 
 
-def arena_floor(arena: str = "anchor") -> Canvas:
-    """`training_floor` retinted per arena via a quiet palette swap — distinct
-    dark hue register, identical composition (DESIGN_DIRECTION § 4). Anchor is
-    byte-identical to `training_floor`."""
-    c = training_floor()
+# ---- Shared floor machinery ------------------------------------------------
+# Extracted from the original training_floor so seven real compositions can
+# share the atmosphere without seven copies of the dither loop. The floor
+# discipline is unchanged: tier-6 quiet, features in muted registers, the
+# duelists and the fang stay the brightest things on the table.
+
+_FLOOR_W, _FLOOR_H = 320, 480
+_FLOOR_BAYER = [[0, 8, 2, 10], [12, 4, 14, 6], [3, 11, 1, 9], [15, 7, 13, 5]]
+
+
+def _floor_dhash(x: int, y: int) -> int:
+    return ((x * 73856093) ^ (y * 19349663)) & 0xFF
+
+
+def _world_px(x_cm: float) -> int:
+    """World x (cm, arena half-width 500) -> floor-canvas x."""
+    return round((x_cm + 500.0) * 0.32)
+
+
+def _world_py(y_cm: float) -> int:
+    """World y (cm) -> floor-canvas y. Texture row 0 is the FAR (+y) court
+    edge (see the app's crumble_arena_floor strip mapping)."""
+    return round((750.0 - y_cm) * 0.32)
+
+
+def _floor_atmosphere(c: Canvas, pools: "list[tuple[int, int, float, float, tuple]]") -> None:
+    """The dithered void->ash->bruise gradient with soft light pools and
+    sparse dark grain. `pools` = [(cx, cy, radius, gain, color)] — the lit
+    spots that make the floor read as a surface under light."""
+    W, H = _FLOOR_W, _FLOOR_H
+    void = PALETTE["void"]
+    ash = PALETTE["deep_ash"]
+    bruise = PALETTE["bruise_shadow"]
+    for y in range(H):
+        t = y / H
+        if t < 0.55:
+            a, b, f = void, ash, t / 0.55
+        else:
+            a, b, f = ash, bruise, (t - 0.55) / 0.45
+        for x in range(W):
+            col = [a[i] + (b[i] - a[i]) * f for i in range(3)]
+            for (px, py, rad, gain, tone) in pools:
+                d = math.hypot(x - px, y - py) / rad
+                if d < 1.0:
+                    g = (1.0 - d) * gain
+                    col = [col[i] + (tone[i] - col[i]) * g for i in range(3)]
+            if _floor_dhash(x // 4, y // 4) < 9:
+                col = [col[i] * 0.84 for i in range(3)]
+            thr = (_FLOOR_BAYER[y & 3][x & 3] - 7.5) * 1.9
+            c.pixels[y * W + x] = _nearest_palette(
+                (int(col[0] + thr), int(col[1] + thr), int(col[2] + thr), 255)
+            )
+
+
+def _floor_grout(c: Canvas, pitch_x: int = 32, pitch_y: int = 32) -> None:
+    bruise = PALETTE["bruise_shadow"]
+    for gx in range(0, _FLOOR_W, pitch_x):
+        for y in range(_FLOOR_H):
+            c.set(gx, y, bruise)
+    for gy in range(0, _FLOOR_H, pitch_y):
+        for x in range(_FLOOR_W):
+            c.set(x, gy, bruise)
+
+
+def _floor_register(c: Canvas, arena: str) -> None:
+    """Shift the base into the arena's dark hue register (the old retint,
+    now applied to the base only — features paint their own colors on top)."""
     swap = {PALETTE[k]: PALETTE[v] for k, v in _ARENA_FLOOR_SWAPS[arena].items()}
     if swap:
         c.pixels = [swap.get(px, px) for px in c.pixels]
+
+
+def _floor_edge_void(c: Canvas) -> None:
+    """Ledge over the void: drop face, edge vignette, lit lip — the
+    open-island read (safe ground simply ENDS)."""
+    W, H = _FLOOR_W, _FLOOR_H
+    void = PALETTE["void"]
+    wbs = PALETTE["warm_bone_shade"]
+    bone = PALETTE["bone"]
+    drop = 10
+    c.rect(0, 0, W, drop, void)
+    c.rect(0, H - drop, W, drop, void)
+    c.rect(0, 0, drop, H, void)
+    c.rect(W - drop, 0, drop, H, void)
+    for y in range(H):
+        for x in range(W):
+            edge = min(x, W - 1 - x, y, H - 1 - y)
+            if edge < 30:
+                px = c.pixels[y * W + x]
+                f = (30 - edge) / 30 * 0.8
+                blended = tuple(round(px[i] * (1 - f) + void[i] * f) for i in range(4))
+                c.pixels[y * W + x] = _nearest_palette(blended)
+    for x in range(drop, W - drop):
+        c.set(x, drop, wbs)
+        c.set(x, H - drop - 1, bone)
+    for y in range(drop, H - drop):
+        c.set(drop, y, wbs)
+        c.set(W - drop - 1, y, wbs)
+
+
+def _floor_edge_walled(c: Canvas) -> None:
+    """The Pit's rim: the island edge is a BUILT wall, not a drop. Nothing
+    falls out of this arena — the boundary ricochets fangs and contains
+    duelists — so the floor must not lie with a void lip. Stone courses,
+    charcoal seams, and ember gouges where fangs have struck the ring."""
+    W, H = _FLOOR_W, _FLOOR_H
+    cold = PALETTE["cold_stone"]
+    char = PALETTE["charcoal_line"]
+    bruise = PALETTE["bruise_shadow"]
+    ember = PALETTE["ember"]
+    band = 10
+    for y in range(H):
+        for x in range(W):
+            edge = min(x, W - 1 - x, y, H - 1 - y)
+            if edge < band:
+                # Stone courses in the dark register — a wall, not a frame.
+                course = (edge // 3) & 1
+                col = bruise if course == 0 else char
+                # Seams between blocks along the run of the wall.
+                run = x if edge in (y, H - 1 - y) else y
+                if run % 16 < 1:
+                    col = PALETTE["void"]
+                # Sparse worn highlights on the outermost course only.
+                if edge < 3 and _floor_dhash(x, y) < 28:
+                    col = cold
+                # Ember gouges — sparse strike memory on the inner course.
+                if edge >= band - 3 and _floor_dhash(x, y) < 5:
+                    col = ember
+                c.pixels[y * W + x] = col
+            elif edge < band + 8:
+                # Contact shadow where the wall meets the floor.
+                if _floor_dhash(x, y) < 120:
+                    px = c.pixels[y * W + x]
+                    blended = tuple(
+                        round(px[i] * 0.72 + PALETTE["void"][i] * 0.28) for i in range(4)
+                    )
+                    c.pixels[y * W + x] = _nearest_palette(blended)
+
+
+def _floor_ring(c: Canvas, cx: int, cy: int, r: float, color, step: int = 5,
+                broken: bool = False) -> None:
+    for a in range(0, 360, step):
+        if broken and _floor_dhash(a, int(r)) < 90:
+            continue
+        c.set(round(cx + r * math.cos(math.radians(a))),
+              round(cy + r * math.sin(math.radians(a))), color)
+
+
+def _floor_broken_line(c: Canvas, x0: int, y0: int, x1: int, y1: int, color,
+                       keep: int = 150) -> None:
+    """A dithered line — Bresenham with hash-skipped pixels, for marks that
+    must read as grown or worn (roots, wear) rather than drawn."""
+    dx, dy = abs(x1 - x0), -abs(y1 - y0)
+    sx, sy = (1 if x0 < x1 else -1), (1 if y0 < y1 else -1)
+    err = dx + dy
+    while True:
+        if _floor_dhash(x0, y0) < keep:
+            c.set(x0, y0, color)
+        if x0 == x1 and y0 == y1:
+            break
+        e2 = 2 * err
+        if e2 >= dy:
+            err += dy
+            x0 += sx
+        if e2 <= dx:
+            err += dx
+            y0 += sy
+
+
+def _floor_smudge(c: Canvas, sx: int, sy: int, rad: int, color) -> None:
+    """The dried-blood ellipse from the original composition."""
+    for a in range(0, 360, 18):
+        for rr in range(rad):
+            if (a + rr) % 3:
+                continue
+            c.set(round(sx + rr * math.cos(math.radians(a))),
+                  round(sy + rr * 0.7 * math.sin(math.radians(a))), color)
+
+
+def _floor_pad(c: Canvas, cx: int, cy: int, hw: int, hh: int, color) -> None:
+    """Hollow footprint pad under a piece of cover — the floor remembers
+    what stands on it."""
+    for x in range(cx - hw, cx + hw + 1):
+        c.set(x, cy - hh, color)
+        c.set(x, cy + hh, color)
+    for y in range(cy - hh, cy + hh + 1):
+        c.set(cx - hw, y, color)
+        c.set(cx + hw, y, color)
+
+
+def _floor_scorch(c: Canvas, cx: int, cy: int, r: int) -> None:
+    """Ember-and-char burn halo under a pyre."""
+    char = PALETTE["charcoal_line"]
+    ember = PALETTE["ember"]
+    for a in range(0, 360, 6):
+        for rr in range(r - 3, r):
+            if _floor_dhash(a, rr) < 110:
+                c.set(round(cx + rr * math.cos(math.radians(a))),
+                      round(cy + rr * 0.8 * math.sin(math.radians(a))),
+                      ember if _floor_dhash(rr, a) < 30 else char)
+
+
+def _floor_spawn_marks(c: Canvas) -> None:
+    """Rings on the true spawn points (0, ±300) — the depth-duel seats."""
+    wbs = PALETTE["warm_bone_shade"]
+    for y_cm in (300, -300):
+        sx, sy = _world_px(0), _world_py(y_cm)
+        for a in range(0, 360, 24):
+            c.set(round(sx + 9 * math.cos(math.radians(a))),
+                  round(sy + 9 * math.sin(math.radians(a))), wbs)
+
+
+# ---- The seven compositions ------------------------------------------------
+
+
+def _anchor_features(c: Canvas) -> None:
+    """The first table: the occult duel stage. Central sigil, crate pads,
+    the pyre's burn memory, old blood."""
+    W, H = _FLOOR_W, _FLOOR_H
+    char = PALETTE["charcoal_line"]
+    wbs = PALETTE["warm_bone_shade"]
+    teal = PALETTE["deep_teal"]
+    bruise = PALETTE["bruise_shadow"]
+    for (x0, y0, x1, y1) in [(48, 60, 78, 128), (250, 392, 226, 452), (150, 300, 168, 358)]:
+        c.line(x0, y0, x1, y1, char)
+    for (sx, sy, rad) in [(72, 150, 10), (250, 330, 12)]:
+        _floor_smudge(c, sx, sy, rad, bruise)
+    cx, cy = W // 2, H // 2
+    _floor_ring(c, cx, cy, 42, teal)
+    _floor_ring(c, cx, cy, 30, wbs)
+    for r in range(36):
+        for (sx, sy) in [(cx - r, cy - 36 + r), (cx + r, cy - 36 + r),
+                         (cx - r, cy + 36 - r), (cx + r, cy + 36 - r)]:
+            c.set(sx, sy, wbs)
+    c.line(cx - 16, cy, cx + 16, cy, wbs)
+    c.line(cx, cy - 16, cx, cy + 16, wbs)
+    _floor_scorch(c, cx, cy, 14)
+    for x_cm in (-280, 280):
+        for y_cm in (300, -300):
+            _floor_pad(c, _world_px(x_cm), _world_py(y_cm), 13, 13, char)
+    _floor_spawn_marks(c)
+
+
+def _crossing_features(c: Canvas) -> None:
+    """The moat arena: a cracked rim where the floor ends at the chasm,
+    blood run over the edge, the worn crossing lane, sigil echoes."""
+    char = PALETTE["charcoal_line"]
+    blood = PALETTE["blood_dark"]
+    teal = PALETTE["deep_teal"]
+    cold = PALETTE["cold_stone"]
+    y_top = _world_py(60)   # far rim of the moat
+    y_bot = _world_py(-60)  # near rim
+    # Cracked rim lines just outside the moat band.
+    for x in range(12, _FLOOR_W - 12):
+        if _floor_dhash(x, 1) < 200:
+            c.set(x, y_top - 1, char)
+        if _floor_dhash(x, 2) < 200:
+            c.set(x, y_bot + 1, char)
+    # Blood that ran over the edge — short drips hanging into the band.
+    for x in range(16, _FLOOR_W - 16, 7):
+        if _floor_dhash(x, 3) < 70:
+            drip = 2 + (_floor_dhash(x, 4) % 4)
+            for d in range(drip):
+                c.set(x, y_top + d, blood)
+                c.set(_FLOOR_W - x, y_bot - d, blood)
+    # The crossing lane: wear dither in an hourglass between the seats.
+    for y_cm in range(-260, 261, 2):
+        y = _world_py(y_cm)
+        half = 6 + round(abs(y_cm) / 260.0 * 10)
+        for x in range(_world_px(0) - half, _world_px(0) + half):
+            if _floor_dhash(x, y) < 26:
+                c.set(x, y, cold)
+    # Sigil echoes under the altars (SIM_VERSION 13 seats: off the duel axis).
+    for (x_cm, y_cm) in ((-230, -150), (230, 150)):
+        sx, sy = _world_px(x_cm), _world_py(y_cm)
+        _floor_ring(c, sx, sy, 10, teal)
+        _floor_ring(c, sx, sy, 14, teal, step=15)
+    # Pillar pads.
+    for x_cm in (-300, 300):
+        for y_cm in (210, -210):
+            _floor_pad(c, _world_px(x_cm), _world_py(y_cm), 11, 24, char)
+    _floor_spawn_marks(c)
+
+
+def _reliquary_features(c: Canvas) -> None:
+    """The sealed temple: niche arches along the far and near walls, teal
+    door thresholds on the diagonal, the chain that links the two pyres."""
+    char = PALETTE["charcoal_line"]
+    wbs = PALETTE["warm_bone_shade"]
+    teal = PALETTE["deep_teal"]
+    bruise = PALETTE["bruise_shadow"]
+    # Reliquary niches: quiet arch outlines along the short walls.
+    for x in range(40, _FLOOR_W - 39, 40):
+        for y in (16, _FLOOR_H - 17):
+            for a in range(0, 181, 20):
+                c.set(round(x + 6 * math.cos(math.radians(a))),
+                      round(y + 4 * math.sin(math.radians(a))) if y < 100
+                      else round(y - 4 * math.sin(math.radians(a))), wbs)
+    # Door thresholds (350,-550) / (-350,550): double teal frames + ticks.
+    for (x_cm, y_cm) in ((350, -550), (-350, 550)):
+        dx, dy = _world_px(x_cm), _world_py(y_cm)
+        _floor_pad(c, dx, dy, 12, 12, teal)
+        _floor_pad(c, dx, dy, 15, 15, bruise)
+        for (tx, ty) in ((-18, 0), (18, 0), (0, -18), (0, 18)):
+            c.set(dx + tx, dy + ty, teal)
+    # The chain: a dashed line linking the two chained pyres at (±200, 0).
+    py = _world_py(0)
+    for x in range(_world_px(-200) + 10, _world_px(200) - 9):
+        if x % 8 < 4:
+            c.set(x, py, char)
+    for x_cm in (-200, 200):
+        _floor_scorch(c, _world_px(x_cm), py, 12)
+    # Bar pads.
+    for (x_cm, y_cm, hw, hh) in ((0, 180, 21, 10), (0, -180, 21, 10),
+                                 (-330, 0, 10, 21), (330, 0, 10, 21)):
+        _floor_pad(c, _world_px(x_cm), _world_py(y_cm), hw, hh, char)
+    c.line(60, 84, 84, 130, char)
+    _floor_smudge(c, 236, 120, 9, bruise)
+    _floor_spawn_marks(c)
+
+
+def _pit_features(c: Canvas) -> None:
+    """The fight ring: concentric wear from years of circling, radial
+    gouges, heavy blood history, ember flecks near the centre."""
+    W, H = _FLOOR_W, _FLOOR_H
+    char = PALETTE["charcoal_line"]
+    blood = PALETTE["blood_dark"]
+    ember = PALETTE["ember"]
+    bruise = PALETTE["bruise_shadow"]
+    cx, cy = W // 2, H // 2
+    for r in (40, 80, 120):
+        _floor_ring(c, cx, cy, r, char, step=3, broken=True)
+    # Radial gouges — short strike lines the ring remembers.
+    for i in range(10):
+        a = i * 36 + (_floor_dhash(i, 7) % 18)
+        r0 = 30 + (_floor_dhash(i, 11) % 70)
+        x0 = round(cx + r0 * math.cos(math.radians(a)))
+        y0 = round(cy + r0 * math.sin(math.radians(a)))
+        x1 = round(cx + (r0 + 14) * math.cos(math.radians(a)))
+        y1 = round(cy + (r0 + 14) * math.sin(math.radians(a)))
+        c.line(x0, y0, x1, y1, char)
+    for (sx, sy, rad) in [(128, 208, 14), (196, 276, 13), (110, 300, 8), (222, 176, 9)]:
+        _floor_smudge(c, sx, sy, rad, blood)
+    for y in range(cy - 120, cy + 120):
+        for x in range(cx - 120, cx + 120):
+            if math.hypot(x - cx, y - cy) < 118 and _floor_dhash(x, y) < 3:
+                c.set(x, y, ember if _floor_dhash(y, x) < 100 else bruise)
+    for x_cm in (-160, 160):
+        _floor_pad(c, _world_px(x_cm), _world_py(0), 13, 13, char)
+    _floor_spawn_marks(c)
+
+
+def _vigil_features(c: Canvas) -> None:
+    """The patient room: pristine long flagstones, the wide vigil circle
+    binding the two pyres, candle specks. No cracks — nothing has ever
+    been allowed to break here."""
+    W, H = _FLOOR_W, _FLOOR_H
+    teal = PALETTE["deep_teal"]
+    bone = PALETTE["bone"]
+    cx, cy = W // 2, H // 2
+    _floor_ring(c, cx, cy, 110, teal, step=4, broken=True)
+    _floor_ring(c, cx, cy, 116, teal, step=9, broken=True)
+    for x_cm in (-220, 220):
+        px, py = _world_px(x_cm), _world_py(0)
+        _floor_scorch(c, px, py, 12)
+        for i in range(14):
+            ox = (_floor_dhash(i, x_cm) % 33) - 16
+            oy = (_floor_dhash(x_cm, i) % 33) - 16
+            if abs(ox) + abs(oy) > 8:
+                c.set(px + ox, py + oy, bone)
+    _floor_spawn_marks(c)
+
+
+def _gallery_features(c: Canvas) -> None:
+    """The museum of angles: parquet checker, corridor runners along the
+    rails, plinth pads with a bone tick — exhibits, labelled."""
+    W = _FLOOR_W
+    char = PALETTE["charcoal_line"]
+    bone = PALETTE["bone"]
+    bruise = PALETTE["bruise_shadow"]
+    # Parquet: darken alternate 32px cells with sparse dither.
+    for cyc in range(0, _FLOOR_H // 32 + 1):
+        for cxc in range(0, W // 32 + 1):
+            if (cxc + cyc) & 1:
+                for y in range(cyc * 32 + 1, min((cyc + 1) * 32, _FLOOR_H)):
+                    for x in range(cxc * 32 + 1, min((cxc + 1) * 32, W)):
+                        if _floor_dhash(x, y) < 34:
+                            c.set(x, y, bruise)
+    # Corridor runners: bone-pale hairlines along the rail edges.
+    for x_cm in (-240, 240):
+        px = _world_px(x_cm)
+        for y in range(_world_py(220), _world_py(-220)):
+            if _floor_dhash(1, y) < 190:
+                c.set(px - 13, y, bone)
+                c.set(px + 13, y, bone)
+    # Pads: rails, bars, corner plinths (with the bone exhibit tick).
+    for (x_cm, y_cm, hw, hh, tick) in (
+        (-240, 0, 9, 61, False), (240, 0, 9, 61, False),
+        (0, 180, 38, 8, False), (0, -180, 38, 8, False),
+        (-330, 480, 14, 14, True), (330, 480, 14, 14, True),
+        (-330, -480, 14, 14, True), (330, -480, 14, 14, True),
+    ):
+        px, py = _world_px(x_cm), _world_py(y_cm)
+        _floor_pad(c, px, py, hw, hh, char)
+        if tick:
+            c.line(px - 3, py + hh + 3, px + 3, py + hh + 3, bone)
+    _floor_spawn_marks(c)
+
+
+def _forest_features(c: Canvas) -> None:
+    """The grove: root veins wandering out of each cluster, moss beds,
+    leaf litter, a root flare under every tree."""
+    W, H = _FLOOR_W, _FLOOR_H
+    char = PALETTE["charcoal_line"]
+    teal = PALETTE["deep_teal"]
+    wbs = PALETTE["warm_bone_shade"]
+    trees = [(-340, 500), (-220, 460), (-300, 360),
+             (340, -500), (220, -460), (300, -360),
+             (380, 120), (430, -10), (-380, -120), (-430, 10),
+             (-90, 40), (90, -40)]
+    # Root veins: two short broken wanderers out of each tree — grown, not
+    # drawn; solid teal polylines read as lightning, not roots.
+    for ti, (x_cm, y_cm) in enumerate(trees):
+        px, py = _world_px(x_cm), _world_py(y_cm)
+        for vi in range(2):
+            a = _floor_dhash(ti, vi) * 360 // 256
+            x, y = float(px), float(py)
+            for seg in range(3):
+                jitter = (_floor_dhash(ti * 7 + seg, vi) % 60) - 30
+                aa = math.radians(a + jitter)
+                nx = x + math.cos(aa) * (5 + seg * 2)
+                ny = y + math.sin(aa) * (5 + seg * 2)
+                _floor_broken_line(c, round(x), round(y), round(nx), round(ny), teal, keep=140)
+                x, y = nx, ny
+        # Root flare: four diagonal ticks at the trunk.
+        for (dx, dy) in ((-1, -1), (1, -1), (-1, 1), (1, 1)):
+            c.line(px + dx * 5, py + dy * 5, px + dx * 9, py + dy * 9, char)
+    # Moss beds around the two big clusters + centre singles.
+    for (x_cm, y_cm) in ((-287, 440), (287, -440), (0, 0)):
+        mx, my = _world_px(x_cm), _world_py(y_cm)
+        for y in range(my - 22, my + 22):
+            for x in range(mx - 26, mx + 26):
+                if math.hypot(x - mx, y - my) < 23 and _floor_dhash(x, y) < 30:
+                    c.set(x, y, teal)
+    # Leaf litter, field-wide and sparse.
+    for y in range(14, H - 14, 3):
+        for x in range(14, W - 14, 3):
+            if _floor_dhash(x + 1, y + 2) < 2:
+                c.set(x, y, wbs)
+    _floor_spawn_marks(c)
+
+
+_ARENA_FLOOR_FEATURES = {
+    "anchor": _anchor_features,
+    "crossing": _crossing_features,
+    "reliquary": _reliquary_features,
+    "pit": _pit_features,
+    "vigil": _vigil_features,
+    "gallery": _gallery_features,
+    "forest": _forest_features,
+}
+
+# Atmosphere light pools per arena (canvas coords). Everyone else gets the
+# single central stage pool; the Vigil's light lives on its two pyres and
+# the Gallery runs dimmer, lit along the corridor crossings.
+_ARENA_FLOOR_POOLS = {
+    "vigil": [(90, 240, 130, 0.12, PALETTE["cold_stone"]),
+              (230, 240, 130, 0.12, PALETTE["cold_stone"])],
+    "gallery": [(160, 120, 120, 0.14, PALETTE["cold_stone"]),
+                (160, 360, 120, 0.14, PALETTE["cold_stone"])],
+    "pit": [(160, 240, 150, 0.26, PALETTE["cold_stone"])],
+}
+_DEFAULT_FLOOR_POOL = [(160, 240, 175, 0.22, PALETTE["cold_stone"])]
+
+# Grout pitch per arena: the Vigil lays long patient flagstones, the
+# Gallery a tight parquet grid.
+_ARENA_FLOOR_GROUT = {"vigil": (40, 64), "gallery": (32, 32)}
+
+
+def arena_floor(arena: str = "anchor") -> Canvas:
+    """One real composition per arena (SIM_VERSION 13 batch — this replaced
+    the seven-retints-of-one-floor era). Shared atmosphere, per-arena hue
+    register (`_ARENA_FLOOR_SWAPS`), then the arena's own features: the
+    floor now states each arena's rules (the Pit's walled rim, the moat's
+    cracked lip, the Vigil's pyre light) instead of just recoloring them."""
+    c = Canvas(_FLOOR_W, _FLOOR_H, PALETTE["deep_ash"])
+    _floor_atmosphere(c, _ARENA_FLOOR_POOLS.get(arena, _DEFAULT_FLOOR_POOL))
+    gx, gy = _ARENA_FLOOR_GROUT.get(arena, (32, 32))
+    _floor_grout(c, gx, gy)
+    _floor_register(c, arena)
+    _ARENA_FLOOR_FEATURES[arena](c)
+    if arena == "pit":
+        _floor_edge_walled(c)
+    else:
+        _floor_edge_void(c)
     return c
+
+
+def training_floor() -> Canvas:
+    """The training slab is the Anchor stage — they were byte-identical in
+    the retint era and staying aliased keeps it honest."""
+    return arena_floor("anchor")
 
 
 # ===========================================================================
