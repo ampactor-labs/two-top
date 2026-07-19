@@ -21,6 +21,7 @@
 //! playback source overwrites `LocalInputs` after every platform source).
 
 use bevy::prelude::*;
+use bevy::text::TextBounds;
 use input_touch::WindowSize;
 use replay::{Replay, ReplayPlayback, decode_for_sim_version};
 use sim::SimSnapshot;
@@ -155,9 +156,14 @@ impl SnapshotBuffer {
 }
 
 /// One listed tape: the path plus the header facts the row shows.
+/// `foreign_version` is `Some(v)` for a tape from another sim version —
+/// listed honestly (dimmed, labeled, inert) instead of silently hidden:
+/// the no-migrations law should read as a law, not as data loss. Viewing
+/// one still means the archived tagged binary, per that law.
 struct TapeEntry {
     path: PathBuf,
     line: String,
+    foreign_version: Option<u32>,
 }
 
 /// The scanned list (refreshed on entering the Replays screen).
@@ -193,10 +199,13 @@ fn replays_dir() -> Option<PathBuf> {
     crate::recorder::replays_dir()
 }
 
-/// Scan the replay dir for loadable tapes, newest first. Only headers that
-/// strict-decode against this binary's `SIM_VERSION` are listed — an old
-/// tape from a previous sim version is honestly invisible here (view it
-/// via the archived tagged binary, per the no-migrations law).
+/// Scan the replay dir for tapes, newest first. Tapes from another sim
+/// version are listed too — dimmed and labeled with their version — so a
+/// version bump never reads as your replays vanishing. Only same-version
+/// tapes are playable here; the rest wait for the archived tagged binary
+/// (the no-migrations law). A tape whose FORMAT no longer decodes at all
+/// stays invisible; there is nothing honest to say about bytes we can't
+/// read.
 fn scan_tapes() -> Vec<TapeEntry> {
     let Some(dir) = replays_dir() else {
         return Vec::new();
@@ -211,8 +220,9 @@ fn scan_tapes() -> Vec<TapeEntry> {
                 return None;
             }
             let bytes = std::fs::read(&path).ok()?;
-            let replay = decode_for_sim_version(&bytes, sim::SIM_VERSION).ok()?;
+            let replay = replay::decode(&bytes).ok()?;
             let h = &replay.header;
+            let foreign_version = (h.sim_version != sim::SIM_VERSION).then_some(h.sim_version);
             let winner_name = match h.winner {
                 Some(w) => h.player_handles[w as usize % 2]
                     .clone()
@@ -220,7 +230,7 @@ fn scan_tapes() -> Vec<TapeEntry> {
                 None => "NOBODY".into(),
             };
             let secs = h.frame_count / h.frame_rate.max(1) as u32;
-            let line = format!(
+            let mut line = format!(
                 "{} WINS - {} - {}:{:02} - {}",
                 winner_name,
                 arena_label(h.arena_id),
@@ -228,7 +238,17 @@ fn scan_tapes() -> Vec<TapeEntry> {
                 secs % 60,
                 date_label(h.recorded_at),
             );
-            Some((h.recorded_at, TapeEntry { path, line }))
+            if let Some(v) = foreign_version {
+                line.push_str(&format!(" - SIM v{v}"));
+            }
+            Some((
+                h.recorded_at,
+                TapeEntry {
+                    path,
+                    line,
+                    foreign_version,
+                },
+            ))
         })
         .collect();
     tapes.sort_by_key(|(at, _)| std::cmp::Reverse(*at));
@@ -312,6 +332,12 @@ fn enter_replays(mut commands: Commands, mut list: ResMut<TapeList>) {
     ));
     for (i, tape) in list.0.iter().enumerate() {
         let fy = LIST_TOP + (i as f32 + 0.5) * LIST_PITCH;
+        // A foreign-version tape reads as an artifact, not an option.
+        let color = if tape.foreign_version.is_some() {
+            render::palette::BONE.with_alpha(0.35)
+        } else {
+            render::palette::BONE
+        };
         commands.spawn((
             ReplayScreenText,
             TapeRow,
@@ -320,9 +346,42 @@ fn enter_replays(mut commands: Commands, mut list: ResMut<TapeList>) {
                 font_size: 34.0,
                 ..default()
             },
-            TextColor(render::palette::BONE),
+            TextColor(color),
             TextLayout::new_with_justify(Justify::Center),
             ScreenAnchor::new(0.0, 1.0 - 2.0 * fy, 0.0, 0.0),
+            Transform::from_xyz(0.0, 0.0, 210.0),
+        ));
+    }
+    // Tape trading, stated where the tapes are: a match tape is a small
+    // file, and the deterministic sim means a friend's tape plays HERE
+    // exactly as it played there. The dir line makes the folder findable
+    // from a Files app in both directions (copy out to send, drop in to
+    // watch). One-tap sharing wants a FileProvider manifest entry that
+    // cargo-apk can't express today — the folder IS the feature for now.
+    if let Some(dir) = replays_dir() {
+        commands.spawn((
+            ReplayScreenText,
+            Text2d::new("tapes are files - swap them with a friend, they play here"),
+            TextFont {
+                font_size: 24.0,
+                ..default()
+            },
+            TextColor(render::palette::BONE.with_alpha(0.55)),
+            TextLayout::new_with_justify(Justify::Center),
+            ScreenAnchor::new(0.0, 1.0 - 2.0 * 0.79, 0.0, 0.0),
+            Transform::from_xyz(0.0, 0.0, 210.0),
+        ));
+        commands.spawn((
+            ReplayScreenText,
+            Text2d::new(dir.display().to_string()),
+            TextFont {
+                font_size: 18.0,
+                ..default()
+            },
+            TextColor(render::palette::BONE.with_alpha(0.4)),
+            TextLayout::new_with_justify(Justify::Center),
+            TextBounds::new_horizontal(1000.0),
+            ScreenAnchor::new(0.0, 1.0 - 2.0 * 0.825, 0.0, 0.0),
             Transform::from_xyz(0.0, 0.0, 210.0),
         ));
     }
@@ -435,6 +494,15 @@ fn replays_input(world: &mut World) {
         let Some(entry) = list.0.get(row) else {
             return;
         };
+        if let Some(v) = entry.foreign_version {
+            tracing::info!(
+                target: "two_top::theater",
+                tape_version = v,
+                "tape speaks sim v{v}; this build speaks v{} — archived binaries own it",
+                sim::SIM_VERSION,
+            );
+            return;
+        }
         entry.path.clone()
     };
     let Ok(bytes) = std::fs::read(&path) else {

@@ -45,8 +45,10 @@ cargo run -p app
   never comes; a killless round expires scoreless), **The Gallery** (dense
   corridor maze), **The Forest** (bone trees block and ricochet; two chips
   fell one, a Heavy fells in one — and FIRE spreads tree to tree, burning
-  the cover down for the rest of the match). Keys 1-3 pick the classics;
-  tapping/cycling reaches all seven. Online rooms hash across the roster.
+  the cover down for the rest of the match). Tap the arena line to open the
+  roster screen (keys 1-7 pick directly on couch; A opens the roster
+  anywhere); online, your pick rides the room name so both players must
+  pick the same table to meet.
 - Start a match. **Player 0 = WASD**, **Player 1 = arrow keys**.
 - Throw is the boomerang button (see the on-screen prompts); dash gives
   i-frames; one hit kills; first to 5 wins the match.
@@ -461,6 +463,19 @@ remembered in `career.json`). A fresh install's bot starts as a passive
 dummy and sharpens one notch per kill you land, so the first match is the
 tutorial. Practice results never touch the online career W-L.
 `TWOTOP_PRACTICE=1` env arms it for desktop automation.
+
+**Trading tapes.** A match tape is a ~14 KB `.bmrg` file, and the sim is
+deterministic, so a friend's tape plays on your device exactly as it played
+on theirs — HUD, kill-cam, audio, the devouring, all of it. The REPLAYS
+screen prints the folder it reads; on Android that is
+`/sdcard/Android/data/dev.ampactor.twotop/files/replays/` (any Files app
+reaches it), on desktop `~/Downloads/two-top/replays/`. Copy a tape out to
+send it (chat, email, whatever moves a file); drop a received tape in and
+it appears in the list. A tape from a different sim version lists dimmed
+with its version tag instead of playing — the strict no-migrations law made
+visible; archived tagged binaries own old tapes. One-tap sharing from
+inside the app is a known follow-up (it wants a FileProvider manifest entry
+that cargo-apk cannot express today).
 
 **The Title is a table.** Your demon stands at the near seat with your name
 over its head; online, the far seat is an empty ring — which is what the
