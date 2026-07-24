@@ -171,54 +171,159 @@ fn push_deadzone(
 /// `;`/`'` the screen shake.
 /// Any change re-clamps, pushes the input mirrors to `input_touch`, and
 /// saves to disk.
-/// The settings screen's rows (window-fraction, y-down). They own this
-/// screen now instead of the title's middle, so the pitch can be generous
-/// — 0.07 is double the old thumb-tight 0.034, and nothing competes for
-/// the space.
-const ROWS_TOP: f32 = 0.32;
-const ROW_PITCH: f32 = 0.07;
+// ---- Layout (window-fraction, y-down) ----
+// The knobs read as three small families, not one undifferentiated stack:
+// FEEL (haptics, shake), AUDIO (sfx, music), CONTROL (deadzone, southpaw).
+// One walk of `layout()` produces every band, and the SAME walk serves the
+// spawner and the tap hit-test — the rows you see and the rows you hit can
+// never drift apart. Everything fits between the heading and BACK with
+// air to spare, so the screen never needs to scroll.
+const GROUPS_TOP: f32 = 0.21;
+const GROUP_HEADER_H: f32 = 0.045;
+const ROW_PITCH: f32 = 0.075;
+const GROUP_GAP: f32 = 0.012;
+const HEADING_FY: f32 = 0.12;
 const ROW_COUNT: usize = 6;
+/// The groups, naming rows by their settled indices (0 haptics, 1 sfx,
+/// 2 music, 3 deadzone, 4 southpaw, 5 shake — `adjust_settings`' keys).
+const GROUPS: [(&str, [usize; 2]); 3] = [
+    ("FEEL", [0, 5]),
+    ("AUDIO", [1, 2]),
+    ("CONTROL", [3, 4]),
+];
 /// BACK, matching the replays screen's band exactly.
 const BACK_BAND: (f32, f32) = (0.86, 0.96);
 
-/// One tappable settings row (0 haptics, 1 sfx, 2 music, 3 deadzone,
-/// 4 southpaw, 5 shake). Row `ROW_COUNT` is the screen heading, `ROW_COUNT + 1`
-/// the BACK label — same component, so one system shows and hides the
-/// whole screen.
+/// The computed screen layout: a y-down band per setting row (indexed by
+/// the row's settled id) and a center fy per group header.
+struct SettingsLayout {
+    row_bands: [(f32, f32); ROW_COUNT],
+    header_centers: [f32; GROUPS.len()],
+}
+
+fn layout() -> SettingsLayout {
+    let mut row_bands = [(0.0, 0.0); ROW_COUNT];
+    let mut header_centers = [0.0; GROUPS.len()];
+    let mut cursor = GROUPS_TOP;
+    for (g, (_, rows)) in GROUPS.iter().enumerate() {
+        header_centers[g] = cursor + GROUP_HEADER_H * 0.5;
+        cursor += GROUP_HEADER_H;
+        for &row in rows {
+            row_bands[row] = (cursor, cursor + ROW_PITCH);
+            cursor += ROW_PITCH;
+        }
+        cursor += GROUP_GAP;
+    }
+    SettingsLayout {
+        row_bands,
+        header_centers,
+    }
+}
+
+/// The setting row whose band contains a y-down window fraction.
+fn row_at(fy: f32) -> Option<usize> {
+    layout()
+        .row_bands
+        .iter()
+        .position(|(top, bottom)| (*top..*bottom).contains(&fy))
+}
+
+/// One piece of the settings screen. `Setting(i)` is a tappable row,
+/// `GroupHeader` a family label (text fixed at spawn), `Heading` the
+/// screen title — one component, so one system shows and hides the whole
+/// screen.
 #[derive(Component)]
-struct SettingRow(usize);
+enum SettingsPiece {
+    Setting(usize),
+    GroupHeader,
+    Heading,
+}
+
+/// The bordered BACK button's parts (the same button chrome every other
+/// screen's BACK wears — this one was a bare floating word).
+#[derive(Component)]
+struct SettingsBack(crate::screen::BtnRole);
 
 fn spawn_setting_rows(mut commands: Commands) {
-    for row in 0..ROW_COUNT + 2 {
-        let (fy, size) = match row {
-            r if r < ROW_COUNT => (ROWS_TOP + (r as f32 + 0.5) * ROW_PITCH, 38.0),
-            r if r == ROW_COUNT => (0.20, 84.0),
-            _ => ((BACK_BAND.0 + BACK_BAND.1) * 0.5, 40.0),
-        };
+    let l = layout();
+    commands.spawn((
+        SettingsPiece::Heading,
+        Text2d::new("SETTINGS"),
+        TextFont {
+            font_size: 84.0,
+            ..default()
+        },
+        TextColor(render::palette::HOT_BONE),
+        TextLayout::new_with_justify(Justify::Center),
+        crate::anchor::ScreenAnchor::new(0.0, 1.0 - 2.0 * HEADING_FY, 0.0, 0.0),
+        Transform::from_xyz(0.0, 0.0, 210.0),
+        Visibility::Hidden,
+    ));
+    for (g, (name, _)) in GROUPS.iter().enumerate() {
         commands.spawn((
-            SettingRow(row),
-            Text2d::new(String::new()),
+            SettingsPiece::GroupHeader,
+            Text2d::new(name.to_string()),
             TextFont {
-                font_size: size,
+                font_size: 24.0,
                 ..default()
             },
-            TextColor(render::palette::BONE.with_alpha(0.8)),
+            TextColor(render::palette::COLD_STONE),
+            TextLayout::new_with_justify(Justify::Center),
+            crate::anchor::ScreenAnchor::new(0.0, 1.0 - 2.0 * l.header_centers[g], 0.0, 0.0),
+            Transform::from_xyz(0.0, 0.0, 210.0),
+            Visibility::Hidden,
+        ));
+    }
+    for (row, (top, bottom)) in l.row_bands.iter().enumerate() {
+        let fy = (top + bottom) * 0.5;
+        commands.spawn((
+            SettingsPiece::Setting(row),
+            Text2d::new(String::new()),
+            TextFont {
+                font_size: 40.0,
+                ..default()
+            },
+            TextColor(render::palette::BONE.with_alpha(0.85)),
             TextLayout::new_with_justify(Justify::Center),
             crate::anchor::ScreenAnchor::new(0.0, 1.0 - 2.0 * fy, 0.0, 0.0),
             Transform::from_xyz(0.0, 0.0, 210.0),
             Visibility::Hidden,
         ));
     }
+    // BACK in the shared bordered-box language, at the shared band.
+    let back_anchor_y = 1.0 - (BACK_BAND.0 + BACK_BAND.1);
+    for role in [
+        crate::screen::BtnRole::Border,
+        crate::screen::BtnRole::Fill,
+        crate::screen::BtnRole::Label,
+    ] {
+        crate::screen::spawn_button_part(
+            &mut commands,
+            role,
+            Vec2::new(0.0, back_anchor_y),
+            Vec2::new(340.0, 76.0),
+            40.0,
+            &mut |ec, role| {
+                ec.insert(SettingsBack(role));
+            },
+        );
+    }
 }
 
-/// Render each row with its tap arrows; the whole screen shows together.
+/// Render each piece; the whole screen shows together. Rows carry their
+/// tap arrows; the BACK chrome colors like every other bordered button.
+#[allow(clippy::type_complexity)]
 fn update_setting_rows(
     screen: Res<State<crate::screen::AppScreen>>,
     settings: Res<Settings>,
-    mut rows: Query<(&SettingRow, &mut Text2d, &mut TextColor, &mut Visibility)>,
+    mut pieces: Query<(&SettingsPiece, &mut Text2d, &mut Visibility), Without<SettingsBack>>,
+    mut back: Query<
+        (&SettingsBack, &mut Visibility, Option<&mut Text2d>),
+        Without<SettingsPiece>,
+    >,
 ) {
     let open = *screen.get() == crate::screen::AppScreen::Settings;
-    for (row, mut text, mut color, mut vis) in &mut rows {
+    for (piece, mut text, mut vis) in &mut pieces {
         *vis = if open {
             Visibility::Visible
         } else {
@@ -227,31 +332,35 @@ fn update_setting_rows(
         if !open {
             continue;
         }
-        if row.0 == ROW_COUNT {
-            text.0 = "SETTINGS".to_string();
-            color.0 = render::palette::HOT_BONE;
-            continue;
+        if let SettingsPiece::Setting(row) = piece {
+            text.0 = match row {
+                0 => format!(
+                    "<  haptics {}  >",
+                    if settings.haptics { "on" } else { "off" }
+                ),
+                1 => format!("<  sfx {:.0}%  >", settings.sfx_volume * 100.0),
+                2 => format!("<  music {:.0}%  >", settings.music_volume * 100.0),
+                3 => format!("<  deadzone {:.0}%  >", settings.stick_deadzone * 100.0),
+                4 => format!(
+                    "<  southpaw {}  >",
+                    if settings.southpaw { "on" } else { "off" }
+                ),
+                _ => format!("<  shake {:.0}%  >", settings.shake * 100.0),
+            };
         }
-        if row.0 == ROW_COUNT + 1 {
-            text.0 = "BACK".to_string();
-            color.0 = render::palette::HOT_BONE;
-            continue;
-        }
-        color.0 = render::palette::BONE.with_alpha(0.8);
-        text.0 = match row.0 {
-            0 => format!(
-                "<  haptics {}  >",
-                if settings.haptics { "on" } else { "off" }
-            ),
-            1 => format!("<  sfx {:.0}%  >", settings.sfx_volume * 100.0),
-            2 => format!("<  music {:.0}%  >", settings.music_volume * 100.0),
-            3 => format!("<  deadzone {:.0}%  >", settings.stick_deadzone * 100.0),
-            4 => format!(
-                "<  southpaw {}  >",
-                if settings.southpaw { "on" } else { "off" }
-            ),
-            _ => format!("<  shake {:.0}%  >", settings.shake * 100.0),
+    }
+    for (part, mut vis, text) in &mut back {
+        *vis = if open {
+            Visibility::Visible
+        } else {
+            Visibility::Hidden
         };
+        if open
+            && part.0 == crate::screen::BtnRole::Label
+            && let Some(mut t) = text
+        {
+            t.0 = "BACK".to_string();
+        }
     }
 }
 
@@ -303,11 +412,10 @@ fn adjust_settings(
     let win = window.0;
     if win.x > 0.0 && win.y > 0.0 {
         for t in touches.iter_just_pressed() {
-            let fy = t.position().y / win.y;
-            if !(ROWS_TOP..ROWS_TOP + ROW_COUNT as f32 * ROW_PITCH).contains(&fy) {
+            // The same layout walk that placed the rows resolves the tap.
+            let Some(row) = row_at(t.position().y / win.y) else {
                 continue;
-            }
-            let row = ((fy - ROWS_TOP) / ROW_PITCH) as usize;
+            };
             let up = t.position().x > win.x * 0.5;
             let sign = if up { 1.0 } else { -1.0 };
             match row {
@@ -363,6 +471,37 @@ mod tests {
             "NaN falls back to default"
         );
         assert!(!wild.haptics);
+    }
+
+    #[test]
+    fn layout_bands_are_disjoint_and_clear_of_back() {
+        let l = layout();
+        // Every row got a real band.
+        for (row, (top, bottom)) in l.row_bands.iter().enumerate() {
+            assert!(bottom > top, "row {row} has a band");
+            assert!(*top >= GROUPS_TOP, "row {row} below the heading");
+            assert!(*bottom < BACK_BAND.0, "row {row} clear of BACK");
+        }
+        // No two bands overlap (grouping must never create a double-hit).
+        for a in 0..ROW_COUNT {
+            for b in (a + 1)..ROW_COUNT {
+                let (at, ab) = l.row_bands[a];
+                let (bt, bb) = l.row_bands[b];
+                assert!(ab <= bt || bb <= at, "rows {a}/{b} overlap");
+            }
+        }
+    }
+
+    #[test]
+    fn taps_resolve_to_the_row_they_land_on() {
+        let l = layout();
+        for (row, (top, bottom)) in l.row_bands.iter().enumerate() {
+            assert_eq!(row_at((top + bottom) * 0.5), Some(row));
+        }
+        // A header tap adjusts nothing.
+        assert_eq!(row_at(l.header_centers[0]), None);
+        // Neither does the BACK band (settings_back owns it).
+        assert_eq!(row_at((BACK_BAND.0 + BACK_BAND.1) * 0.5), None);
     }
 
     #[test]
