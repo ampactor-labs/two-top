@@ -401,7 +401,7 @@ fn fire_fang_lights_the_pyre_it_shatters() {
         modifier: Some(PickupKind::Fire),
         is_secondary: false,
         despawn_at_frame: None,
-        boundary_bounces: 0,
+        wall_bounces: 0,
     });
     for _ in 0..6 {
         app.update();
@@ -462,7 +462,7 @@ fn swap_fang_trades_places_on_the_recall_press() {
         modifier: Some(PickupKind::Swap),
         is_secondary: false,
         despawn_at_frame: None,
-        boundary_bounces: 0,
+        wall_bounces: 0,
     });
     let p0_before = player_pos(&mut app, 0);
     // The recall press (THROW down with every slot out) trades places.

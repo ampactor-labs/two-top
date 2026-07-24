@@ -67,7 +67,7 @@ fn fang_at(app: &mut App, modifier: Option<PickupKind>, cx: i32, cy: i32, vx: i3
                 modifier,
                 is_secondary: false,
                 despawn_at_frame: None,
-                boundary_bounces: 0,
+                wall_bounces: 0,
             },
             PositionF(Vec2F::from_cm(cx, cy)),
             PreviousPositionF(Vec2F::from_cm(cx, cy)),
@@ -110,9 +110,11 @@ fn two_chips_fell_a_tree_and_a_stump_stops_blocking() {
         let tr = tree(&mut app, t);
         assert_eq!(tr.hp, TREE_HP - chip, "chip {chip} lands");
         assert_eq!(tr.felled, chip == TREE_HP, "falls exactly on the last chip");
-        // The chip knocked the fang Loose (cover semantics) and pushed it out.
+        // Each fresh fang banks its one free bounce off the trunk (still
+        // Flying, still lethal); the chip lands either way. The drop on a
+        // SECOND solid contact is pinned by the two-pillar boomerang test.
         let boom = *app.world().entity(f).get::<Boomerang>().unwrap();
-        assert!(matches!(boom.state, BoomerangState::Loose));
+        assert!(matches!(boom.state, BoomerangState::Flying));
         app.world_mut().despawn(f);
     }
     // A felled tree is open ground: a fresh fang flies straight through.

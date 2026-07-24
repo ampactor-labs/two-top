@@ -96,7 +96,16 @@ pub const TICK_DT: Fix = Fix::lit("0.01666666666");
 /// spawns landed inside (spawn-in-moat round-start deaths + the respawn
 /// death cascade), and the altar sigils move off the duel axis onto each
 /// seat's half.
-pub const SIM_VERSION: u32 = 13;
+///
+/// `14` = the bank shot: a Flying fang's first contact with any solid
+/// (cover, walled boundary, tree, pyre) is a clean full-energy ricochet —
+/// the fang stays Flying and lethal — and its SECOND solid contact knocks
+/// it Loose ([`MAX_FREE_WALL_BOUNCES`], one shared budget replacing the
+/// Pit-only `boundary_bounces` pair). Bouncy is exempt everywhere (endless
+/// ricochet is that pickup's identity — it now rides cover, not just the
+/// Pit ring); Heavy's plow-through and Multishot's die-on-first-wall are
+/// unchanged. Same `BoomerangMods` layout (field renamed), no new state.
+pub const SIM_VERSION: u32 = 14;
 
 // ---- Components ----
 
@@ -338,19 +347,22 @@ pub struct BoomerangMods {
     /// hit a wall (a backstop for fangs that fly through a gap). `None` for
     /// primaries and non-multishot fangs — they live until recalled/caught.
     pub despawn_at_frame: Option<u32>,
-    /// Boundary ricochets taken in a WALLED arena (the Pit). The reach cap
-    /// is displacement-from-origin, which a fang ping-ponging inside a
-    /// 1000×1500 box may never hit — so the ring only gives a fang
-    /// [`PIT_MAX_BOUNDARY_BOUNCES`] free angles before knocking it Loose.
-    /// Unused (stays 0) everywhere else.
-    pub boundary_bounces: u8,
+    /// Solid contacts this Flying fang has ricocheted off — cover, a walled
+    /// arena's boundary ring, a standing tree, an intact pyre; ONE shared
+    /// budget ([`MAX_FREE_WALL_BOUNCES`]). The first contact reflects at
+    /// full energy and the fang stays Flying (the bank shot); the next
+    /// knocks it Loose. Bouncy never spends budget (endless ricochet IS
+    /// that pickup's identity). Reset per throw.
+    pub wall_bounces: u8,
 }
 
-/// Boundary ricochets a Flying fang gets in a walled arena before it is
-/// knocked Loose. Two free wall angles per throw; the third drops it.
-/// Bouncy fangs are exempt — endless ricochet IS that pickup's identity
-/// (the owner can always hold recall to pull it home).
-pub const PIT_MAX_BOUNDARY_BOUNCES: u8 = 2;
+/// Solid ricochets a Flying fang gets before the next contact knocks it
+/// Loose. One free bounce: banking a throw off a wall for a kill is a real
+/// play, pinballing forever is not — the second collision with anything
+/// solid drops the fang (Boomerang-Fu drop). The reach cap alone can't
+/// bound this: displacement-from-origin may never grow while a fang
+/// ping-pongs between parallel faces.
+pub const MAX_FREE_WALL_BOUNCES: u8 = 1;
 
 /// Throw origin of a recallable primary boomerang — the thrower's
 /// position at launch. A primary auto-recalls once it has travelled
@@ -2099,7 +2111,7 @@ pub fn throw_boomerangs(
                 modifier,
                 is_secondary: false,
                 despawn_at_frame: None,
-                boundary_bounces: 0,
+                wall_bounces: 0,
             },
             ThrowOrigin(pos.0),
             ThrowReach(reach),
@@ -2123,7 +2135,7 @@ pub fn throw_boomerangs(
                         modifier,
                         is_secondary: true,
                         despawn_at_frame: Some(expire),
-                        boundary_bounces: 0,
+                        wall_bounces: 0,
                     },
                     PositionF(pos.0),
                     PreviousPositionF(pos.0),
@@ -2204,9 +2216,9 @@ pub fn boomerang_wall_collision(
                 //
                 // In a WALLED arena (the Pit) the ring is a live cushion
                 // instead: the fang reflects and KEEPS FLYING — the angle
-                // game is the arena — for a bounded number of kisses
-                // (`PIT_MAX_BOUNDARY_BOUNCES`), after which it's knocked
-                // Loose like any cover hit. Bouncy rides the ring forever.
+                // game is the arena — spending the shared bounce budget
+                // ([`MAX_FREE_WALL_BOUNCES`]) like any other solid. Bouncy
+                // rides the ring forever.
                 WallKind::Boundary => {
                     if !walled {
                         continue;
@@ -2215,29 +2227,43 @@ pub fn boomerang_wall_collision(
                     vel.0 = reflect_velocity_for_push(vel.0, push);
                     if bouncy {
                         vel.0 = bouncy_accelerate(vel.0);
-                    } else if matches!(boom.state, BoomerangState::Flying) {
-                        mods.boundary_bounces += 1;
-                        if mods.boundary_bounces > PIT_MAX_BOUNDARY_BOUNCES {
-                            boom.state = BoomerangState::Loose;
-                        }
+                    } else {
+                        spend_wall_bounce(&mut boom, &mut mods);
                     }
                 }
-                // Inner cover ricochets the fang — and knocks a Flying fang
-                // LOOSE, so after the bounce it loses momentum and settles to
-                // rest instead of pinballing forever (Boomerang-Fu drop). A
-                // fang that's already Loose keeps ricocheting + decelerating.
+                // Inner cover ricochets the fang. The FIRST solid contact is
+                // a clean full-energy bounce and the fang stays Flying (the
+                // bank shot — a deliberate carom into a kill); the SECOND
+                // knocks it Loose so it settles instead of pinballing
+                // (Boomerang-Fu drop). A fang that's already Loose keeps
+                // ricocheting + decelerating.
                 WallKind::Obstacle => {
                     pos.0 = contact + push;
                     vel.0 = reflect_velocity_for_push(vel.0, push);
                     if bouncy {
                         vel.0 = bouncy_accelerate(vel.0);
-                    }
-                    if matches!(boom.state, BoomerangState::Flying) {
-                        boom.state = BoomerangState::Loose;
+                    } else {
+                        spend_wall_bounce(&mut boom, &mut mods);
                     }
                 }
             }
         }
+    }
+}
+
+/// Spend one solid-contact ricochet from a fang's shared bounce budget
+/// ([`MAX_FREE_WALL_BOUNCES`]): within budget the fang stays Flying (and
+/// lethal — the bank shot); past it the contact knocks it Loose. Loose /
+/// Returning fangs are untouched (a Loose fang keeps ricocheting while it
+/// decelerates; Returning phases and never reaches the callers). Callers
+/// exempt Bouncy before calling.
+fn spend_wall_bounce(boom: &mut Boomerang, mods: &mut BoomerangMods) {
+    if !matches!(boom.state, BoomerangState::Flying) {
+        return;
+    }
+    mods.wall_bounces = mods.wall_bounces.saturating_add(1);
+    if mods.wall_bounces > MAX_FREE_WALL_BOUNCES {
+        boom.state = BoomerangState::Loose;
     }
 }
 
@@ -3730,9 +3756,9 @@ pub fn arena_pyres_for(arena: ArenaId) -> Vec<BonePyre> {
 pub fn boomerang_pyre_collision(
     frame: Res<FrameCount>,
     mut pyres: Query<&mut BonePyre>,
-    mut boomerangs: Query<(&Boomerang, &BoomerangMods, &mut PositionF, &mut VelocityF)>,
+    mut boomerangs: Query<(&mut Boomerang, &mut BoomerangMods, &mut PositionF, &mut VelocityF)>,
 ) {
-    for (boom, mods, mut pos, mut vel) in &mut boomerangs {
+    for (mut boom, mut mods, mut pos, mut vel) in &mut boomerangs {
         if matches!(boom.state, BoomerangState::Returning { .. }) {
             continue;
         }
@@ -3742,6 +3768,7 @@ pub fn boomerang_pyre_collision(
         }
         // Heavy plows through: it shatters the pyre but doesn't ricochet.
         let heavy = matches!(mods.modifier, Some(PickupKind::Heavy));
+        let bouncy = matches!(mods.modifier, Some(PickupKind::Bouncy));
         for mut pyre in &mut pyres {
             if pyre.shattered {
                 continue;
@@ -3751,6 +3778,12 @@ pub fn boomerang_pyre_collision(
                 if !heavy {
                     pos.0 = pos.0 + push;
                     vel.0 = reflect_velocity_for_push(vel.0, push);
+                    // A pyre carom is a solid contact like any other: the
+                    // shared budget decides whether the fang flies on
+                    // (first bounce) or drops (second). Bouncy exempt.
+                    if !bouncy {
+                        spend_wall_bounce(&mut boom, &mut mods);
+                    }
                 }
                 pyre.shattered = true;
                 // A FIRE fang doesn't just shatter the bones — it LIGHTS
@@ -4105,9 +4138,9 @@ pub fn tree_collision(trees: Query<&BoneTree>, mut players: Query<&mut PositionF
 pub fn boomerang_tree_collision(
     frame: Res<FrameCount>,
     mut trees: Query<&mut BoneTree>,
-    mut boomerangs: Query<(&mut Boomerang, &BoomerangMods, &mut PositionF, &mut VelocityF)>,
+    mut boomerangs: Query<(&mut Boomerang, &mut BoomerangMods, &mut PositionF, &mut VelocityF)>,
 ) {
-    for (mut boom, mods, mut pos, mut vel) in &mut boomerangs {
+    for (mut boom, mut mods, mut pos, mut vel) in &mut boomerangs {
         if matches!(boom.state, BoomerangState::Returning { .. }) {
             continue;
         }
@@ -4137,22 +4170,23 @@ pub fn boomerang_tree_collision(
                 vel.0 = bouncy_accelerate(vel.0);
             }
             if fire {
-                // Ignite (once) instead of chipping; the fang stays live
-                // exactly like a pyre lighting.
+                // Ignite (once) instead of chipping; the burn does the
+                // felling. The trunk contact still spends the shared bounce
+                // budget below — a fire fang banks once like any other.
                 if tree.lit_until_frame.is_none() {
                     tree.lit_until_frame = Some(frame.0 + TREE_BURN_FRAMES);
                     tree.lit_by = boom.owner_handle;
                 }
-                continue;
+            } else {
+                tree.hp = tree.hp.saturating_sub(1);
+                if tree.hp == 0 {
+                    tree.felled = true;
+                }
             }
-            tree.hp = tree.hp.saturating_sub(1);
-            if tree.hp == 0 {
-                tree.felled = true;
-            }
-            // Cover semantics: the bounce knocks a Flying fang Loose so it
-            // settles instead of grinding the same trunk tick after tick.
-            if matches!(boom.state, BoomerangState::Flying) {
-                boom.state = BoomerangState::Loose;
+            // Cover semantics: first solid contact is a clean bank, the
+            // second knocks the fang Loose (shared budget; Bouncy exempt).
+            if !bouncy {
+                spend_wall_bounce(&mut boom, &mut mods);
             }
         }
     }

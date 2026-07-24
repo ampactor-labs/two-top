@@ -554,10 +554,11 @@ fn walled_arena_boundary_contains_players() {
 // ---- 2026-07-16 roster rules: the Pit's ring + the no-storm arenas ----
 
 /// In the Pit the boundary reflects a Flying fang and KEEPS it flying —
-/// for two free bounces; the third knocks it Loose like any cover hit.
+/// for the shared free-bounce budget; the contact past it knocks the fang
+/// Loose like any cover hit.
 #[test]
-fn pit_boundary_ricochets_then_drops_on_the_third_kiss() {
-    use sim::{BoomerangMods, PIT_MAX_BOUNDARY_BOUNCES, boomerang_wall_collision};
+fn pit_boundary_ricochets_then_drops_past_the_bounce_budget() {
+    use sim::{BoomerangMods, MAX_FREE_WALL_BOUNCES, boomerang_wall_collision};
     let mut app = bare_app();
     app.world_mut().resource_mut::<SelectedArena>().0 = ArenaId::Pit;
     for wall in sim::arena_walls() {
@@ -577,7 +578,7 @@ fn pit_boundary_ricochets_then_drops_on_the_third_kiss() {
             VelocityF(Vec2F::new(Fix::const_from_int(20), Fix::ZERO)),
         ))
         .id();
-    for bounce in 1..=PIT_MAX_BOUNDARY_BOUNCES {
+    for bounce in 1..=MAX_FREE_WALL_BOUNCES {
         app.world_mut()
             .run_system_once(boomerang_wall_collision)
             .unwrap();
@@ -593,7 +594,7 @@ fn pit_boundary_ricochets_then_drops_on_the_third_kiss() {
             matches!(boom.state, BoomerangState::Flying),
             "bounce {bounce}: the ring keeps the fang alive"
         );
-        assert_eq!(mods.boundary_bounces, bounce);
+        assert_eq!(mods.wall_bounces, bounce);
         assert!(vel.x < Fix::ZERO, "bounce {bounce}: velocity reflected");
         // Shove it back into the wall flying east for the next kiss.
         let mut e = app.world_mut().entity_mut(fang);

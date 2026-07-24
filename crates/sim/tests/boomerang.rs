@@ -387,10 +387,11 @@ fn boomerang_exits_boundary_then_returns_via_cap() {
 }
 
 #[test]
-fn boomerang_ricochets_off_inner_obstacle() {
-    // Inner cover (an Obstacle wall) still ricochets a fang. A centre player
-    // throws east into a pillar before the boomerang ever reaches the boundary;
-    // its x-velocity must flip negative (a clean bounce, magnitude preserved).
+fn boomerang_banks_off_inner_obstacle_and_stays_flying() {
+    // Inner cover (an Obstacle wall) ricochets a fang — and the FIRST solid
+    // contact is a free bank: the x-velocity flips negative (clean
+    // reflection off the surface normal) while the fang stays Flying (and
+    // therefore lethal — the deliberate carom into a kill).
     let mut app = build_arena_app_at(0, 0);
     app.world_mut().spawn(Wall {
         kind: WallKind::Obstacle,
@@ -409,13 +410,13 @@ fn boomerang_ricochets_off_inner_obstacle() {
     let mut reflected = false;
     for _ in 0..8 {
         app.update();
-        // The bounce flips vx negative AND knocks the fang Loose (it'll settle).
         if let Some((b, _, v)) = first_boomerang(&mut app)
             && v.x < Fix::ZERO
         {
             assert!(
-                matches!(b.state, BoomerangState::Loose),
-                "a cover bounce should knock the fang loose"
+                matches!(b.state, BoomerangState::Flying),
+                "the first cover contact is a free bank — the fang keeps flying, got {:?}",
+                b.state
             );
             reflected = true;
             break;
@@ -424,13 +425,19 @@ fn boomerang_ricochets_off_inner_obstacle() {
     assert!(reflected, "fang should ricochet off the inner obstacle");
 }
 
-/// Centre player throws east into a pillar; returns once the fang is knocked
-/// Loose (the cover bounce), with the stick idle.
+/// Centre player throws east between two facing pillars: the east pillar
+/// banks the fang (first free bounce, still Flying), the west pillar is the
+/// SECOND solid contact that knocks it Loose. Returns once the fang is
+/// Loose, with the stick idle.
 fn app_with_loose_fang() -> App {
     let mut app = build_arena_app_at(0, 0);
     app.world_mut().spawn(Wall {
         kind: WallKind::Obstacle,
         rect: RectF::from_min_max(Vec2F::from_cm(150, -100), Vec2F::from_cm(200, 100)),
+    });
+    app.world_mut().spawn(Wall {
+        kind: WallKind::Obstacle,
+        rect: RectF::from_min_max(Vec2F::from_cm(-200, -100), Vec2F::from_cm(-150, 100)),
     });
     app.update();
     hold_full_charge(&mut app);
@@ -442,7 +449,7 @@ fn app_with_loose_fang() -> App {
     };
     app.update();
     app.world_mut().resource_mut::<SynthesizedInputs>().0 = PlayerInput::default();
-    for _ in 0..12 {
+    for _ in 0..40 {
         app.update();
         if matches!(
             first_boomerang(&mut app).map(|(b, _, _)| b.state),
@@ -452,6 +459,26 @@ fn app_with_loose_fang() -> App {
         }
     }
     app
+}
+
+#[test]
+fn second_solid_contact_knocks_the_fang_loose() {
+    // The bank budget is exactly one: pillar one reflects a still-Flying
+    // fang, pillar two drops it. `app_with_loose_fang` drives that exact
+    // ping-pong; reaching Loose (asserted by the fixture's consumers below)
+    // plus the bank test above pins both halves of the rule. Here: the
+    // fang really did spend a bounce before dropping.
+    let mut app = app_with_loose_fang();
+    let mut q = app
+        .world_mut()
+        .query::<(&sim::Boomerang, &sim::BoomerangMods)>();
+    let (boom, mods) = q.iter(app.world()).next().expect("fang exists");
+    assert!(matches!(boom.state, BoomerangState::Loose));
+    assert!(
+        mods.wall_bounces > sim::MAX_FREE_WALL_BOUNCES,
+        "the drop must come from spending the budget, got {} bounces",
+        mods.wall_bounces
+    );
 }
 
 #[test]
