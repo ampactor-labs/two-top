@@ -123,7 +123,10 @@ impl Plugin for ScreenPlugin {
             .add_systems(Startup, spawn_overlays)
             .add_plugins(RollbackClockPlugin)
             .add_systems(OnEnter(AppScreen::InMatch), spawn_match)
-            .add_systems(OnExit(AppScreen::InMatch), despawn_match)
+            .add_systems(
+                OnExit(AppScreen::InMatch),
+                (despawn_match, disarm_practice_on_exit),
+            )
             .add_systems(
                 Update,
                 quit_button_input.run_if(in_state(AppScreen::InMatch)),
@@ -526,6 +529,25 @@ fn spawn_obstacle_block(
     ));
 }
 
+/// `OnExit(InMatch)`: practice is a per-entry choice, not a sticky mode.
+/// Leaving it armed made the home page depend on how you arrived: a fresh
+/// boot showed FIND OPPONENT with PRACTICE at rest, while the title after
+/// a bot match showed PLAY with PRACTICE inverted — and the big button
+/// silently started another bot match instead of matchmaking. Disarming on
+/// the way out gives one home page regardless of the path; tapping
+/// PRACTICE re-arms it in one gesture, and the gauntlet ladder lives in
+/// the persisted `CareerRecord`, not in this flag. The one exception is
+/// the bot-fallback bounce ([`PendingBotMatch`]), which passes through
+/// Title with practice deliberately armed.
+fn disarm_practice_on_exit(
+    pending: Res<PendingBotMatch>,
+    mut practice: ResMut<crate::bot::PracticeMode>,
+) {
+    if !pending.0 && practice.0 {
+        practice.0 = false;
+    }
+}
+
 /// Zero the rollback clock on every tick with no session, which is exactly
 /// when bevy_ggrs zeroes the frame count that clock is derived from.
 ///
@@ -600,6 +622,11 @@ fn despawn_match(
     mut state: ResMut<MatchState>,
     mut score: ResMut<MatchScore>,
     mut frame: ResMut<sim::FrameCount>,
+    mut rng: ResMut<sim::SimRng>,
+    mut history: ResMut<sim::InputHistory>,
+    mut bridge: ResMut<sim::BridgeState>,
+    mut door: ResMut<sim::DoorCooldown>,
+    mut pickup_timer: ResMut<sim::PickupSpawnTimer>,
     mut kill_cam: ResMut<crate::camera::KillCam>,
     mut last_kill: ResMut<render::LastKillPos>,
     mut shake: ResMut<render::ScreenShake>,
@@ -610,6 +637,7 @@ fn despawn_match(
             With<render::ArenaProp>,
             With<Boomerang>,
             With<Pickup>,
+            With<sim::FireTrailCell>,
             With<render::FloorStain>,
             With<render::EffectSprite>,
             With<render::TrailGhost>,
@@ -625,6 +653,19 @@ fn despawn_match(
     *state = MatchState::default();
     *score = MatchScore::default();
     *frame = sim::FrameCount::default();
+    // The WHOLE rolled-back resource set resets, not just the three the
+    // summary reads. Anything skipped here seeds the next session with the
+    // previous match's tail: a carried `SimRng` made every second match's
+    // pickup schedule differ from a fresh boot (and two re-paired online
+    // peers with different histories would desync on it at the first
+    // spawn), a carried `InputHistory` made frame-1 edges read against the
+    // last match's final buttons, and a live `FireTrailCell` (no despawn
+    // system runs without a session) stayed lethal into the next match.
+    *rng = sim::SimRng::default();
+    *history = sim::InputHistory::default();
+    *bridge = sim::BridgeState::default();
+    *door = sim::DoorCooldown::default();
+    *pickup_timer = sim::PickupSpawnTimer::default();
     *kill_cam = crate::camera::KillCam::default();
     *last_kill = render::LastKillPos::default();
     *shake = render::ScreenShake::default();
