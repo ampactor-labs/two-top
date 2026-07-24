@@ -178,6 +178,26 @@ struct ReplayScreenText;
 #[derive(Component)]
 struct TapeRow;
 
+/// The list's subline ("tap a tape to watch it") — stands down while a
+/// refusal notice speaks in its place.
+#[derive(Component)]
+struct ReplaySubline;
+
+/// The refusal notice's text entity (same slot as the subline).
+#[derive(Component)]
+struct TapeNoticeText;
+
+/// A live tap-refusal notice: the message and the moment it was raised.
+/// A tap on a foreign-version tape used to answer with a tracing log and
+/// nothing else — on a phone that is indistinguishable from a dead button.
+/// The no-migrations law stands (the tape still doesn't play); the REFUSAL
+/// just becomes something the thumb can see.
+#[derive(Resource, Default)]
+struct TapeNoticeState(Option<(String, f32)>);
+
+/// Seconds a refusal notice holds the subline slot before the hint returns.
+const TAPE_NOTICE_SECS: f32 = 4.0;
+
 #[derive(Component)]
 struct ScrubPart(ScrubRole);
 
@@ -298,8 +318,13 @@ fn civil_from_days(z: i64) -> (i64, u32, u32) {
 // Replays list screen.
 // ---------------------------------------------------------------------------
 
-fn enter_replays(mut commands: Commands, mut list: ResMut<TapeList>) {
+fn enter_replays(
+    mut commands: Commands,
+    mut list: ResMut<TapeList>,
+    mut notice: ResMut<TapeNoticeState>,
+) {
     list.0 = scan_tapes();
+    notice.0 = None;
 
     commands.spawn((
         ReplayScreenText,
@@ -320,6 +345,7 @@ fn enter_replays(mut commands: Commands, mut list: ResMut<TapeList>) {
     };
     commands.spawn((
         ReplayScreenText,
+        ReplaySubline,
         Text2d::new(sub),
         TextFont {
             font_size: 32.0,
@@ -329,6 +355,23 @@ fn enter_replays(mut commands: Commands, mut list: ResMut<TapeList>) {
         TextLayout::new_with_justify(Justify::Center),
         ScreenAnchor::new(0.0, 0.66, 0.0, 0.0),
         Transform::from_xyz(0.0, 0.0, 210.0),
+    ));
+    // The refusal notice shares the subline's slot; `update_tape_notice`
+    // swaps which of the two speaks.
+    commands.spawn((
+        ReplayScreenText,
+        TapeNoticeText,
+        Text2d::new(String::new()),
+        TextFont {
+            font_size: 30.0,
+            ..default()
+        },
+        TextColor(render::palette::EMBER),
+        TextLayout::new_with_justify(Justify::Center),
+        TextBounds::new_horizontal(1080.0),
+        ScreenAnchor::new(0.0, 0.66, 0.0, 0.0),
+        Transform::from_xyz(0.0, 0.0, 210.5),
+        Visibility::Hidden,
     ));
     for (i, tape) in list.0.iter().enumerate() {
         let fy = LIST_TOP + (i as f32 + 0.5) * LIST_PITCH;
@@ -501,19 +544,74 @@ fn replays_input(world: &mut World) {
                 "tape speaks sim v{v}; this build speaks v{} — archived binaries own it",
                 sim::SIM_VERSION,
             );
+            raise_tape_notice(
+                world,
+                format!(
+                    "that tape speaks SIM v{v} - this build speaks v{}\nold tapes play on the build that recorded them",
+                    sim::SIM_VERSION,
+                ),
+            );
             return;
         }
         entry.path.clone()
     };
     let Ok(bytes) = std::fs::read(&path) else {
         tracing::warn!(target: "two_top::theater", path = %path.display(), "tape unreadable");
+        raise_tape_notice(world, "that tape would not read from disk".to_string());
         return;
     };
     let Ok(replay) = decode_for_sim_version(&bytes, sim::SIM_VERSION) else {
         tracing::warn!(target: "two_top::theater", path = %path.display(), "tape rejected (version/format)");
+        raise_tape_notice(world, "that tape would not decode - not a playable recording".to_string());
         return;
     };
     start_playback(world, replay);
+}
+
+/// Every refusal a tape tap can hit answers on screen through here — the
+/// log line is for the operator, this is for the thumb.
+fn raise_tape_notice(world: &mut World, msg: String) {
+    let now = world.resource::<Time<Real>>().elapsed_secs();
+    world.resource_mut::<TapeNoticeState>().0 = Some((msg, now));
+}
+
+/// Swap the subline for the live refusal notice, and put it back once the
+/// notice has said its piece.
+#[allow(clippy::type_complexity)]
+fn update_tape_notice(
+    time: Res<Time<Real>>,
+    mut state: ResMut<TapeNoticeState>,
+    mut notice: Query<
+        (&mut Text2d, &mut Visibility),
+        (With<TapeNoticeText>, Without<ReplaySubline>),
+    >,
+    mut subline: Query<&mut Visibility, (With<ReplaySubline>, Without<TapeNoticeText>)>,
+) {
+    let live = match &state.0 {
+        Some((_, at)) if time.elapsed_secs() - at > TAPE_NOTICE_SECS => {
+            state.0 = None;
+            false
+        }
+        Some(_) => true,
+        None => false,
+    };
+    if let Ok((mut text, mut vis)) = notice.single_mut() {
+        if live {
+            if let Some((msg, _)) = &state.0 {
+                text.0.clone_from(msg);
+            }
+            *vis = Visibility::Visible;
+        } else {
+            *vis = Visibility::Hidden;
+        }
+    }
+    if let Ok(mut vis) = subline.single_mut() {
+        *vis = if live {
+            Visibility::Hidden
+        } else {
+            Visibility::Visible
+        };
+    }
 }
 
 /// Load a decoded tape and roll it: arena from the header, playback
@@ -952,6 +1050,7 @@ impl Plugin for TheaterPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<TheaterMode>()
             .init_resource::<TapeList>()
+            .init_resource::<TapeNoticeState>()
             .add_systems(OnEnter(AppScreen::Replays), enter_replays)
             .add_systems(OnExit(AppScreen::Replays), exit_replays)
             .add_systems(OnEnter(AppScreen::InMatch), spawn_theater_ui)
@@ -959,7 +1058,9 @@ impl Plugin for TheaterPlugin {
             .add_systems(
                 Update,
                 (
-                    replays_input.run_if(in_state(AppScreen::Replays)),
+                    (replays_input, update_tape_notice)
+                        .chain()
+                        .run_if(in_state(AppScreen::Replays)),
                     // Ordered: the seek `theater_input` issues this frame must
                     // be consumed by `theater_drive_seek` this frame, not next,
                     // or the transport lags a frame behind every tap.
