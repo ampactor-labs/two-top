@@ -422,11 +422,31 @@ fn drive_netplay(world: &mut World) {
     }
 
     // --- Pre-swap: drive the lobby from socket peer-state ---
-    let (our_id, peer_updates) = {
+    // `try_`, not `update_peers`: once the signaling loop dies (server
+    // unreachable after matchbox's built-in retries), the plain call
+    // unwraps the closed channel and ABORTS the app — a phone with no
+    // network crashed ~6 s after tapping FIND OPPONENT. A dead socket
+    // reads as a refusal instead: drop the driver, park the lobby at
+    // Idle. The SUMMONING overlay's stall diagnosis has already told the
+    // player to check the connection; QUIT and PLAY THE BOT stay one tap
+    // away.
+    let polled = {
         let mut driver = world.non_send_resource_mut::<MatchboxDriver>();
         let our_id = driver.socket.id();
-        let updates = driver.socket.update_peers();
-        (our_id, updates)
+        driver.socket.try_update_peers().map(|u| (our_id, u))
+    };
+    let (our_id, peer_updates) = match polled {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::error!(
+                target: "two_top::net",
+                error = %e,
+                "signaling connection lost before pairing — abandoning the summons",
+            );
+            world.remove_non_send_resource::<MatchboxDriver>();
+            *world.resource_mut::<LobbyState>() = LobbyState::Idle;
+            return;
+        }
     };
 
     {
