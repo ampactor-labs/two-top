@@ -22,9 +22,9 @@
 use bevy::prelude::*;
 use bevy_ggrs::LocalInputs;
 use sim::{
-    ARENA_HALF_HEIGHT_CM, ARENA_HALF_WIDTH_CM, Boomerang, BoomerangMods, BoomerangState,
+    ARENA_HALF_HEIGHT_CM, ARENA_HALF_WIDTH_CM, BoneTree, Boomerang, BoomerangMods, BoomerangState,
     CHARGE_MAX_FRAMES, DashState, Dead, FrameCount, GgrsCfg, MatchState, Player, PlayerInput,
-    PositionF, ThrowCapacity, ThrowCharge, VelocityF, sudden_death_factor,
+    PositionF, ThrowCapacity, ThrowCharge, VelocityF, Wall, WallKind, sudden_death_factor,
 };
 
 /// Practice mode: a local match against the bot (forces a local session
@@ -37,7 +37,7 @@ pub const BOT_HANDLE: usize = 1;
 
 /// Everything the policy looks at, in plain f32 (inputs are not sim state —
 /// they only become deterministic once they enter the wire pipeline).
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Default)]
 pub struct BotView {
     pub frame: u32,
     pub me: Vec2,
@@ -63,6 +63,11 @@ pub struct BotView {
     /// every SECOND kill, which keeps the "it's learning you" read without
     /// the mid-match spike.
     pub difficulty: u32,
+    /// Blocking solids on the field — cover blocks and standing trees, as
+    /// (center, half-extents) in cm. The steering slides along these; the
+    /// old bounds-only policy walked orbit paths straight through cover
+    /// and ground against the face every tick (the wall-jitter read).
+    pub obstacles: Vec<(Vec2, Vec2)>,
 }
 
 /// Preferred dueling range (cm). Inside it the bot backs off, outside it
@@ -154,7 +159,7 @@ pub fn bot_decide(v: &BotView) -> PlayerInput {
         if lvl >= 2 && v.threat.is_none() && (30..90).contains(&beat) {
             return input_from(Vec2::ZERO, PlayerInput::TAUNT_DOWN);
         }
-        return input_from(-v.me * 0.002, 0);
+        return input_from(steer(v, -v.me * 0.002), 0);
     }
 
     // Level 0 — a passive sparring dummy: it just ambles around slowly and
@@ -181,7 +186,7 @@ pub fn bot_decide(v: &BotView) -> PlayerInput {
                 -perp
             };
             let buttons = if v.can_dash { PlayerInput::DASH_DOWN } else { 0 };
-            return input_from(dir, buttons);
+            return input_from(steer(v, dir), buttons);
         }
     }
 
@@ -191,7 +196,7 @@ pub fn bot_decide(v: &BotView) -> PlayerInput {
         && let Some(loose) = v.my_loose
     {
         let dir = (loose - v.me).normalize_or_zero();
-        return input_from(edge_safe(v, dir), 0);
+        return input_from(steer(v, dir), 0);
     }
 
     // 3) A fang in flight: steer the recall arc at the foe (Returning), or
@@ -207,7 +212,7 @@ pub fn bot_decide(v: &BotView) -> PlayerInput {
         let press = far && v.frame % 24 < 2;
         let dir = orbit_dir(v);
         return input_from(
-            edge_safe(v, dir),
+            steer(v, dir),
             if press { PlayerInput::THROW_DOWN } else { 0 },
         );
     }
@@ -233,9 +238,9 @@ pub fn bot_decide(v: &BotView) -> PlayerInput {
     // the next frame presses fresh, else the bot would orbit forever
     // squeezing a dead button.
     if v.my_charge == 0 && v.frame.is_multiple_of(8) {
-        return input_from(edge_safe(v, orbit_dir(v)), 0);
+        return input_from(steer(v, orbit_dir(v)), 0);
     }
-    input_from(edge_safe(v, orbit_dir(v)), PlayerInput::THROW_DOWN)
+    input_from(steer(v, orbit_dir(v)), PlayerInput::THROW_DOWN)
 }
 
 /// Range-keeping orbit: radial correction toward the preferred ring plus a
@@ -268,7 +273,7 @@ fn aim_at_foe(v: &BotView) -> Vec2 {
 fn wander_dir(v: &BotView) -> Vec2 {
     let f = v.frame as f32;
     let drift = Vec2::new((f * 0.018).sin(), (f * 0.013).cos());
-    edge_safe(v, drift) * 0.42
+    steer(v, drift) * 0.42
 }
 
 /// Clamp a movement intent so it never walks the bot over the (possibly
@@ -283,6 +288,93 @@ fn edge_safe(v: &BotView, dir: Vec2) -> Vec2 {
         d.y = -v.me.y.signum() * 0.6;
     }
     d
+}
+
+/// How far ahead (cm) a movement intent is probed for cover — ~12 ticks of
+/// walking, far enough to turn before contact instead of at it.
+const AVOID_LOOKAHEAD: f32 = 130.0;
+/// Padding (cm) added to a block's half-extents for the probe: the bot's
+/// own half-extent plus clearance, so the slide path keeps the body off
+/// the face instead of grinding it.
+const AVOID_PAD: f32 = 44.0;
+
+/// Slide a movement intent along cover instead of into it. The old policy
+/// steered purely by the orbit ring and the island edge, so any cover on
+/// the path became a wall the bot pushed into every tick — the collision
+/// solver held it out, and the fight between the two read as the bot
+/// jittering/clipping against the block. Three cases, all pure:
+///
+///   * probe clear → intent unchanged;
+///   * approaching a face → the into-wall component is dropped, the
+///     tangent kept (the clean slide along the wall);
+///   * dead head-on (no tangent left) or wedged inside the padded ring →
+///     walk along/off the face, biased toward the foe so the detour stays
+///     a duel move.
+fn slide_around_cover(v: &BotView, dir: Vec2) -> Vec2 {
+    let d = dir.clamp_length_max(1.0);
+    if d.length_squared() < 1e-4 {
+        return d;
+    }
+    let probe = v.me + d.normalize_or_zero() * AVOID_LOOKAHEAD;
+    for (center, half) in &v.obstacles {
+        let pad = *half + Vec2::splat(AVOID_PAD);
+        let rel = probe - *center;
+        if rel.x.abs() >= pad.x || rel.y.abs() >= pad.y {
+            continue;
+        }
+        let me_rel = v.me - *center;
+        let outside_x = me_rel.x.abs() >= pad.x;
+        let outside_y = me_rel.y.abs() >= pad.y;
+        if !outside_x && !outside_y {
+            // Already inside the padded ring (hugging the face): step out
+            // along the shallow axis, keeping the along-wall intent.
+            let push_x = pad.x - me_rel.x.abs();
+            let push_y = pad.y - me_rel.y.abs();
+            let out = if push_x <= push_y {
+                Vec2::new(me_rel.x.signum(), d.y)
+            } else {
+                Vec2::new(d.x, me_rel.y.signum())
+            };
+            return out.clamp_length_max(1.0);
+        }
+        let mut out = d;
+        if outside_x && (out.x * me_rel.x.signum()) < 0.0 {
+            out.x = 0.0;
+        }
+        if outside_y && (out.y * me_rel.y.signum()) < 0.0 {
+            out.y = 0.0;
+        }
+        if out.length_squared() < 0.05 {
+            // Dead head-on: pick the tangent that rounds the block toward
+            // the foe (a detour that still closes the duel).
+            let tangent = if outside_x {
+                Vec2::new(0.0, 1.0)
+            } else {
+                Vec2::new(1.0, 0.0)
+            };
+            let toward = (v.foe - v.me).dot(tangent);
+            out = tangent * if toward < 0.0 { -1.0 } else { 1.0 };
+        }
+        return out.clamp_length_max(1.0);
+    }
+    d
+}
+
+/// The one movement filter: island-edge clamp, then the cover slide.
+/// Every movement intent the policy emits goes through here; aim vectors
+/// never do (aim is aim).
+fn steer(v: &BotView, dir: Vec2) -> Vec2 {
+    slide_around_cover(v, edge_safe(v, dir))
+}
+
+/// A sim rect as the (center, half-extents) pair the steering reads.
+fn rect_center_half(rect: fixed_math::RectF) -> (Vec2, Vec2) {
+    let (min_x, min_y) = rect.min.to_f32();
+    let (max_x, max_y) = rect.max.to_f32();
+    (
+        Vec2::new((min_x + max_x) * 0.5, (min_y + max_y) * 0.5),
+        Vec2::new((max_x - min_x) * 0.5, (max_y - min_y) * 0.5),
+    )
 }
 
 /// Collect the view + queue the input patch. Runs in `ReadInputs`, ordered
@@ -315,6 +407,24 @@ pub fn drive_bot(world: &mut World) {
     {
         let remaining = expires_at_frame.saturating_sub(frame);
         view.bounds *= sudden_death_factor(remaining).to_num::<f32>();
+    }
+
+    // Blocking solids for the steering slide: cover blocks always, trees
+    // while they still block (a felled stump is open ground). Read live so
+    // a mid-round felling opens the path the same tick the sim opens it.
+    {
+        let mut walls = world.query::<&Wall>();
+        for wall in walls.iter(world) {
+            if matches!(wall.kind, WallKind::Obstacle) {
+                view.obstacles.push(rect_center_half(wall.rect));
+            }
+        }
+        let mut trees = world.query::<&BoneTree>();
+        for tree in trees.iter(world) {
+            if tree.blocks() {
+                view.obstacles.push(rect_center_half(tree.rect));
+            }
+        }
     }
 
     let mut me_alive = true;
@@ -536,5 +646,52 @@ mod tests {
         v.me = Vec2::new(480.0, 300.0); // near the +x rim
         let d = edge_safe(&v, Vec2::new(1.0, 0.0));
         assert!(d.x < 0.0, "never walks off the island");
+    }
+
+    /// A cover block dead ahead on the +x path, the bot west of it.
+    fn view_with_block() -> BotView {
+        let mut v = base_view();
+        v.me = Vec2::new(-200.0, 0.0);
+        v.foe = Vec2::new(400.0, 300.0);
+        v.obstacles = vec![(Vec2::new(0.0, 0.0), Vec2::new(60.0, 60.0))];
+        v
+    }
+
+    #[test]
+    fn clear_intent_passes_through_untouched() {
+        let v = view_with_block();
+        // Walking away from the block: no obstacle on the probe, no change.
+        let d = steer(&v, Vec2::new(-0.8, 0.2));
+        assert!((d - Vec2::new(-0.8, 0.2)).length() < 1e-4);
+    }
+
+    #[test]
+    fn diagonal_intent_slides_along_the_face() {
+        let v = view_with_block();
+        // Aiming through the block's west face at a diagonal: the into-wall
+        // x is dropped, the tangent y survives — the clean slide.
+        let d = steer(&v, Vec2::new(0.7, 0.5));
+        assert_eq!(d.x, 0.0, "into-wall component dropped");
+        assert!(d.y > 0.0, "tangent kept: {d:?}");
+    }
+
+    #[test]
+    fn head_on_intent_rounds_the_block_toward_the_foe() {
+        let v = view_with_block();
+        // Dead head-on leaves no tangent; the detour goes the foe's way
+        // (+y here) instead of an arbitrary side.
+        let d = steer(&v, Vec2::new(1.0, 0.0));
+        assert!(d.x.abs() < 1e-4, "not into the wall");
+        assert!(d.y > 0.0, "rounds toward the foe: {d:?}");
+    }
+
+    #[test]
+    fn wedged_against_the_face_walks_off_it() {
+        let mut v = view_with_block();
+        // Standing inside the padded ring (grinding the west face) while
+        // still pushing east: the slide steps it OFF the face.
+        v.me = Vec2::new(-80.0, 0.0);
+        let d = steer(&v, Vec2::new(1.0, 0.0));
+        assert!(d.x < 0.0, "steps away from the face: {d:?}");
     }
 }
