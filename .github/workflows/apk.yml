@@ -94,6 +94,11 @@ jobs:
           # The ephemeral-ICE vendor URL (crates/ice_vendor). A URL, not a
           # credential — safe in a public binary. Unset ⇒ STUN-only, as now.
           TWOTOP_ICE_URL: ${{ vars.TWOTOP_ICE_URL }}
+          # The vendor's optional X-App-Key turnstile. Extractable from the
+          # APK (any baked string is), so it filters scrapers rather than
+          # authenticating anyone; a secret only to keep it out of the repo.
+          # Unset ⇒ header omitted, which an open vendor accepts.
+          TWOTOP_ICE_KEY: ${{ secrets.TWOTOP_ICE_KEY }}
         run: |
           # Runner-image env (ANDROID_NDK_LATEST_HOME) is process env, not
           # expression-time `env:` context — resolve it in the shell.

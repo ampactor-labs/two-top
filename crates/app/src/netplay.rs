@@ -80,6 +80,12 @@ pub struct NetplayConfig {
     /// carries a URL, never a secret. `None` ⇒ the baked/STUN-only
     /// [`ice_server_config`] path, unchanged.
     pub ice_url: Option<String>,
+    /// The vendor's optional `X-App-Key` value (`TWOTOP_ICE_KEY`,
+    /// runtime env then compile-time bake). A shared turnstile the vendor
+    /// checks to filter drive-by scrapers — extractable from the APK like
+    /// any baked string, so it is a filter, never authentication. `None` ⇒
+    /// no header, which a vendor without `ICE_APP_KEY` accepts as before.
+    pub ice_key: Option<String>,
 }
 
 /// Which player handle is *this* device's local player, once a P2P session is
@@ -120,18 +126,28 @@ impl NetplayConfig {
                     .filter(|s| !s.is_empty())
                     .map(str::to_string)
             });
+        let ice_key = std::env::var("TWOTOP_ICE_KEY")
+            .ok()
+            .filter(|s| !s.is_empty())
+            .or_else(|| {
+                option_env!("TWOTOP_ICE_KEY")
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_string)
+            });
         let mut args = std::env::args().skip(1);
         while let Some(arg) = args.next() {
             if arg == "--room" {
                 return Self {
                     room_url: args.next(),
                     ice_url,
+                    ice_key,
                 };
             }
             if let Some(url) = arg.strip_prefix("--room=") {
                 return Self {
                     room_url: Some(url.to_string()),
                     ice_url,
+                    ice_key,
                 };
             }
         }
@@ -146,7 +162,11 @@ impl NetplayConfig {
                     .filter(|s| !s.is_empty())
                     .map(str::to_string)
             });
-        Self { room_url, ice_url }
+        Self {
+            room_url,
+            ice_url,
+            ice_key,
+        }
     }
 }
 
@@ -271,9 +291,12 @@ pub(crate) fn parse_ice_response(body: &str) -> Option<RtcIceServerConfig> {
 
 /// Blocking fetch of the vendor's ICE config (runs on the IO task pool —
 /// never the main thread). Tight timeout: the fallback exists.
-fn fetch_ice(url: &str) -> Option<RtcIceServerConfig> {
-    let response = ureq::get(url)
-        .timeout(Duration::from_secs(2))
+fn fetch_ice(url: &str, app_key: Option<&str>) -> Option<RtcIceServerConfig> {
+    let mut request = ureq::get(url).timeout(Duration::from_secs(2));
+    if let Some(key) = app_key {
+        request = request.set("X-App-Key", key);
+    }
+    let response = request
         .call()
         .map_err(|e| {
             tracing::warn!(target: "two_top::net", error = %e, "ice vendor unreachable");
@@ -309,10 +332,11 @@ fn start_matchbox(world: &mut World) {
     };
 
     if let Some(ice_url) = config.ice_url {
+        let ice_key = config.ice_key;
         let (tx, rx) = std::sync::mpsc::channel();
         bevy::tasks::IoTaskPool::get()
             .spawn(async move {
-                let _ = tx.send(fetch_ice(&ice_url));
+                let _ = tx.send(fetch_ice(&ice_url, ice_key.as_deref()));
             })
             .detach();
         let started_at = world.resource::<Time<Real>>().elapsed_secs();
