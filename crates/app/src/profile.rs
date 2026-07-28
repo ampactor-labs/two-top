@@ -210,9 +210,8 @@ fn profile_path() -> Option<PathBuf> {
 }
 
 fn load_profile() -> LocalProfile {
-    let mut profile: LocalProfile = profile_path()
-        .and_then(|p| std::fs::read_to_string(p).ok())
-        .and_then(|text| serde_json::from_str(&text).ok())
+    let mut profile = profile_path()
+        .map(|p| read_profile(&p))
         .unwrap_or_default();
     // Normalize whatever the file held (hand edits, an older build's
     // 4-glyph name) through the same clamp the wire uses.
@@ -247,6 +246,35 @@ fn load_profile() -> LocalProfile {
     profile
 }
 
+/// Read + parse the profile file. An absent file is a first boot. A file
+/// that exists but will not parse is quarantined as a `.corrupt` sibling
+/// (evidence a human can hand back) instead of being silently replaced;
+/// the identity inside is unrecoverable either way, but the bytes say what
+/// happened — and with `paths::write_atomic` on every save, the only way
+/// to get here anymore is outside interference (a hand edit, a bad disk).
+fn read_profile(path: &std::path::Path) -> LocalProfile {
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return LocalProfile::default();
+    };
+    match serde_json::from_str(&text) {
+        Ok(profile) => profile,
+        Err(e) => {
+            tracing::error!(
+                target: "two_top::profile",
+                error = %e,
+                "profile.json is corrupt — quarantining it and reminting",
+            );
+            let mut name = path
+                .file_name()
+                .map(std::ffi::OsStr::to_os_string)
+                .unwrap_or_default();
+            name.push(".corrupt");
+            let _ = std::fs::rename(path, path.with_file_name(name));
+            LocalProfile::default()
+        }
+    }
+}
+
 fn save_profile(profile: &LocalProfile) {
     let Some(path) = profile_path() else {
         return;
@@ -254,8 +282,10 @@ fn save_profile(profile: &LocalProfile) {
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
-    if let Ok(json) = serde_json::to_string_pretty(profile) {
-        let _ = std::fs::write(&path, json);
+    if let Ok(json) = serde_json::to_string_pretty(profile)
+        && let Err(e) = crate::paths::write_atomic(&path, json.as_bytes())
+    {
+        tracing::warn!(target: "two_top::profile", error = %e, "failed to save profile");
     }
 }
 
@@ -662,6 +692,44 @@ mod tests {
         assert_eq!(identity_tag(id), identity_tag(id), "stable");
         assert_eq!(identity_tag(id).chars().count(), 3);
         assert_ne!(identity_tag(id), identity_tag(id ^ 0xFFFF));
+    }
+
+    #[test]
+    fn a_garbage_tmp_sibling_never_touches_the_identity() {
+        // The interrupted-save shape: the old profile intact on disk, a
+        // truncated .tmp corpse beside it (the process died before the
+        // rename). The identity must load exactly as saved.
+        let dir = crate::paths::test_scratch("profile_tmp_corpse");
+        let path = dir.join("profile.json");
+        let saved = LocalProfile {
+            install_id: 7,
+            name: "SUDS".to_string(),
+            named: true,
+        };
+        std::fs::write(&path, serde_json::to_string_pretty(&saved).unwrap()).unwrap();
+        std::fs::write(dir.join("profile.json.tmp"), "{\"install_id\": 99").unwrap();
+        let loaded = read_profile(&path);
+        assert_eq!(loaded.install_id, 7);
+        assert_eq!(loaded.name, "SUDS");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_corrupt_profile_is_quarantined_not_silently_replaced() {
+        let dir = crate::paths::test_scratch("profile_corrupt");
+        let path = dir.join("profile.json");
+        std::fs::write(&path, "{\"install_id\": 12345, \"na").unwrap();
+        let loaded = read_profile(&path);
+        assert_eq!(
+            loaded.install_id, 0,
+            "an unreadable identity falls to default; the caller mints"
+        );
+        assert!(!path.exists(), "the corrupt file is moved aside");
+        assert!(
+            dir.join("profile.json.corrupt").exists(),
+            "the evidence survives for a human to hand back"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

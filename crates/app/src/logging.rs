@@ -98,9 +98,9 @@ fn install_panic_hook() {
         tracing::error!(target: "two_top::panic", %location, %payload, "PANIC");
         if let Some(dir) = crate::paths::shared_dir() {
             let _ = std::fs::create_dir_all(&dir);
-            let _ = std::fs::write(
-                dir.join("crash.log"),
-                format!("2-Top panic\n  at {location}\n  {payload}\n"),
+            let _ = crate::paths::write_atomic(
+                &dir.join("crash.log"),
+                format!("2-Top panic\n  at {location}\n  {payload}\n").as_bytes(),
             );
         }
         previous(info);

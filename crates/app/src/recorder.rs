@@ -223,7 +223,7 @@ fn write_replay(replay: &Replay, recorded_at: u64, winner: u8) -> Option<PathBuf
         if winner == 0 { "cur" } else { "stag" }
     );
     let path = dir.join(name);
-    match std::fs::write(&path, &bytes) {
+    match crate::paths::write_atomic(&path, &bytes) {
         Ok(()) => {
             tracing::info!(
                 target: "two_top::recorder",

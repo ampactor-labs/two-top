@@ -166,7 +166,7 @@ fn save_career(record: &CareerRecord) {
         let _ = std::fs::create_dir_all(parent);
     }
     if let Ok(json) = serde_json::to_string_pretty(record)
-        && let Err(e) = std::fs::write(&path, json)
+        && let Err(e) = crate::paths::write_atomic(&path, json.as_bytes())
     {
         tracing::warn!(target: "two_top::grudge", error = %e, "failed to save career record");
     }

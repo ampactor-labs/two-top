@@ -141,8 +141,10 @@ fn save_room_code(code: &RoomCode) {
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
-    if let Ok(json) = serde_json::to_string_pretty(code) {
-        let _ = std::fs::write(&path, json);
+    if let Ok(json) = serde_json::to_string_pretty(code)
+        && let Err(e) = crate::paths::write_atomic(&path, json.as_bytes())
+    {
+        tracing::warn!(target: "two_top::room_code", error = %e, "failed to save room code");
     }
 }
 
