@@ -85,9 +85,7 @@ fn update_summoning(
     };
     // At MatchOver the summary card owns the screen — it carries the fled /
     // abandoned facts itself, and this text was stacking straight into it.
-    if *screen.get() != AppScreen::InMatch
-        || matches!(*match_state, sim::MatchState::MatchOver)
-    {
+    if *screen.get() != AppScreen::InMatch || matches!(*match_state, sim::MatchState::MatchOver) {
         *vis = Visibility::Hidden;
         *stall = None;
         return;
@@ -154,10 +152,7 @@ fn update_summoning(
 
 /// "CURS" → "C U R S" (the glyphs read as a dialed code, not a word).
 fn code_spaced(code: &str) -> String {
-    code.chars()
-        .map(String::from)
-        .collect::<Vec<_>>()
-        .join(" ")
+    code.chars().map(String::from).collect::<Vec<_>>().join(" ")
 }
 
 fn spawn_overlay(mut commands: Commands) {

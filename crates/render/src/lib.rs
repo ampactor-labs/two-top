@@ -548,8 +548,7 @@ pub fn sync_charge_auras(
         *vis = Visibility::Visible;
         let (size, color) = if charge.0 > 0 {
             let power = (charge.0 as f32 / sim::CHARGE_MAX_FRAMES as f32).clamp(0.0, 1.0);
-            let size =
-                CHARGE_AURA_MAX_SIZE + (CHARGE_AURA_MIN_SIZE - CHARGE_AURA_MAX_SIZE) * power;
+            let size = CHARGE_AURA_MAX_SIZE + (CHARGE_AURA_MIN_SIZE - CHARGE_AURA_MAX_SIZE) * power;
             // Overdrive past white toward full charge → the ring blooms harder.
             // The perfect-catch STREAK escalates the ring's color: ember at
             // tier 2, overdriven spark at tier 3 — the storm the opponent can
@@ -565,8 +564,7 @@ pub fn sync_charge_auras(
             // The flex: the ring swells outward over the taunt and heats
             // from bone to spark as the payout approaches.
             let flex = 1.0 - (taunt.0 as f32 / sim::TAUNT_FRAMES as f32).clamp(0.0, 1.0);
-            let size =
-                CHARGE_AURA_MIN_SIZE + (CHARGE_AURA_MAX_SIZE - CHARGE_AURA_MIN_SIZE) * flex;
+            let size = CHARGE_AURA_MIN_SIZE + (CHARGE_AURA_MAX_SIZE - CHARGE_AURA_MIN_SIZE) * flex;
             let color = if flex < 0.6 {
                 scale_color(palette::HOT_BONE, 1.0 + flex)
             } else {
@@ -668,12 +666,9 @@ pub fn sync_aim_telegraphs(
         let fang_out = booms
             .iter()
             .any(|(b, m)| b.owner_handle == beam.handle && !m.is_secondary);
-        let aiming = input.buttons & sim::PlayerInput::AIM_ACTIVE != 0
-            && (charge.0 > 0 || fang_out);
-        let stick = Vec2::new(
-            input.stick_x as f32 / 127.0,
-            input.stick_y as f32 / 127.0,
-        );
+        let aiming =
+            input.buttons & sim::PlayerInput::AIM_ACTIVE != 0 && (charge.0 > 0 || fang_out);
+        let stick = Vec2::new(input.stick_x as f32 / 127.0, input.stick_y as f32 / 127.0);
         let pose = (!dead.is_dying() && aiming)
             .then(|| telegraph_pose(target.translation.truncate(), stick, flip.0))
             .flatten();
@@ -688,8 +683,7 @@ pub fn sync_aim_telegraphs(
         let (_, wy) = pos.0.to_f32();
         let s = depth_scale(wy * flip.0);
         sprite.custom_size = Some(Vec2::new(TELEGRAPH_LEN * s, TELEGRAPH_THICKNESS * s));
-        let scaled_mid = target.translation.truncate()
-            + (mid - target.translation.truncate()) * s;
+        let scaled_mid = target.translation.truncate() + (mid - target.translation.truncate()) * s;
         tx.translation.x = scaled_mid.x;
         tx.translation.y = scaled_mid.y;
         tx.rotation = Quat::from_rotation_z(angle);
@@ -1141,7 +1135,10 @@ pub fn sync_crossing_visuals(
 #[derive(Resource, Default)]
 pub struct MatchPointRitual(pub bool);
 
-pub fn update_match_point_ritual(score: Res<sim::MatchScore>, mut ritual: ResMut<MatchPointRitual>) {
+pub fn update_match_point_ritual(
+    score: Res<sim::MatchScore>,
+    mut ritual: ResMut<MatchPointRitual>,
+) {
     let brink = sim::MATCH_WIN_THRESHOLD.saturating_sub(1);
     let on = score.p0 == brink && score.p1 == brink;
     if ritual.0 != on {
@@ -1759,7 +1756,11 @@ pub const TRAIL_GHOST_ALPHA: f32 = 0.55;
 
 /// The three-band palette ramp for a stamp: bright state color at the head,
 /// then the violet darks the whole stage is built from. Stepped, not lerped.
-pub fn trail_ramp(returning: bool, owner_handle: usize, modifier: Option<sim::PickupKind>) -> [Color; 3] {
+pub fn trail_ramp(
+    returning: bool,
+    owner_handle: usize,
+    modifier: Option<sim::PickupKind>,
+) -> [Color; 3] {
     let head = trail_tint(returning, owner_handle, modifier);
     [
         head.with_alpha(TRAIL_GHOST_ALPHA),

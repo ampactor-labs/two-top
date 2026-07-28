@@ -251,10 +251,7 @@ fn room_code_input(
                 // pills, so a fat-fingered tap still lands on a real mode.
                 code.custom = fx >= 0.5;
                 changed = true;
-            } else if code.custom
-                && (DIAL_RECT.0..DIAL_RECT.1).contains(&fy)
-                && fx >= DIAL_LEFT
-            {
+            } else if code.custom && (DIAL_RECT.0..DIAL_RECT.1).contains(&fy) && fx >= DIAL_LEFT {
                 let cell = ((fx - DIAL_LEFT) / CELL_W) as usize;
                 if cell < CODE_LEN {
                     let slot = &mut code.slots[cell];
@@ -318,7 +315,11 @@ fn update_pad(
         } else {
             Visibility::Hidden
         };
-        text.0 = glyphs.chars().nth(cell.0).map(String::from).unwrap_or_default();
+        text.0 = glyphs
+            .chars()
+            .nth(cell.0)
+            .map(String::from)
+            .unwrap_or_default();
     }
     for (pill, mut vis, sprite, text, color) in &mut pills {
         *vis = if show {
@@ -333,8 +334,8 @@ fn update_pad(
         match pill.role {
             BtnRole::Border => {
                 if let Some(mut s) = sprite {
-                    s.color = render::palette::HOT_BONE
-                        .with_alpha(if selected { 1.0 } else { 0.45 });
+                    s.color =
+                        render::palette::HOT_BONE.with_alpha(if selected { 1.0 } else { 0.45 });
                 }
             }
             BtnRole::Fill => {

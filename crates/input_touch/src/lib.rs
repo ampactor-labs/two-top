@@ -231,16 +231,12 @@ pub const QUIT_ZONE_Y_FRAC: f32 = 0.16;
 /// without flexing a taunt on the way through. Southpaw mirrors it to the
 /// top-left along with every other zone probe.
 pub fn is_quit_zone(pos: Vec2, window: Vec2) -> bool {
-    window.x > 0.0
-        && pos.x >= window.x * QUIT_ZONE_X_FRAC
-        && pos.y < window.y * QUIT_ZONE_Y_FRAC
+    window.x > 0.0 && pos.x >= window.x * QUIT_ZONE_X_FRAC && pos.y < window.y * QUIT_ZONE_Y_FRAC
 }
 
 /// The TAUNT strip: the top of the screen, full width minus the QUIT corner.
 pub fn is_taunt_zone(pos: Vec2, window: Vec2) -> bool {
-    window.x > 0.0
-        && pos.y < window.y * TAUNT_ZONE_Y_FRAC
-        && !is_quit_zone(pos, window)
+    window.x > 0.0 && pos.y < window.y * TAUNT_ZONE_Y_FRAC && !is_quit_zone(pos, window)
 }
 
 /// Bevy's window coords are top-left origin, y-down. The match screen is
@@ -263,9 +259,7 @@ pub const DASH_ZONE_Y_FRAC: f32 = 0.80;
 /// corner. The only fixed control on the screen — both sticks float, so
 /// dash needs a home the right thumb can find without looking.
 pub fn is_dash_zone(pos: Vec2, window: Vec2) -> bool {
-    window.x > 0.0
-        && pos.x >= window.x * DASH_ZONE_X_FRAC
-        && pos.y >= window.y * DASH_ZONE_Y_FRAC
+    window.x > 0.0 && pos.x >= window.x * DASH_ZONE_X_FRAC && pos.y >= window.y * DASH_ZONE_Y_FRAC
 }
 
 /// The throw/aim zone: the whole right half, MINUS the dash corner, the
@@ -1039,7 +1033,10 @@ mod tests {
             STICK_DEADZONE_INNER,
             STICK_DEADZONE_SATURATION,
         );
-        assert!((stick.length() - 1.0).abs() < 1e-5, "followed stick stays saturated");
+        assert!(
+            (stick.length() - 1.0).abs() < 1e-5,
+            "followed stick stays saturated"
+        );
         assert!(stick.x > 0.99);
     }
 
@@ -1061,7 +1058,10 @@ mod tests {
             STICK_DEADZONE_INNER,
             STICK_DEADZONE_SATURATION,
         );
-        assert!(stick.x < 0.0, "reversal reads within one radius, got {stick:?}");
+        assert!(
+            stick.x < 0.0,
+            "reversal reads within one radius, got {stick:?}"
+        );
     }
 
     #[test]
@@ -1071,12 +1071,18 @@ mod tests {
         // ends trailing directly BELOW the thumb.
         let s = drag(
             start,
-            &[start + Vec2::new(200.0, 0.0), start + Vec2::new(200.0, -300.0)],
+            &[
+                start + Vec2::new(200.0, 0.0),
+                start + Vec2::new(200.0, -300.0),
+            ],
         );
         let t = &s.touches[0];
         let delta = t.current_pos - t.anchor_pos;
         assert!((delta.length() - STICK_FOLLOW_RADIUS_PX).abs() < 1e-3);
-        assert!(delta.y < 0.0 && delta.x.abs() < delta.y.abs() * 0.5, "anchor trails the new heading, delta {delta:?}");
+        assert!(
+            delta.y < 0.0 && delta.x.abs() < delta.y.abs() * 0.5,
+            "anchor trails the new heading, delta {delta:?}"
+        );
         // start_pos never moved — zone semantics stay pinned to the landing.
         assert_eq!(t.start_pos, start);
     }
@@ -1188,8 +1194,8 @@ mod tests {
         // Corner starts at x >= 0.78 * 1080 = 842.4, ends at y < 0.16 * 2400 = 384.
         for p in [
             Vec2::new(900.0, 100.0),
-            Vec2::new(843.0, 383.0),  // just inside
-            Vec2::new(1079.0, 10.0),  // corner pixel
+            Vec2::new(843.0, 383.0), // just inside
+            Vec2::new(1079.0, 10.0), // corner pixel
         ] {
             assert!(is_quit_zone(p, win), "{p:?} is the quit corner");
             assert!(!is_taunt_zone(p, win));
@@ -1219,15 +1225,9 @@ mod tests {
     #[test]
     fn quantized_taunt_bit_follows_taunt_held() {
         let mut state = TouchState::default();
-        assert_eq!(
-            quantize_inputs(&state).buttons & PlayerInput::TAUNT_DOWN,
-            0
-        );
+        assert_eq!(quantize_inputs(&state).buttons & PlayerInput::TAUNT_DOWN, 0);
         state.taunt_held = true;
-        assert_ne!(
-            quantize_inputs(&state).buttons & PlayerInput::TAUNT_DOWN,
-            0
-        );
+        assert_ne!(quantize_inputs(&state).buttons & PlayerInput::TAUNT_DOWN, 0);
     }
 
     #[test]
@@ -1334,11 +1334,20 @@ mod tests {
         let up = stick_aim_angle(Vec2::new(0.0, -1.0)); // pushed visually up
         assert!((up - std::f32::consts::FRAC_PI_2).abs() < 1e-6, "got {up}");
         let down = stick_aim_angle(Vec2::new(0.0, 1.0));
-        assert!((down + std::f32::consts::FRAC_PI_2).abs() < 1e-6, "got {down}");
+        assert!(
+            (down + std::f32::consts::FRAC_PI_2).abs() < 1e-6,
+            "got {down}"
+        );
         let left = stick_aim_angle(Vec2::new(-1.0, 0.0));
-        assert!((left.abs() - std::f32::consts::PI).abs() < 1e-6, "got {left}");
+        assert!(
+            (left.abs() - std::f32::consts::PI).abs() < 1e-6,
+            "got {left}"
+        );
         let diag = stick_aim_angle(Vec2::new(1.0, -1.0)); // up-right
-        assert!((diag - std::f32::consts::FRAC_PI_4).abs() < 1e-6, "got {diag}");
+        assert!(
+            (diag - std::f32::consts::FRAC_PI_4).abs() < 1e-6,
+            "got {diag}"
+        );
     }
 
     // ---- Cycle 3: left-stick aiming (throw button + move stick heading) ----

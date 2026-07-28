@@ -76,10 +76,7 @@ impl CareerRecord {
     pub fn display_name(&self, peer: net::ProfileData) -> String {
         let name = crate::profile::peer_name(Some(peer));
         let key = rival_key(peer.install_id);
-        let collides = self
-            .rivals
-            .iter()
-            .any(|(k, r)| *k != key && r.name == name);
+        let collides = self.rivals.iter().any(|(k, r)| *k != key && r.name == name);
         if collides {
             format!("{name}#{}", crate::profile::identity_tag(peer.install_id))
         } else {
@@ -175,12 +172,7 @@ fn save_career(record: &CareerRecord) {
 /// Did we win this decided match? Score settles it when someone actually
 /// reached the threshold; a forfeit goes to whoever stayed at the table.
 /// Pure for testing.
-pub fn match_won(
-    our_score: u8,
-    their_score: u8,
-    forfeited: bool,
-    we_went_absent: bool,
-) -> bool {
+pub fn match_won(our_score: u8, their_score: u8, forfeited: bool, we_went_absent: bool) -> bool {
     if our_score >= MATCH_WIN_THRESHOLD {
         return true;
     }
@@ -345,17 +337,28 @@ mod tests {
         // One MORGAN in the ledger: they are just MORGAN.
         career.rivals.insert(
             rival_key(morgan_a.install_id),
-            RivalRecord { name: "MORGAN".into(), wins: 1, losses: 0 },
+            RivalRecord {
+                name: "MORGAN".into(),
+                wins: 1,
+                losses: 0,
+            },
         );
         assert_eq!(career.display_name(morgan_a), "MORGAN");
         // A second, different identity wearing the same name: now both
         // carry the tag, and the two tags differ.
         career.rivals.insert(
             rival_key(morgan_b.install_id),
-            RivalRecord { name: "MORGAN".into(), wins: 0, losses: 1 },
+            RivalRecord {
+                name: "MORGAN".into(),
+                wins: 0,
+                losses: 1,
+            },
         );
         let (a, b) = (career.display_name(morgan_a), career.display_name(morgan_b));
-        assert!(a.starts_with("MORGAN#") && b.starts_with("MORGAN#"), "{a} / {b}");
+        assert!(
+            a.starts_with("MORGAN#") && b.starts_with("MORGAN#"),
+            "{a} / {b}"
+        );
         assert_ne!(a, b, "the tag is what tells them apart");
         // An unrelated name is untouched by their collision.
         let suds = net::ProfileData {

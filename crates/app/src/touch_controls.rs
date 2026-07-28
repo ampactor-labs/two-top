@@ -194,8 +194,18 @@ fn spawn_controls(
     // into text soup) and points up at it.
     for (zone, fx, fy, text) in [
         (HintZone::Move, -0.5, -0.38, "MOVE\ndrag anywhere here"),
-        (HintZone::Throw, 0.5, -0.38, "THROW\nhold to charge, stick aims"),
-        (HintZone::Taunt, 0.0, 0.44, "tap the ring above to flex\nfinish it: tier up"),
+        (
+            HintZone::Throw,
+            0.5,
+            -0.38,
+            "THROW\nhold to charge, stick aims",
+        ),
+        (
+            HintZone::Taunt,
+            0.0,
+            0.44,
+            "tap the ring above to flex\nfinish it: tier up",
+        ),
     ] {
         commands.spawn((
             zone,
@@ -220,7 +230,12 @@ const TAUNT_RING_SIZE: f32 = 96.0;
 fn taunt_anchor() -> ScreenAnchor {
     // Strip spans [0, TAUNT_ZONE_Y_FRAC] y-down; sit at its lower half so
     // a notch/status bar never covers the mark.
-    ScreenAnchor::new(0.0, 1.0 - 2.0 * (input_touch::TAUNT_ZONE_Y_FRAC * 0.72), 0.0, 0.0)
+    ScreenAnchor::new(
+        0.0,
+        1.0 - 2.0 * (input_touch::TAUNT_ZONE_Y_FRAC * 0.72),
+        0.0,
+        0.0,
+    )
 }
 
 fn taunt_idle() -> Color {
@@ -280,7 +295,12 @@ struct ControlCtx<'w> {
 #[allow(clippy::type_complexity, clippy::too_many_arguments)]
 fn update_controls(
     ctx: ControlCtx,
-    sim_players: Query<(&sim::Player, &sim::ThrowCharge, &sim::DashState, &sim::Taunt)>,
+    sim_players: Query<(
+        &sim::Player,
+        &sim::ThrowCharge,
+        &sim::DashState,
+        &sim::Taunt,
+    )>,
     booms: Query<(&sim::Boomerang, &sim::BoomerangMods)>,
     mut hints_used: ResMut<HintsUsed>,
     mut parts: Query<(
@@ -323,8 +343,7 @@ fn update_controls(
     // match-over summary (the controls were overlapping the win text), or
     // a tape playing in the theater (the tape's thumbs, not yours).
     let over = matches!(*match_state, sim::MatchState::MatchOver);
-    let live =
-        *screen.get() == AppScreen::InMatch && !awaiting.0 && !over && !theater.active();
+    let live = *screen.get() == AppScreen::InMatch && !awaiting.0 && !over && !theater.active();
     let win = window.0;
     let ready = live && win.x > 0.0 && win.y > 0.0 && rect.half != Vec2::ZERO;
 
@@ -411,14 +430,17 @@ fn update_controls(
                 let p = if is_knob { knob } else { base };
                 tx.translation.x = p.x;
                 tx.translation.y = p.y;
-                let d = if is_knob { base_size * KNOB_FRAC } else { base_size };
+                let d = if is_knob {
+                    base_size * KNOB_FRAC
+                } else {
+                    base_size
+                };
                 sprite.custom_size = Some(Vec2::splat(d));
                 // While a LIVE throw hold is down, this stick IS the aim —
                 // it heats up ember so the handoff reads at a glance. An
                 // inert hold leaves it in movement colors: the stick really
                 // is just walking.
-                let aiming_hand =
-                    (touch.throw_held || touch.aim_release_sticky) && live_hold;
+                let aiming_hand = (touch.throw_held || touch.aim_release_sticky) && live_hold;
                 sprite.color = match (is_knob, aiming_hand) {
                     (false, false) => render::palette::COLD_STONE.with_alpha(0.35),
                     (false, true) => render::palette::EMBER.with_alpha(0.55),
@@ -480,11 +502,9 @@ fn update_controls(
                     // Refilling: dim and shrunken, growing back to full size
                     // as it recharges — the ring itself is the cooldown meter.
                     Some(sim::DashState::Cooldown { frames_remaining }) => {
-                        let f = 1.0
-                            - frames_remaining as f32 / sim::DASH_COOLDOWN_FRAMES as f32;
+                        let f = 1.0 - frames_remaining as f32 / sim::DASH_COOLDOWN_FRAMES as f32;
                         sprite.color = render::palette::COLD_STONE.with_alpha(0.25 + 0.2 * f);
-                        sprite.custom_size =
-                            Some(Vec2::splat(dash_size * (0.7 + 0.3 * f)));
+                        sprite.custom_size = Some(Vec2::splat(dash_size * (0.7 + 0.3 * f)));
                     }
                     Some(sim::DashState::Dashing { .. }) => {
                         sprite.color = dash_active();
@@ -514,9 +534,7 @@ fn update_controls(
         };
         *anchor = dash_anchor(southpaw.0);
         color.0 = match dash_state {
-            Some(sim::DashState::Cooldown { .. }) => {
-                render::palette::COLD_STONE.with_alpha(0.35)
-            }
+            Some(sim::DashState::Cooldown { .. }) => render::palette::COLD_STONE.with_alpha(0.35),
             Some(sim::DashState::Dashing { .. }) => dash_active(),
             _ if touch.dash_held => dash_active(),
             _ => dash_idle(),

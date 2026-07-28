@@ -615,9 +615,8 @@ fn play_charge_riser_sfx(
             let entity = commands
                 .spawn((
                     AudioPlayer::new(assets.charge_riser.clone()),
-                    PlaybackSettings::DESPAWN.with_volume(Volume::Linear(
-                        sfx_gain(&settings) * TRIM_CHARGE_RISER,
-                    )),
+                    PlaybackSettings::DESPAWN
+                        .with_volume(Volume::Linear(sfx_gain(&settings) * TRIM_CHARGE_RISER)),
                 ))
                 .id();
             track.0.insert(h, entity);

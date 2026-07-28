@@ -186,11 +186,7 @@ const HEADING_FY: f32 = 0.12;
 const ROW_COUNT: usize = 6;
 /// The groups, naming rows by their settled indices (0 haptics, 1 sfx,
 /// 2 music, 3 deadzone, 4 southpaw, 5 shake — `adjust_settings`' keys).
-const GROUPS: [(&str, [usize; 2]); 3] = [
-    ("FEEL", [0, 5]),
-    ("AUDIO", [1, 2]),
-    ("CONTROL", [3, 4]),
-];
+const GROUPS: [(&str, [usize; 2]); 3] = [("FEEL", [0, 5]), ("AUDIO", [1, 2]), ("CONTROL", [3, 4])];
 /// BACK, matching the replays screen's band exactly.
 const BACK_BAND: (f32, f32) = (0.86, 0.96);
 
@@ -317,10 +313,7 @@ fn update_setting_rows(
     screen: Res<State<crate::screen::AppScreen>>,
     settings: Res<Settings>,
     mut pieces: Query<(&SettingsPiece, &mut Text2d, &mut Visibility), Without<SettingsBack>>,
-    mut back: Query<
-        (&SettingsBack, &mut Visibility, Option<&mut Text2d>),
-        Without<SettingsPiece>,
-    >,
+    mut back: Query<(&SettingsBack, &mut Visibility, Option<&mut Text2d>), Without<SettingsPiece>>,
 ) {
     let open = *screen.get() == crate::screen::AppScreen::Settings;
     for (piece, mut text, mut vis) in &mut pieces {

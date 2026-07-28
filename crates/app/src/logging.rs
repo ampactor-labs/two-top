@@ -145,8 +145,10 @@ pub fn init_logging() -> LogGuard {
         // tester can hand back after the fact. Both, because each covers the
         // other's hole: logcat rolls, and a file cannot be watched live.
         let file_layer = android_log_dir().map(|dir| {
-            let (writer, guard) =
-                tracing_appender::non_blocking(tracing_appender::rolling::daily(&dir, "two_top.log"));
+            let (writer, guard) = tracing_appender::non_blocking(tracing_appender::rolling::daily(
+                &dir,
+                "two_top.log",
+            ));
             let layer = tracing_subscriber::fmt::layer()
                 .with_writer(writer)
                 .with_ansi(false);

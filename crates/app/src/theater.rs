@@ -562,7 +562,10 @@ fn replays_input(world: &mut World) {
     };
     let Ok(replay) = decode_for_sim_version(&bytes, sim::SIM_VERSION) else {
         tracing::warn!(target: "two_top::theater", path = %path.display(), "tape rejected (version/format)");
-        raise_tape_notice(world, "that tape would not decode - not a playable recording".to_string());
+        raise_tape_notice(
+            world,
+            "that tape would not decode - not a playable recording".to_string(),
+        );
         return;
     };
     start_playback(world, replay);
@@ -1054,7 +1057,10 @@ impl Plugin for TheaterPlugin {
             .add_systems(OnEnter(AppScreen::Replays), enter_replays)
             .add_systems(OnExit(AppScreen::Replays), exit_replays)
             .add_systems(OnEnter(AppScreen::InMatch), spawn_theater_ui)
-            .add_systems(OnExit(AppScreen::InMatch), (despawn_theater_ui, theater_teardown))
+            .add_systems(
+                OnExit(AppScreen::InMatch),
+                (despawn_theater_ui, theater_teardown),
+            )
             .add_systems(
                 Update,
                 (
@@ -1064,11 +1070,7 @@ impl Plugin for TheaterPlugin {
                     // Ordered: the seek `theater_input` issues this frame must
                     // be consumed by `theater_drive_seek` this frame, not next,
                     // or the transport lags a frame behind every tap.
-                    (
-                        theater_input,
-                        theater_capture_snapshot,
-                        theater_drive_seek,
-                    )
+                    (theater_input, theater_capture_snapshot, theater_drive_seek)
                         .chain()
                         .run_if(in_state(AppScreen::InMatch)),
                     theater_update_ui.after(ScreenAnchorSet),
@@ -1159,8 +1161,14 @@ mod tests {
     /// can always reach the start of the tape. Frame 0 is never banked.
     #[test]
     fn snapshots_cover_the_whole_tape() {
-        assert!(!should_snapshot(0), "frame 0 is the spawn state, never banked");
-        assert!(should_snapshot(1), "frame 1 anchors the start so scrub reaches it");
+        assert!(
+            !should_snapshot(0),
+            "frame 0 is the spawn state, never banked"
+        );
+        assert!(
+            should_snapshot(1),
+            "frame 1 anchors the start so scrub reaches it"
+        );
         assert!(!should_snapshot(2));
         assert!(!should_snapshot(59));
         assert!(should_snapshot(60), "one-second cadence");

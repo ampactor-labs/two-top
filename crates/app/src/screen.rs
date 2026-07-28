@@ -424,8 +424,7 @@ fn spawn_obstacle_block(
                 custom_size: Some(size),
                 ..default()
             },
-            Transform::from_xyz(center.x, center.y, zz)
-                .with_rotation(Quat::from_rotation_z(angle)),
+            Transform::from_xyz(center.x, center.y, zz).with_rotation(Quat::from_rotation_z(angle)),
         ));
     };
     // Void silhouette → front → contact → top → motif; explicit z orders it.
@@ -1275,19 +1274,12 @@ fn summary_text(
         let idx = if p0_won { 0 } else { 1 };
         let fallback = if p0_won { "CUR" } else { "STAG" };
         let who = names[idx].clone().unwrap_or_else(|| fallback.to_string());
-        return format!(
-            "{who} WINS\n\n{}  -  {}\n\nTAPE ENDS",
-            score.p0, score.p1
-        );
+        return format!("{who} WINS\n\n{}  -  {}\n\nTAPE ENDS", score.p0, score.p1);
     }
 
     if !online || practice {
         let winner = winner_label(score);
-        let replay_line = if saved {
-            "\n\nreplay saved"
-        } else {
-            ""
-        };
+        let replay_line = if saved { "\n\nreplay saved" } else { "" };
         return format!("{winner}\n\n{}  -  {}{replay_line}", score.p0, score.p1);
     }
 
@@ -1318,11 +1310,7 @@ fn summary_text(
     } else {
         ""
     };
-    let replay_line = if saved {
-        "\nreplay saved"
-    } else {
-        ""
-    };
+    let replay_line = if saved { "\nreplay saved" } else { "" };
     format!(
         "{winner}\n\n{}  -  {}{rivalry_line}{gone_line}{replay_line}",
         score.p0, score.p1
@@ -2026,7 +2014,6 @@ mod tests {
         assert_eq!(arena_name(sim::ArenaId::Anchor), "Anchor");
         assert_eq!(arena_name(sim::ArenaId::Pit), "The Pit");
     }
-
 
     fn online_summary(gone: bool) -> String {
         let peer = net::ProfileData {

@@ -295,15 +295,26 @@ fn dash_pressed_during_windup_fires_right_after_the_throw() {
         app.update();
     }
     // Press DASH mid-charge: eaten now (a charge commits you in place)...
-    set_input(&mut app, 0, PlayerInput::THROW_DOWN | PlayerInput::DASH_DOWN);
+    set_input(
+        &mut app,
+        0,
+        PlayerInput::THROW_DOWN | PlayerInput::DASH_DOWN,
+    );
     app.update();
-    assert!(matches!(read_dash(&mut app), DashState::Idle), "no dash out of a wind-up");
+    assert!(
+        matches!(read_dash(&mut app), DashState::Idle),
+        "no dash out of a wind-up"
+    );
 
     // ...release everything with a direction: the throw fires, and the
     // buffered dash press fires the very next legal tick.
     set_input(&mut app, 127, 0);
     app.update();
-    assert_eq!(count_boomerangs(&mut app), 1, "throw must not be eaten by the dash");
+    assert_eq!(
+        count_boomerangs(&mut app),
+        1,
+        "throw must not be eaten by the dash"
+    );
     app.update();
     assert!(
         matches!(read_dash(&mut app), DashState::Dashing { .. }),
@@ -325,13 +336,20 @@ fn dash_pressed_late_in_cooldown_fires_the_moment_it_ends() {
     // Run until 4 cooldown ticks remain (inside the 7-tick buffer window).
     for _ in 0..200 {
         app.update();
-        if matches!(read_dash(&mut app), DashState::Cooldown { frames_remaining: 4 }) {
+        if matches!(
+            read_dash(&mut app),
+            DashState::Cooldown {
+                frames_remaining: 4
+            }
+        ) {
             break;
         }
     }
     assert!(matches!(
         read_dash(&mut app),
-        DashState::Cooldown { frames_remaining: 4 }
+        DashState::Cooldown {
+            frames_remaining: 4
+        }
     ));
 
     // Press DASH now: no-op during cooldown, but buffered.
@@ -359,7 +377,11 @@ fn dash_press_expires_if_the_windup_holds_too_long() {
         app.update();
     }
     // Press DASH, then keep charging well past the buffer window.
-    set_input(&mut app, 0, PlayerInput::THROW_DOWN | PlayerInput::DASH_DOWN);
+    set_input(
+        &mut app,
+        0,
+        PlayerInput::THROW_DOWN | PlayerInput::DASH_DOWN,
+    );
     app.update();
     set_input(&mut app, 0, PlayerInput::THROW_DOWN);
     for _ in 0..12 {

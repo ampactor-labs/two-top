@@ -185,7 +185,11 @@ pub fn bot_decide(v: &BotView) -> PlayerInput {
             } else {
                 -perp
             };
-            let buttons = if v.can_dash { PlayerInput::DASH_DOWN } else { 0 };
+            let buttons = if v.can_dash {
+                PlayerInput::DASH_DOWN
+            } else {
+                0
+            };
             return input_from(steer(v, dir), buttons);
         }
     }
@@ -391,7 +395,9 @@ pub fn drive_bot(world: &mut World) {
     // practice). A fresh install starts at the passive dummy; a tier-6
     // gauntlet runner faces a bot that opens sharp and still sharpens as
     // it loses.
-    let tier = world.resource::<crate::grudge::CareerRecord>().gauntlet_tier;
+    let tier = world
+        .resource::<crate::grudge::CareerRecord>()
+        .gauntlet_tier;
     let difficulty = tier + world.resource::<sim::MatchScore>().p0 as u32 / 2;
 
     let mut view = BotView {
@@ -451,8 +457,7 @@ pub fn drive_bot(world: &mut World) {
         }
     }
     {
-        let mut fangs =
-            world.query::<(&Boomerang, &BoomerangMods, &PositionF, &VelocityF)>();
+        let mut fangs = world.query::<(&Boomerang, &BoomerangMods, &PositionF, &VelocityF)>();
         let mut nearest = f32::MAX;
         for (boom, mods, pos, vel) in fangs.iter(world) {
             let (x, y) = pos.0.to_f32();
@@ -562,7 +567,10 @@ mod tests {
         let mut v = base_view();
         v.frame += 1; // off the re-arm beat (frame % 8 == 0 releases at charge 0)
         let input = bot_decide(&v);
-        assert!(input.buttons & PlayerInput::THROW_DOWN != 0, "should charge");
+        assert!(
+            input.buttons & PlayerInput::THROW_DOWN != 0,
+            "should charge"
+        );
         assert!(input.buttons & PlayerInput::AIM_ACTIVE == 0, "no plant yet");
     }
 
@@ -588,7 +596,10 @@ mod tests {
         v.my_charge = commit - 2;
         let plant = bot_decide(&v);
         assert!(plant.buttons & PlayerInput::THROW_DOWN != 0);
-        assert!(plant.buttons & PlayerInput::AIM_ACTIVE != 0, "visible plant");
+        assert!(
+            plant.buttons & PlayerInput::AIM_ACTIVE != 0,
+            "visible plant"
+        );
         v.my_charge = commit;
         let release = bot_decide(&v);
         assert!(
@@ -637,7 +648,10 @@ mod tests {
         v.my_fang = Some((Vec2::new(200.0, 0.0), true));
         let input = bot_decide(&v);
         assert!(input.buttons & PlayerInput::AIM_ACTIVE != 0, "steering");
-        assert!(input.stick_x < 0 || input.stick_y < 0, "bends toward the foe");
+        assert!(
+            input.stick_x < 0 || input.stick_y < 0,
+            "bends toward the foe"
+        );
     }
 
     #[test]

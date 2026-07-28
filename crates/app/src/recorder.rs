@@ -168,7 +168,11 @@ fn save_replay_on_match_over(
         Some(0) => {
             rec.saved = true;
             rec.save_in = None;
-            let winner = if score.p0 >= MATCH_WIN_THRESHOLD { 0 } else { 1 };
+            let winner = if score.p0 >= MATCH_WIN_THRESHOLD {
+                0
+            } else {
+                1
+            };
             let recorded_at = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.as_secs())
@@ -184,13 +188,7 @@ fn save_replay_on_match_over(
                     frame_count: rec.frames.len() as u32,
                     recorded_at,
                     winner: Some(winner),
-                    player_handles: header_names(
-                        &netplay,
-                        practice.0,
-                        local.0,
-                        &profile,
-                        &peer,
-                    ),
+                    player_handles: header_names(&netplay, practice.0, local.0, &profile, &peer),
                     arena_id: selected.0.as_u8(),
                 },
                 inputs: rec.frames.clone(),
@@ -349,8 +347,7 @@ mod tests {
         // exactly at iteration k.
         app.update();
         for tick in 0..120u32 {
-            app.world_mut().resource_mut::<SynthesizedInputs>().0 =
-                if tick < 60 { a } else { b };
+            app.world_mut().resource_mut::<SynthesizedInputs>().0 = if tick < 60 { a } else { b };
             app.update();
         }
 
@@ -365,12 +362,7 @@ mod tests {
         }
         assert_eq!(rec.frames[59][0], a, "tick 59 is the last A");
         assert_eq!(rec.frames[60][0], b, "tick 60 is the first B");
-        let transitions = rec
-            .frames
-            .windows(2)
-            .filter(|w| w[0][0] != w[1][0])
-            .count();
+        let transitions = rec.frames.windows(2).filter(|w| w[0][0] != w[1][0]).count();
         assert_eq!(transitions, 1, "one clean A→B flip, no glitch frames");
     }
-
 }

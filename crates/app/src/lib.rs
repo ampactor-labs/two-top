@@ -25,8 +25,6 @@ use std::collections::HashMap;
 
 mod anchor;
 mod arena_select;
-mod intro_card;
-mod runes;
 mod audio;
 mod bot;
 mod camera;
@@ -34,19 +32,21 @@ mod dark_beyond;
 mod debug_overlay;
 mod devour;
 mod grudge;
-mod profile;
-mod recorder;
-mod room_code;
-mod theater;
-mod touch_controls;
 mod haptics;
 mod hud;
+mod intro_card;
 mod lobby_overlay;
 mod logging;
 mod netplay;
 mod paths;
+mod profile;
+mod recorder;
+mod room_code;
+mod runes;
 mod screen;
 mod settings;
+mod theater;
+mod touch_controls;
 use anchor::{FullScreenSprite, ScreenAnchorPlugin};
 use audio::GameAudioPlugin;
 use bot::BotPlugin;
@@ -55,17 +55,17 @@ use dark_beyond::DarkBeyondPlugin;
 use debug_overlay::DebugInputOverlayPlugin;
 use devour::DevourPlugin;
 use grudge::GrudgePlugin;
-use profile::ProfilePlugin;
-use recorder::MatchRecorderPlugin;
-use room_code::RoomCodePlugin;
-use theater::TheaterPlugin;
-use touch_controls::TouchControlsPlugin;
 use haptics::HapticsPlugin;
 use hud::HudPlugin;
 use lobby_overlay::LobbyOverlayPlugin;
 use netplay::{MatchboxPlugin, NetplayConfig};
+use profile::ProfilePlugin;
+use recorder::MatchRecorderPlugin;
+use room_code::RoomCodePlugin;
 use screen::{AppScreen, ScreenPlugin};
 use settings::SettingsPlugin;
+use theater::TheaterPlugin;
+use touch_controls::TouchControlsPlugin;
 
 /// Desktop window size, overridable via `TWOTOP_WINDOW=WxH` (e.g. `540x1200`
 /// to preview a tall-phone aspect). Defaults to the 2:3 portrait that frames
@@ -530,8 +530,7 @@ fn scale_actors_by_depth(
         let (_, y) = pos.0.to_f32();
         let s = render::depth_scale(y * flip.0);
         let (vx, vy) = vel.0.to_f32();
-        let speed_frac =
-            (vx.abs().max(vy.abs())) / sim::WALK_SPEED_CM_PER_TICK as f32;
+        let speed_frac = (vx.abs().max(vy.abs())) / sim::WALK_SPEED_CM_PER_TICK as f32;
         // Per-player gait phase offset so the two never hop in sync.
         let gait = time.elapsed_secs() * 11.0 + player.handle as f32 * 1.7;
         let pose = actor_pose(
@@ -542,8 +541,10 @@ fn scale_actors_by_depth(
             stun.0 > 0,
             gait,
         );
-        sprite.custom_size =
-            Some(Vec2::new(render::PLAYER_RENDER_SIZE * s * pose.x, render::PLAYER_RENDER_SIZE * s * pose.y));
+        sprite.custom_size = Some(Vec2::new(
+            render::PLAYER_RENDER_SIZE * s * pose.x,
+            render::PLAYER_RENDER_SIZE * s * pose.y,
+        ));
     }
     for (pos, mut sprite) in &mut pickups {
         let (_, y) = pos.0.to_f32();
@@ -862,8 +863,7 @@ fn capture_config_from_env() -> Option<CaptureConfig> {
         .ok()
         .and_then(|s| s.parse().ok())
         .unwrap_or(90);
-    let wait_matchover =
-        std::env::var("TWOTOP_CAPTURE_ON").is_ok_and(|v| v == "matchover");
+    let wait_matchover = std::env::var("TWOTOP_CAPTURE_ON").is_ok_and(|v| v == "matchover");
     Some(CaptureConfig {
         path,
         settle_frames,
@@ -886,10 +886,7 @@ fn capture_frame(
     use bevy::render::view::screenshot::{Screenshot, save_to_disk};
     // Hold the settle counter at zero until the gate opens (if any), so
     // `settle_frames` is a delay measured from MatchOver, not app start.
-    if cfg.wait_matchover
-        && *frame == 0
-        && !matches!(*match_state, sim::MatchState::MatchOver)
-    {
+    if cfg.wait_matchover && *frame == 0 && !matches!(*match_state, sim::MatchState::MatchOver) {
         return;
     }
     *frame += 1;

@@ -79,8 +79,7 @@ fn backend_from_env() -> Backend {
     }
     if let (Some(key_id), Some(token)) = (get("CF_TURN_KEY_ID"), get("CF_TURN_API_TOKEN")) {
         let endpoint = get("CF_TURN_API_URL").unwrap_or_else(|| {
-            "https://rtc.live.cloudflare.com/v1/turn/keys/{key_id}/credentials/generate"
-                .to_string()
+            "https://rtc.live.cloudflare.com/v1/turn/keys/{key_id}/credentials/generate".to_string()
         });
         return Backend::Cloudflare(endpoint.replace("{key_id}", &key_id), token);
     }
@@ -210,8 +209,8 @@ fn main() {
             "/healthz" => (200, "ok".to_string(), "text/plain"),
             _ => (404, "not found".to_string(), "text/plain"),
         };
-        let header = tiny_http::Header::from_bytes("Content-Type", content_type)
-            .expect("static header");
+        let header =
+            tiny_http::Header::from_bytes("Content-Type", content_type).expect("static header");
         let response = tiny_http::Response::from_string(body)
             .with_status_code(status)
             .with_header(header);

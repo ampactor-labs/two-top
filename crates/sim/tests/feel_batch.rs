@@ -10,12 +10,12 @@ use bevy_ggrs::prelude::*;
 use core::time::Duration;
 use fixed_math::{Fix, RectF, Vec2F};
 use sim::{
-    BOOMERANG_HALF_EXTENT_CM, BONE_PYRE_HALF_EXTENT_CM, BonePyre, Boomerang, BoomerangMods,
-    BoomerangState, CatchStreak, Dead, DefaultInputsPlugin, Empowered, FrameCount,
-    GROW_MAX_FACTOR, GgrsCfg, LastClashFrame, MatchScore, PYRE_BURN_FRAMES, PickupKind, Player,
-    PlayerInput, PositionF, PreviousPositionF, REACH_MAX_CM, SimPlugin, SynthesizedInputs,
-    ThrowReach, VelocityF, grown_half_extent, streak_speed_factor, sudden_death_factor,
-    SUDDEN_DEATH_FRAMES, SUDDEN_DEATH_MIN_FACTOR,
+    BONE_PYRE_HALF_EXTENT_CM, BOOMERANG_HALF_EXTENT_CM, BonePyre, Boomerang, BoomerangMods,
+    BoomerangState, CatchStreak, Dead, DefaultInputsPlugin, Empowered, FrameCount, GROW_MAX_FACTOR,
+    GgrsCfg, LastClashFrame, MatchScore, PYRE_BURN_FRAMES, PickupKind, Player, PlayerInput,
+    PositionF, PreviousPositionF, REACH_MAX_CM, SUDDEN_DEATH_FRAMES, SUDDEN_DEATH_MIN_FACTOR,
+    SimPlugin, SynthesizedInputs, ThrowReach, VelocityF, grown_half_extent, streak_speed_factor,
+    sudden_death_factor,
 };
 
 // ---- Pure helpers ----
@@ -118,7 +118,13 @@ fn set_inputs(app: &mut App, input: PlayerInput) {
     app.world_mut().resource_mut::<SynthesizedInputs>().0 = input;
 }
 
-fn spawn_fang(app: &mut App, owner: usize, pos: Vec2F, vel: Vec2F, state: BoomerangState) -> Entity {
+fn spawn_fang(
+    app: &mut App,
+    owner: usize,
+    pos: Vec2F,
+    vel: Vec2F,
+    state: BoomerangState,
+) -> Entity {
     app.world_mut()
         .spawn((
             Boomerang {
@@ -175,7 +181,10 @@ fn neutral_stick_release_throws_at_the_opponent() {
         } else {
             assert!(vel.y < Fix::ZERO, "p1 fang must fly toward p0 (-y)");
         }
-        assert!(vel.x.abs() <= Fix::from_bits(2), "duel axis throw is straight");
+        assert!(
+            vel.x.abs() <= Fix::from_bits(2),
+            "duel axis throw is straight"
+        );
     }
 }
 
@@ -280,7 +289,10 @@ fn dashing_through_an_enemy_fang_empowers() {
         }
     }
     assert!(!died, "dash i-frames keep the graze survivable");
-    assert!(empowered_seen, "dashing through the enemy fang must empower");
+    assert!(
+        empowered_seen,
+        "dashing through the enemy fang must empower"
+    );
 }
 
 // ---- Perfect-catch streak escalation ----
@@ -370,7 +382,10 @@ fn aim_stick_bends_the_return_arc() {
         vel.y < Fix::ZERO,
         "the pull home still dominates (fang above owner flies -y)"
     );
-    assert!(vel.x > Fix::ZERO, "the aim stick bends the arc east, got {vel:?}");
+    assert!(
+        vel.x > Fix::ZERO,
+        "the aim stick bends the arc east, got {vel:?}"
+    );
 }
 
 // ---- Fire-lit pyres ----
@@ -447,7 +462,11 @@ fn burning_pyre_kills_and_credits_the_igniter() {
         .map(|(_, d)| d.is_dying())
         .unwrap();
     assert!(dying, "a burning pyre is lethal");
-    assert_eq!(world.resource::<MatchScore>().p0, 1, "kill credits the igniter");
+    assert_eq!(
+        world.resource::<MatchScore>().p0,
+        1,
+        "kill credits the igniter"
+    );
 }
 
 // ---- Swap trade-places ----

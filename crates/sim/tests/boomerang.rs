@@ -1120,9 +1120,7 @@ fn cannot_throw_again_while_boomerang_in_flight() {
 // ---- SIM_VERSION 8: fresh-press throw arming ----
 
 fn player_x(app: &mut App) -> Fix {
-    let mut q = app
-        .world_mut()
-        .query_filtered::<&PositionF, With<Player>>();
+    let mut q = app.world_mut().query_filtered::<&PositionF, With<Player>>();
     q.iter(app.world()).next().unwrap().0.x
 }
 

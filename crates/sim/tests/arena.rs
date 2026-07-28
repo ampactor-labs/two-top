@@ -657,7 +657,9 @@ fn walled_and_no_storm_arenas_gate_the_void() {
     // bounds, far outside the shrunken ones.
     let edge = Vec2F::from_cm(480, 0);
     // Remaining round time near zero => max crumble everywhere it applies.
-    let expiring = MatchState::InRound { expires_at_frame: 1 };
+    let expiring = MatchState::InRound {
+        expires_at_frame: 1,
+    };
     let run = |arena: ArenaId| -> u32 {
         let mut app = bare_app();
         app.world_mut().resource_mut::<SelectedArena>().0 = arena;

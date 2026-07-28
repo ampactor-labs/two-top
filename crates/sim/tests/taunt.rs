@@ -259,9 +259,7 @@ fn spawn_guard_blocks_the_camped_fang_until_it_expires() {
     // Hand-grant a short guard window (the respawn path is covered by
     // `respawn_grants_guard_that_breaks_on_offense`).
     {
-        let mut q = app
-            .world_mut()
-            .query::<(&Player, &mut SpawnGuard)>();
+        let mut q = app.world_mut().query::<(&Player, &mut SpawnGuard)>();
         for (p, mut g) in q.iter_mut(app.world_mut()) {
             if p.handle == 1 {
                 g.0 = 10;

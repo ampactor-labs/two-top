@@ -42,8 +42,8 @@ use crate::screen::AppScreen;
 /// peer's name renders wrong. The on-screen layout is a separate thing
 /// entirely; see [`KEY_ROWS`].
 pub const NAME_ALPHABET: [char; 36] = [
-    'A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'J', 'K', 'L', 'M', 'N', 'O', 'P', 'Q', 'R',
-    'S', 'T', 'U', 'V', 'W', 'X', 'Y', 'Z', '0', '1', '2', '3', '4', '5', '6', '7', '8', '9',
+    'A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'J', 'K', 'L', 'M', 'N', 'O', 'P', 'Q', 'R', 'S',
+    'T', 'U', 'V', 'W', 'X', 'Y', 'Z', '0', '1', '2', '3', '4', '5', '6', '7', '8', '9',
 ];
 
 /// The keyboard, laid out the way every phone on earth lays one out.
@@ -210,9 +210,7 @@ fn profile_path() -> Option<PathBuf> {
 }
 
 fn load_profile() -> LocalProfile {
-    let mut profile = profile_path()
-        .map(|p| read_profile(&p))
-        .unwrap_or_default();
+    let mut profile = profile_path().map(|p| read_profile(&p)).unwrap_or_default();
     // Normalize whatever the file held (hand edits, an older build's
     // 4-glyph name) through the same clamp the wire uses.
     profile.name = name_from_slots(&slots_from_name(&profile.name));
@@ -367,8 +365,20 @@ fn spawn_name_ui(mut commands: Commands, netplay: Res<NetplayConfig>) {
             );
         }
     }
-    key(GridKey::Del, 0.28, ACTION_ROW_Y, 34.0, render::palette::COLD_STONE);
-    key(GridKey::Done, 0.72, ACTION_ROW_Y, 40.0, render::palette::SPARK);
+    key(
+        GridKey::Del,
+        0.28,
+        ACTION_ROW_Y,
+        34.0,
+        render::palette::COLD_STONE,
+    );
+    key(
+        GridKey::Done,
+        0.72,
+        ACTION_ROW_Y,
+        40.0,
+        render::palette::SPARK,
+    );
 }
 
 /// Entering the keyboard: an unclaimed name starts BLANK so you can just
@@ -439,7 +449,11 @@ fn name_entry_input(
             let p = t.position();
             let (fx, fy) = (p.x / win.x, p.y / win.y);
             if (ACTION_BAND.0..ACTION_BAND.1).contains(&fy) {
-                hit = Some(if fx < 0.5 { GridKey::Del } else { GridKey::Done });
+                hit = Some(if fx < 0.5 {
+                    GridKey::Del
+                } else {
+                    GridKey::Done
+                });
             } else if let Some(i) = key_at(fx, fy) {
                 letter = Some(i);
             }
@@ -633,11 +647,17 @@ mod tests {
         // conflation once stored the literal words as a player's name.
         assert_eq!(peer_name(None), "THE CHALLENGER");
         assert_eq!(
-            peer_name(Some(net::ProfileData { install_id: 1, name: [NAME_EMPTY; NAME_MAX] })),
+            peer_name(Some(net::ProfileData {
+                install_id: 1,
+                name: [NAME_EMPTY; NAME_MAX]
+            })),
             "THE CHALLENGER"
         );
         assert_eq!(
-            peer_name(Some(net::ProfileData { install_id: 1, name: slots_from_name("SUDS") })),
+            peer_name(Some(net::ProfileData {
+                install_id: 1,
+                name: slots_from_name("SUDS")
+            })),
             "SUDS"
         );
     }

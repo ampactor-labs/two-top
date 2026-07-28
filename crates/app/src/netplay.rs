@@ -38,8 +38,9 @@ use bevy_ggrs::ggrs::{DesyncDetection, GgrsEvent, PlayerType, SessionBuilder};
 // app needs no direct matchbox/uuid dependency.
 use net::{
     ChannelConfig, LastPeerMessageFrame, LobbyState, MatchboxBridge, MatchboxPeerId as PeerId,
-    NetMsg, NetSendQueue, PeerProfile, PeerState, PendingP2PSwap, RematchConsent, RtcIceServerConfig,
-    WebRtcSocket, WebRtcSocketBuilder, addr_to_peer, decode_net_msg, encode_net_msg, peer_to_addr,
+    NetMsg, NetSendQueue, PeerProfile, PeerState, PendingP2PSwap, RematchConsent,
+    RtcIceServerConfig, WebRtcSocket, WebRtcSocketBuilder, addr_to_peer, decode_net_msg,
+    encode_net_msg, peer_to_addr,
 };
 use sim::GgrsCfg;
 
@@ -337,7 +338,12 @@ fn finish_ice_fetch(world: &mut World) {
     let now = world.resource::<Time<Real>>().elapsed_secs();
     let outcome = {
         let pending = world.resource::<PendingIce>();
-        match pending.rx.lock().expect("fetch thread never panics holding it").try_recv() {
+        match pending
+            .rx
+            .lock()
+            .expect("fetch thread never panics holding it")
+            .try_recv()
+        {
             Ok(result) => Some(result),
             Err(std::sync::mpsc::TryRecvError::Disconnected) => Some(None),
             Err(std::sync::mpsc::TryRecvError::Empty) => {
@@ -848,6 +854,9 @@ mod tests {
         // "vendor unusable" — the caller takes the baked/STUN-only path.
         assert!(parse_ice_response("not json").is_none());
         assert!(parse_ice_response(r#"{"nope":true}"#).is_none());
-        assert!(parse_ice_response(r#"{"urls":[],"username":null,"credential":null,"ttl_secs":9}"#).is_none());
+        assert!(
+            parse_ice_response(r#"{"urls":[],"username":null,"credential":null,"ttl_secs":9}"#)
+                .is_none()
+        );
     }
 }

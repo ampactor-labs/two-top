@@ -17,8 +17,8 @@ use fixed_math::{Fix, Vec2F};
 use sim::{
     ArenaId, BoneTree, Boomerang, BoomerangMods, BoomerangState, Dead, FrameCount, GgrsCfg,
     MatchScore, MatchState, PickupKind, Player, PositionF, PreviousPositionF, SimPlugin,
-    SimSnapshot, TREE_BURN_FRAMES, TREE_HP, TREE_SPREAD_DELAY_FRAMES, VelocityF,
-    arena_trees_for, boomerang_tree_collision, tree_burn_kills, tree_collision, tree_fire,
+    SimSnapshot, TREE_BURN_FRAMES, TREE_HP, TREE_SPREAD_DELAY_FRAMES, VelocityF, arena_trees_for,
+    boomerang_tree_collision, tree_burn_kills, tree_collision, tree_fire,
 };
 
 fn bare_app() -> App {
@@ -49,10 +49,9 @@ fn tree_at(app: &mut App, cx: i32, cy: i32) -> Entity {
     let half = (template.rect.max.x - template.rect.min.x) * Fix::lit("0.5");
     let center = Vec2F::from_cm(cx, cy);
     app.world_mut()
-        .spawn(BoneTree::standing(fixed_math::RectF::from_center_half_extents(
-            center,
-            Vec2F::new(half, half),
-        )))
+        .spawn(BoneTree::standing(
+            fixed_math::RectF::from_center_half_extents(center, Vec2F::new(half, half)),
+        ))
         .id()
 }
 
@@ -123,7 +122,10 @@ fn two_chips_fell_a_tree_and_a_stump_stops_blocking() {
         .run_system_once(boomerang_tree_collision)
         .unwrap();
     let boom = *app.world().entity(f).get::<Boomerang>().unwrap();
-    assert!(matches!(boom.state, BoomerangState::Flying), "stump doesn't block");
+    assert!(
+        matches!(boom.state, BoomerangState::Flying),
+        "stump doesn't block"
+    );
 }
 
 #[test]
@@ -145,8 +147,11 @@ fn returning_and_phantom_phase_through() {
     let t = tree_at(&mut app, 0, 0);
     let ph = fang_at(&mut app, Some(PickupKind::Phantom), -20, 0, 50);
     let ret = fang_at(&mut app, None, 20, 0, 50);
-    app.world_mut().entity_mut(ret).get_mut::<Boomerang>().unwrap().state =
-        BoomerangState::Returning { since: 0 };
+    app.world_mut()
+        .entity_mut(ret)
+        .get_mut::<Boomerang>()
+        .unwrap()
+        .state = BoomerangState::Returning { since: 0 };
     app.world_mut()
         .run_system_once(boomerang_tree_collision)
         .unwrap();
@@ -167,7 +172,11 @@ fn fire_fang_ignites_instead_of_chipping_and_burnout_fells() {
         .unwrap();
     let tr = tree(&mut app, t);
     assert_eq!(tr.hp, TREE_HP, "fire doesn't chip");
-    assert_eq!(tr.lit_until_frame, Some(TREE_BURN_FRAMES), "lit from frame 0");
+    assert_eq!(
+        tr.lit_until_frame,
+        Some(TREE_BURN_FRAMES),
+        "lit from frame 0"
+    );
     assert_eq!(tr.lit_by, 0);
     assert!(tr.is_burning(1));
 
@@ -200,8 +209,14 @@ fn fire_spreads_to_neighbors_after_the_delay_within_radius_only() {
     // At the delay: the neighbor catches, the far tree never does.
     app.world_mut().resource_mut::<FrameCount>().0 = TREE_SPREAD_DELAY_FRAMES;
     app.world_mut().run_system_once(tree_fire).unwrap();
-    assert!(tree(&mut app, near).lit_until_frame.is_some(), "neighbor catches");
-    assert!(tree(&mut app, far).lit_until_frame.is_none(), "out of reach");
+    assert!(
+        tree(&mut app, near).lit_until_frame.is_some(),
+        "neighbor catches"
+    );
+    assert!(
+        tree(&mut app, far).lit_until_frame.is_none(),
+        "out of reach"
+    );
 }
 
 #[test]
@@ -231,7 +246,11 @@ fn burning_tree_kills_and_credits_like_a_pyre() {
         app.world().entity(victim).get::<Dead>().unwrap().is_dying(),
         "the fire bites"
     );
-    assert_eq!(app.world().resource::<MatchScore>().p0, 1, "igniter credited");
+    assert_eq!(
+        app.world().resource::<MatchScore>().p0,
+        1,
+        "igniter credited"
+    );
 
     // Self-burn: the igniter walking into their own fire credits the OPPONENT.
     let own_goal = app
@@ -243,7 +262,13 @@ fn burning_tree_kills_and_credits_like_a_pyre() {
         ))
         .id();
     app.world_mut().run_system_once(tree_burn_kills).unwrap();
-    assert!(app.world().entity(own_goal).get::<Dead>().unwrap().is_dying());
+    assert!(
+        app.world()
+            .entity(own_goal)
+            .get::<Dead>()
+            .unwrap()
+            .is_dying()
+    );
     assert_eq!(
         app.world().resource::<MatchScore>().p1,
         1,
@@ -267,9 +292,17 @@ fn standing_tree_blocks_a_player_felled_does_not() {
     let pushed = app.world().entity(p).get::<PositionF>().unwrap().0;
     assert_ne!(pushed, Vec2F::from_cm(10, 0), "standing trunk pushes out");
 
-    app.world_mut().entity_mut(t).get_mut::<BoneTree>().unwrap().felled = true;
+    app.world_mut()
+        .entity_mut(t)
+        .get_mut::<BoneTree>()
+        .unwrap()
+        .felled = true;
     let back = Vec2F::from_cm(10, 0);
-    app.world_mut().entity_mut(p).get_mut::<PositionF>().unwrap().0 = back;
+    app.world_mut()
+        .entity_mut(p)
+        .get_mut::<PositionF>()
+        .unwrap()
+        .0 = back;
     app.world_mut().run_system_once(tree_collision).unwrap();
     assert_eq!(
         app.world().entity(p).get::<PositionF>().unwrap().0,

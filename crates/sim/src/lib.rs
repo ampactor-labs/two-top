@@ -823,10 +823,7 @@ pub fn arena_obstacles_for(arena: ArenaId) -> Vec<Wall> {
         ],
         // The Pit: two chunky mid-field blocks — everything else is the
         // ricochet ring itself. Angles are the arena.
-        ArenaId::Pit => vec![
-            block(-160, 0, 40, 40),
-            block(160, 0, 40, 40),
-        ],
+        ArenaId::Pit => vec![block(-160, 0, 40, 40), block(160, 0, 40, 40)],
         // The Vigil: open sightlines — the two pyres (arena_pyres_for) are
         // the only structure. Patience is the cover. The Forest's cover is
         // its TREES (`arena_trees_for`), not dead blocks.
@@ -1283,7 +1280,13 @@ pub fn start_dash(
     match_state: Res<MatchState>,
     inputs: Res<PlayerInputs<GgrsCfg>>,
     history: Res<InputHistory>,
-    mut q: Query<(&Player, &Dead, &mut DashState, &mut StunFrames, &ThrowCharge)>,
+    mut q: Query<(
+        &Player,
+        &Dead,
+        &mut DashState,
+        &mut StunFrames,
+        &ThrowCharge,
+    )>,
 ) {
     if !match_state.is_in_round() {
         return;
@@ -1664,11 +1667,7 @@ pub fn dash_melee_kill(
         }
         let drect = player_rect(dpos.0);
         for (ventity, victim, vpos, _, vdead, vstun, vguard) in &players {
-            if victim.handle == dasher.handle
-                || vdead.is_dying()
-                || vstun.0 > 0
-                || vguard.0 > 0
-            {
+            if victim.handle == dasher.handle || vdead.is_dying() || vstun.0 > 0 || vguard.0 > 0 {
                 // Same player, already dying, or invincible (its own
                 // dash i-frames or the respawn guard).
                 continue;
@@ -2015,8 +2014,18 @@ pub fn throw_boomerangs(
         .iter()
         .map(|(p, _, pos, ..)| (p.handle, pos.0))
         .collect();
-    for (player, dead, pos, capacity, mut anim, mut empowered, mut held, mut charge, streak, dash) in
-        &mut players
+    for (
+        player,
+        dead,
+        pos,
+        capacity,
+        mut anim,
+        mut empowered,
+        mut held,
+        mut charge,
+        streak,
+        dash,
+    ) in &mut players
     {
         if dead.is_dying() {
             charge.0 = 0;
@@ -2439,11 +2448,7 @@ pub fn fire_trail_kills(
     for (cell, cell_pos) in &cells {
         let cr = fire_trail_rect(cell_pos.0);
         for (player, player_pos, mut dead, stun, guard) in &mut players {
-            if dead.is_dying()
-                || player.handle == cell.owner_handle
-                || stun.0 > 0
-                || guard.0 > 0
-            {
+            if dead.is_dying() || player.handle == cell.owner_handle || stun.0 > 0 || guard.0 > 0 {
                 continue;
             }
             if player_rect(player_pos.0).overlaps(cr) {
@@ -2586,7 +2591,9 @@ pub fn recall_boomerangs(
                 // places instead — owner teleports to the fang, the fang
                 // drops Loose where the owner stood. A dying owner can't
                 // teleport (their corpse stays where it fell).
-                if manual && !owner_dead.is_dying() && matches!(mods.modifier, Some(PickupKind::Swap))
+                if manual
+                    && !owner_dead.is_dying()
+                    && matches!(mods.modifier, Some(PickupKind::Swap))
                 {
                     let old_owner = owner_pos.0;
                     let fang_at = boom_pos.0;
@@ -2820,9 +2827,7 @@ pub fn oob_death(
     // No-storm arenas (Vigil) keep the full island for the whole round: a
     // killless round simply expires scoreless in `tick_match_state`.
     let remaining = match *match_state {
-        MatchState::InRound { expires_at_frame } => {
-            expires_at_frame.saturating_sub(frame.0)
-        }
+        MatchState::InRound { expires_at_frame } => expires_at_frame.saturating_sub(frame.0),
         _ => u32::MAX,
     };
     let crumbling = selected.0.crumbles() && remaining < SUDDEN_DEATH_FRAMES;
@@ -3756,7 +3761,12 @@ pub fn arena_pyres_for(arena: ArenaId) -> Vec<BonePyre> {
 pub fn boomerang_pyre_collision(
     frame: Res<FrameCount>,
     mut pyres: Query<&mut BonePyre>,
-    mut boomerangs: Query<(&mut Boomerang, &mut BoomerangMods, &mut PositionF, &mut VelocityF)>,
+    mut boomerangs: Query<(
+        &mut Boomerang,
+        &mut BoomerangMods,
+        &mut PositionF,
+        &mut VelocityF,
+    )>,
 ) {
     for (mut boom, mut mods, mut pos, mut vel) in &mut boomerangs {
         if matches!(boom.state, BoomerangState::Returning { .. }) {
@@ -4138,7 +4148,12 @@ pub fn tree_collision(trees: Query<&BoneTree>, mut players: Query<&mut PositionF
 pub fn boomerang_tree_collision(
     frame: Res<FrameCount>,
     mut trees: Query<&mut BoneTree>,
-    mut boomerangs: Query<(&mut Boomerang, &mut BoomerangMods, &mut PositionF, &mut VelocityF)>,
+    mut boomerangs: Query<(
+        &mut Boomerang,
+        &mut BoomerangMods,
+        &mut PositionF,
+        &mut VelocityF,
+    )>,
 ) {
     for (mut boom, mut mods, mut pos, mut vel) in &mut boomerangs {
         if matches!(boom.state, BoomerangState::Returning { .. }) {
@@ -4965,9 +4980,7 @@ impl SimSnapshot {
         let extra_trees: Vec<Entity> = world
             .query::<(Entity, &BoneTree)>()
             .iter(world)
-            .filter(|(_, t)| {
-                !tree_keys.contains(&(t.rect.min.x.to_bits(), t.rect.min.y.to_bits()))
-            })
+            .filter(|(_, t)| !tree_keys.contains(&(t.rect.min.x.to_bits(), t.rect.min.y.to_bits())))
             .map(|(e, _)| e)
             .collect();
         for e in extra_trees {

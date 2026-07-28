@@ -60,7 +60,11 @@ fn devouring_ceremony(
     *prev_over = over;
 
     if entered && fang.is_empty() {
-        let winner = if score.p0 >= MATCH_WIN_THRESHOLD { 0 } else { 1 };
+        let winner = if score.p0 >= MATCH_WIN_THRESHOLD {
+            0
+        } else {
+            1
+        };
         commands.spawn((
             DevourFang {
                 t: -DEVOUR_HOLD,
