@@ -53,7 +53,11 @@ const DEFAULT_FILTER: &str = "info,\
 /// those paths write synchronously to stderr/logcat and have nothing to flush.
 #[must_use = "drop the LogGuard at the end of run() to flush pending log writes"]
 pub struct LogGuard {
-    #[cfg(all(not(debug_assertions), not(target_os = "android")))]
+    #[cfg(all(
+        not(debug_assertions),
+        not(target_os = "android"),
+        not(target_family = "wasm")
+    ))]
     _appender_guard: tracing_appender::non_blocking::WorkerGuard,
     /// `None` when the phone gave us nowhere to write (then the log is
     /// logcat-only, exactly as it was before) — never a reason to panic.
@@ -179,7 +183,24 @@ pub fn init_logging() -> LogGuard {
         }
     }
 
-    #[cfg(all(not(debug_assertions), not(target_os = "android")))]
+    #[cfg(all(not(debug_assertions), target_family = "wasm"))]
+    {
+        // A browser has no file to roll and no useful stderr; install the
+        // filter over a discarding writer. (Console routing via a
+        // tracing-wasm layer is a tracked follow-up if web debugging
+        // ever needs it — the browser devtools profiler covers most.)
+        tracing_subscriber::registry()
+            .with(filter)
+            .with(tracing_subscriber::fmt::layer().with_writer(std::io::sink))
+            .init();
+        LogGuard {}
+    }
+
+    #[cfg(all(
+        not(debug_assertions),
+        not(target_os = "android"),
+        not(target_family = "wasm")
+    ))]
     {
         let log_dir = log_dir();
         // Best-effort directory creation; if it fails the appender's
@@ -216,7 +237,11 @@ pub fn init_logging() -> LogGuard {
 /// 1. `<exe-dir>/logs/` if the current exe path is resolvable.
 /// 2. `./logs/` as a last-resort cwd fallback.
 ///
-#[cfg(all(not(debug_assertions), not(target_os = "android")))]
+#[cfg(all(
+    not(debug_assertions),
+    not(target_os = "android"),
+    not(target_family = "wasm")
+))]
 fn log_dir() -> std::path::PathBuf {
     use std::path::PathBuf;
     if let Ok(exe) = std::env::current_exe()

@@ -1,0 +1,8 @@
+# Workspace-level target config. The only entry is the wasm one: getrandom
+# 0.3 (in the graph via the uuid/matchbox stack) selects its entropy
+# backend by cfg rather than cargo feature, and without this every wasm
+# build dies in getrandom. Native targets read nothing from here, so the
+# determinism matrix is untouched.
+
+[target.wasm32-unknown-unknown]
+rustflags = ['--cfg', 'getrandom_backend="wasm_js"']

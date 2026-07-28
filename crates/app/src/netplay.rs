@@ -298,7 +298,11 @@ pub(crate) fn parse_ice_response(body: &str) -> Option<RtcIceServerConfig> {
 }
 
 /// Blocking fetch of the vendor's ICE config (runs on the IO task pool —
-/// never the main thread). Tight timeout: the fallback exists.
+/// never the main thread). Tight timeout: the fallback exists. Native
+/// only: a browser cannot block a thread, so the wasm build skips the
+/// vendor and runs the STUN-only path (a gloo-fetch port is the follow-up
+/// if browser duels ever need the relay).
+#[cfg(not(target_family = "wasm"))]
 fn fetch_ice(url: &str, app_key: Option<&str>) -> Option<RtcIceServerConfig> {
     let mut request = ureq::get(url).timeout(Duration::from_secs(2));
     if let Some(key) = app_key {
@@ -339,6 +343,9 @@ fn start_matchbox(world: &mut World) {
         return;
     };
 
+    #[cfg(target_family = "wasm")]
+    let _ = (&config.ice_url, &config.ice_key);
+    #[cfg(not(target_family = "wasm"))]
     if let Some(ice_url) = config.ice_url {
         let ice_key = config.ice_key;
         let (tx, rx) = std::sync::mpsc::channel();

@@ -96,10 +96,6 @@ tracing-subscriber = { version = "0.3", default-features = false, features = [
     "registry",
     "std",
 ] }
-# tracing-appender's RollingFileAppender writes to a directory with
-# date-stamped filenames. Used for the release file-output path; dev
-# builds skip the appender entirely and write to stderr.
-tracing-appender = "0.2"
 
 # Phase 18 Task 5.5c — persisted settings (deadzone, haptics, volumes) as
 # JSON in the platform config dir. `serde`/`serde_json` are already in the
@@ -179,3 +175,18 @@ exported = true
 # store dependency, which matters on Android.
 [target.'cfg(not(target_family = "wasm"))'.dependencies]
 ureq = { version = "2", default-features = false, features = ["tls", "json"] }
+# tracing-appender's RollingFileAppender writes date-stamped files (the
+# release desktop/Android log path). It cannot build on wasm (symlinks),
+# and a browser has no file to roll anyway — the wasm-release logging
+# branch drops the file half.
+tracing-appender = "0.2"
+
+
+# The wasm rite of passage: getrandom must be told a browser is a valid
+# entropy source. Both generations live in the graph — 0.2 (rand/bevy
+# stack) takes a cargo feature; 0.3 (uuid/matchbox stack) additionally
+# reads the getrandom_backend cfg, set for the wasm target in
+# .cargo/config.toml. Native builds are untouched by either.
+[target.'cfg(target_family = "wasm")'.dependencies]
+getrandom02 = { package = "getrandom", version = "0.2", features = ["js"] }
+getrandom03 = { package = "getrandom", version = "0.3", features = ["wasm_js"] }
