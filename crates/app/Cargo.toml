@@ -106,6 +106,11 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 dirs = "5"
 
+# NORTH N3 — SHARE renders the watch link as a QR sprite (share.rs).
+# Pure-Rust bit matrix only; the image/svg renderer features stay off
+# (the sprite pipeline is the renderer here).
+qrcode = { version = "=0.14.1", default-features = false }
+
 # The install identity (profile.rs) mints one random u128 per install.
 # uuid v4 is the tree's existing randomness-with-no-ceremony source —
 # matchbox already pulls uuid; net uses it for the PeerId bijection.

@@ -568,6 +568,8 @@ fn replays_input(world: &mut World) {
         );
         return;
     };
+    // The share surface needs to know which tape is on the projector.
+    world.resource_mut::<crate::share::SharedTapePath>().0 = Some(path.clone());
     start_playback(world, replay);
 }
 
@@ -1023,6 +1025,7 @@ fn theater_update_ui(
 /// player's arena pick restored.
 fn theater_teardown(world: &mut World) {
     tracing::info!(target: "two_top::theater", "step: teardown");
+    world.resource_mut::<crate::share::SharedTapePath>().0 = None;
     let (was_active, prev_arena) = {
         let theater = world.resource::<TheaterMode>();
         (theater.active, theater.prev_arena)

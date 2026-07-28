@@ -46,6 +46,7 @@ mod room_code;
 mod runes;
 mod screen;
 mod settings;
+mod share;
 mod theater;
 mod touch_controls;
 use anchor::{FullScreenSprite, ScreenAnchorPlugin};
@@ -164,6 +165,7 @@ pub fn run() {
         .add_plugins(DevourPlugin)
         .add_plugins(GrudgePlugin)
         .add_plugins(AttestPlugin)
+        .add_plugins(share::SharePlugin)
         .add_plugins(ProfilePlugin)
         .add_plugins(MatchRecorderPlugin)
         .add_plugins(RoomCodePlugin)

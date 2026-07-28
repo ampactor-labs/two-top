@@ -99,6 +99,12 @@ jobs:
           # authenticating anyone; a secret only to keep it out of the repo.
           # Unset ⇒ header omitted, which an open vendor accepts.
           TWOTOP_ICE_KEY: ${{ secrets.TWOTOP_ICE_KEY }}
+          # NORTH N3 — the SHARE loop's two endpoints: the tape drop
+          # (crates/tape_drop) and the static web theater the QR points
+          # at. Both plain URLs, safe in a public binary; both unset ⇒
+          # the SHARE surfaces never appear.
+          TWOTOP_DROP_URL: ${{ vars.TWOTOP_DROP_URL }}
+          TWOTOP_WATCH_URL: ${{ vars.TWOTOP_WATCH_URL }}
         run: |
           # Runner-image env (ANDROID_NDK_LATEST_HOME) is process env, not
           # expression-time `env:` context — resolve it in the shell.
