@@ -1,0 +1,37 @@
+name: Wasm Determinism
+
+# The fifth lane of the determinism story (NORTH N3, COMPLETION_PLAN P.6):
+# the canonical demo's per-frame checksums, computed inside a real headless
+# Chrome, must equal the committed golden byte-for-byte. The four native
+# lanes prove linux-x64/arm, macOS, and Android agree; this one proves the
+# browser build is the same game and not a port of it.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  browser-checksums:
+    name: wasm32 checksum lane (headless chrome)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Add wasm target
+        run: rustup target add wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: wasm
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: wasm-pack
+      # wasm-pack drives cargo, wasm-bindgen-test-runner, and chromedriver;
+      # the runner image ships Chrome. Only the wasm_checksums test target
+      # builds — the native-only suites never compile for this lane.
+      - name: Run the browser checksum test
+        run: |
+          wasm-pack test --headless --chrome crates/replay_sync -- --test wasm_checksums
