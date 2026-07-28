@@ -108,6 +108,11 @@ The four documents at the repository root are the source of truth:
 - [`MORGAN_NOTES.md`](./MORGAN_NOTES.md): the reasoning. Decision
   rationale and the alternatives that were rejected.
 
+[`docs/NORTH.md`](./docs/NORTH.md) is where those four point: the finished
+form of the game (the rivalry ledger as the home surface, dual-signed match
+results, the tape as broadcast), with the phased execution plan in
+[`docs/plans/NORTH_PLAN.md`](./docs/plans/NORTH_PLAN.md).
+
 [`PLAYBOOK.md`](./PLAYBOOK.md) is the operator's ladder from a laptop
 couch match to two phones on different carriers. [`SIGNALING.md`](./SIGNALING.md)
 covers the signaling server and NAT traversal, including the ephemeral
