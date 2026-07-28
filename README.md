@@ -13,9 +13,10 @@ produce bit-identical state on every platform, because two phones on
 opposite ends of a connection either agree exactly or the match desyncs.
 That one constraint shapes the whole codebase.
 
-Android is the product platform today; iOS and a web PWA are on the
-roadmap. The desktop build is a dev tool: couch versus on one keyboard,
-plus the capture and loopback harnesses.
+Android is the product platform today, and the same build runs in a
+browser (wasm32 + WebGL2, deployed to Pages); iOS is on the roadmap. The
+desktop build is a dev tool: couch versus on one keyboard, plus the
+capture and loopback harnesses.
 
 > **Naming.** The displayed name is **2-Top**. Code identifiers stay
 > textual as `two-top` (directory), `two_top` (Rust crate), and `twotop`
@@ -32,7 +33,10 @@ https://github.com/ampactor-labs/two-top/releases/download/apk-latest/two-top.ap
 ```
 
 Install it on two Android phones ([`SIDELOAD.md`](./SIDELOAD.md)), tap
-FIND OPPONENT on both, and the public room pairs you. Dial the same
+FIND OPPONENT on both, and the public room pairs you. The game also runs
+in a browser at [ampactor.dev/two-top](https://ampactor.dev/two-top/),
+and a shared match plays there straight from its QR link
+(`#watch=<id>` — see PLAYBOOK § Sharing a match). Dial the same
 four-glyph code on both phones for a private duel. The public build
 carries no relay secrets: it fetches throwaway TURN credentials from a
 small credential service at match entry, so cross-carrier matches relay
@@ -59,7 +63,7 @@ A determinism-first systems project that happens to be a game.
   per-component checksums for byte-for-byte identity. A nightly fuzz soak
   replays randomized matches across all seven arenas, because the walk-only
   golden checksum structurally cannot catch a boomerang-clash desync.
-- Twelve crates, 532 tests, clippy-clean under `-D warnings`, a pinned
+- Thirteen crates, 556 tests, clippy-clean under `-D warnings`, a pinned
   toolchain, and a committed `Cargo.lock` enforced with `--locked`.
   Replays are strictly version-matched with no migration path, so any
   change that touches the simulation bumps `sim_version` (currently 14).
@@ -87,7 +91,8 @@ Rounds end in a sudden-death floor crumble where the storm exists, and
 every decided match writes a replay tape you can watch on the phone,
 through the live presentation, with scrubbing and playback speeds.
 
-Online has an identity layer: a dialed four-glyph name, a per-opponent
+Online has an identity layer: a typed name over a durable install-id,
+a result-signing key that dual-signs decided matches, a per-opponent
 rivalry record ("4TH MEETING, you lead 2-1"), a consent-gated RUN IT BACK
 rematch, and honest forfeit blame: whoever walked away owns the loss, and
 quitting a live duel from the in-match QUIT chip is scored the same way.
@@ -120,12 +125,14 @@ TURN credential service in `crates/ice_vendor`.
 
 ## Status
 
-The full gameplay loop, netplay, seven arenas, the social layer, the
-on-device replay theater, and the CI/APK pipelines are built and green.
-Open items: the two-phone cross-carrier field test (the relay path is
-deployed and verified server-side; the parking-lot test remains), desktop
-packaging, and the web/WASM PWA milestone, which also means adding wasm32
-to the determinism matrix.
+The full gameplay loop, netplay, seven arenas, the social layer, signed
+results, the on-device replay theater, the share loop with its browser
+theater, and the CI/APK/Pages pipelines are built and green; wasm32 is
+the determinism matrix's fifth lane. Open items: the two-phone
+cross-carrier field test (the relay path is deployed and verified
+server-side; the parking-lot test remains), desktop packaging, browser
+netplay verification, and the NORTH program's remaining phases
+(docs/plans/NORTH_PLAN.md).
 
 ## Build
 

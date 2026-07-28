@@ -30,8 +30,13 @@ jobs:
         with:
           tool: wasm-pack
       # wasm-pack drives cargo, wasm-bindgen-test-runner, and chromedriver;
-      # the runner image ships Chrome. Only the wasm_checksums test target
-      # builds — the native-only suites never compile for this lane.
+      # the runner image ships Chrome. `--test` sits at the cargo level
+      # (after the crate path, before any `--`) so only the wasm_checksums
+      # target builds — behind a `--` it reaches the harness runner, which
+      # rejects it. Release profile: 1800 frames of debug-profile wasm sim
+      # is where default harness timeouts go to die.
       - name: Run the browser checksum test
+        env:
+          WASM_BINDGEN_TEST_TIMEOUT: "300"
         run: |
-          wasm-pack test --headless --chrome crates/replay_sync -- --test wasm_checksums
+          wasm-pack test --headless --chrome crates/replay_sync --test wasm_checksums --release

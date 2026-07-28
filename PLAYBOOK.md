@@ -452,6 +452,17 @@ For cross-network: deploy `matchbox_server` to a public host (see Rung 5).
 
 What every install carries, no server or second phone needed:
 
+**Sharing a match (the watch link).** On a build with the share endpoints
+baked (`TWOTOP_DROP_URL` pointing at the tape_drop service and
+`TWOTOP_WATCH_URL` at the web theater), a SHARE label appears on the match
+summary once the tape saves, and in the theater while a tape plays. Tap it
+(S on desktop): the tape posts to the drop and the screen shows a QR of
+`<watch-url>#watch=<id>` with the link printed under it — any phone camera
+opens the match in a browser, playing through the real engine. Links live
+about a week (the drop's TTL) and re-sharing the same match re-mints the
+same link. Attestations (`.attest.json` beside a tape) do not travel with
+the share; `replay_sync --attest` verifies them wherever the files are.
+
 **The gauntlet (practice vs the bot).** Tap PRACTICE VS BOT on the Title
 (P on desktop), then PLAY. The match runs the normal local session with the
 bot supplying player 2's inputs — it keeps range, plants visibly before it

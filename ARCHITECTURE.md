@@ -56,7 +56,10 @@ two-top/
     ├── ci.yml                     # check / test / clippy + art gates
     ├── determinism.yml            # 4-target replay checksum matrix
     ├── fuzz_soak.yml              # nightly randomized-match soak
-    └── apk.yml                    # release APK build + publish
+    ├── apk.yml                    # release APK build + publish
+    ├── audit.yml                  # weekly cargo-audit advisory scan
+    ├── wasm.yml                   # browser checksum lane (5th determinism lane)
+    └── web.yml                    # wasm bundle build + GitHub Pages deploy
 ```
 
 The `sim` crate has zero `bevy_render` dependency. The `render` crate depends on `sim` read-only.
