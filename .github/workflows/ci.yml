@@ -26,6 +26,10 @@ jobs:
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-nextest
+      # First: cheapest gate, catches drift the toolchain's own component
+      # can fix locally with one `cargo fmt`. The tree was normalized in one
+      # behavior-neutral commit; this step is what keeps it that way.
+      - run: cargo fmt --all --check
       - run: cargo check --workspace --locked
       - run: cargo nextest run --workspace --locked
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
