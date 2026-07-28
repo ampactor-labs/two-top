@@ -1,0 +1,29 @@
+name: Audit
+
+# The workspace pins everything (`=` versions, committed lock, --locked
+# everywhere) because toolchain and dependency drift are determinism risks
+# (MORGAN_NOTES, CONVENTIONS). Pins need a complement: nothing would notice
+# a RUSTSEC advisory against `fixed`, `cordic` (frozen upstream), `tiny_http`,
+# or `ureq`. This job is that complement — weekly, and it files an issue
+# instead of failing PRs, so pins move on evidence instead of noise.
+
+on:
+  schedule:
+    - cron: "0 5 * * 1" # Mondays 05:00 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  audit:
+    name: cargo audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      # On scheduled runs this action files an issue per advisory instead
+      # of failing a build; it installs cargo-audit itself.
+      - uses: rustsec/audit-check@v2
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
