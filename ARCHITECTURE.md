@@ -53,8 +53,10 @@ two-top/
 ├── scripts/
 │   └── diagnose_desync.sh
 └── .github/workflows/
-    ├── ci.yml
-    └── determinism.yml
+    ├── ci.yml                     # check / test / clippy + art gates
+    ├── determinism.yml            # 4-target replay checksum matrix
+    ├── fuzz_soak.yml              # nightly randomized-match soak
+    └── apk.yml                    # release APK build + publish
 ```
 
 The `sim` crate has zero `bevy_render` dependency. The `render` crate depends on `sim` read-only.

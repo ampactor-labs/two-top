@@ -52,7 +52,7 @@ Hard rules. Violations cause subtle bugs that are expensive to find. The CI and 
 ## Replay and Logging
 
 - **Strict version matching for replays.** Don't write migration code. Bump `sim_version` on any sim-affecting change.
-- **Release builds stamp the real `sim::SIM_VERSION`** (currently `1`, bumped for v1.0.0-rc1). The committed canonical demo (`tests/demos/canonical/match_v1.bmrg`) stamps this value and must be regenerated on any bump. Pre-release main carries `replay::DEV_SIM_VERSION = u32::MAX` (tagged "🚧 dev replay" in the viewer). Strict match goes through `replay::decode_for_sim_version`.
+- **Release builds stamp the real `sim::SIM_VERSION`** (currently `14`). The committed canonical demo (`tests/demos/canonical/match_v1.bmrg`) stamps this value and must be regenerated on any bump. Pre-release main carries `replay::DEV_SIM_VERSION = u32::MAX` (tagged "🚧 dev replay" in the viewer). Strict match goes through `replay::decode_for_sim_version`.
 - **`tracing` features pinned in `Cargo.toml`** with `release_max_level_info`.
 - **Performance category is opt-in.** Don't leave `TRACE!` calls active in shipped builds.
 

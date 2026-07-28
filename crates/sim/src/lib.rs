@@ -194,8 +194,8 @@ pub struct Empowered(pub bool);
 /// enough to land with practice.
 pub const PERFECT_CATCH_WINDOW_FRAMES: u32 = 10;
 
-/// Full-charge throw speed of an empowered (perfect-catch) throw. 31 vs the
-/// base 24 (~1.3×): a clearly faster, harder-to-react-to fang. Charge scales
+/// Full-charge throw speed of an empowered (perfect-catch) throw. 41 vs the
+/// base 32 (~1.3×): a clearly faster, harder-to-react-to fang. Charge scales
 /// this down for a partial draw just like the base (see [`aimed_throw_speed`]).
 pub const EMPOWERED_THROW_SPEED_CM_PER_TICK: i32 = 41;
 
