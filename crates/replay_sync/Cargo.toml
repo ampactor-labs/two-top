@@ -17,12 +17,3 @@ rand_xoshiro = "0.8"
 replay = { path = "../replay" }
 serde_json = "1"
 sim = { path = "../sim" }
-
-# The wasm determinism lane: the canonical checksums asserted from a real
-# browser (tests/wasm_checksums.rs). Version pinned to the wasm-bindgen
-# already in the lock via the bevy stack — the CLI at bindgen time must
-# match it exactly.
-[target.'cfg(target_arch = "wasm32")'.dev-dependencies]
-wasm-bindgen-test = "0.3"
-getrandom02 = { package = "getrandom", version = "0.2", features = ["js"] }
-getrandom03 = { package = "getrandom", version = "0.3", features = ["wasm_js"] }

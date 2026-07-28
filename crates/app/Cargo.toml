@@ -20,6 +20,10 @@ path = "src/main.rs"
 
 [features]
 default = []
+# The wasm determinism lane's probe (web.rs::checksum_golden_probe +
+# web/check.html): embeds the canonical tape and its golden TSV, so it
+# stays OFF for the deployed site and on only in wasm.yml's lane build.
+wasm-probe = ["dep:replay_sync"]
 # Controller support. Off by default so the standard keyboard build needs
 # no system libraries; the gilrs backend pulls `libudev-sys`, which on
 # Linux needs `libudev` dev headers (Fedora: `libudev-devel`, Debian:
@@ -201,6 +205,7 @@ tracing-appender = "0.2"
 bevy = { version = "=0.18.1", default-features = false, features = [
     "webgl2",
 ] }
+replay_sync = { path = "../replay_sync", optional = true }
 getrandom02 = { package = "getrandom", version = "0.2", features = ["js"] }
 getrandom03 = { package = "getrandom", version = "0.3", features = ["wasm_js"] }
 # The browser entry (src/web.rs). Pinned exactly to the version the bevy

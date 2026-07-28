@@ -1,10 +1,17 @@
 name: Wasm Determinism
 
 # The fifth lane of the determinism story (NORTH N3, COMPLETION_PLAN P.6):
-# the canonical demo's per-frame checksums, computed inside a real headless
+# the canonical demo's per-frame checksums, recomputed inside headless
 # Chrome, must equal the committed golden byte-for-byte. The four native
 # lanes prove linux-x64/arm, macOS, and Android agree; this one proves the
 # browser build is the same game and not a port of it.
+#
+# The harness is deliberately primitive: build the probe-featured app for
+# wasm, bindgen it, serve web/check.html, and let plain headless Chrome
+# print the verdict into the DOM. A wasm-bindgen-test + chromedriver +
+# wasm-pack stack was tried first and hung identically on two machines
+# without ever running a test; the page harness is the machinery the
+# deployed site already proves works.
 
 on:
   push:
@@ -17,7 +24,7 @@ env:
 
 jobs:
   browser-checksums:
-    name: wasm32 checksum lane (headless chrome)
+    name: wasm32 checksum probe (headless chrome)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
@@ -26,17 +33,26 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: wasm
-      - uses: taiki-e/install-action@v2
-        with:
-          tool: wasm-pack
-      # wasm-pack drives cargo, wasm-bindgen-test-runner, and chromedriver;
-      # the runner image ships Chrome. `--test` sits at the cargo level
-      # (after the crate path, before any `--`) so only the wasm_checksums
-      # target builds — behind a `--` it reaches the harness runner, which
-      # rejects it. Release profile: 1800 frames of debug-profile wasm sim
-      # is where default harness timeouts go to die.
-      - name: Run the browser checksum test
-        env:
-          WASM_BINDGEN_TEST_TIMEOUT: "300"
+      - name: Build the probe app for wasm
         run: |
-          wasm-pack test --headless --chrome crates/replay_sync --test wasm_checksums --release
+          cargo build -p app --lib --target wasm32-unknown-unknown \
+            --release --locked --features wasm-probe
+      - name: Install the matching wasm-bindgen CLI
+        run: |
+          WBG=$(grep -A1 'name = "wasm-bindgen"$' Cargo.lock | grep version | head -1 | cut -d'"' -f2)
+          echo "wasm-bindgen $WBG (from Cargo.lock)"
+          curl -sL "https://github.com/wasm-bindgen/wasm-bindgen/releases/download/${WBG}/wasm-bindgen-${WBG}-x86_64-unknown-linux-musl.tar.gz" \
+            | tar xz
+          echo "$PWD/wasm-bindgen-${WBG}-x86_64-unknown-linux-musl" >> "$GITHUB_PATH"
+      - name: Run the probe in headless Chrome
+        run: |
+          wasm-bindgen --target web --no-typescript \
+            --out-dir probe_dist --out-name app \
+            target/wasm32-unknown-unknown/release/app.wasm
+          cp web/check.html probe_dist/
+          python3 -m http.server 18099 --bind 127.0.0.1 -d probe_dist &
+          sleep 1
+          google-chrome --headless=new --no-sandbox --disable-dev-shm-usage \
+            --enable-unsafe-swiftshader --virtual-time-budget=120000 \
+            --dump-dom http://127.0.0.1:18099/check.html | tee probe_dom.txt
+          grep -q 'CHECKSUMS-OK 1800 frames' probe_dom.txt

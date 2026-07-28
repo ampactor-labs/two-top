@@ -132,7 +132,7 @@ pub fn init_logging() -> LogGuard {
         "STATIC_MAX_LEVEL ({static_max:?}) must be >= INFO",
     );
 
-    #[cfg(debug_assertions)]
+    #[cfg(all(debug_assertions, not(target_family = "wasm")))]
     {
         tracing_subscriber::registry()
             .with(filter)
@@ -187,9 +187,10 @@ pub fn init_logging() -> LogGuard {
         }
     }
 
-    #[cfg(all(not(debug_assertions), target_family = "wasm"))]
+    #[cfg(target_family = "wasm")]
     {
-        // No subscriber at all in the browser. The first draft installed a
+        // No subscriber at all in the browser, in every profile. The
+        // first draft installed a
         // discarding fmt layer, and that nearly unshippable choice hid a
         // real lesson: fmt's default timer stamps events with
         // SystemTime::now(), which PANICS on wasm32-unknown — so any panic

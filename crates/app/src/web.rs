@@ -28,6 +28,39 @@ pub fn web_start(watch_tape: Option<Vec<u8>>) {
     crate::run();
 }
 
+/// The determinism lane's probe (wasm.yml + web/check.html): recompute
+/// the canonical demo's checksums inside this very browser build and
+/// compare them to the committed golden, byte for byte. This replaced a
+/// wasm-bindgen-test harness that hung identically on two machines
+/// without ever running a test; a plain page in plain headless Chrome is
+/// the machinery the theater screenshot already proved.
+#[cfg(feature = "wasm-probe")]
+#[wasm_bindgen]
+pub fn checksum_golden_probe() -> String {
+    const GOLDEN: &str = include_str!("../../../tests/demos/canonical/match_v1.checksums.tsv");
+    const TAPE: &[u8] = include_bytes!("../../../tests/demos/canonical/match_v1.bmrg");
+    let replay = match replay::decode_for_sim_version(TAPE, sim::SIM_VERSION) {
+        Ok(r) => r,
+        Err(e) => return format!("CHECKSUMS-FAIL decode: {e}"),
+    };
+    let tsv = replay_sync::compute_checksum_tsv(&replay);
+    if tsv == GOLDEN {
+        format!("CHECKSUMS-OK {} frames", replay.header.frame_count)
+    } else {
+        match tsv
+            .lines()
+            .zip(GOLDEN.lines())
+            .enumerate()
+            .find(|(_, (a, b))| a != b)
+        {
+            Some((i, (ours, golden))) => {
+                format!("CHECKSUMS-FAIL line {i}\nbrowser: {ours}\ngolden:  {golden}")
+            }
+            None => "CHECKSUMS-FAIL length mismatch".to_string(),
+        }
+    }
+}
+
 /// Once, at the Title: if the page brought a tape, roll it. A tape that
 /// won't decode (foreign sim version, truncation) logs and leaves the
 /// game at the Title — the visitor still gets the game itself.

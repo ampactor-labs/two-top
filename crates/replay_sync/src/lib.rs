@@ -30,6 +30,66 @@ use std::path::PathBuf;
 
 pub mod fuzz;
 
+/// [`checksum_hasher`] (SeaHasher) wrapped for width portability: every
+/// fixed-width write forwards untouched, while `usize`/`isize` — which
+/// std's derived `Hash` uses for enum discriminants and slice length
+/// prefixes — are widened to 64-bit. Hasher::write_usize emits 4 bytes on
+/// wasm32 and 8 on the native matrix, and that single fact skewed every
+/// enum-bearing column of the browser lane's first probe run from
+/// frame 0. On the 64-bit natives the widening writes the bytes usize
+/// already wrote, so fingerprints there are unchanged.
+struct PortableHasher<H: Hasher>(H);
+
+impl<H: Hasher> Hasher for PortableHasher<H> {
+    fn finish(&self) -> u64 {
+        self.0.finish()
+    }
+    fn write(&mut self, bytes: &[u8]) {
+        self.0.write(bytes)
+    }
+    fn write_u8(&mut self, i: u8) {
+        self.0.write_u8(i)
+    }
+    fn write_u16(&mut self, i: u16) {
+        self.0.write_u16(i)
+    }
+    fn write_u32(&mut self, i: u32) {
+        self.0.write_u32(i)
+    }
+    fn write_u64(&mut self, i: u64) {
+        self.0.write_u64(i)
+    }
+    fn write_u128(&mut self, i: u128) {
+        self.0.write_u128(i)
+    }
+    fn write_i8(&mut self, i: i8) {
+        self.0.write_i8(i)
+    }
+    fn write_i16(&mut self, i: i16) {
+        self.0.write_i16(i)
+    }
+    fn write_i32(&mut self, i: i32) {
+        self.0.write_i32(i)
+    }
+    fn write_i64(&mut self, i: i64) {
+        self.0.write_i64(i)
+    }
+    fn write_i128(&mut self, i: i128) {
+        self.0.write_i128(i)
+    }
+    fn write_usize(&mut self, i: usize) {
+        self.0.write_u64(i as u64)
+    }
+    fn write_isize(&mut self, i: isize) {
+        self.0.write_i64(i as i64)
+    }
+}
+
+/// The lane's hasher: [`checksum_hasher`] behind [`PortableHasher`].
+fn portable_hasher() -> impl Hasher {
+    PortableHasher(checksum_hasher())
+}
+
 pub const TSV_HEADER: &str = "frame\ttotal_checksum\tpositionf_part\tvelocityf_part\tdashstate_part\tstunframes_part\tboomerang_part\tmatch_score_part\tmatch_state_part";
 
 // ---- Canonical demo (Phase 5) ----
@@ -288,14 +348,14 @@ fn hash_component<C: Component + Hash>(world: &mut World) -> u64 {
         .query::<(&Player, &C)>()
         .iter(world)
         .map(|(p, c)| {
-            let mut h = checksum_hasher();
+            let mut h = portable_hasher();
             c.hash(&mut h);
             (p.handle, h.finish())
         })
         .collect();
     rows.sort_by_key(|(h, _)| *h);
 
-    let mut h = checksum_hasher();
+    let mut h = portable_hasher();
     for (handle, part) in &rows {
         handle.hash(&mut h);
         part.hash(&mut h);
@@ -309,7 +369,7 @@ fn hash_component<C: Component + Hash>(world: &mut World) -> u64 {
 /// cross-platform matrix rather than getting masked by the rest of
 /// the world checksum.
 fn hash_resource<R: Resource + Hash>(world: &World) -> u64 {
-    let mut h = checksum_hasher();
+    let mut h = portable_hasher();
     world.resource::<R>().hash(&mut h);
     h.finish()
 }
@@ -326,7 +386,7 @@ fn hash_boomerangs(world: &mut World) -> u64 {
         .query::<(&Boomerang, &PositionF, &VelocityF)>()
         .iter(world)
         .map(|(b, pos, vel)| {
-            let mut h = checksum_hasher();
+            let mut h = portable_hasher();
             b.hash(&mut h);
             pos.hash(&mut h);
             vel.hash(&mut h);
@@ -335,7 +395,7 @@ fn hash_boomerangs(world: &mut World) -> u64 {
         .collect();
     rows.sort_by_key(|(h, _)| *h);
 
-    let mut h = checksum_hasher();
+    let mut h = portable_hasher();
     for (handle, part) in &rows {
         handle.hash(&mut h);
         part.hash(&mut h);

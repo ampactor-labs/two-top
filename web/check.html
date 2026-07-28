@@ -1,0 +1,20 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>2-Top checksum probe</title></head>
+<body style="background:#100e22;color:#f2e5c9;font-family:monospace">
+  <pre id="out">PROBING…</pre>
+  <script type="module">
+    // The wasm determinism lane (wasm.yml): load the probe build's glue,
+    // recompute the canonical checksums in this browser, and put the
+    // verdict where --dump-dom can read it.
+    const out = document.getElementById("out");
+    try {
+      const { default: init, checksum_golden_probe } = await import("./app.js");
+      await init();
+      out.textContent = checksum_golden_probe();
+    } catch (e) {
+      out.textContent = `CHECKSUMS-FAIL harness: ${e}`;
+    }
+  </script>
+</body>
+</html>
