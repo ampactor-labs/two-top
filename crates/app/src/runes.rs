@@ -109,6 +109,50 @@ pub fn shade_target(shade: u8) -> bevy::color::Color {
     }
 }
 
+/// How many kill-sting voicings the mint carries (0 = the classic hit).
+pub const STING_COUNT: u8 = 8;
+
+/// The sting an install strikes with — bits above the shade's.
+pub fn my_sting(install_id: u128) -> u8 {
+    ((install_id >> 16) % STING_COUNT as u128) as u8
+}
+
+/// A stand-in opponent's sting: never yours.
+pub fn foil_sting(mine: u8) -> u8 {
+    (mine + 7) % STING_COUNT
+}
+
+/// A tape header name's sting — its own fold, so ghosts vary on all three
+/// axes.
+pub fn name_sting(name: Option<&str>) -> u8 {
+    let Some(name) = name else {
+        return 0;
+    };
+    let mut h: u32 = 0x51ab;
+    for b in name.bytes() {
+        h = h.wrapping_mul(167).wrapping_add(b as u32);
+    }
+    (h % STING_COUNT as u32) as u8
+}
+
+/// The sting a handle strikes with, mirroring [`rune_for`].
+pub fn sting_for(
+    handle: usize,
+    local_handle: usize,
+    mine: u8,
+    peer_sting: Option<u8>,
+    theater_name: Option<Option<&str>>,
+) -> u8 {
+    if let Some(name) = theater_name {
+        return name_sting(name);
+    }
+    if handle == local_handle {
+        mine
+    } else {
+        peer_sting.unwrap_or_else(|| foil_sting(mine))
+    }
+}
+
 /// The rune a handle should wear right now. Pure for tests.
 pub fn rune_for(
     handle: usize,

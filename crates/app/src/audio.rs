@@ -112,7 +112,7 @@ pub struct AudioAssets {
     pub shatter: Handle<AudioSource>,
     pub catch: Handle<AudioSource>,
     pub catch_perfect: Handle<AudioSource>,
-    pub kill: Handle<AudioSource>,
+    pub kill: [Handle<AudioSource>; 8],
     pub countdown_toll: Handle<AudioSource>,
     pub round_over_sting: Handle<AudioSource>,
     pub match_win_sting: Handle<AudioSource>,
@@ -208,7 +208,13 @@ fn load_audio_and_start_music(
         shatter: asset_server.load("audio/shatter.wav"),
         catch: asset_server.load("audio/catch.wav"),
         catch_perfect: asset_server.load("audio/catch_perfect.wav"),
-        kill: asset_server.load("audio/kill.wav"),
+        kill: std::array::from_fn(|k| {
+            if k == 0 {
+                asset_server.load("audio/kill.wav")
+            } else {
+                asset_server.load(format!("audio/kill_v{k}.wav"))
+            }
+        }),
         countdown_toll: asset_server.load("audio/countdown_toll.wav"),
         round_over_sting: asset_server.load("audio/round_over_sting.wav"),
         match_win_sting: asset_server.load("audio/match_win_sting.wav"),
@@ -479,24 +485,46 @@ struct DyingTrack(HashMap<usize, bool>);
 /// Kill cue + music duck: the tick a player transitions into dying, the 80s
 /// action hit lands and the music bus dips out of its way (sidechain feel:
 /// instant attack here, slow release in [`mix_music`]).
+#[allow(clippy::too_many_arguments)]
 fn play_kill_sfx(
     mut commands: Commands,
     assets: Res<AudioAssets>,
     settings: Res<Settings>,
+    profile: Res<crate::profile::LocalProfile>,
+    peer: Res<net::PeerProfile>,
+    local: Res<crate::netplay::LocalPlayerHandle>,
+    theater: Res<crate::theater::TheaterMode>,
     mut mix: ResMut<MusicMix>,
     mut rng: ResMut<CosmeticRng>,
     players: Query<(&Player, &Dead)>,
     mut track: Local<DyingTrack>,
 ) {
+    let mine = crate::runes::my_sting(profile.install_id);
+    let peer_sting = peer.0.map(|p| crate::runes::my_sting(p.install_id));
+    let local_handle = local.0.unwrap_or(0);
+    let theater_names = theater.active().then(|| theater.header_names());
     for (player, dead) in &players {
         let now = dead.is_dying();
         let was = track.0.get(&player.handle).copied().unwrap_or(false);
         if now && !was {
+            // The KILLER's sting, not the fallen's: in a 1v1 the killer is
+            // the other seat, and the hit is their voice (the mint's third
+            // axis — see crate::runes).
+            let killer = 1 - (player.handle % 2);
+            let theater_name = theater_names.as_ref().map(|names| names[killer].as_deref());
+            let sting =
+                crate::runes::sting_for(killer, local_handle, mine, peer_sting, theater_name)
+                    as usize;
             // A hair of pitch scatter so a double-kill round doesn't fire
             // two identical hits back to back. Tight range — the kill's
             // identity must stay recognizable.
             let speed = rng.0.gen_range(0.96..1.05);
-            play_pitched(&mut commands, &assets.kill, sfx_gain(&settings), speed);
+            play_pitched(
+                &mut commands,
+                &assets.kill[sting % assets.kill.len()],
+                sfx_gain(&settings),
+                speed,
+            );
             mix.duck = mix.duck.min(KILL_DUCK);
         }
         if !now && was {

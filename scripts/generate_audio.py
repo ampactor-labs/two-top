@@ -531,19 +531,46 @@ def cue_catch_perfect(_rng: random.Random) -> list[float]:
     return echo(seq, 0.13, 0.4, 0.4, tail_s=0.35)
 
 
+# The mint's sting voicings (NORTH N5): the same 80s hit, tempered per
+# identity — the sub's drop and the zap's tessitura shift together so every
+# voicing keeps the kill's chest-felt identity while being audibly THAT
+# demon's. Index 0 is the classic and ships as kill.wav, unchanged.
+KILL_VOICINGS = [
+    ((110.0, 38.0), (220.0, 55.0)),   # 0 — the classic
+    ((96.0, 34.0), (196.0, 49.0)),    # 1 — lower, heavier
+    ((124.0, 42.0), (247.0, 62.0)),   # 2 — brighter crack
+    ((88.0, 30.0), (175.0, 44.0)),    # 3 — the pit
+    ((132.0, 46.0), (262.0, 66.0)),   # 4 — high snap
+    ((104.0, 26.0), (208.0, 40.0)),   # 5 — long fall
+    ((140.0, 50.0), (294.0, 74.0)),   # 6 — the whipcrack
+    ((80.0, 36.0), (165.0, 52.0)),    # 7 — the tomb
+]
+
+
+def cue_kill_voiced(k: int):
+    """See KILL_VOICINGS; returns the cue fn for voicing `k`."""
+    (sub0, sub1), (zap0, zap1) = KILL_VOICINGS[k]
+
+    def cue(rng: random.Random) -> list[float]:
+        dur = 0.45
+        sub = _saturate(mul(glide("sine", sub0, sub1, dur), exp_env(dur, 0.16)), 1.6)
+        crack = mul(noise(0.006, rng), exp_env(0.006, 0.002))
+        burst = one_pole_hp(one_pole_lp(noise(0.2, rng), 5200.0), 500.0)
+        burst = gated_verb(mul(burst, exp_env(0.2, 0.06)), rng,
+                           room_s=0.12, gate_s=0.14, level=0.9)
+        zap = glide("saw", zap0, zap1, 0.22)
+        zap = mul(svf_lp(zap, exp_sweep(2000.0, 180.0, n_samples(0.22)), 3.0),
+                  exp_env(0.22, 0.07))
+        return attack(mix(sub, gain(crack, 0.7), gain(burst, 0.6), gain(zap, 0.7)), 0.4)
+
+    return cue
+
+
 def cue_kill(rng: random.Random) -> list[float]:
     """The one-hit kill — the 80s action hit: sub drop, noise crack, a gated
-    snare-burst body, and a downward resonant zap. Felt in the chest."""
-    dur = 0.45
-    sub = _saturate(mul(glide("sine", 110.0, 38.0, dur), exp_env(dur, 0.16)), 1.6)
-    crack = mul(noise(0.006, rng), exp_env(0.006, 0.002))
-    burst = one_pole_hp(one_pole_lp(noise(0.2, rng), 5200.0), 500.0)
-    burst = gated_verb(mul(burst, exp_env(0.2, 0.06)), rng,
-                       room_s=0.12, gate_s=0.14, level=0.9)
-    zap = glide("saw", 220.0, 55.0, 0.22)
-    zap = mul(svf_lp(zap, exp_sweep(2000.0, 180.0, n_samples(0.22)), 3.0),
-              exp_env(0.22, 0.07))
-    return attack(mix(sub, gain(crack, 0.7), gain(burst, 0.6), gain(zap, 0.7)), 0.4)
+    snare-burst body, and a downward resonant zap. Felt in the chest.
+    Voicing 0 of KILL_VOICINGS; the mint's other stings are kill_v*.wav."""
+    return cue_kill_voiced(0)(rng)
 
 
 def cue_countdown_toll(_rng: random.Random) -> list[float]:
@@ -999,6 +1026,13 @@ CUES = [
     ("catch.wav", cue_catch, SFX_PEAK),
     ("catch_perfect.wav", cue_catch_perfect, SFX_PEAK),
     ("kill.wav", cue_kill, SFX_PEAK),
+    ("kill_v1.wav", cue_kill_voiced(1), SFX_PEAK),
+    ("kill_v2.wav", cue_kill_voiced(2), SFX_PEAK),
+    ("kill_v3.wav", cue_kill_voiced(3), SFX_PEAK),
+    ("kill_v4.wav", cue_kill_voiced(4), SFX_PEAK),
+    ("kill_v5.wav", cue_kill_voiced(5), SFX_PEAK),
+    ("kill_v6.wav", cue_kill_voiced(6), SFX_PEAK),
+    ("kill_v7.wav", cue_kill_voiced(7), SFX_PEAK),
     ("countdown_toll.wav", cue_countdown_toll, SFX_PEAK),
     ("round_over_sting.wav", cue_round_over_sting, SFX_PEAK),
     ("match_win_sting.wav", cue_match_win_sting, SFX_PEAK),
