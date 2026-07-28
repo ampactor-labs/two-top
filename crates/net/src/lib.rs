@@ -113,17 +113,32 @@ pub fn encode_message(msg: &Message) -> Packet {
         .into_boxed_slice()
 }
 
-/// Decode a packet back into `(NetAddr, ggrs::Message)`. Panics on
-/// deserialization failure — peers that send malformed bincode are
-/// either lying or running an incompatible build, and ggrs has no
-/// recovery semantics for either case. The matchbox reference impl
-/// does the same. The inbound `PeerId` is mapped to the neutral
-/// `sim::NetAddr` ggrs expects (see module docs).
-pub fn decode_packet(message: (PeerId, Packet)) -> (NetAddr, Message) {
+/// Decode a packet back into `(NetAddr, ggrs::Message)`, or `None` for
+/// bytes that don't parse. Peers that send malformed bincode are either
+/// lying or running an incompatible build; the matchbox reference impl
+/// panics on them, but this app has a better answer than aborting
+/// mid-duel — drop the packet and let the silence FSM score the abuser
+/// as the walk-away ([`DISCONNECT_AFTER_FRAMES`] →
+/// [`FORFEIT_AFTER_FRAMES`]). The public room pairs strangers, and no
+/// stranger's bytes get to crash the table. (ggrs itself still `expect`s
+/// on per-player input bytes inside a well-formed `Message` — an
+/// upstream issue; this closes the cheap half.) The inbound `PeerId` is
+/// mapped to the neutral `sim::NetAddr` ggrs expects (see module docs).
+pub fn decode_packet(message: (PeerId, Packet)) -> Option<(NetAddr, Message)> {
     let (peer, bytes) = message;
-    let (msg, _) = bincode::serde::decode_from_slice(&bytes, bincode::config::standard())
-        .expect("peer sent malformed ggrs packet");
-    (peer_to_addr(peer), msg)
+    match bincode::serde::decode_from_slice(&bytes, bincode::config::standard()) {
+        Ok((msg, _)) => Some((peer_to_addr(peer), msg)),
+        Err(e) => {
+            tracing::warn!(
+                target: "two_top::net",
+                peer = %peer.0,
+                len = bytes.len(),
+                error = %e,
+                "undecodable ggrs packet dropped",
+            );
+            None
+        }
+    }
 }
 
 impl NonBlockingSocket<NetAddr> for MatchboxBridge {
@@ -135,7 +150,7 @@ impl NonBlockingSocket<NetAddr> for MatchboxBridge {
         self.channel
             .receive()
             .into_iter()
-            .map(decode_packet)
+            .filter_map(decode_packet)
             .collect()
     }
 }
@@ -545,28 +560,22 @@ mod tests {
         assert_eq!(peer_to_addr(addr_to_peer(addr)), addr);
     }
 
-    /// Sanity check that `decode_packet` preserves the `PeerId`
-    /// passed in — our impl just forwards it. Doesn't exercise the
-    /// bincode payload (which would require a constructable
-    /// `Message`); covers the routing half of the bridge.
-    ///
-    /// We also smoke-test that bincode can decode an empty buffer
-    /// into the expected error path: `decode_packet` is documented
-    /// to panic on malformed input, so a real test would be a
-    /// `#[should_panic]` — but constructing a definitely-malformed
-    /// packet that bincode rejects is itself non-trivial without
-    /// a real `Message` reference, so we leave that as runtime
-    /// behavior verified by integration with peers.
+    /// Malformed ggrs-channel bytes must be dropped, not fatal. The old
+    /// contract panicked here (mirroring matchbox's reference impl),
+    /// which handed any stranger in the public room a one-packet abort
+    /// of the app; now the packet is discarded and the silence FSM
+    /// scores a peer that only ever sends garbage as the walk-away.
+    /// A well-formed `Message` can't be constructed from outside ggrs
+    /// (private fields), so the decode-success path is covered the
+    /// moment two real peers exchange a sync handshake; the refusal
+    /// path is what's testable, and it's the one that matters.
     #[test]
-    fn peer_id_threads_through_decode() {
-        // A minimal "valid bincode-encoded value" we can construct
-        // is hard without `Message` — but we don't need to actually
-        // call `decode_packet` here: `peer_id_threads_through_decode`
-        // is documented behavior that's a single line in our
-        // implementation (`(peer, ..)` in the return tuple).
-        // The compile-fence above is the load-bearing test.
-        let dummy_peer = PeerId(uuid::Uuid::from_u128(0xdead_beef));
-        assert_eq!(dummy_peer.0, uuid::Uuid::from_u128(0xdead_beef));
+    fn malformed_ggrs_packets_are_dropped_not_fatal() {
+        let peer = PeerId(Uuid::from_u128(0xbad));
+        let garbage: Packet = vec![0xff; 7].into_boxed_slice();
+        assert!(decode_packet((peer, garbage)).is_none());
+        let empty: Packet = Vec::new().into_boxed_slice();
+        assert!(decode_packet((peer, empty)).is_none());
     }
 
     // ---- Side-channel codec ----
