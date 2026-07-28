@@ -238,6 +238,18 @@ very different tape sets produce visibly different shades); full gate green.
 both land in the same private room and arena, the duel starts (documented as
 a PLAYBOOK rung variant). Desktop `--room` flows unchanged. Full gate green.
 
+## Findings ledger (added during execution)
+
+- **Width-portable fingerprints (found by the N3 browser lane's first
+  run).** `Hasher::write_usize` emits 4 bytes on wasm32 and 8 on the
+  64-bit natives, and std's derived `Hash` writes enum discriminants as
+  `isize` — so any checksum stream containing a `usize` field or any
+  enum diverges between widths while the state underneath is identical.
+  `replay_sync::PortableHasher` fixes the lane. The same class lives in
+  bevy_ggrs's own online desync-detection hashing: before browser-vs-
+  phone duels are supported, that path needs the same width audit (and
+  sim's twelve `usize` component fields are the tell to look for).
+
 ## Cross-cutting rules
 
 - Every phase ends with `cargo nextest run --workspace --locked`,
