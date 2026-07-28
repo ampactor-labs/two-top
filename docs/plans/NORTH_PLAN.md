@@ -133,11 +133,17 @@ Completes the viewer half of COMPLETION_PLAN P.5/P.6.
   headless-browser CI is the fiddly part; the fallback gate is a manually
   run browser page asserting the same checksums, with CI automation as a
   fast-follow.
-- **`web_theater` crate** (new workspace member): bevy wasm build reusing
-  `sim`, `render`, `replay`, and the theater's playback pattern
-  (`build_playback_session`, the snapshot-ring scrub). Loads a tape by drop
-  id from the URL fragment. No matchbox, no ureq; the cfg surface stays small
-  because full web netplay is horizon, not this phase.
+- **`web_theater` crate** — *amended 2026-07-28, mid-execution*: the
+  separate viewer crate is unnecessary. The measured wasm cfg surface of
+  the full `app` crate was three mechanical walls (getrandom's browser
+  features, tracing-appender excluded where symlinks don't exist, the
+  blocking ice fetch cfg'd to the STUN-only path), and
+  `cargo check -p app --target wasm32-unknown-unknown` is clean. The web
+  build is the app itself — theater screen included, netplay included
+  since matchbox is browser-native — so P.5 completes in full rather
+  than viewer-first. Remaining for the web half: wasm-bindgen entry glue
+  plus an index.html that reads `#watch=<id>`, fetches the tape from the
+  drop, and hands the bytes to the theater.
 - **`tape_drop` crate** (new): `POST /tape` (64 KB cap, content-addressed id,
   TTL eviction, N1's token bucket), `GET /tape/<id>`, `GET /healthz`.
   Deployed beside ice_vendor; the APK bakes `TWOTOP_DROP_URL` like
