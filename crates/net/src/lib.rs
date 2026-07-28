@@ -218,6 +218,15 @@ pub enum NetMsg {
     /// Clean goodbye: the peer is leaving on purpose. The receiver forfeits
     /// immediately instead of waiting out the disconnect grace.
     Bye,
+    /// Identity plus result-signing key, sent alongside [`NetMsg::Profile`].
+    /// New builds read this; old builds fail to decode the unknown variant,
+    /// ignore the message, and still get the legacy `Profile` — a mixed
+    /// pairing degrades to unsigned results instead of breaking.
+    Profile2(ProfileData2),
+    /// Our ed25519 signature over [`MatchStatement::encode`] for the match
+    /// that just reached the score threshold. Split halves keep the enum
+    /// `Copy` (serde's array impls stop at 32).
+    MatchSig { sig: [[u8; 32]; 2] },
 }
 
 /// Encode a side-channel message. Infallible for these types (postcard on
@@ -235,6 +244,223 @@ pub fn encode_net_msg(msg: &NetMsg) -> Packet {
 pub fn decode_net_msg(bytes: &[u8]) -> Option<NetMsg> {
     postcard::from_bytes(bytes).ok()
 }
+
+// ---- Signed results (NORTH N2) --------------------------------------------
+//
+// The install-id travels in the open on the side channel, so it identifies
+// but cannot prove. An ed25519 keypair minted beside it can: pubkeys ride
+// `Profile2`, and when a match is decided ON SCORE both peers sign one
+// canonical statement and swap signatures. The result becomes an artifact
+// anyone can check — re-run the tape, rebuild the statement, verify both
+// signatures (`replay_sync --attest`). Forfeits stay ledger-only: each
+// client's lobby FSM observes the walk-away at its own frame, so there is
+// no shared statement to sign.
+
+/// A peer's shareable identity plus its result-signing pubkey.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub struct ProfileData2 {
+    pub install_id: u128,
+    pub name: [u8; NAME_MAX],
+    /// ed25519 verifying key. The matching signing key never leaves the
+    /// device that minted it.
+    pub pubkey: [u8; 32],
+}
+
+impl ProfileData2 {
+    /// The identity half, for everything that already speaks `ProfileData`.
+    pub fn profile(&self) -> ProfileData {
+        ProfileData {
+            install_id: self.install_id,
+            name: self.name,
+        }
+    }
+}
+
+pub const STATEMENT_MAGIC: [u8; 4] = *b"2TRS";
+pub const STATEMENT_VERSION: u16 = 1;
+
+/// One duelist's seat in a [`MatchStatement`]. `handle` records which ggrs
+/// seat this identity played (both peers agree on it: lower matchbox
+/// peer-id is handle 0), which is what lets a verifier map the statement's
+/// scores onto a replayed tape's per-handle scores.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub struct SeatStatement {
+    pub install_id: u128,
+    pub pubkey: [u8; 32],
+    pub handle: u8,
+    pub score: u8,
+}
+
+/// The canonical, dual-signable statement of a score-decided match. Both
+/// peers must serialize identical bytes, so seats sort by install-id
+/// (never by handle) and every field is either rollback-deterministic
+/// (sim_version, arena, scores) or session-shared: the sorted matchbox
+/// peer-id pair is the session nonce (an old signature cannot be replayed
+/// for a new pairing), and `match_index` counts the matches this session
+/// already decided (RUN IT BACK keeps the session; the index keeps each
+/// rematch's statement distinct).
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub struct MatchStatement {
+    pub magic: [u8; 4],
+    pub version: u16,
+    pub sim_version: u32,
+    pub arena_id: u8,
+    pub session_low: u128,
+    pub session_high: u128,
+    pub match_index: u32,
+    pub seat_low: SeatStatement,
+    pub seat_high: SeatStatement,
+}
+
+impl MatchStatement {
+    /// Build with seats and session ids in canonical order, whatever order
+    /// the caller holds them in.
+    pub fn new(
+        sim_version: u32,
+        arena_id: u8,
+        session: (u128, u128),
+        match_index: u32,
+        seats: [SeatStatement; 2],
+    ) -> Self {
+        let (session_low, session_high) = if session.0 <= session.1 {
+            (session.0, session.1)
+        } else {
+            (session.1, session.0)
+        };
+        let [a, b] = seats;
+        let (seat_low, seat_high) = if a.install_id <= b.install_id {
+            (a, b)
+        } else {
+            (b, a)
+        };
+        Self {
+            magic: STATEMENT_MAGIC,
+            version: STATEMENT_VERSION,
+            sim_version,
+            arena_id,
+            session_low,
+            session_high,
+            match_index,
+            seat_low,
+            seat_high,
+        }
+    }
+
+    /// The bytes both peers sign. Postcard is deterministic for a fixed
+    /// struct layout, so equal statements encode to equal bytes.
+    pub fn encode(&self) -> Vec<u8> {
+        postcard::to_allocvec(self).expect("MatchStatement postcard encoding cannot fail")
+    }
+
+    /// Verify a split signature over this statement against `pubkey`.
+    pub fn verify(&self, pubkey: &[u8; 32], sig: &[[u8; 32]; 2]) -> bool {
+        use ed25519_dalek::{Signature, Verifier, VerifyingKey};
+        let Ok(key) = VerifyingKey::from_bytes(pubkey) else {
+            return false;
+        };
+        let mut bytes = [0u8; 64];
+        bytes[..32].copy_from_slice(&sig[0]);
+        bytes[32..].copy_from_slice(&sig[1]);
+        key.verify(&self.encode(), &Signature::from_bytes(&bytes))
+            .is_ok()
+    }
+
+    /// The seat that played ggrs handle `handle`, if the statement has one.
+    pub fn seat_for_handle(&self, handle: u8) -> Option<&SeatStatement> {
+        [&self.seat_low, &self.seat_high]
+            .into_iter()
+            .find(|s| s.handle == handle)
+    }
+}
+
+/// Sign a statement with a raw 32-byte ed25519 signing key, split for the
+/// `Copy` wire form.
+pub fn sign_statement(stmt: &MatchStatement, signing_key: &[u8; 32]) -> [[u8; 32]; 2] {
+    use ed25519_dalek::{Signer, SigningKey};
+    let sig = SigningKey::from_bytes(signing_key)
+        .sign(&stmt.encode())
+        .to_bytes();
+    let mut halves = [[0u8; 32]; 2];
+    halves[0].copy_from_slice(&sig[..32]);
+    halves[1].copy_from_slice(&sig[32..]);
+    halves
+}
+
+/// The verifying key for a raw signing key — what `Profile2` carries.
+pub fn pubkey_for(signing_key: &[u8; 32]) -> [u8; 32] {
+    use ed25519_dalek::SigningKey;
+    SigningKey::from_bytes(signing_key)
+        .verifying_key()
+        .to_bytes()
+}
+
+/// 32 bytes as lowercase hex — the same greppable convention as the grudge
+/// ledger's install-id keys.
+pub fn hex32(bytes: &[u8; 32]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// Inverse of [`hex32`].
+pub fn from_hex32(hex: &str) -> Option<[u8; 32]> {
+    if hex.len() != 64 {
+        return None;
+    }
+    let mut out = [0u8; 32];
+    for (i, chunk) in hex.as_bytes().chunks(2).enumerate() {
+        out[i] = u8::from_str_radix(std::str::from_utf8(chunk).ok()?, 16).ok()?;
+    }
+    Some(out)
+}
+
+/// A split signature as 128 hex chars, and back.
+pub fn sig_to_hex(sig: &[[u8; 32]; 2]) -> String {
+    format!("{}{}", hex32(&sig[0]), hex32(&sig[1]))
+}
+
+pub fn sig_from_hex(hex: &str) -> Option<[[u8; 32]; 2]> {
+    if hex.len() != 128 {
+        return None;
+    }
+    Some([from_hex32(&hex[..64])?, from_hex32(&hex[64..])?])
+}
+
+/// The on-disk attestation written beside a tape (`<stem>.attest.json`):
+/// the statement plus both seats' signatures, hex-encoded so the file is
+/// greppable and hand-checkable. `replay_sync --attest` is the reader.
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub struct Attestation {
+    pub statement: MatchStatement,
+    /// `seat_low`'s signature over `statement.encode()`, 128 hex chars.
+    pub sig_low: String,
+    /// `seat_high`'s signature, 128 hex chars.
+    pub sig_high: String,
+}
+
+impl Attestation {
+    /// Verify both signatures against their seats' own pubkeys.
+    pub fn verify(&self) -> bool {
+        let (Some(low), Some(high)) = (sig_from_hex(&self.sig_low), sig_from_hex(&self.sig_high))
+        else {
+            return false;
+        };
+        self.statement.verify(&self.statement.seat_low.pubkey, &low)
+            && self
+                .statement
+                .verify(&self.statement.seat_high.pubkey, &high)
+    }
+}
+
+/// The connected peer's result-signing pubkey, once its `Profile2`
+/// arrives. `None` against a legacy build — results then stay unsigned.
+/// Cleared on session teardown.
+#[derive(Resource, Default, Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PeerKeys(pub Option<[u8; 32]>);
+
+/// The peer's signature for the current decided match, once its
+/// `MatchSig` arrives. Consumed by the app's attestation writer; cleared
+/// when the sim leaves `MatchOver` and on session teardown.
+#[derive(Resource, Default, Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PeerSig(pub Option<[[u8; 32]; 2]>);
 
 /// The connected peer's identity, once its `Profile` message arrives.
 /// Cleared on session teardown.
@@ -518,6 +744,8 @@ impl Plugin for NetPlugin {
             .init_resource::<PendingP2PSwap>()
             .init_resource::<LastPeerMessageFrame>()
             .init_resource::<PeerProfile>()
+            .init_resource::<PeerKeys>()
+            .init_resource::<PeerSig>()
             .init_resource::<RematchConsent>()
             .init_resource::<NetSendQueue>()
             .add_systems(
@@ -600,6 +828,131 @@ mod tests {
     fn malformed_side_channel_bytes_are_ignored_not_fatal() {
         assert_eq!(decode_net_msg(&[]), None);
         assert_eq!(decode_net_msg(&[0xff, 0xff, 0xff, 0xff]), None);
+    }
+
+    // ---- Signed results ----
+
+    fn seat(install_id: u128, key: &[u8; 32], handle: u8, score: u8) -> SeatStatement {
+        SeatStatement {
+            install_id,
+            pubkey: pubkey_for(key),
+            handle,
+            score,
+        }
+    }
+
+    /// Both peers hold the same facts in opposite order (each lists itself
+    /// first) — the canonical form must serialize to identical bytes, or
+    /// the two signatures cover different messages and nothing verifies.
+    #[test]
+    fn statements_are_byte_identical_across_handle_orderings() {
+        let (ka, kb) = (&[1u8; 32], &[2u8; 32]);
+        let a = seat(0xaaa, ka, 0, 5);
+        let b = seat(0xbbb, kb, 1, 3);
+        let ours = MatchStatement::new(14, 3, (77, 11), 2, [a, b]);
+        let theirs = MatchStatement::new(14, 3, (11, 77), 2, [b, a]);
+        assert_eq!(ours, theirs);
+        assert_eq!(ours.encode(), theirs.encode());
+        assert_eq!(ours.seat_low.install_id, 0xaaa, "sorted by install-id");
+        assert_eq!(ours.session_low, 11, "session pair sorted too");
+        assert_eq!(ours.seat_for_handle(1).unwrap().install_id, 0xbbb);
+    }
+
+    #[test]
+    fn signatures_round_trip_and_tampering_breaks_them() {
+        let (ka, kb) = (&[3u8; 32], &[4u8; 32]);
+        let stmt = MatchStatement::new(
+            14,
+            0,
+            (1, 2),
+            0,
+            [seat(0xaaa, ka, 0, 5), seat(0xbbb, kb, 1, 2)],
+        );
+        let sig_a = sign_statement(&stmt, ka);
+        assert!(stmt.verify(&pubkey_for(ka), &sig_a));
+        assert!(
+            !stmt.verify(&pubkey_for(kb), &sig_a),
+            "the other seat's key must not accept it"
+        );
+        let mut flipped = stmt;
+        flipped.seat_low.score = 4;
+        assert!(
+            !flipped.verify(&pubkey_for(ka), &sig_a),
+            "a changed score invalidates the signature"
+        );
+    }
+
+    #[test]
+    fn attestations_verify_both_seats_or_fail() {
+        let (ka, kb) = (&[5u8; 32], &[6u8; 32]);
+        let stmt = MatchStatement::new(
+            14,
+            6,
+            (9, 8),
+            1,
+            [seat(0x111, ka, 1, 3), seat(0x222, kb, 0, 5)],
+        );
+        let good = Attestation {
+            statement: stmt,
+            sig_low: sig_to_hex(&sign_statement(&stmt, ka)),
+            sig_high: sig_to_hex(&sign_statement(&stmt, kb)),
+        };
+        assert!(good.verify());
+        let swapped = Attestation {
+            statement: stmt,
+            sig_low: good.sig_high.clone(),
+            sig_high: good.sig_low.clone(),
+        };
+        assert!(
+            !swapped.verify(),
+            "seats' signatures are not interchangeable"
+        );
+        let garbled = Attestation {
+            sig_low: "zz".repeat(64),
+            ..good.clone()
+        };
+        assert!(
+            !garbled.verify(),
+            "unparseable hex is a failure, not a panic"
+        );
+    }
+
+    #[test]
+    fn hex_helpers_round_trip() {
+        let bytes = pubkey_for(&[7u8; 32]);
+        assert_eq!(from_hex32(&hex32(&bytes)), Some(bytes));
+        assert_eq!(from_hex32("short"), None);
+        let sig = sign_statement(
+            &MatchStatement::new(
+                1,
+                0,
+                (0, 1),
+                0,
+                [seat(1, &[8u8; 32], 0, 5), seat(2, &[9u8; 32], 1, 0)],
+            ),
+            &[8u8; 32],
+        );
+        assert_eq!(sig_from_hex(&sig_to_hex(&sig)), Some(sig));
+        assert_eq!(sig_from_hex(&"0".repeat(127)), None);
+    }
+
+    #[test]
+    fn profile2_and_matchsig_ride_the_side_channel() {
+        let key = [10u8; 32];
+        let msgs = [
+            NetMsg::Profile2(ProfileData2 {
+                install_id: 0xfeed,
+                name: crate::name_slots(&[2, 6, 0, 4]),
+                pubkey: pubkey_for(&key),
+            }),
+            NetMsg::MatchSig {
+                sig: [[0xab; 32], [0xcd; 32]],
+            },
+        ];
+        for msg in msgs {
+            let bytes = encode_net_msg(&msg);
+            assert_eq!(decode_net_msg(&bytes), Some(msg));
+        }
     }
 
     // ---- Cycle 2: LobbyState ----

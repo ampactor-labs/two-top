@@ -71,6 +71,42 @@ fn main() -> ExitCode {
         return ExitCode::SUCCESS;
     }
 
+    // NORTH N2: verify a dual-signed result against this tape. The tape
+    // re-simulates (that's the whole point), the statement's facts must
+    // match it, and both signatures must check out.
+    if let Some(attest_path) = arg_value::<String>(&args, "--attest") {
+        let attestation: net::Attestation = match fs::read_to_string(&attest_path)
+            .map_err(|e| e.to_string())
+            .and_then(|text| serde_json::from_str(&text).map_err(|e| e.to_string()))
+        {
+            Ok(a) => a,
+            Err(e) => {
+                eprintln!("replay_sync: failed to read attestation {attest_path}: {e}");
+                return ExitCode::FAILURE;
+            }
+        };
+        return match replay_sync::verify_attestation(&replay, &attestation) {
+            Ok(()) => {
+                let s = &attestation.statement;
+                println!(
+                    "ATTESTED: {:032x} {} - {} {:032x} on arena {} (sim v{}, match {})",
+                    s.seat_low.install_id,
+                    s.seat_low.score,
+                    s.seat_high.score,
+                    s.seat_high.install_id,
+                    s.arena_id,
+                    s.sim_version,
+                    s.match_index,
+                );
+                ExitCode::SUCCESS
+            }
+            Err(e) => {
+                eprintln!("replay_sync: attestation REFUSED — {e}");
+                ExitCode::FAILURE
+            }
+        };
+    }
+
     // For --fuzz, catch SyncTest panics via run_replay_caught so the
     // workflow's bash loop sees a clean non-zero exit instead of a stack
     // trace. For --demo, run compute_checksum_tsv directly — a failing

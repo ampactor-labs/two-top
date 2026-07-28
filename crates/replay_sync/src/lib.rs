@@ -395,6 +395,62 @@ pub fn compute_checksum_tsv(replay: &Replay) -> String {
     out
 }
 
+/// Replay the tape to its end and return the final match score — the
+/// re-simulated truth an attestation's claim is checked against.
+pub fn final_score(replay: &Replay) -> MatchScore {
+    let mut app = build_app(replay.clone());
+    for _ in 0..replay.header.frame_count {
+        app.update();
+    }
+    *app.world().resource::<MatchScore>()
+}
+
+/// NORTH N2 — check a dual-signed attestation against the tape it claims
+/// to describe. A claim passes only if the statement's static facts match
+/// the tape header, BOTH signatures verify against the pubkeys inside the
+/// statement, and the scores match what re-simulating the tape actually
+/// produces. "Your claim must re-simulate" is the whole anti-cheat.
+pub fn verify_attestation(replay: &Replay, attestation: &net::Attestation) -> Result<(), String> {
+    let stmt = &attestation.statement;
+    if stmt.magic != net::STATEMENT_MAGIC {
+        return Err(format!("bad statement magic {:?}", stmt.magic));
+    }
+    if stmt.version != net::STATEMENT_VERSION {
+        return Err(format!("unsupported statement version {}", stmt.version));
+    }
+    if stmt.sim_version != replay.header.sim_version {
+        return Err(format!(
+            "statement sim_version {} but tape carries {}",
+            stmt.sim_version, replay.header.sim_version
+        ));
+    }
+    if stmt.arena_id != replay.header.arena_id {
+        return Err(format!(
+            "statement arena {} but tape carries {}",
+            stmt.arena_id, replay.header.arena_id
+        ));
+    }
+    if !attestation.verify() {
+        return Err("signature verification failed".to_string());
+    }
+    let score = final_score(replay);
+    for (handle, replayed) in [(0u8, score.p0), (1u8, score.p1)] {
+        let Some(seat) = stmt.seat_for_handle(handle) else {
+            return Err(format!("statement has no seat for handle {handle}"));
+        };
+        if seat.score != replayed {
+            return Err(format!(
+                "seat {:032x} claims {} for handle {handle}; the tape re-simulates to {}",
+                seat.install_id, seat.score, replayed
+            ));
+        }
+    }
+    if score.p0 < sim::MATCH_WIN_THRESHOLD && score.p1 < sim::MATCH_WIN_THRESHOLD {
+        return Err("tape never reaches the score threshold — not a signable match".to_string());
+    }
+    Ok(())
+}
+
 /// Run `replay` to the requested frame and return a human-readable dump of
 /// every entity's state. Used by `diagnose_desync.sh` to print sides of a
 /// divergence. Format: one comment header line, then one line per entity in

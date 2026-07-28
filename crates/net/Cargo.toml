@@ -38,6 +38,13 @@ tracing = { version = "0.1", default-features = false, features = ["std"] }
 # matchbox already pulls uuid transitively; declaring it explicitly
 # makes the bridge's dependency obvious.
 uuid = "1"
+# NORTH N2 — signed results. All ed25519 lives here so app and
+# replay_sync share one implementation: sign_statement / verify /
+# pubkey_for. default-features off ("fast" precomputed tables are for
+# servers verifying at volume; a duel signs and verifies once).
+ed25519-dalek = { version = "=2.2.0", default-features = false, features = [
+    "std",
+] }
 # Bevy without render features — same posture as the sim crate.
 # We need `Resource` and the plugin/system traits, nothing else.
 bevy = { version = "=0.18.1", default-features = false, features = [

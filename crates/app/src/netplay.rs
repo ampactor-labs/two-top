@@ -38,9 +38,9 @@ use bevy_ggrs::ggrs::{DesyncDetection, GgrsEvent, PlayerType, SessionBuilder};
 // app needs no direct matchbox/uuid dependency.
 use net::{
     ChannelConfig, LastPeerMessageFrame, LobbyState, MatchboxBridge, MatchboxPeerId as PeerId,
-    NetMsg, NetSendQueue, PeerProfile, PeerState, PendingP2PSwap, RematchConsent,
-    RtcIceServerConfig, WebRtcSocket, WebRtcSocketBuilder, addr_to_peer, decode_net_msg,
-    encode_net_msg, peer_to_addr,
+    NetMsg, NetSendQueue, PeerKeys, PeerProfile, PeerSig, PeerState, PendingP2PSwap,
+    RematchConsent, RtcIceServerConfig, WebRtcSocket, WebRtcSocketBuilder, addr_to_peer,
+    decode_net_msg, encode_net_msg, peer_to_addr,
 };
 use sim::GgrsCfg;
 
@@ -95,6 +95,14 @@ pub struct NetplayConfig {
 /// Init'd in `app::run` so it always exists; set in [`perform_swap`].
 #[derive(Resource, Clone, Copy, Debug, Default)]
 pub struct LocalPlayerHandle(pub Option<usize>);
+
+/// The (ours, peer) matchbox peer-id pair of the live session, as u128s.
+/// Both sides know both ids, which makes the sorted pair the session nonce
+/// of a `net::MatchStatement` — the thing that stops an old signature
+/// being replayed against a new pairing. Set in [`perform_swap`], cleared
+/// in [`leave_online_match`].
+#[derive(Resource, Clone, Copy, Debug, Default)]
+pub struct SessionIds(pub Option<(u128, u128)>);
 
 impl NetplayConfig {
     /// Read the room URL, in precedence order: the `--room <url>` CLI flag,
@@ -562,11 +570,16 @@ fn perform_swap(world: &mut World, peer_id: PeerId) {
 
     // Open the duel with the identity handshake: install-id + name on the
     // reliable channel. The peer's grudge ledger files this match under it.
+    // Profile2 rides along with the signing pubkey — an old build ignores
+    // the unknown variant and still gets the legacy Profile.
+    world.resource_mut::<SessionIds>().0 = Some((our_id.0.as_u128(), peer_id.0.as_u128()));
     let profile = world.resource::<crate::profile::LocalProfile>().as_data();
-    world
-        .resource_mut::<NetSendQueue>()
-        .0
-        .push(NetMsg::Profile(profile));
+    let profile2 = world.resource::<crate::profile::LocalProfile>().as_data2();
+    let mut queue = world.resource_mut::<NetSendQueue>();
+    queue.0.push(NetMsg::Profile(profile));
+    if let Some(data2) = profile2 {
+        queue.0.push(NetMsg::Profile2(data2));
+    }
 
     tracing::info!(
         target: "two_top::net",
@@ -700,6 +713,18 @@ fn pump_side_channel(world: &mut World) {
                     "peer profile received",
                 );
                 world.resource_mut::<PeerProfile>().0 = Some(profile);
+            }
+            NetMsg::Profile2(data2) => {
+                tracing::info!(
+                    target: "two_top::net",
+                    install_id = format_args!("{:032x}", data2.install_id),
+                    "peer profile2 received — results can be signed",
+                );
+                world.resource_mut::<PeerProfile>().0 = Some(data2.profile());
+                world.resource_mut::<PeerKeys>().0 = Some(data2.pubkey);
+            }
+            NetMsg::MatchSig { sig } => {
+                world.resource_mut::<PeerSig>().0 = Some(sig);
             }
             NetMsg::RematchWant => {
                 world.resource_mut::<RematchConsent>().peer = true;
@@ -844,6 +869,12 @@ pub fn leave_online_match(world: &mut World) {
     *world.resource_mut::<LobbyState>() = LobbyState::Idle;
     world.resource_mut::<PendingP2PSwap>().0 = None;
     world.resource_mut::<PeerProfile>().0 = None;
+    world.resource_mut::<PeerKeys>().0 = None;
+    world.resource_mut::<PeerSig>().0 = None;
+    world.resource_mut::<SessionIds>().0 = None;
+    world
+        .resource_mut::<crate::attest::AttestState>()
+        .reset_session();
     *world.resource_mut::<RematchConsent>() = RematchConsent::default();
     world.resource_mut::<NetSendQueue>().0.clear();
     world.resource_mut::<LocalPlayerHandle>().0 = None;

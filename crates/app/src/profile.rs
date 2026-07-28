@@ -116,6 +116,14 @@ pub struct LocalProfile {
     /// Has the player actually claimed this name? False on a fresh install
     /// (the dealt name is a placeholder), which opens the keyboard once.
     pub named: bool,
+    /// The result-signing key (NORTH N2): 64 hex chars = 32 bytes of
+    /// ed25519 seed, minted beside the install-id and never sent anywhere.
+    /// The pubkey derived from it rides `NetMsg::Profile2`, and a match
+    /// decided on score gets dual-signed with it. Hex keeps the file
+    /// greppable and hand-editable like everything else here; a value
+    /// that doesn't parse reads as absent and is reminted, which touches
+    /// nothing else — the install-id stays the identity.
+    pub signing_key: String,
 }
 
 impl LocalProfile {
@@ -129,6 +137,37 @@ impl LocalProfile {
     pub fn name_string(&self) -> String {
         self.name.clone()
     }
+
+    /// The raw signing key, when the stored hex is valid.
+    pub fn signing_key_bytes(&self) -> Option<[u8; 32]> {
+        net::from_hex32(&self.signing_key)
+    }
+
+    /// Identity plus pubkey for the `Profile2` handshake. `None` only
+    /// before `ensure_signing_key` has run or after a hand edit broke the
+    /// hex — callers then simply don't send a Profile2, and the pairing
+    /// degrades to unsigned results like any legacy build.
+    pub fn as_data2(&self) -> Option<net::ProfileData2> {
+        Some(net::ProfileData2 {
+            install_id: self.install_id,
+            name: slots_from_name(&self.name),
+            pubkey: net::pubkey_for(&self.signing_key_bytes()?),
+        })
+    }
+}
+
+/// Mint the result-signing key if the profile has none (a fresh install,
+/// an older build's file, or a hand edit that broke the hex). Returns true
+/// when it minted, so the caller knows to save.
+fn ensure_signing_key(profile: &mut LocalProfile) -> bool {
+    if profile.signing_key_bytes().is_some() {
+        return false;
+    }
+    use rand::RngCore as _;
+    let mut seed = [0u8; 32];
+    rand::rngs::OsRng.fill_bytes(&mut seed);
+    profile.signing_key = net::hex32(&seed);
+    true
 }
 
 /// Render wire glyph indices into text: stop at the first pad byte and
@@ -214,7 +253,13 @@ fn load_profile() -> LocalProfile {
     // Normalize whatever the file held (hand edits, an older build's
     // 4-glyph name) through the same clamp the wire uses.
     profile.name = name_from_slots(&slots_from_name(&profile.name));
+    let minted_key = ensure_signing_key(&mut profile);
     if !profile.name.is_empty() && profile.install_id != 0 {
+        if minted_key {
+            // An existing install from before signing keys existed: keep
+            // everything, persist the new key.
+            save_profile(&profile);
+        }
         return profile;
     }
     if !profile.name.is_empty() {
@@ -715,6 +760,38 @@ mod tests {
     }
 
     #[test]
+    fn a_signing_key_is_minted_once_and_survives_hand_damage() {
+        let mut profile = LocalProfile {
+            install_id: 7,
+            name: "SUDS".into(),
+            named: true,
+            ..Default::default()
+        };
+        assert!(ensure_signing_key(&mut profile), "fresh profile mints");
+        let key = profile.signing_key_bytes().expect("valid 32 bytes");
+        assert!(!ensure_signing_key(&mut profile), "second boot keeps it");
+        assert_eq!(profile.signing_key_bytes(), Some(key));
+        let data2 = profile.as_data2().expect("pubkey derivable");
+        assert_eq!(data2.pubkey, net::pubkey_for(&key));
+        assert_eq!(data2.install_id, 7);
+        // An older build's file predates the field: serde defaults it
+        // empty, so those installs mint on next boot with the identity
+        // untouched.
+        let old: LocalProfile =
+            serde_json::from_str(r#"{"install_id": 7, "name": "TAGC"}"#).unwrap();
+        assert!(old.signing_key.is_empty());
+        // A hand edit that broke the hex reads as absent, not fatal.
+        let mut broken = profile.clone();
+        broken.signing_key = "not hex".into();
+        assert!(ensure_signing_key(&mut broken));
+        assert_ne!(
+            broken.signing_key_bytes(),
+            Some(key),
+            "a remint is a new key"
+        );
+    }
+
+    #[test]
     fn a_garbage_tmp_sibling_never_touches_the_identity() {
         // The interrupted-save shape: the old profile intact on disk, a
         // truncated .tmp corpse beside it (the process died before the
@@ -725,6 +802,7 @@ mod tests {
             install_id: 7,
             name: "SUDS".to_string(),
             named: true,
+            ..Default::default()
         };
         std::fs::write(&path, serde_json::to_string_pretty(&saved).unwrap()).unwrap();
         std::fs::write(dir.join("profile.json.tmp"), "{\"install_id\": 99").unwrap();

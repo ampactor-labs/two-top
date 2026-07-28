@@ -29,10 +29,15 @@ use crate::netplay::{LocalPlayerHandle, NetplayConfig, RecentAbsence};
 /// One opponent's ledger line. `name` is their latest dialed name — it can
 /// change between meetings; the install-id is the identity.
 #[derive(Serialize, Deserialize, Default, Clone, Debug)]
+#[serde(default)]
 pub struct RivalRecord {
     pub name: String,
     pub wins: u32,
     pub losses: u32,
+    /// Wins whose result carries a completed dual-signed attestation
+    /// (NORTH N2). A subset of `wins`: unsigned wins still count — a
+    /// legacy peer's build simply can't sign.
+    pub attested_wins: u32,
 }
 
 impl RivalRecord {
@@ -127,6 +132,17 @@ pub fn record_abandoned_loss(record: &mut CareerRecord, peer: Option<net::Profil
     }
     save_career(record);
     tracing::info!(target: "two_top::grudge", "abandoned duel recorded as a loss");
+}
+
+/// An attestation completed for a match we won on score: the rival's line
+/// gains a provable win (`crate::attest` calls this after the sidecar is
+/// on disk). Separate from the win/loss tally on purpose — wins count
+/// whether or not the peer's build could sign.
+pub fn record_attested_win(record: &mut CareerRecord, peer: net::ProfileData) {
+    let rival = record.rivals.entry(rival_key(peer.install_id)).or_default();
+    rival.attested_wins += 1;
+    save_career(record);
+    tracing::info!(target: "two_top::grudge", "attested win recorded");
 }
 
 /// 1 → 1ST, 2 → 2ND, 3 → 3RD, 4 → 4TH, 11-13 → TH (the English trap).
@@ -341,6 +357,7 @@ mod tests {
                 name: "MORGAN".into(),
                 wins: 1,
                 losses: 0,
+                ..Default::default()
             },
         );
         assert_eq!(career.display_name(morgan_a), "MORGAN");
@@ -352,6 +369,7 @@ mod tests {
                 name: "MORGAN".into(),
                 wins: 0,
                 losses: 1,
+                ..Default::default()
             },
         );
         let (a, b) = (career.display_name(morgan_a), career.display_name(morgan_b));
@@ -385,6 +403,7 @@ mod tests {
                 name: "TAGC".into(),
                 wins: 2,
                 losses: 1,
+                ..Default::default()
             },
         );
         assert_eq!(

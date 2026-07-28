@@ -25,6 +25,7 @@ use std::collections::HashMap;
 
 mod anchor;
 mod arena_select;
+mod attest;
 mod audio;
 mod bot;
 mod camera;
@@ -48,6 +49,7 @@ mod settings;
 mod theater;
 mod touch_controls;
 use anchor::{FullScreenSprite, ScreenAnchorPlugin};
+use attest::AttestPlugin;
 use audio::GameAudioPlugin;
 use bot::BotPlugin;
 use camera::CameraFollowPlugin;
@@ -161,6 +163,7 @@ pub fn run() {
         .add_plugins(DarkBeyondPlugin)
         .add_plugins(DevourPlugin)
         .add_plugins(GrudgePlugin)
+        .add_plugins(AttestPlugin)
         .add_plugins(ProfilePlugin)
         .add_plugins(MatchRecorderPlugin)
         .add_plugins(RoomCodePlugin)
@@ -177,6 +180,7 @@ pub fn run() {
         .add_plugins(ScreenPlugin)
         .add_plugins(SettingsPlugin)
         .init_resource::<netplay::LocalPlayerHandle>()
+        .init_resource::<netplay::SessionIds>()
         .init_resource::<netplay::RecentAbsence>()
         .init_resource::<render::PerspectiveFlip>()
         // Full-bleed void: whatever the aspect ratio shows beyond the arena
