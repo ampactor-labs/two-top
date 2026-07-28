@@ -722,6 +722,7 @@ fn pump_side_channel(world: &mut World) {
                     "peer profile received",
                 );
                 world.resource_mut::<PeerProfile>().0 = Some(profile);
+                reseed_our_table(world, profile.install_id);
             }
             NetMsg::Profile2(data2) => {
                 tracing::info!(
@@ -731,6 +732,7 @@ fn pump_side_channel(world: &mut World) {
                 );
                 world.resource_mut::<PeerProfile>().0 = Some(data2.profile());
                 world.resource_mut::<PeerKeys>().0 = Some(data2.pubkey);
+                reseed_our_table(world, data2.install_id);
             }
             NetMsg::MatchSig { sig } => {
                 world.resource_mut::<PeerSig>().0 = Some(sig);
@@ -745,6 +747,26 @@ fn pump_side_channel(world: &mut World) {
             }
         }
     }
+}
+
+/// "Our table": the cosmetic stream (stains, embers, the dark beyond's
+/// eye placement) reseeds from the sorted install-id pair the moment the
+/// rivalry is known, so the arena these two always play carries marks
+/// strangers' arenas don't — and both phones agree on them, because both
+/// derive the same seed. Render-side only; the sim never reads this
+/// stream. [`leave_online_match`] restores the boot seed.
+fn reseed_our_table(world: &mut World, peer_install: u128) {
+    use rand::SeedableRng as _;
+    let ours = world.resource::<crate::profile::LocalProfile>().install_id;
+    let (low, high) = if ours <= peer_install {
+        (ours, peer_install)
+    } else {
+        (peer_install, ours)
+    };
+    let fold = |v: u128| (v as u64) ^ ((v >> 64) as u64);
+    let seed = fold(low) ^ fold(high).rotate_left(29);
+    world.resource_mut::<render::CosmeticRng>().0 = rand::rngs::SmallRng::seed_from_u64(seed);
+    tracing::info!(target: "two_top::net", seed, "our table is set — cosmetic stream reseeded");
 }
 
 /// When did this app last go away — a suspend, a focus loss, or a frozen
@@ -888,6 +910,11 @@ pub fn leave_online_match(world: &mut World) {
     world.resource_mut::<NetSendQueue>().0.clear();
     world.resource_mut::<LocalPlayerHandle>().0 = None;
     world.resource_mut::<render::PerspectiveFlip>().0 = 1.0;
+    {
+        use rand::SeedableRng as _;
+        world.resource_mut::<render::CosmeticRng>().0 =
+            rand::rngs::SmallRng::seed_from_u64(render::COSMETIC_BOOT_SEED);
+    }
     tracing::info!(target: "two_top::net", "left the online match — lobby reset");
 }
 

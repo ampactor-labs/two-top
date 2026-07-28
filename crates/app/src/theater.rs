@@ -290,7 +290,7 @@ fn arena_label(id: u8) -> &'static str {
 
 /// Unix seconds → "10 JUL" (UTC). The civil-from-days algorithm (Howard
 /// Hinnant's) — no chrono dependency for one label.
-fn date_label(unix_secs: u64) -> String {
+pub(crate) fn date_label(unix_secs: u64) -> String {
     let days = (unix_secs / 86_400) as i64;
     let (y, m, d) = civil_from_days(days);
     const MONTHS: [&str; 12] = [

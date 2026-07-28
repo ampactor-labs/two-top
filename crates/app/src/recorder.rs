@@ -151,6 +151,7 @@ fn save_replay_on_match_over(
     local: Res<crate::netplay::LocalPlayerHandle>,
     profile: Res<crate::profile::LocalProfile>,
     peer: Res<net::PeerProfile>,
+    mut record: ResMut<crate::grudge::CareerRecord>,
     mut rec: ResMut<MatchRecorder>,
     mut last_saved: ResMut<LastSavedReplay>,
 ) {
@@ -194,6 +195,14 @@ fn save_replay_on_match_over(
                 inputs: rec.frames.clone(),
             };
             last_saved.0 = write_replay(&replay, recorded_at, winner);
+            // A live duel's tape lands on the rival's ring too, so the
+            // rivals screen can replay the recent conversation.
+            if let (Some(path), Some(peer), false) = (&last_saved.0, peer.0, practice.0)
+                && netplay.room_url.is_some()
+                && let Some(name) = path.file_name().and_then(|n| n.to_str())
+            {
+                crate::grudge::note_rival_tape(&mut record, peer, name.to_string());
+            }
         }
         Some(ref mut n) => *n -= 1,
     }

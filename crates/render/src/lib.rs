@@ -1863,6 +1863,11 @@ pub fn advance_trail_ghosts(
 #[derive(Resource)]
 pub struct CosmeticRng(pub SmallRng);
 
+/// The boot seed of the cosmetic stream. Netplay reseeds the stream from
+/// the rivalry's install-id pair while online ("our table") and restores
+/// this on leave.
+pub const COSMETIC_BOOT_SEED: u64 = 0x00b0_07ed_2709;
+
 /// Drives the ambient-ember spawner: roughly every
 /// `1.0 / EMBER_RATE_HZ` real seconds, spawn an ember sprite at a
 /// random arena-interior position. The arena is 1500x1000 cm
@@ -2080,7 +2085,7 @@ pub struct EffectsPlugin;
 
 impl Plugin for EffectsPlugin {
     fn build(&self, app: &mut App) {
-        app.insert_resource(CosmeticRng(SmallRng::seed_from_u64(0x00b0_07ed_2709)))
+        app.insert_resource(CosmeticRng(SmallRng::seed_from_u64(COSMETIC_BOOT_SEED)))
             .insert_resource(EmberAccumulator { elapsed: 0.0 })
             .init_resource::<ScreenShake>()
             .init_resource::<LastKillPos>()

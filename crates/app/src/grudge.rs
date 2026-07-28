@@ -38,6 +38,73 @@ pub struct RivalRecord {
     /// (NORTH N2). A subset of `wins`: unsigned wins still count — a
     /// legacy peer's build simply can't sign.
     pub attested_wins: u32,
+    /// When this rivalry last met (unix seconds; 0 for pre-N4 rows).
+    pub last_met_unix: u64,
+    /// The current run: +n = our last n meetings were wins, -n = theirs.
+    pub streak: i32,
+    /// Filenames (not paths) of recent tapes against this rival, newest
+    /// last, capped at [`RIVAL_TAPE_RING`]. The rivals screen plays them
+    /// straight from `recorder::replays_dir()`.
+    pub tapes: Vec<String>,
+}
+
+/// How many tapes a rivalry remembers. Older ones stay on disk for the
+/// REPLAYS screen; the ledger keeps the recent conversation.
+pub const RIVAL_TAPE_RING: usize = 4;
+
+/// The next value of a win/loss streak. Pure for the tests: a streak
+/// extends in its own direction and flips to ±1 on a reversal.
+pub fn next_streak(streak: i32, won: bool) -> i32 {
+    if won {
+        if streak > 0 { streak + 1 } else { 1 }
+    } else if streak < 0 {
+        streak - 1
+    } else {
+        -1
+    }
+}
+
+/// Meeting numbers the dark beyond celebrates (`dark_beyond` consumes
+/// [`MilestoneFlareArmed`] on the next GO).
+pub fn milestone_meeting(n: u32) -> bool {
+    matches!(n, 10 | 50 | 100 | 500)
+}
+
+/// Armed when the CURRENT online match is a milestone meeting; the dark
+/// beyond's every eye flares on the first GO, then this disarms.
+#[derive(Resource, Default, Clone, Copy)]
+pub struct MilestoneFlareArmed(pub bool);
+
+/// Arm the milestone flare the moment the peer's identity lands during a
+/// live match: meetings()+1 is the meeting now being played.
+fn arm_milestone_flare(
+    screen: Res<State<crate::screen::AppScreen>>,
+    peer: Res<net::PeerProfile>,
+    record: Res<CareerRecord>,
+    mut armed: ResMut<MilestoneFlareArmed>,
+    mut seen: Local<Option<u128>>,
+) {
+    if *screen.get() != crate::screen::AppScreen::InMatch {
+        *seen = None;
+        return;
+    }
+    let Some(peer) = peer.0 else {
+        return;
+    };
+    if *seen == Some(peer.install_id) {
+        return;
+    }
+    *seen = Some(peer.install_id);
+    let n = record
+        .rivals
+        .get(&rival_key(peer.install_id))
+        .map(|r| r.meetings())
+        .unwrap_or(0)
+        + 1;
+    if milestone_meeting(n) {
+        armed.0 = true;
+        tracing::info!(target: "two_top::grudge", meeting = n, "milestone meeting — the dark beyond is watching");
+    }
 }
 
 impl RivalRecord {
@@ -250,8 +317,24 @@ fn record_match_result(
         } else {
             rival.losses += 1;
         }
+        rival.streak = next_streak(rival.streak, won);
+        rival.last_met_unix = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
     }
     save_career(&record);
+}
+
+/// The recorder froze a tape for a live duel: remember it on the rival's
+/// ring so the rivals screen can replay the recent conversation.
+pub fn note_rival_tape(record: &mut CareerRecord, peer: net::ProfileData, filename: String) {
+    let rival = record.rivals.entry(rival_key(peer.install_id)).or_default();
+    rival.tapes.push(filename);
+    while rival.tapes.len() > RIVAL_TAPE_RING {
+        rival.tapes.remove(0);
+    }
+    save_career(record);
 }
 
 /// The practice ladder: a decided bot match moves the gauntlet. Win → the
@@ -291,7 +374,15 @@ pub struct GrudgePlugin;
 impl Plugin for GrudgePlugin {
     fn build(&self, app: &mut App) {
         app.insert_resource(load_career())
-            .add_systems(Update, (record_match_result, record_gauntlet_result));
+            .init_resource::<MilestoneFlareArmed>()
+            .add_systems(
+                Update,
+                (
+                    record_match_result,
+                    record_gauntlet_result,
+                    arm_milestone_flare,
+                ),
+            );
     }
 }
 
@@ -327,6 +418,39 @@ mod tests {
         assert!(!match_won(2, 1, true, true));
         // No forfeit and no threshold: not a win (shouldn't happen online).
         assert!(!match_won(2, 1, false, false));
+    }
+
+    #[test]
+    fn streaks_extend_and_flip() {
+        assert_eq!(next_streak(0, true), 1);
+        assert_eq!(next_streak(3, true), 4);
+        assert_eq!(next_streak(3, false), -1, "a reversal starts their run");
+        assert_eq!(next_streak(-2, false), -3);
+        assert_eq!(next_streak(-2, true), 1);
+    }
+
+    #[test]
+    fn the_tape_ring_keeps_the_recent_conversation() {
+        let mut record = CareerRecord::default();
+        let peer = net::ProfileData {
+            install_id: 0xabc,
+            name: net::name_slots(&[0]),
+        };
+        for i in 0..6 {
+            note_rival_tape(&mut record, peer, format!("t{i}.bmrg"));
+        }
+        let rival = &record.rivals[&rival_key(peer.install_id)];
+        assert_eq!(rival.tapes.len(), RIVAL_TAPE_RING);
+        assert_eq!(rival.tapes.first().unwrap(), "t2.bmrg", "oldest dropped");
+        assert_eq!(rival.tapes.last().unwrap(), "t5.bmrg");
+    }
+
+    #[test]
+    fn milestones_are_the_meetings_worth_a_flare() {
+        assert!(milestone_meeting(10));
+        assert!(milestone_meeting(100));
+        assert!(!milestone_meeting(9));
+        assert!(!milestone_meeting(11));
     }
 
     #[test]

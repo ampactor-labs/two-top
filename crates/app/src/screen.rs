@@ -71,6 +71,9 @@ pub enum AppScreen {
     /// The arena roster: seven tables, each shown with its floor and its
     /// rules, tap to pick (`crate::arena_select`).
     ArenaSelect,
+    /// The rivalry home: every opponent you have history with, the ledger
+    /// as a place (`crate::rivals`, NORTH N4).
+    Rivals,
 }
 
 impl AppScreen {
@@ -694,8 +697,9 @@ const SUBLINE_ANCHOR_Y: f32 = 1.0 - 2.0 * 0.55;
 /// PRACTICE · REPLAYS · SETTINGS share one row, split on window-x.
 const SECONDARY_ROW_RECT: (f32, f32) = (0.59, 0.66);
 const SECONDARY_ANCHOR_Y: f32 = 1.0 - 2.0 * 0.625;
-const SECONDARY_PRACTICE_X: f32 = 0.38;
-const SECONDARY_REPLAYS_X: f32 = 0.70;
+const SECONDARY_PRACTICE_X: f32 = 0.26;
+const SECONDARY_RIVALS_X: f32 = 0.50;
+const SECONDARY_REPLAYS_X: f32 = 0.74;
 /// QUICK MATCH | PRIVATE, sitting directly on top of the button it
 /// relabels (room_code.rs draws it; the adjacency is the explanation).
 pub const MODE_TOGGLE_RECT: (f32, f32) = (0.68, 0.74);
@@ -719,6 +723,7 @@ pub const TOP_EXIT_ANCHOR_Y: f32 = 1.0 - (TOP_EXIT_BAND.0 + TOP_EXIT_BAND.1);
 enum TitleAction {
     Play,
     Practice,
+    Rivals,
     Replays,
     Settings,
 }
@@ -856,23 +861,30 @@ fn spawn_overlays(mut commands: Commands) {
     spawn_title_button(
         &mut commands,
         TitleAction::Practice,
-        Vec2::new(-0.62, SECONDARY_ANCHOR_Y),
-        Vec2::new(330.0, 92.0),
-        26.0,
+        Vec2::new(-0.72, SECONDARY_ANCHOR_Y),
+        Vec2::new(250.0, 92.0),
+        22.0,
+    );
+    spawn_title_button(
+        &mut commands,
+        TitleAction::Rivals,
+        Vec2::new(-0.24, SECONDARY_ANCHOR_Y),
+        Vec2::new(230.0, 92.0),
+        22.0,
     );
     spawn_title_button(
         &mut commands,
         TitleAction::Replays,
-        Vec2::new(0.08, SECONDARY_ANCHOR_Y),
-        Vec2::new(270.0, 92.0),
-        26.0,
+        Vec2::new(0.24, SECONDARY_ANCHOR_Y),
+        Vec2::new(230.0, 92.0),
+        22.0,
     );
     spawn_title_button(
         &mut commands,
         TitleAction::Settings,
-        Vec2::new(0.70, SECONDARY_ANCHOR_Y),
-        Vec2::new(270.0, 92.0),
-        26.0,
+        Vec2::new(0.72, SECONDARY_ANCHOR_Y),
+        Vec2::new(240.0, 92.0),
+        22.0,
     );
     // Summary overlay — screen-centered (the kill-cam holds zoomed-in on
     // MatchOver, so a world-parked summary would sit off-center), shown only
@@ -979,6 +991,7 @@ fn title_buttons_input(
                 "1" => Some(AppScreen::InMatch),
                 "replays" => Some(AppScreen::Replays),
                 "settings" => Some(AppScreen::Settings),
+                "rivals" => Some(AppScreen::Rivals),
                 "name" => Some(AppScreen::NameEntry),
                 "arenas" => Some(AppScreen::ArenaSelect),
                 _ => None,
@@ -995,6 +1008,10 @@ fn title_buttons_input(
     }
     if keys.just_pressed(KeyCode::KeyV) {
         next.set(AppScreen::Replays);
+        return;
+    }
+    if keys.just_pressed(KeyCode::KeyR) {
+        next.set(AppScreen::Rivals);
         return;
     }
     if keys.just_pressed(KeyCode::KeyO) {
@@ -1023,6 +1040,9 @@ fn title_buttons_input(
         if in_band(yd, SECONDARY_ROW_RECT) {
             if xd < SECONDARY_PRACTICE_X {
                 practice.0 = !practice.0;
+            } else if xd < SECONDARY_RIVALS_X {
+                next.set(AppScreen::Rivals);
+                return;
             } else if xd < SECONDARY_REPLAYS_X {
                 next.set(AppScreen::Replays);
                 return;
@@ -1114,6 +1134,7 @@ fn update_title_buttons(
                                 "PRACTICE".to_string()
                             }
                         }
+                        TitleAction::Rivals => "RIVALS".to_string(),
                         TitleAction::Replays => "REPLAYS".to_string(),
                         TitleAction::Settings => "SETTINGS".to_string(),
                     };

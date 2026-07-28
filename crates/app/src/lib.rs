@@ -42,6 +42,7 @@ mod netplay;
 mod paths;
 mod profile;
 mod recorder;
+mod rivals;
 mod room_code;
 mod runes;
 mod screen;
@@ -178,6 +179,7 @@ pub fn run() {
         .add_plugins(GrudgePlugin)
         .add_plugins(AttestPlugin)
         .add_plugins(share::SharePlugin)
+        .add_plugins(rivals::RivalsPlugin)
         .add_plugins(ProfilePlugin)
         .add_plugins(MatchRecorderPlugin)
         .add_plugins(RoomCodePlugin)

@@ -93,14 +93,24 @@ fn spawn_eyes(mut commands: Commands, mut rng: ResMut<CosmeticRng>) {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn animate_eyes(
     time: Res<Time<Real>>,
     score: Res<MatchScore>,
+    state: Res<sim::MatchState>,
+    mut armed: ResMut<crate::grudge::MilestoneFlareArmed>,
     mut flare: ResMut<EyeFlare>,
     mut last_score: Local<Option<MatchScore>>,
     fangs: Query<(&PositionF, &Boomerang)>,
     mut eyes: Query<(&VoidEye, &mut Sprite, &mut Transform)>,
 ) {
+    // A milestone meeting's first GO: every eye in the void flares long —
+    // the hundredth sitting at this table is seen. Consumes the armed flag
+    // grudge::arm_milestone_flare set when the rivalry was recognized.
+    if armed.0 && matches!(*state, sim::MatchState::InRound { .. }) {
+        armed.0 = false;
+        flare.0 = 2.5;
+    }
     // A kill = the total went UP (a rematch reset going to 0-0 must not flare).
     let prev = last_score.unwrap_or(*score);
     if score.p0 + score.p1 > prev.p0 + prev.p1 {
