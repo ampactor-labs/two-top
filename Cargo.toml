@@ -31,3 +31,10 @@ opt-level = 3
 [profile.release]
 lto = "thin"
 codegen-units = 1
+# The phone build shipped 21.4 MiB of symbol/debug sections inside
+# libapp.so (69.0 -> 46.6 MiB under eu-strip, measured on apk-latest);
+# mostly std's prebuilt debuginfo linking in. The determinism matrix runs
+# the dev profile, so release symbols never feed a checksum, and the
+# panic hook logs source locations from panic metadata, which stripping
+# does not touch.
+strip = "symbols"
