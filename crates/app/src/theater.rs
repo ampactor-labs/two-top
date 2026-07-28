@@ -622,7 +622,7 @@ fn update_tape_notice(
 /// Load a decoded tape and roll it: arena from the header, playback
 /// resources in, then enter the match screen (whose spawn path sees the
 /// theater flag and builds the playback session).
-fn start_playback(world: &mut World, replay: Replay) {
+pub(crate) fn start_playback(world: &mut World, replay: Replay) {
     let header = replay.header.clone();
     let prev_arena = world.resource::<sim::SelectedArena>().0;
     world.resource_mut::<sim::SelectedArena>().0 = sim::ArenaId::from_u8(header.arena_id);

@@ -37,7 +37,9 @@
 //! and pending writes are lost. `run()` binds it with `let _guard = …;`
 //! immediately so it lives for the entire `App::run()` scope.
 
-use tracing_subscriber::{EnvFilter, prelude::*};
+use tracing_subscriber::EnvFilter;
+#[cfg(not(target_family = "wasm"))]
+use tracing_subscriber::prelude::*;
 
 /// Default filter when `RUST_LOG` is unset. Keeps wgpu/bevy chatter out
 /// of the way; lets our own crates through at `INFO` and above. `app`,
@@ -86,6 +88,7 @@ fn android_log_dir() -> Option<std::path::PathBuf> {
 /// an unwinding Rust panic). Writing the payload + location beside the
 /// replays means the next crash survives the walk back to the desk:
 /// `adb pull /sdcard/Android/data/<pkg>/files/crash.log`.
+#[cfg(not(target_family = "wasm"))]
 fn install_panic_hook() {
     let previous = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
@@ -112,6 +115,7 @@ fn install_panic_hook() {
 }
 
 pub fn init_logging() -> LogGuard {
+    #[cfg(not(target_family = "wasm"))]
     install_panic_hook();
     let filter =
         EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(DEFAULT_FILTER));
@@ -185,14 +189,17 @@ pub fn init_logging() -> LogGuard {
 
     #[cfg(all(not(debug_assertions), target_family = "wasm"))]
     {
-        // A browser has no file to roll and no useful stderr; install the
-        // filter over a discarding writer. (Console routing via a
-        // tracing-wasm layer is a tracked follow-up if web debugging
-        // ever needs it — the browser devtools profiler covers most.)
-        tracing_subscriber::registry()
-            .with(filter)
-            .with(tracing_subscriber::fmt::layer().with_writer(std::io::sink))
-            .init();
+        // No subscriber at all in the browser. The first draft installed a
+        // discarding fmt layer, and that nearly unshippable choice hid a
+        // real lesson: fmt's default timer stamps events with
+        // SystemTime::now(), which PANICS on wasm32-unknown — so any panic
+        // that our own hook then logged re-panicked inside the hook and
+        // aborted as a bare `unreachable` with no message at all. Events
+        // go nowhere (console routing via tracing-wasm is the follow-up);
+        // panics reach the console through console_error_panic_hook,
+        // installed first thing in web_start. The fs-writing panic hook
+        // stays native-only for the same reason.
+        let _ = filter;
         LogGuard {}
     }
 

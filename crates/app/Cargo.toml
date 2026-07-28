@@ -193,5 +193,30 @@ tracing-appender = "0.2"
 # reads the getrandom_backend cfg, set for the wasm target in
 # .cargo/config.toml. Native builds are untouched by either.
 [target.'cfg(target_family = "wasm")'.dependencies]
+# The curated native feature list above carries no browser graphics
+# backend, and wgpu's Instance::new panics rather than degrades when it
+# has none. WebGL2 is the reach choice (every mobile browser); WebGPU
+# can join later as a progressive upgrade. Cargo unifies this with the
+# main bevy dep whenever the wasm target builds.
+bevy = { version = "=0.18.1", default-features = false, features = [
+    "webgl2",
+] }
 getrandom02 = { package = "getrandom", version = "0.2", features = ["js"] }
 getrandom03 = { package = "getrandom", version = "0.3", features = ["wasm_js"] }
+# The browser entry (src/web.rs). Pinned exactly to the version the bevy
+# stack already put in the lock — the CLI that generates the JS glue must
+# match it, and the Pages workflow reads this version out of Cargo.lock.
+wasm-bindgen = "=0.2.121"
+# ggrs times frames with the `instant` crate, which without its js
+# feature falls back to `extern "C" { fn now() -> f64 }` — the lone
+# unresolved `env.now` import that broke the first browser boot. ggrs's
+# own wasm-bindgen feature turns the right knobs (instant/wasm-bindgen,
+# getrandom/js); cargo unifies it with net's default-features-off dep.
+ggrs = { version = "0.12", default-features = false, features = [
+    "wasm-bindgen",
+] }
+# A panic in wasm is a bare `RuntimeError: unreachable` unless something
+# forwards the message; this puts the real panic text in the browser
+# console, which is the whole difference between a bug report and a
+# shrug. Installed first in web_start, so our own hook chains onto it.
+console_error_panic_hook = "0.1"

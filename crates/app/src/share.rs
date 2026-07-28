@@ -78,6 +78,9 @@ pub struct SharedTapePath(pub Option<PathBuf>);
 enum ShareState {
     #[default]
     Idle,
+    /// Native-only by construction: the wasm arm never posts, so the
+    /// variant is dead there and the lint knows it.
+    #[cfg_attr(target_family = "wasm", allow(dead_code))]
     Posting {
         rx: std::sync::Mutex<std::sync::mpsc::Receiver<Result<String, String>>>,
     },
@@ -96,6 +99,7 @@ struct ShareLabel {
 struct ShareOverlayPiece;
 
 /// `<watch-url>#watch=<id>`, tolerant of a trailing slash on the bake.
+#[cfg(not(target_family = "wasm"))]
 pub(crate) fn compose_watch_url(watch_base: &str, id: &str) -> String {
     format!("{}#watch={id}", watch_base.trim_end_matches('/'))
 }
@@ -136,6 +140,7 @@ pub(crate) fn qr_image(text: &str) -> Option<(Image, u32)> {
 }
 
 /// The drop's receipt for a stored tape.
+#[cfg(not(target_family = "wasm"))]
 #[derive(serde::Deserialize)]
 struct DropReceipt {
     id: String,
@@ -258,27 +263,35 @@ fn drive_share(
             if !(keys.just_pressed(KeyCode::KeyS) || tapped_at(band)) {
                 return;
             }
-            let Ok(bytes) = std::fs::read(&path) else {
-                tracing::warn!(target: "two_top::share", path = %path.display(), "tape unreadable — not shared");
-                return;
-            };
-            let (drop_url, watch_url) = (
-                config.drop_url.clone().expect("checked complete"),
-                config.watch_url.clone().expect("checked complete"),
-            );
-            let (tx, rx) = std::sync::mpsc::channel();
-            #[cfg(not(target_family = "wasm"))]
-            bevy::tasks::IoTaskPool::get()
-                .spawn(async move {
-                    let _ = tx.send(post_tape(drop_url, watch_url, bytes));
-                })
-                .detach();
             #[cfg(target_family = "wasm")]
-            let _ = tx.send(Err("sharing from the browser is a follow-up".to_string()));
-            *state = ShareState::Posting {
-                rx: std::sync::Mutex::new(rx),
-            };
-            tracing::info!(target: "two_top::share", "tape posting to the drop");
+            {
+                let _ = path;
+                tracing::warn!(
+                    target: "two_top::share",
+                    "sharing from the browser is a follow-up — the web build is the destination",
+                );
+            }
+            #[cfg(not(target_family = "wasm"))]
+            {
+                let Ok(bytes) = std::fs::read(&path) else {
+                    tracing::warn!(target: "two_top::share", path = %path.display(), "tape unreadable — not shared");
+                    return;
+                };
+                let (drop_url, watch_url) = (
+                    config.drop_url.clone().expect("checked complete"),
+                    config.watch_url.clone().expect("checked complete"),
+                );
+                let (tx, rx) = std::sync::mpsc::channel();
+                bevy::tasks::IoTaskPool::get()
+                    .spawn(async move {
+                        let _ = tx.send(post_tape(drop_url, watch_url, bytes));
+                    })
+                    .detach();
+                *state = ShareState::Posting {
+                    rx: std::sync::Mutex::new(rx),
+                };
+                tracing::info!(target: "two_top::share", "tape posting to the drop");
+            }
         }
         ShareState::Posting { rx } => {
             let outcome = rx

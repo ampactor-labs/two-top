@@ -49,6 +49,8 @@ mod settings;
 mod share;
 mod theater;
 mod touch_controls;
+#[cfg(target_family = "wasm")]
+mod web;
 use anchor::{FullScreenSprite, ScreenAnchorPlugin};
 use attest::AttestPlugin;
 use audio::GameAudioPlugin;
@@ -116,6 +118,13 @@ pub fn run() {
                     primary_window: Some(Window {
                         title: "2-Top".to_string(),
                         resolution: window_resolution_from_env().into(),
+                        // The web build renders into the page's own canvas
+                        // (web/index.html) and follows its CSS size — the
+                        // page owns layout, the game fills the element.
+                        #[cfg(target_family = "wasm")]
+                        canvas: Some("#twotop-canvas".into()),
+                        #[cfg(target_family = "wasm")]
+                        fit_canvas_to_parent: true,
                         ..default()
                     }),
                     ..default()
@@ -131,7 +140,10 @@ pub fn run() {
             // bundles `../../assets` (Cargo.toml `[package.metadata.android]
             // assets`) as the APK asset root, so the in-code load paths
             // ("audio/throw.wav", "sprites/...") already line up there.
-            #[cfg(not(target_os = "android"))]
+            // Wasm keeps the default too: the browser fetches "assets/…"
+            // relative to the page, and the Pages workflow serves the
+            // workspace assets dir beside index.html.
+            #[cfg(not(any(target_os = "android", target_family = "wasm")))]
             let plugins = plugins.set(bevy::asset::AssetPlugin {
                 file_path: concat!(env!("CARGO_MANIFEST_DIR"), "/../../assets").to_string(),
                 ..default()
@@ -264,6 +276,11 @@ pub fn run() {
     if let Some(cap) = capture_config_from_env() {
         app.insert_resource(cap).add_systems(Last, capture_frame);
     }
+
+    // The browser entry's autoplay: a tape carried in by the page rolls
+    // once the Title is reached (src/web.rs).
+    #[cfg(target_family = "wasm")]
+    app.add_systems(Update, web::watch_autoplay);
 
     app.run();
 

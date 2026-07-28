@@ -1,0 +1,67 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>2-Top</title>
+  <style>
+    /* The page is a frame; the game owns the pixels. Void backdrop from
+       the game's own palette so the letterbox reads as the dark beyond. */
+    html, body { margin: 0; height: 100%; background: #100e22; }
+    body { display: flex; align-items: center; justify-content: center; }
+    #twotop-canvas { width: 100vw; height: 100vh; outline: none; }
+    #boot {
+      position: fixed; inset: 0; display: flex; flex-direction: column;
+      align-items: center; justify-content: center; gap: 0.6em;
+      color: #f2e5c9; font-family: monospace; font-size: 14px;
+      pointer-events: none; text-align: center; padding: 0 1em;
+    }
+  </style>
+</head>
+<body>
+  <canvas id="twotop-canvas"></canvas>
+  <div id="boot">SUMMONING…</div>
+  <script type="module">
+    // Substituted by the Pages workflow from the repo's TWOTOP_DROP_URL
+    // var; an empty value just disables #watch links.
+    const DROP_URL = "__TWOTOP_DROP_URL__";
+    const boot = document.getElementById("boot");
+    const say = (t) => { boot.textContent = t; };
+
+    async function watchTape() {
+      const m = location.hash.match(/^#watch=([0-9a-f]{12})$/);
+      if (!m) return undefined;
+      if (!DROP_URL || DROP_URL.startsWith("__")) {
+        say("this build has no tape drop configured");
+        return undefined;
+      }
+      say("FETCHING THE TAPE…");
+      const res = await fetch(`${DROP_URL.replace(/\/$/, "")}/tape/${m[1]}`);
+      if (!res.ok) {
+        say(res.status === 404
+          ? "that tape has expired from the drop - ask for a fresh link"
+          : `tape drop answered ${res.status}`);
+        return undefined;
+      }
+      return new Uint8Array(await res.arrayBuffer());
+    }
+
+    try {
+      const tape = await watchTape();
+      const { default: init, web_start } = await import("./app.js");
+      await init();
+      boot.remove();
+      web_start(tape);
+    } catch (e) {
+      // A bevy wasm app "exits" its main via an exception on purpose
+      // (winit keeps running); anything else is a real boot failure.
+      if (!`${e}`.includes("Using exceptions for control flow")) {
+        say(`boot failed: ${e}`);
+        console.error(e);
+      } else {
+        boot.remove();
+      }
+    }
+  </script>
+</body>
+</html>

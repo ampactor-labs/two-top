@@ -275,6 +275,7 @@ struct PendingIce {
 
 /// The vendor's `GET /ice` contract — field names in lockstep with
 /// `ice_vendor::IceResponse`.
+#[cfg(not(target_family = "wasm"))]
 #[derive(serde::Deserialize)]
 struct IceResponse {
     urls: Vec<String>,
@@ -285,6 +286,7 @@ struct IceResponse {
 /// Parse a vendor response body into matchbox's ICE config. `None` for
 /// anything malformed or empty — the caller falls back to the baked path.
 /// Pure for tests.
+#[cfg(not(target_family = "wasm"))]
 pub(crate) fn parse_ice_response(body: &str) -> Option<RtcIceServerConfig> {
     let parsed: IceResponse = serde_json::from_str(body).ok()?;
     if parsed.urls.is_empty() {

@@ -1,0 +1,71 @@
+name: Web
+
+# The web theater (NORTH N3 / COMPLETION_PLAN P.5): the whole game built
+# for wasm32 and published to GitHub Pages. A shared match plays at
+# <pages-url>/#watch=<id> (web/index.html fetches the tape from the drop
+# and rolls it through the theater); a bare visit boots the game.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: build wasm bundle
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Add wasm target
+        run: rustup target add wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: wasm
+      - name: Build the app for wasm
+        run: cargo build -p app --lib --target wasm32-unknown-unknown --release --locked
+      # The CLI must match the wasm-bindgen crate version exactly; read it
+      # out of the lock so a future bump cannot skew them.
+      - name: Install the matching wasm-bindgen CLI
+        run: |
+          WBG=$(grep -A1 'name = "wasm-bindgen"$' Cargo.lock | grep version | head -1 | cut -d'"' -f2)
+          echo "wasm-bindgen $WBG (from Cargo.lock)"
+          curl -sL "https://github.com/wasm-bindgen/wasm-bindgen/releases/download/${WBG}/wasm-bindgen-${WBG}-x86_64-unknown-linux-musl.tar.gz" \
+            | tar xz
+          echo "$PWD/wasm-bindgen-${WBG}-x86_64-unknown-linux-musl" >> "$GITHUB_PATH"
+      - name: Bindgen + assemble dist
+        env:
+          TWOTOP_DROP_URL: ${{ vars.TWOTOP_DROP_URL }}
+        run: |
+          wasm-bindgen --target web --no-typescript \
+            --out-dir dist --out-name app \
+            target/wasm32-unknown-unknown/release/app.wasm
+          cp web/index.html dist/
+          sed -i "s|__TWOTOP_DROP_URL__|${TWOTOP_DROP_URL}|" dist/index.html
+          cp -r assets dist/assets
+          ls -la dist
+      - uses: actions/upload-pages-artifact@v4
+        with:
+          path: dist
+
+  deploy:
+    name: deploy to pages
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4
