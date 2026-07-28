@@ -13,6 +13,7 @@ members = [
     "crates/replay_sync",
     "crates/replay_viewer",
     "crates/ice_vendor",
+    "crates/tape_drop",
 ]
 
 [workspace.package]

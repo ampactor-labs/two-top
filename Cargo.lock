@@ -5912,6 +5912,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "tape_drop"
+version = "0.0.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "sha2",
+ "tiny_http",
+]
+
+[[package]]
 name = "tempfile"
 version = "3.27.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"

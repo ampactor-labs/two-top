@@ -1,0 +1,17 @@
+[package]
+name = "tape_drop"
+version = "0.0.0"
+edition.workspace = true
+publish = false
+
+# NORTH N3 — the tape share relay, ice_vendor's sibling: a phone POSTs a
+# decided match's .bmrg, gets back a short content-addressed id, and any
+# browser can GET the bytes into the web theater while the link lives.
+# Deploy-side only (tiny_http, sync, in-memory store); never part of the
+# game binaries and excluded from the determinism-matrix cross builds.
+
+[dependencies]
+tiny_http = "0.12"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
