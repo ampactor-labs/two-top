@@ -339,13 +339,17 @@ fn spawn_overlay(commands: &mut Commands, images: &mut Assets<Image>, url: &str)
         return;
     };
     let handle = images.add(image);
-    // ~5 screen px per module reads well on a phone at arm's length.
-    let scale = 5.0;
+    // custom_size, never Transform::scale — the screen-anchor system owns
+    // anchored scale (see room_code's join QR for the incident report).
     commands.spawn((
         ShareOverlayPiece,
-        Sprite::from_image(handle),
+        Sprite {
+            image: handle,
+            custom_size: Some(Vec2::splat(190.0)),
+            ..default()
+        },
         ScreenAnchor::new(0.0, 0.12, 0.0, 0.0),
-        Transform::from_xyz(0.0, 0.0, 210.0).with_scale(Vec3::splat(scale)),
+        Transform::from_xyz(0.0, 0.0, 210.0),
     ));
     let _ = side;
     commands.spawn((

@@ -247,7 +247,7 @@ fn build_rivals_ui(world: &mut World) {
                     fact.clone(),
                     28.0,
                     render::palette::BONE.with_alpha(0.75),
-                    (0.0, 1.0 - 2.0 * (0.27 + i as f32 * 0.055)),
+                    (0.0, 1.0 - 2.0 * (0.27 + i as f32 * 0.050)),
                     210.0,
                 );
             }
@@ -574,6 +574,27 @@ mod tests {
             ),
             "SUDS"
         );
+    }
+
+    #[test]
+    fn the_detail_bands_never_overlap() {
+        // Facts stack from fy 0.27 at 0.055 pitch (three rows max); the
+        // SHADE band and the tape rows must clear them and each other —
+        // pixels for the list were eyeballed via the capture harness, and
+        // this pins the detail view's arithmetic the same way the roster
+        // pins its rows.
+        let facts_bottom = 0.27 + 3.0 * 0.050;
+        assert!(
+            facts_bottom <= SHADE_BAND.0,
+            "facts stop above the shade band"
+        );
+        assert!(
+            SHADE_BAND.1 <= DETAIL_TAPES_TOP,
+            "shade band clears the tapes"
+        );
+        let tapes_bottom =
+            DETAIL_TAPES_TOP + crate::grudge::RIVAL_TAPE_RING as f32 * DETAIL_TAPES_PITCH;
+        assert!(tapes_bottom <= BACK_BAND.0, "a full ring clears BACK");
     }
 
     #[test]

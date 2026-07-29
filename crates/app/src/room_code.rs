@@ -498,9 +498,20 @@ fn update_join_qr(
                 link: None,
                 handle: None,
             },
-            Sprite::default(),
-            ScreenAnchor::new(-0.80, DIAL_ANCHOR_Y + 0.13, 0.0, 0.0),
-            Transform::from_xyz(0.0, 0.0, 204.0).with_scale(Vec3::splat(2.4)),
+            // custom_size, never Transform::scale: apply_screen_anchors
+            // overwrites anchored scale every frame with the view scale
+            // (that is how text stays screen-constant), which silently
+            // shrank the first three placements of this code to a chip.
+            Sprite {
+                custom_size: Some(Vec2::splat(110.0)),
+                ..default()
+            },
+            // Upper-right arena space: the one region of the Title that is
+            // guaranteed dead backdrop at every aspect (first placement sat
+            // inside the QUICK MATCH pill, unscannable at 2.4x — the
+            // capture harness caught it).
+            ScreenAnchor::new(0.64, 0.30, 0.0, 0.0),
+            Transform::from_xyz(0.0, 0.0, 204.0),
             Visibility::Hidden,
         ));
         return;
