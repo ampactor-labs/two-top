@@ -26,6 +26,18 @@ migration.
 4. **The server-side half of pillar II stays on the horizon.** This plan ends
    at peer-signed, locally stored, tool-verifiable results.
 
+## Status — 2026-07-29
+
+All eight phases are implemented and pushed: N0 through N5 landed
+2026-07-28, N6 (the shade) and N7 (the sit-down ritual) 2026-07-29, at
+569 tests with every gate green and `SIM_VERSION` still 14. What remains
+is not phases: the operator gates (the Rung 2 loopback smoke that now
+also proves an attest sidecar, the stripped-APK device install, the
+two-phone rung covering rivals rows, minted demons, a fitted shade, and
+the QR sit-down), the tape_drop Railway deploy plus its `TWOTOP_DROP_URL`
+var (auth-gated), and the horizon list in NORTH.md. The findings ledger
+below carries what execution taught.
+
 ## Milestone map
 
 | # | Phase | Produces | Sim-affecting? |
