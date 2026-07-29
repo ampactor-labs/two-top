@@ -461,6 +461,17 @@ the intent filter ships in the APK manifest). No app camera, no
 permission, no typing; a phone without the app gets the APK link and
 dials by hand. Both phones then tap DUEL AT the same code as ever.
 
+**Deploying the tape drop (one-time, Railway).** The service lives in the
+two-top-matchbox project as `tape-drop`, deployed by CLI upload (this
+account has no Railway↔GitHub link, and buildpack heuristics auto-build
+the wrong workspace bin — the first attempt shipped ice_vendor). The
+recipe: temporarily point railway.json's `build.dockerfilePath` at
+`crates/tape_drop/Dockerfile`, `railway up --service tape-drop --detach`,
+then restore railway.json (the committed one stays generic because every
+service in this repo reads it). `.railwayignore` keeps the upload lean.
+The service domain feeds the `TWOTOP_DROP_URL` repo var, which both
+apk.yml and web.yml bake.
+
 **Sharing a match (the watch link).** On a build with the share endpoints
 baked (`TWOTOP_DROP_URL` pointing at the tape_drop service and
 `TWOTOP_WATCH_URL` at the web theater), a SHARE label appears on the match

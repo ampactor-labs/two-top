@@ -1,0 +1,11 @@
+# railway up uploads the working tree; the drop needs cargo's inputs and
+# nothing else. Keeping the tarball lean keeps deploys fast.
+target/
+.git/
+assets/
+docs/
+tests/
+web/
+scripts/
+.github/
+*.md
