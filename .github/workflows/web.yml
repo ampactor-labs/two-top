@@ -52,6 +52,7 @@ jobs:
             --out-dir dist --out-name app \
             target/wasm32-unknown-unknown/release/app.wasm
           cp web/index.html dist/
+          cp web/join.html dist/
           sed -i "s|__TWOTOP_DROP_URL__|${TWOTOP_DROP_URL}|" dist/index.html
           cp -r assets dist/assets
           ls -la dist

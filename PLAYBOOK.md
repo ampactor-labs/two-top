@@ -452,6 +452,15 @@ For cross-network: deploy `matchbox_server` to a public host (see Rung 5).
 
 What every install carries, no server or second phone needed:
 
+**Joining by QR (the sit-down ritual).** With PRIVATE selected on the
+Title, the dial shows its own join QR (on builds with `TWOTOP_WATCH_URL`
+baked). The other phone's system camera opens the join page — the code
+huge, the table named — and its OPEN IN 2-TOP button deep-links an
+installed app straight to that code and arena (`twotop://join/<CODE>-<arena>`;
+the intent filter ships in the APK manifest). No app camera, no
+permission, no typing; a phone without the app gets the APK link and
+dials by hand. Both phones then tap DUEL AT the same code as ever.
+
 **Sharing a match (the watch link).** On a build with the share endpoints
 baked (`TWOTOP_DROP_URL` pointing at the tape_drop service and
 `TWOTOP_WATCH_URL` at the web theater), a SHARE label appears on the match

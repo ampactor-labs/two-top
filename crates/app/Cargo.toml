@@ -179,6 +179,21 @@ config_changes = "orientation|keyboardHidden|screenSize"
 launch_mode = "singleTask"
 exported = true
 
+# The sit-down ritual (NORTH N7): the join page's OPEN IN 2-TOP button is
+# a twotop://join/<CODE>-<arena> link; this filter is what makes the OS
+# offer us for it. Custom scheme on purpose — https app-links need domain
+# verification at the domain root, which the Pages subpath can't host.
+[[package.metadata.android.application.activity.intent_filter]]
+actions = ["android.intent.action.VIEW"]
+categories = [
+    "android.intent.category.DEFAULT",
+    "android.intent.category.BROWSABLE",
+]
+
+[[package.metadata.android.application.activity.intent_filter.data]]
+scheme = "twotop"
+
+
 # Ephemeral-ICE credential fetch (netplay.rs): one HTTPS GET at match
 # entry, on the IO task pool. rustls via ureq's tls feature — no OS cert
 # store dependency, which matters on Android.

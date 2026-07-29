@@ -116,6 +116,102 @@ pub fn room_url_with_parts(base: &str, code: Option<&str>, tag: &str) -> String 
     }
 }
 
+/// Parse a join reference — `twotop://join/CURS-pit`, a join page's
+/// `#CURS-pit` fragment, or the bare `CURS-pit` — into dial slots plus
+/// the arena. `None` for anything that isn't exactly a code and a known
+/// table: a QR is typed by nobody, so there is no fuzziness to forgive.
+#[cfg_attr(not(target_os = "android"), allow(dead_code))]
+pub fn parse_join(uri: &str) -> Option<([u8; CODE_LEN], sim::ArenaId)> {
+    let tail = uri.trim().rsplit(['/', '#']).next()?;
+    let (code, tag) = tail.split_once('-')?;
+    if code.chars().count() != CODE_LEN {
+        return None;
+    }
+    let mut slots = [0u8; CODE_LEN];
+    for (i, ch) in code.chars().enumerate() {
+        slots[i] = CODE_ALPHABET
+            .iter()
+            .position(|c| c.eq_ignore_ascii_case(&ch))? as u8;
+    }
+    let tag = tag.to_ascii_lowercase();
+    let arena = sim::ALL_ARENAS
+        .iter()
+        .copied()
+        .find(|a| arena_room_tag(*a) == tag)?;
+    Some((slots, arena))
+}
+
+/// The join link a dialed code shares: the web join page carries the code
+/// for humans and the `twotop://` button for installed phones.
+pub fn join_link(watch_base: &str, code: &str, arena: sim::ArenaId) -> String {
+    format!(
+        "{}/join.html#{}-{}",
+        watch_base.trim_end_matches('/'),
+        code,
+        arena_room_tag(arena),
+    )
+}
+
+/// Android: the URI this launch was opened with, if any — the deep-link
+/// half of the sit-down ritual (`twotop://join/...` from the join page's
+/// button). One JNI hop: activity.getIntent().getDataString().
+#[cfg(target_os = "android")]
+fn launch_uri() -> Option<String> {
+    let ctx = ndk_context::android_context();
+    let vm = unsafe { jni::JavaVM::from_raw(ctx.vm().cast()) }.ok()?;
+    let mut env = vm.attach_current_thread().ok()?;
+    let activity = unsafe { jni::objects::JObject::from_raw(ctx.context().cast()) };
+    let intent = env
+        .call_method(&activity, "getIntent", "()Landroid/content/Intent;", &[])
+        .ok()?
+        .l()
+        .ok()?;
+    let data = env
+        .call_method(&intent, "getDataString", "()Ljava/lang/String;", &[])
+        .ok()?
+        .l()
+        .ok()?;
+    if data.is_null() {
+        return None;
+    }
+    let s: String = env
+        .get_string(&jni::objects::JString::from(data))
+        .ok()?
+        .into();
+    Some(s)
+}
+
+/// Android: a scanned join link lands both phones at the same table with
+/// zero typing — parse the launch URI into the dial and the arena pick.
+/// Runs once in PostStartup (after the persisted arena restore, so the
+/// link's pick wins the boot it arrived on).
+#[cfg(target_os = "android")]
+fn apply_launch_join(
+    mut code: ResMut<RoomCode>,
+    mut selected: ResMut<sim::SelectedArena>,
+    mut settings: ResMut<crate::settings::Settings>,
+) {
+    let Some(uri) = launch_uri() else {
+        return;
+    };
+    let Some((slots, arena)) = parse_join(&uri) else {
+        tracing::info!(target: "two_top::room_code", %uri, "launch uri is not a join link");
+        return;
+    };
+    code.slots = slots;
+    code.custom = true;
+    selected.0 = arena;
+    settings.arena = arena.as_u8();
+    crate::settings::persist(&settings);
+    save_room_code(&code);
+    tracing::info!(
+        target: "two_top::room_code",
+        code = %code.code_string(),
+        arena = arena_room_tag(arena),
+        "join link accepted — the table is set",
+    );
+}
+
 fn room_code_path() -> Option<PathBuf> {
     crate::paths::config_file("room_code.json")
 }
@@ -367,12 +463,86 @@ fn update_pad(
     }
 }
 
+/// The dial's join QR: the sit-down ritual's display half. While PRIVATE
+/// is selected (and a watch host is baked), the code's join link renders
+/// as a QR beside the dial — the other phone's system camera opens the
+/// join page, whose OPEN IN 2-TOP button deep-links the app straight to
+/// this code and table. Reuses the share module's renderer.
+#[derive(Component)]
+struct JoinQr {
+    /// The link currently rendered, so the image only re-mints on change.
+    link: Option<String>,
+    handle: Option<Handle<Image>>,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn update_join_qr(
+    mut commands: Commands,
+    mut images: ResMut<Assets<Image>>,
+    share: Res<crate::share::ShareConfig>,
+    netplay: Res<NetplayConfig>,
+    code: Res<RoomCode>,
+    selected: Res<sim::SelectedArena>,
+    screen: Res<State<AppScreen>>,
+    mut q: Query<(&mut JoinQr, &mut Sprite, &mut Visibility)>,
+) {
+    let Some(watch) = share.watch_url.as_deref() else {
+        return;
+    };
+    if netplay.room_url.is_none() {
+        return;
+    }
+    if q.is_empty() {
+        commands.spawn((
+            JoinQr {
+                link: None,
+                handle: None,
+            },
+            Sprite::default(),
+            ScreenAnchor::new(-0.80, DIAL_ANCHOR_Y + 0.13, 0.0, 0.0),
+            Transform::from_xyz(0.0, 0.0, 204.0).with_scale(Vec3::splat(2.4)),
+            Visibility::Hidden,
+        ));
+        return;
+    }
+    let show = *screen.get() == AppScreen::Title && code.custom;
+    for (mut qr, mut sprite, mut vis) in &mut q {
+        *vis = if show {
+            Visibility::Visible
+        } else {
+            Visibility::Hidden
+        };
+        if !show {
+            continue;
+        }
+        let link = join_link(watch, &code.code_string(), selected.0);
+        if qr.link.as_deref() == Some(link.as_str()) {
+            continue;
+        }
+        let Some((image, _side)) = crate::share::qr_image(&link) else {
+            continue;
+        };
+        if let Some(old) = qr.handle.take() {
+            images.remove(&old);
+        }
+        let handle = images.add(image);
+        sprite.image = handle.clone();
+        qr.link = Some(link);
+        qr.handle = Some(handle);
+    }
+}
+
 pub struct RoomCodePlugin;
 
 impl Plugin for RoomCodePlugin {
     fn build(&self, app: &mut App) {
+        // The scanned join link lands after the persisted picks restore,
+        // so the boot it arrived on is the boot it configures.
+        #[cfg(target_os = "android")]
+        app.add_systems(PostStartup, apply_launch_join);
         app.insert_resource(load_room_code())
             .add_systems(Startup, (init_room_code, spawn_pad))
+            .add_systems(Update, update_join_qr)
             .add_systems(
                 Update,
                 (
@@ -389,6 +559,27 @@ impl Plugin for RoomCodePlugin {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn join_links_round_trip_through_the_parser() {
+        let link = join_link("https://ampactor.dev/two-top/", "CURS", sim::ArenaId::Pit);
+        assert_eq!(link, "https://ampactor.dev/two-top/join.html#CURS-pit");
+        let (slots, arena) = parse_join(&link).expect("own link parses");
+        assert_eq!(arena, sim::ArenaId::Pit);
+        let code: String = slots.iter().map(|&i| CODE_ALPHABET[i as usize]).collect();
+        assert_eq!(code, "CURS");
+        // The deep-link form and the bare form parse identically.
+        assert_eq!(parse_join("twotop://join/curs-pit"), parse_join("CURS-PIT"));
+        // Garbage is refused, never guessed at.
+        assert_eq!(parse_join("twotop://join/CURS-atlantis"), None);
+        assert_eq!(parse_join("twotop://join/CURSX-pit"), None);
+        assert_eq!(
+            parse_join("twotop://join/CXRS-pit"),
+            None,
+            "X is not on the wheel"
+        );
+        assert_eq!(parse_join(""), None);
+    }
 
     #[test]
     fn code_and_arena_suffix_the_room_name_not_the_query() {

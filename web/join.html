@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>2-Top — join the table</title>
+  <style>
+    html, body { margin: 0; height: 100%; background: #100e22; color: #f2e5c9; }
+    body {
+      display: flex; flex-direction: column; align-items: center;
+      justify-content: center; gap: 1.1em; font-family: monospace;
+      text-align: center; padding: 0 1em;
+    }
+    #code { font-size: 64px; letter-spacing: 0.35em; color: #fff3ca; }
+    #arena { font-size: 20px; color: #ffdc70; }
+    a.open {
+      display: inline-block; padding: 0.8em 1.6em; border: 3px solid #fff3ca;
+      background: #201c42; color: #fff3ca; text-decoration: none;
+      font-size: 20px;
+    }
+    .dim { color: rgba(210,196,156,0.6); font-size: 14px; max-width: 30em; }
+  </style>
+</head>
+<body>
+  <div class="dim">YOU HAVE BEEN SUMMONED</div>
+  <div id="code">····</div>
+  <div id="arena"></div>
+  <a class="open" id="open" href="#">OPEN IN 2-TOP</a>
+  <div class="dim">
+    installed: the button drops you at this table. not yet: get the APK
+    (<a style="color:#ffdc70" href="https://github.com/ampactor-labs/two-top/releases/download/apk-latest/two-top.apk">two-top.apk</a>),
+    then tap PRIVATE on the title and dial the code by hand.
+  </div>
+  <script>
+    const m = location.hash.match(/^#([A-Za-z]{4})-([a-z]+)$/);
+    if (m) {
+      const code = m[1].toUpperCase();
+      document.getElementById("code").textContent = code.split("").join(" ");
+      document.getElementById("arena").textContent = "THE TABLE: " + m[2].toUpperCase();
+      document.getElementById("open").href = `twotop://join/${code}-${m[2]}`;
+    } else {
+      document.getElementById("code").textContent = "NO CODE";
+      document.getElementById("open").remove();
+    }
+  </script>
+</body>
+</html>
