@@ -297,7 +297,18 @@ fn build_rivals_ui(world: &mut World) {
 }
 
 fn enter_rivals(world: &mut World) {
-    *world.resource_mut::<RivalsView>() = RivalsView::List;
+    // Capture-verification reach (the TWOTOP_AUTOSTART family): land
+    // straight on the deepest rivalry's detail so the harness can see
+    // the facts stack, the shade band, and the tape rows without input.
+    let detail = std::env::var("TWOTOP_AUTOSTART").is_ok_and(|v| v == "rivalsdetail");
+    *world.resource_mut::<RivalsView>() = if detail {
+        ranked(world.resource::<CareerRecord>())
+            .first()
+            .map(|(key, _)| RivalsView::Detail(key.clone()))
+            .unwrap_or(RivalsView::List)
+    } else {
+        RivalsView::List
+    };
     build_rivals_ui(world);
 }
 

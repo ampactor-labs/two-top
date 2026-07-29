@@ -991,7 +991,7 @@ fn title_buttons_input(
                 "1" => Some(AppScreen::InMatch),
                 "replays" => Some(AppScreen::Replays),
                 "settings" => Some(AppScreen::Settings),
-                "rivals" => Some(AppScreen::Rivals),
+                "rivals" | "rivalsdetail" => Some(AppScreen::Rivals),
                 "name" => Some(AppScreen::NameEntry),
                 "arenas" => Some(AppScreen::ArenaSelect),
                 _ => None,

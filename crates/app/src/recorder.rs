@@ -157,6 +157,9 @@ fn save_replay_on_match_over(
     profile: Res<crate::profile::LocalProfile>,
     peer: Res<net::PeerProfile>,
     shade: Res<crate::bot::ShadeStyle>,
+    lobby: Res<net::LobbyState>,
+    absence: Res<crate::netplay::RecentAbsence>,
+    time: Res<Time<Real>>,
     mut record: ResMut<crate::grudge::CareerRecord>,
     mut rec: ResMut<MatchRecorder>,
     mut last_saved: ResMut<LastSavedReplay>,
@@ -175,10 +178,33 @@ fn save_replay_on_match_over(
         Some(0) => {
             rec.saved = true;
             rec.save_in = None;
+            // Threshold first; on a forfeit (nobody reached it) the tape
+            // is the SURVIVOR's recording, so the walkover goes to
+            // whichever seat stayed — the same honesty the grudge ledger
+            // applies. The first cut stamped `else 1`, which named the
+            // Stag winner of a match the Cur won by walkover (caught by
+            // the automated Rung 2 smoke's tape filename).
             let winner = if score.p0 >= MATCH_WIN_THRESHOLD {
                 0
-            } else {
+            } else if score.p1 >= MATCH_WIN_THRESHOLD {
                 1
+            } else {
+                let forfeited = matches!(*lobby, net::LobbyState::Forfeited { .. });
+                let local_handle = local.0.unwrap_or(0);
+                let we_went_absent = absence.within(
+                    time.elapsed_secs(),
+                    crate::netplay::RecentAbsence::FORFEIT_BLAME_SECS,
+                );
+                let (ours, theirs) = if local_handle == 0 {
+                    (score.p0, score.p1)
+                } else {
+                    (score.p1, score.p0)
+                };
+                if crate::grudge::match_won(ours, theirs, forfeited, we_went_absent) {
+                    local_handle as u8
+                } else {
+                    1 - local_handle as u8
+                }
             };
             let recorded_at = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)

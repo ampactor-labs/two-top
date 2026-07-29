@@ -100,7 +100,7 @@ Then three terminals:
 
 ```sh
 # Terminal 1 — signaling server (brokers the handshake only)
-matchbox_server --host 0.0.0.0 --port 3536
+matchbox_server 0.0.0.0:3536   # newer builds take HOST positionally; --host/--port are gone
 
 # Terminal 2 — peer A
 cargo run -p app -- --room ws://127.0.0.1:3536/two-top?next=2
@@ -256,7 +256,7 @@ That rule is unnecessary for the normal two-phone setup.
 ### 4c. Start the signaling server (laptop)
 
 ```sh
-matchbox_server --host 0.0.0.0 --port 3536
+matchbox_server 0.0.0.0:3536   # newer builds take HOST positionally; --host/--port are gone
 ```
 
 ### 4d. Bake the room URL into one APK
@@ -386,7 +386,7 @@ cargo clippy --workspace --all-targets --locked -- -D warnings
 cargo run -p sync_test -- --frames 600 --check-distance 7
 
 # Signaling server
-matchbox_server --host 0.0.0.0 --port 3536
+matchbox_server 0.0.0.0:3536   # newer builds take HOST positionally; --host/--port are gone
 
 # Laptop joins a room (optional laptop peer / loopback testing)
 cargo run -p app -- --room ws://<HOST>:3536/two-top?next=2
