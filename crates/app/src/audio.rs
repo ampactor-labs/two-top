@@ -492,6 +492,7 @@ fn play_kill_sfx(
     settings: Res<Settings>,
     profile: Res<crate::profile::LocalProfile>,
     peer: Res<net::PeerProfile>,
+    shade: Res<crate::bot::ShadeStyle>,
     local: Res<crate::netplay::LocalPlayerHandle>,
     theater: Res<crate::theater::TheaterMode>,
     mut mix: ResMut<MusicMix>,
@@ -500,7 +501,12 @@ fn play_kill_sfx(
     mut track: Local<DyingTrack>,
 ) {
     let mine = crate::runes::my_sting(profile.install_id);
-    let peer_sting = peer.0.map(|p| crate::runes::my_sting(p.install_id));
+    let far_identity = shade
+        .0
+        .as_ref()
+        .map(|s| s.install_id)
+        .or(peer.0.map(|p| p.install_id));
+    let peer_sting = far_identity.map(crate::runes::my_sting);
     let local_handle = local.0.unwrap_or(0);
     let theater_names = theater.active().then(|| theater.header_names());
     for (player, dead) in &players {

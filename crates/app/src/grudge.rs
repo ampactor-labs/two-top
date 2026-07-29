@@ -343,6 +343,7 @@ fn record_gauntlet_result(
     state: Res<MatchState>,
     score: Res<MatchScore>,
     practice: Res<crate::bot::PracticeMode>,
+    shade: Res<crate::bot::ShadeStyle>,
     theater: Res<crate::theater::TheaterMode>,
     mut record: ResMut<CareerRecord>,
     mut prev_over: Local<bool>,
@@ -351,6 +352,12 @@ fn record_gauntlet_result(
     let entered = over && !*prev_over;
     *prev_over = over;
     if !entered || !practice.0 || theater.active() {
+        return;
+    }
+    if shade.0.is_some() {
+        // Sparring a shade moves NOTHING: not the rivalry (practice
+        // already guards that) and not the tier — the ladder is the
+        // ladder, and a fitted caricature is neither a human nor a rung.
         return;
     }
     // The human is always handle 0 in practice.

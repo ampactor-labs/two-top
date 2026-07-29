@@ -68,6 +68,38 @@ pub struct BotView {
     /// old bounds-only policy walked orbit paths straight through cover
     /// and ground against the face every tick (the wall-jitter read).
     pub obstacles: Vec<(Vec2, Vec2)>,
+    /// A shade's fitted habits (NORTH N6). `Some` replaces the level-keyed
+    /// knobs with a rival's measured ones; the tier ladder is untouched.
+    pub style: Option<BotStyle>,
+}
+
+/// A rival's measured habits, fitted from their tape ring by
+/// `crate::shade`. Every field lands on a knob the tier ladder already
+/// turns, so the shade is the same readable duelist — planted throws,
+/// orbit, dodge — with THEIR numbers in it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct BotStyle {
+    /// Charge fraction the shade commits its throws at (their mean hold).
+    pub commit_frac: f32,
+    /// Dodge-reflex bubble in cm (their dash appetite).
+    pub dodge_radius: f32,
+    /// Aim wobble amplitude in radians (their plant discipline, inverted).
+    pub wobble: f32,
+    /// Preferred dueling range in cm (their tempo: pressers close in).
+    pub range: f32,
+}
+
+/// The armed shade, if any: the fitted style plus the identity it wears
+/// (mint axes + the tape header's honest name). Set by the rivals screen,
+/// cleared on returning to the Title.
+#[derive(Resource, Default)]
+pub struct ShadeStyle(pub Option<ShadeSpec>);
+
+#[derive(Clone, Debug)]
+pub struct ShadeSpec {
+    pub style: BotStyle,
+    pub install_id: u128,
+    pub name: String,
 }
 
 /// Preferred dueling range (cm). Inside it the bot backs off, outside it
@@ -165,18 +197,23 @@ pub fn bot_decide(v: &BotView) -> PlayerInput {
     // Level 0 — a passive sparring dummy: it just ambles around slowly and
     // never throws or dodges, so the player warms up and lands the first free
     // kill. Every kill the player scores raises the level by one.
-    if lvl == 0 {
+    if lvl == 0 && v.style.is_none() {
         return input_from(wander_dir(v), 0);
     }
 
     // 1) Survival dodge: a lethal fang closing in → dash through it. The bot
     //    only starts protecting itself once it has been beaten a couple of
-    //    times (level >= 2); below that it eats the player's throws.
-    if lvl >= 2
+    //    times (level >= 2); below that it eats the player's throws. A
+    //    shade dodges from the first tick — its reflex is the rival's, not
+    //    the ladder's.
+    if (lvl >= 2 || v.style.is_some())
         && let Some((tpos, tvel)) = v.threat
     {
         let to_me = v.me - tpos;
-        if tvel.dot(to_me) > 0.0 && to_me.length() < threat_radius(lvl) {
+        let radius = v
+            .style
+            .map_or_else(|| threat_radius(lvl), |s| s.dodge_radius);
+        if tvel.dot(to_me) > 0.0 && to_me.length() < radius {
             // Perpendicular to the fang's path, biased toward the center so
             // the dodge never carries the bot off the island.
             let perp = Vec2::new(-tvel.y, tvel.x).normalize_or_zero();
@@ -224,7 +261,10 @@ pub fn bot_decide(v: &BotView) -> PlayerInput {
     // 4) Armed and free (level >= 1): charge while positioning; plant + aim
     //    for the final ticks; release at the level's commit charge, which
     //    grows with the level so throws hit harder as the player wins.
-    let commit = throw_at_charge(lvl);
+    let commit = v.style.map_or_else(
+        || throw_at_charge(lvl),
+        |s| (CHARGE_MAX_FRAMES as f32 * s.commit_frac) as u32,
+    );
     if v.my_charge >= commit {
         // RELEASE tick: drop THROW, keep AIM + the aim vector on the stick.
         return input_from(aim_at_foe(v), PlayerInput::AIM_ACTIVE);
@@ -252,7 +292,8 @@ pub fn bot_decide(v: &BotView) -> PlayerInput {
 fn orbit_dir(v: &BotView) -> Vec2 {
     let to_foe = v.foe - v.me;
     let dist = to_foe.length().max(1.0);
-    let radial = to_foe / dist * ((dist - PREFERRED_RANGE) / 200.0).clamp(-1.0, 1.0);
+    let range = v.style.map_or(PREFERRED_RANGE, |s| s.range);
+    let radial = to_foe / dist * ((dist - range) / 200.0).clamp(-1.0, 1.0);
     let swing = if (v.frame / 120).is_multiple_of(2) {
         1.0
     } else {
@@ -267,8 +308,12 @@ fn orbit_dir(v: &BotView) -> Vec2 {
 fn aim_at_foe(v: &BotView) -> Vec2 {
     let base = (v.foe - v.me).normalize_or_zero();
     // Wobble amplitude shrinks as the bot levels up: a wide early spray, a
-    // tighter (still imperfect) aim once the player has been winning.
-    let wobble = (v.frame as f32 * 0.11).sin() * wobble_amp(v.difficulty);
+    // tighter (still imperfect) aim once the player has been winning. A
+    // shade sprays exactly as wide as its rival planted tight.
+    let amp = v
+        .style
+        .map_or_else(|| wobble_amp(v.difficulty), |s| s.wobble);
+    let wobble = (v.frame as f32 * 0.11).sin() * amp;
     Vec2::from_angle(wobble).rotate(base)
 }
 
@@ -404,6 +449,7 @@ pub fn drive_bot(world: &mut World) {
         frame,
         bounds: Vec2::new(ARENA_HALF_WIDTH_CM as f32, ARENA_HALF_HEIGHT_CM as f32),
         difficulty,
+        style: world.resource::<ShadeStyle>().0.as_ref().map(|s| s.style),
         ..default()
     };
     // Sudden-death crumble awareness — only where the storm exists (the
@@ -499,6 +545,14 @@ pub fn drive_bot(world: &mut World) {
     }
 }
 
+/// Returning to the Title dissolves the shade: practice reverts to the
+/// plain gauntlet bot, and nothing armed lingers into the next summons.
+fn disarm_shade(mut shade: ResMut<ShadeStyle>, mut practice: ResMut<PracticeMode>) {
+    if shade.0.take().is_some() {
+        practice.0 = false;
+    }
+}
+
 pub struct BotPlugin;
 
 impl Plugin for BotPlugin {
@@ -507,6 +561,11 @@ impl Plugin for BotPlugin {
         // TWOTOP_AUTOSTART for headless capture verification of the bot).
         let boot_practice = std::env::var("TWOTOP_PRACTICE").is_ok_and(|v| v == "1");
         app.insert_resource(PracticeMode(boot_practice));
+        app.init_resource::<ShadeStyle>();
+        app.add_systems(
+            bevy::state::state::OnEnter(crate::screen::AppScreen::Title),
+            disarm_shade,
+        );
         // The exclusive system is registered per-platform in lib.rs so it
         // orders after that platform's input source.
     }

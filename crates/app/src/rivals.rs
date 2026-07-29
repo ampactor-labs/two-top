@@ -31,6 +31,11 @@ const BACK_BAND: (f32, f32) = (0.86, 0.96);
 /// Detail view: the tape rows start here.
 const DETAIL_TAPES_TOP: f32 = 0.52;
 const DETAIL_TAPES_PITCH: f32 = 0.075;
+/// The SPAR THEIR SHADE band, between the facts and the tapes.
+const SHADE_BAND: (f32, f32) = (0.43, 0.50);
+/// Ring tapes needed before a shade can be fitted — fewer reads one
+/// match's mood, not a habit.
+const SHADE_MIN_TAPES: usize = 3;
 
 /// Which face the screen is showing: the list, or one rivalry's detail
 /// (keyed by the ledger's install-id hex key).
@@ -246,6 +251,16 @@ fn build_rivals_ui(world: &mut World) {
                     210.0,
                 );
             }
+            if r.tapes.len() >= SHADE_MIN_TAPES {
+                spawn_text(
+                    &mut commands,
+                    "SPAR THEIR SHADE".to_string(),
+                    32.0,
+                    render::palette::EMBER,
+                    (0.0, 1.0 - (SHADE_BAND.0 + SHADE_BAND.1)),
+                    210.0,
+                );
+            }
             if r.tapes.is_empty() {
                 spawn_text(
                     &mut commands,
@@ -362,6 +377,14 @@ fn rivals_input(world: &mut World) {
                 build_rivals_ui(world);
                 return;
             }
+            let shade_tapped = tapped_at.is_some_and(|fy| fy >= SHADE_BAND.0 && fy < SHADE_BAND.1)
+                || world
+                    .resource::<ButtonInput<KeyCode>>()
+                    .just_pressed(KeyCode::KeyS);
+            if shade_tapped {
+                summon_shade(world, &key);
+                return;
+            }
             let row = digit_row.or_else(|| {
                 tapped_at.and_then(|fy| {
                     (fy >= DETAIL_TAPES_TOP)
@@ -406,6 +429,63 @@ fn roll_tape(world: &mut World, filename: &str) {
             tracing::warn!(target: "two_top::rivals", error = %e, "rivalry tape rejected");
         }
     }
+}
+
+/// Fit a shade from the rival's ring and step onto the table with it:
+/// arm `bot::ShadeStyle`, flip practice on, enter the match. Refuses
+/// quietly (log only) when the ring is thin or no tape names the rival's
+/// seat — a wrong seat would fit OUR habits onto their ghost.
+fn summon_shade(world: &mut World, key: &str) {
+    let (rival_name, tapes) = {
+        let record = world.resource::<CareerRecord>();
+        let Some(r) = record.rivals.get(key) else {
+            return;
+        };
+        (r.name.clone(), r.tapes.clone())
+    };
+    if tapes.len() < SHADE_MIN_TAPES {
+        return;
+    }
+    let my_name = world
+        .resource::<crate::profile::LocalProfile>()
+        .name_string();
+    let Some(dir) = crate::recorder::replays_dir() else {
+        return;
+    };
+    let mut stats = Vec::new();
+    for tape in &tapes {
+        let Ok(bytes) = std::fs::read(dir.join(tape)) else {
+            continue;
+        };
+        let Ok(replay) = replay::decode_for_sim_version(&bytes, sim::SIM_VERSION) else {
+            continue;
+        };
+        let Some(handle) = crate::shade::rival_handle(&replay, &rival_name, &my_name) else {
+            continue;
+        };
+        stats.push(crate::shade::extract(&replay.inputs, handle));
+    }
+    if stats.is_empty() {
+        tracing::warn!(target: "two_top::rivals", "no readable tape names the rival's seat — no shade");
+        return;
+    }
+    let style = crate::shade::fit(&stats);
+    let install_id = u128::from_str_radix(key, 16).unwrap_or(0);
+    tracing::info!(
+        target: "two_top::rivals",
+        tapes = stats.len(),
+        ?style,
+        "shade fitted — stepping onto the table",
+    );
+    world.resource_mut::<crate::bot::ShadeStyle>().0 = Some(crate::bot::ShadeSpec {
+        style,
+        install_id,
+        name: rival_name,
+    });
+    world.resource_mut::<crate::bot::PracticeMode>().0 = true;
+    world
+        .resource_mut::<NextState<AppScreen>>()
+        .set(AppScreen::InMatch);
 }
 
 pub struct RivalsPlugin;

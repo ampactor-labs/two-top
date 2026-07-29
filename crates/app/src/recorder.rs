@@ -120,12 +120,17 @@ pub fn capture_tick_inputs(
 fn header_names(
     netplay: &crate::netplay::NetplayConfig,
     practice: bool,
+    shade: Option<&str>,
     local: Option<usize>,
     profile: &crate::profile::LocalProfile,
     peer: &net::PeerProfile,
 ) -> [Option<String>; 2] {
     if practice {
-        return [Some(profile.name_string()), Some("BOT".to_string())];
+        let far = match shade {
+            Some(name) => format!("{name} SHADE"),
+            None => "BOT".to_string(),
+        };
+        return [Some(profile.name_string()), Some(far)];
     }
     if netplay.room_url.is_none() {
         return [None, None];
@@ -151,6 +156,7 @@ fn save_replay_on_match_over(
     local: Res<crate::netplay::LocalPlayerHandle>,
     profile: Res<crate::profile::LocalProfile>,
     peer: Res<net::PeerProfile>,
+    shade: Res<crate::bot::ShadeStyle>,
     mut record: ResMut<crate::grudge::CareerRecord>,
     mut rec: ResMut<MatchRecorder>,
     mut last_saved: ResMut<LastSavedReplay>,
@@ -189,7 +195,14 @@ fn save_replay_on_match_over(
                     frame_count: rec.frames.len() as u32,
                     recorded_at,
                     winner: Some(winner),
-                    player_handles: header_names(&netplay, practice.0, local.0, &profile, &peer),
+                    player_handles: header_names(
+                        &netplay,
+                        practice.0,
+                        shade.0.as_ref().map(|s| s.name.as_str()),
+                        local.0,
+                        &profile,
+                        &peer,
+                    ),
                     arena_id: selected.0.as_u8(),
                 },
                 inputs: rec.frames.clone(),

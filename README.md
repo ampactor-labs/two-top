@@ -63,7 +63,7 @@ A determinism-first systems project that happens to be a game.
   per-component checksums for byte-for-byte identity. A nightly fuzz soak
   replays randomized matches across all seven arenas, because the walk-only
   golden checksum structurally cannot catch a boomerang-clash desync.
-- Thirteen crates, 563 tests, clippy-clean under `-D warnings`, a pinned
+- Thirteen crates, 568 tests, clippy-clean under `-D warnings`, a pinned
   toolchain, and a committed `Cargo.lock` enforced with `--locked`.
   Replays are strictly version-matched with no migration path, so any
   change that touches the simulation bumps `sim_version` (currently 14).

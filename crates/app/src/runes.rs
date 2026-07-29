@@ -230,14 +230,22 @@ fn sync_demon_mints(
     mut minted: ResMut<MintedSheets>,
     profile: Res<crate::profile::LocalProfile>,
     peer: Res<net::PeerProfile>,
+    shade: Res<crate::bot::ShadeStyle>,
     local: Res<crate::netplay::LocalPlayerHandle>,
     theater: Res<crate::theater::TheaterMode>,
     mut players: Query<(Entity, &Player, &mut Sprite, Option<&WornMint>)>,
 ) {
     let mine = my_rune(profile.install_id);
     let my_shade_ = my_shade(profile.install_id);
-    let peer_rune = peer.0.map(|p| my_rune(p.install_id));
-    let peer_shade = peer.0.map(|p| my_shade(p.install_id));
+    // While sparring a shade, the far seat is minted from the RIVAL's
+    // identity — the ghost wears their rune and their shadow.
+    let far_identity = shade
+        .0
+        .as_ref()
+        .map(|s| s.install_id)
+        .or(peer.0.map(|p| p.install_id));
+    let peer_rune = far_identity.map(my_rune);
+    let peer_shade = far_identity.map(my_shade);
     let local_handle = local.0.unwrap_or(0);
     let theater_names = theater.active().then(|| theater.header_names());
     for (entity, player, mut sprite, worn) in &mut players {

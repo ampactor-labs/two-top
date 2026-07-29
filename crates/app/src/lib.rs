@@ -47,6 +47,7 @@ mod room_code;
 mod runes;
 mod screen;
 mod settings;
+mod shade;
 mod share;
 mod theater;
 mod touch_controls;
