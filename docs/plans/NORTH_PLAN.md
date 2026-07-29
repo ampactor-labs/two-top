@@ -253,14 +253,23 @@ a PLAYBOOK rung variant). Desktop `--room` flows unchanged. Full gate green.
 ## Findings ledger (added during execution)
 
 - **Width-portable fingerprints (found by the N3 browser lane's first
-  run).** `Hasher::write_usize` emits 4 bytes on wasm32 and 8 on the
-  64-bit natives, and std's derived `Hash` writes enum discriminants as
-  `isize` — so any checksum stream containing a `usize` field or any
-  enum diverges between widths while the state underneath is identical.
-  `replay_sync::PortableHasher` fixes the lane. The same class lives in
-  bevy_ggrs's own online desync-detection hashing: before browser-vs-
-  phone duels are supported, that path needs the same width audit (and
-  sim's twelve `usize` component fields are the tell to look for).
+  run; audit completed 2026-07-29).** `Hasher::write_usize` emits 4
+  bytes on wasm32 and 8 on the 64-bit natives, and std's derived `Hash`
+  writes enum discriminants as `isize` — so any checksum stream
+  containing a `usize` field or any enum diverges between widths while
+  the state underneath is identical. `net::PortableHasher` (promoted
+  from replay_sync) fixes the fingerprint lane. The audit's live half:
+  SimPlugin's checksum block (`checksum_component_with_hash`, sim
+  lib.rs ~3359) feeds derived `Hash` straight into SeaHasher — correct
+  for today's same-width peers and for SyncTest, but a browser-vs-phone
+  duel would false-desync on every enum and handle. The fix is swapping
+  those registrations to width-stable hash fns INSIDE SimPlugin
+  (SyncTest builds without the app crate, so they cannot move out);
+  that is a deliberate sim-crate edit reserved for the browser-netplay
+  work, not smuggled into a sim-neutral program. A first attempt to
+  duplicate the registrations app-side panicked at boot — bevy_ggrs
+  refuses a second ChecksumPlugin per type — which is how the audit
+  found the block the original grep had truncated away.
 
 ## Cross-cutting rules
 

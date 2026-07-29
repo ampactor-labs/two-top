@@ -14,7 +14,6 @@
 
 use bevy::prelude::*;
 use bevy_ggrs::GgrsPlugin;
-use bevy_ggrs::prelude::*;
 use fixed_math::Fix;
 use input_touch::{CursorPosition, InputTouchPlugin, WindowSize, update_touch_state};
 use render::{EffectsPlugin, RenderSyncPlugin};
@@ -155,24 +154,6 @@ pub fn run() {
         })
         .add_plugins(GgrsPlugin::<GgrsCfg>::default())
         .add_plugins(SimPlugin)
-        // Real desync detection (NORTH findings ledger): ggrs has been
-        // exchanging checksums every 30 frames since Phase 12, but with no
-        // checksum components registered both peers always sent the same
-        // trivial value — the detector could never fire. Register the
-        // fingerprint set replay_sync already columns, hashed through
-        // net's width-portable hasher so a future browser peer compares
-        // like with like against a phone. Registration lives here, not in
-        // SimPlugin: it is online bookkeeping, and the sim crate stays
-        // untouched.
-        .checksum_component::<PositionF>(net::portable_hash64)
-        .checksum_component::<VelocityF>(net::portable_hash64)
-        .checksum_component::<sim::DashState>(net::portable_hash64)
-        .checksum_component::<sim::StunFrames>(net::portable_hash64)
-        .checksum_component::<Boomerang>(net::portable_hash64)
-        .checksum_component::<sim::BoomerangState>(net::portable_hash64)
-        .checksum_resource::<sim::MatchScore>(net::portable_hash64)
-        .checksum_resource::<sim::MatchState>(net::portable_hash64)
-        .checksum_resource::<sim::SimRng>(net::portable_hash64)
         // Arena selection lives in `arena_select`: the persisted pick (or
         // TWOTOP_ARENA for automation) restores at Startup over SimPlugin's
         // Anchor default, and the roster screen owns changes from there.
