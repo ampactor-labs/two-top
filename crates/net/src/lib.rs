@@ -276,6 +276,79 @@ impl ProfileData2 {
     }
 }
 
+/// A hasher wrapper that makes fingerprints width-portable: every
+/// fixed-width write forwards untouched, while `usize`/`isize` — which
+/// std's derived `Hash` uses for enum discriminants, slice length
+/// prefixes, and handle fields — widen to 64-bit. `Hasher::write_usize`
+/// emits 4 bytes on wasm32 and 8 on the 64-bit natives, which skewed
+/// every enum-bearing column of the browser determinism lane's first
+/// run from frame 0. On 64-bit targets the widening writes the bytes
+/// `usize` already wrote, so native fingerprints are unchanged — the
+/// committed golden proved that before the browser did. Used by
+/// `replay_sync`'s fingerprint columns and by the app's online desync
+/// checksums, so a future browser-vs-phone duel compares like with like.
+pub struct PortableHasher<H: core::hash::Hasher>(pub H);
+
+impl<H: core::hash::Hasher> core::hash::Hasher for PortableHasher<H> {
+    fn finish(&self) -> u64 {
+        self.0.finish()
+    }
+    fn write(&mut self, bytes: &[u8]) {
+        self.0.write(bytes)
+    }
+    fn write_u8(&mut self, i: u8) {
+        self.0.write_u8(i)
+    }
+    fn write_u16(&mut self, i: u16) {
+        self.0.write_u16(i)
+    }
+    fn write_u32(&mut self, i: u32) {
+        self.0.write_u32(i)
+    }
+    fn write_u64(&mut self, i: u64) {
+        self.0.write_u64(i)
+    }
+    fn write_u128(&mut self, i: u128) {
+        self.0.write_u128(i)
+    }
+    fn write_i8(&mut self, i: i8) {
+        self.0.write_i8(i)
+    }
+    fn write_i16(&mut self, i: i16) {
+        self.0.write_i16(i)
+    }
+    fn write_i32(&mut self, i: i32) {
+        self.0.write_i32(i)
+    }
+    fn write_i64(&mut self, i: i64) {
+        self.0.write_i64(i)
+    }
+    fn write_i128(&mut self, i: i128) {
+        self.0.write_i128(i)
+    }
+    fn write_usize(&mut self, i: usize) {
+        self.0.write_u64(i as u64)
+    }
+    fn write_isize(&mut self, i: isize) {
+        self.0.write_i64(i as i64)
+    }
+}
+
+/// A fresh width-portable SeaHasher — the same hasher family
+/// `bevy_ggrs::checksum_hasher` hands out, wrapped.
+pub fn portable_checksum_hasher() -> PortableHasher<seahash::SeaHasher> {
+    PortableHasher(seahash::SeaHasher::new())
+}
+
+/// One-shot width-portable hash of any `Hash` value. The `fn`-pointer
+/// shape bevy_ggrs's `checksum_component`/`checksum_resource` want.
+pub fn portable_hash64<T: core::hash::Hash>(value: &T) -> u64 {
+    use core::hash::Hasher as _;
+    let mut h = portable_checksum_hasher();
+    value.hash(&mut h);
+    h.finish()
+}
+
 pub const STATEMENT_MAGIC: [u8; 4] = *b"2TRS";
 pub const STATEMENT_VERSION: u16 = 1;
 

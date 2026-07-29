@@ -28,19 +28,20 @@
     const boot = document.getElementById("boot");
     const say = (t) => { boot.textContent = t; };
 
+    let notice = "";
     async function watchTape() {
       const m = location.hash.match(/^#watch=([0-9a-f]{12})$/);
       if (!m) return undefined;
       if (!DROP_URL || DROP_URL.startsWith("__")) {
-        say("this build has no tape drop configured");
+        notice = "this build has no tape drop configured";
         return undefined;
       }
       say("FETCHING THE TAPE…");
       const res = await fetch(`${DROP_URL.replace(/\/$/, "")}/tape/${m[1]}`);
       if (!res.ok) {
-        say(res.status === 404
+        notice = res.status === 404
           ? "that tape has expired from the drop - ask for a fresh link"
-          : `tape drop answered ${res.status}`);
+          : `tape drop answered ${res.status}`;
         return undefined;
       }
       return new Uint8Array(await res.arrayBuffer());
@@ -50,7 +51,17 @@
       const tape = await watchTape();
       const { default: init, web_start } = await import("./app.js");
       await init();
-      boot.remove();
+      if (notice) {
+        // The tape failed but the game still boots: the notice stays up
+        // long enough to be read instead of dying with the boot screen
+        // (the first cut removed it in the same tick it appeared).
+        say(notice);
+        boot.style.alignItems = "flex-start";
+        boot.style.paddingTop = "1.2em";
+        setTimeout(() => boot.remove(), 8000);
+      } else {
+        boot.remove();
+      }
       web_start(tape);
     } catch (e) {
       // A bevy wasm app "exits" its main via an exception on purpose

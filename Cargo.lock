@@ -4392,6 +4392,7 @@ dependencies = [
  "ggrs",
  "matchbox_socket",
  "postcard",
+ "seahash",
  "serde",
  "sim",
  "tracing",
