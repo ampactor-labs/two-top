@@ -382,7 +382,7 @@ fn finish_ice_fetch(world: &mut World) {
         match pending
             .rx
             .lock()
-            .expect("fetch thread never panics holding it")
+            .expect("only this system ever locks the receiver")
             .try_recv()
         {
             Ok(result) => Some(result),

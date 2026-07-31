@@ -9,7 +9,6 @@ use bevy::prelude::*;
 use bevy::time::TimeUpdateStrategy;
 use bevy_ggrs::GgrsPlugin;
 use bevy_ggrs::prelude::*;
-use core::time::Duration;
 use fixed_math::Vec2F;
 use sim::{
     Boomerang, BoomerangState, CatchStreak, Dead, DefaultInputsPlugin, GgrsCfg, Player,
@@ -29,9 +28,7 @@ fn build_two_player_app_cd(check_distance: usize) -> App {
 
     let mut app = App::new();
     app.add_plugins(MinimalPlugins);
-    app.insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_secs_f64(
-        1.0 / sim::TICK_HZ as f64,
-    )));
+    app.insert_resource(TimeUpdateStrategy::ManualDuration(sim::tick_duration()));
     app.add_plugins(GgrsPlugin::<GgrsCfg>::default());
     app.add_plugins(SimPlugin);
     app.add_plugins(sim::InfiniteRoundPlugin);

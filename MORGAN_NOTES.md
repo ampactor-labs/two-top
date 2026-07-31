@@ -97,6 +97,14 @@ The fix mirrors bevy_ggrs's own reset condition (no session on this tick, zero t
 
 Upstream should reset the clock where it resets the counter. Worth a PR against `bevy_ggrs` if this survives contact.
 
+## Why a desync in practice mode crashes on purpose
+
+`SimPlugin` installs an observer that hard-panics on `SyncTestMismatch`, and the app runs practice and couch matches through a real SyncTest session with `check_distance: 2`. Together those mean any rollback nondeterminism in the sim aborts the player's process mid-match. That is a decision, not an oversight. The best reconstruction of the early on-device crashes ("it died when I dash-killed the bot", "it died when I released a charge") is exactly this observer firing on the two fixed-point order bugs the 500-seed soak later caught: mismatches surface within `check_distance` frames of the divergent tick, and the divergent ticks are where entity churn concentrates, throws and kills.
+
+A silent desync would be worse. The crash names its frame in `crash.log`; the desync corrupts every downstream artifact — the tape, the attestation, the ledger — while looking like a normal match. And `check_distance: 2` in the shipping app means every practice match on every phone re-verifies determinism for free.
+
+The bill: if a nondeterminism bug ever ships again, a player gets a crash instead of a weird round. Acceptable while the fleet is two phones and every crash is a report I can read. The revisit gate is public release; at that point the humane version is to fence the observer to harness builds and have the app end the match as a forfeit with the tape flagged. Until then, fail loud.
+
 ## Why a configurable deadzone is determinism-safe
 
 `Settings.stick_deadzone` is player-local and persisted to disk, which normally screams desync risk — per-machine state feeding the sim is exactly how rollback games break. It's safe here because it acts strictly *pre-wire*: it shapes the analog stick magnitude *before* quantization into the 4-byte `PlayerInput`. Two peers with different deadzones still exchange byte-identical quantized wire inputs and resimulate identically; the deadzone only changes how each player's raw touch maps into those bytes, exactly like controller sensitivity. The rule it illustrates: anything *before* wire-quantization may be local and non-deterministic; anything *consuming* the wire input must be identical everywhere. `StickDeadzone` (in `input_touch`) is read by the touch sampler before it emits `PlayerInput`, and `Settings` just mirrors the persisted value into it. (The volume, music, and haptics settings are cosmetic — they never touch the sim at all.)

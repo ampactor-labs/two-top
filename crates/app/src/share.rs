@@ -296,7 +296,7 @@ fn drive_share(
         ShareState::Posting { rx } => {
             let outcome = rx
                 .get_mut()
-                .expect("share task never panics holding it")
+                .expect("only this system ever locks the receiver")
                 .try_recv();
             match outcome {
                 Ok(Ok(url)) => {

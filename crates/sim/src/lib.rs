@@ -53,6 +53,16 @@ pub type GgrsCfg = GgrsConfig<PlayerInput, NetAddr>;
 pub const TICK_HZ: usize = 60;
 pub const TICK_DT: Fix = Fix::lit("0.01666666666");
 
+/// One sim tick as a wall-clock `Duration` (1/[`TICK_HZ`]) — what test
+/// harnesses feed `TimeUpdateStrategy::ManualDuration` so one
+/// `app.update()` advances exactly one tick. Bevy's clock API is
+/// float-typed; the conversion is fenced here (the same fence as
+/// [`LastSimTickTime`]) so harnesses stay float-free.
+#[allow(clippy::disallowed_types)]
+pub fn tick_duration() -> core::time::Duration {
+    core::time::Duration::from_secs_f64(1.0 / TICK_HZ as f64)
+}
+
 /// Strict-match version stamped on `.bmrg` replays. `1` was the
 /// `v1.0.0-rc1` release (Milestone 6); pre-release `main` carried the
 /// `u32::MAX` dev sentinel. Bumped to `2` for the boomerang-feel pass:
@@ -407,7 +417,7 @@ impl Default for ThrowCapacity {
     }
 }
 
-/// Frames of THROW-hold to reach full charge (max speed + reach). 45 ≈ 0.75 s:
+/// Frames of THROW-hold to reach full charge (max speed + reach). 34 ≈ 0.57 s:
 /// chargeable under pressure without feeling sluggish. A release before this
 /// throws proportionally weaker (never a dud — even an instant tap lobs).
 pub const CHARGE_MAX_FRAMES: u32 = 34;
@@ -430,10 +440,10 @@ pub const LOOSE_REST_SPEED_CM: i32 = 4;
 pub const BOOMERANG_MAX_THROW_DISTANCE_CM: i32 = 1000;
 
 /// Full-charge throw speed in cm/tick — the fastest a fang launches (at max
-/// [`ThrowCharge`]). Lowered to 24 (2026-06-30 charge pass) so the whole game
-/// runs slower/floatier and the DASH gains value by contrast. A partial charge
-/// scales this down toward `THROW_SPEED × MIN_THROW_POWER_FRAC` (see
-/// [`aimed_throw_speed`]). 24 × 60 = 1440 cm/sec at full draw.
+/// [`ThrowCharge`]). Kept under the dash impulse (42) so the DASH holds its
+/// value by contrast. A partial charge scales this down toward
+/// `THROW_SPEED × MIN_THROW_POWER_FRAC` (see [`aimed_throw_speed`]).
+/// 32 × 60 = 1920 cm/sec at full draw.
 pub const THROW_SPEED_CM_PER_TICK: i32 = 32;
 
 /// Floor of the charge→speed ramp: a zero-charge (instant tap) throw launches
@@ -480,15 +490,14 @@ pub fn charged_reach(power: Fix) -> Fix {
 /// chunky thrown weapon without making it cheese-easy to hit with.
 pub const BOOMERANG_HALF_EXTENT_CM: i32 = 13;
 
-/// Recall speed in cm/tick. A touch faster than `THROW_SPEED` so the
-/// boomerang catches up to a player who's moved forward since the
+/// Recall speed in cm/tick. A touch faster than `THROW_SPEED` (37 vs 32) so
+/// the boomerang catches up to a player who's moved forward since the
 /// throw — recall reads as "reeling in" rather than "drifting back".
-/// A touch above the full-charge throw speed (26 vs 24) so recall still reels in.
 pub const RECALL_SPEED_CM_PER_TICK: i32 = 37;
 
 /// Distance from the world origin at which a boomerang is despawned.
 /// Generously outside the arena (1000 cm half-extent of the visible
-/// space; 4000 gives ~3 s of straight flight before despawn at
+/// space; 4000 gives ~2 s of straight flight before despawn at
 /// THROW_SPEED). Cycle 2's wall ricochet should keep boomerangs
 /// bounded inside the arena under normal play; this radius is just a
 /// safety net so a stuck-velocity boomerang can't run out the
@@ -662,13 +671,13 @@ pub const DASH_COOLDOWN_FRAMES: u32 = 20;
 /// commits you in place, but "throw then dash" is a natural combo), at
 /// cooldown's end, or when the stick finds a direction a beat after the
 /// press. 7 ticks ≈ 117 ms at 60 Hz, inside the 100–150 ms feel-standard
-/// band, and far below `DASH_DURATION_FRAMES + DASH_COOLDOWN_FRAMES` (30),
+/// band, and far below `DASH_DURATION_FRAMES + DASH_COOLDOWN_FRAMES` (25),
 /// so one press can never fire two dashes. Also the widest window the
 /// 8-slot input ring can answer (`INPUT_HISTORY_LEN - 1`).
 pub const DASH_BUFFER_TICKS: usize = 7;
-/// Dash impulse speed in cm/tick. ~2.3× walk speed: makes dash feel
+/// Dash impulse speed in cm/tick. ~3.8× walk speed: makes dash feel
 /// distinctly impulsive without crossing more than a fifth of the
-/// arena per dash (10 ticks × 30 cm = 300 cm of travel; arena width is
+/// arena per dash (5 ticks × 42 cm = 210 cm of travel; arena width is
 /// 1000 cm).
 pub const DASH_SPEED_CM_PER_TICK: i32 = 42;
 /// Minimum stick magnitude required to start a dash. Without this, a
@@ -1097,6 +1106,11 @@ impl MatchState {
 /// so it captures the moment the most recent tick (rolled-back or not)
 /// finished advancing. Not itself rolled back — purely a render-side
 /// timestamp.
+///
+/// The one sanctioned float in this crate (CONVENTIONS § sim purity): it
+/// never feeds sim math, is never registered for rollback or checksums, and
+/// exists here only because its writer must run in a sim schedule.
+#[allow(clippy::disallowed_types)]
 #[derive(Resource, Default)]
 pub struct LastSimTickTime(pub f64);
 
@@ -1192,12 +1206,10 @@ pub fn read_local_inputs(
 }
 
 /// Walk speed in cm/tick. Sized so the arena's longest dimension
-/// (2 * ARENA_HALF_HEIGHT_CM = 1500 cm) crosses in about 2 seconds at
-/// 60 Hz: 1500 cm / (13 cm/tick * 60 tick/s) ~= 1.92 s.
-///
-/// Walk speed in cm/tick. Brought down to 8 (2026-06-30 charge pass) so the
-/// DASH (30 cm/tick, unchanged) reads as a big, valuable burst by contrast —
-/// ~3.75× walk. Slower, more deliberate spacing pairs with the charged fang.
+/// (2 * ARENA_HALF_HEIGHT_CM = 1500 cm) crosses in about 2.3 seconds at
+/// 60 Hz: 1500 cm / (11 cm/tick * 60 tick/s) ~= 2.27 s — deliberate spacing
+/// that pairs with the charged fang, while the DASH (42 cm/tick, ~3.8×)
+/// reads as a big, valuable burst by contrast.
 pub const WALK_SPEED_CM_PER_TICK: i32 = 11;
 
 /// Decode the wire-format stick into a Fix-space vector with

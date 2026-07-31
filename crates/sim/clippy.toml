@@ -1,0 +1,7 @@
+disallowed-types = [
+    { path = "f32", reason = "no floats in sim (CONVENTIONS #1); use `Fix`/`Vec2F` from fixed_math. The only exception is the `LastSimTickTime` wall-clock timestamp, annotated with `#[allow(clippy::disallowed_types)]`." },
+    { path = "f64", reason = "no floats in sim (CONVENTIONS #1); use `Fix`/`Vec2F` from fixed_math. The only exception is the `LastSimTickTime` wall-clock timestamp, annotated with `#[allow(clippy::disallowed_types)]`." },
+    { path = "std::collections::HashMap", reason = "random hasher state is non-portable (CONVENTIONS #6); use BTreeMap or Vec<(K,V)>." },
+    { path = "std::collections::HashSet", reason = "random hasher state is non-portable (CONVENTIONS #6); use BTreeSet." },
+    { path = "std::hash::DefaultHasher", reason = "not portable across platforms (CONVENTIONS #7); use bevy_ggrs::checksum_hasher." },
+]

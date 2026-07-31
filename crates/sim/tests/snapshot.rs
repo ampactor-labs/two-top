@@ -11,8 +11,6 @@
 //! pattern used by every other sim integration test (e.g. dash.rs,
 //! match_state.rs).
 
-use core::time::Duration;
-
 use bevy::prelude::*;
 use bevy::time::TimeUpdateStrategy;
 use bevy_ggrs::GgrsPlugin;
@@ -40,9 +38,7 @@ fn seed_app() -> App {
 
     let mut app = App::new();
     app.add_plugins(MinimalPlugins);
-    app.insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_secs_f64(
-        1.0 / sim::TICK_HZ as f64,
-    )));
+    app.insert_resource(TimeUpdateStrategy::ManualDuration(sim::tick_duration()));
     app.add_plugins(GgrsPlugin::<GgrsCfg>::default());
     app.add_plugins(SimPlugin);
     app.insert_resource(Session::SyncTest(session));

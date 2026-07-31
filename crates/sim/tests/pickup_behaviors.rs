@@ -3,8 +3,6 @@
 //! Heavy plow, Bouncy acceleration, Curve bend). Multishot + Fire-trail land
 //! in their own cycles.
 
-use core::time::Duration;
-
 use bevy::ecs::system::RunSystemOnce;
 use bevy::prelude::*;
 use bevy::time::TimeUpdateStrategy;
@@ -32,9 +30,7 @@ fn bare_app() -> App {
     let session = sb.start_synctest_session().unwrap();
     let mut app = App::new();
     app.add_plugins(MinimalPlugins);
-    app.insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_secs_f64(
-        1.0 / sim::TICK_HZ as f64,
-    )));
+    app.insert_resource(TimeUpdateStrategy::ManualDuration(sim::tick_duration()));
     app.add_plugins(GgrsPlugin::<GgrsCfg>::default());
     app.add_plugins(SimPlugin);
     app.insert_resource(Session::SyncTest(session));
@@ -216,9 +212,7 @@ fn full_app() -> (App, Entity) {
 
     let mut app = App::new();
     app.add_plugins(MinimalPlugins);
-    app.insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_secs_f64(
-        1.0 / sim::TICK_HZ as f64,
-    )));
+    app.insert_resource(TimeUpdateStrategy::ManualDuration(sim::tick_duration()));
     app.add_plugins(GgrsPlugin::<GgrsCfg>::default());
     app.add_plugins(SimPlugin);
     app.add_plugins(InfiniteRoundPlugin);

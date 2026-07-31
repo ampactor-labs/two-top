@@ -4,7 +4,7 @@ Hard rules. Violations cause subtle bugs that are expensive to find. The CI and 
 
 ## Determinism Invariants
 
-- **No `f32` or `f64` in the `sim` crate.** Period. Use `Fix` and `Vec2F` from `fixed_math`. The only exception is `Vec2F::to_f32` for explicit sim→render conversion, called only in render systems.
+- **No `f32` or `f64` in the `sim` crate.** Period. Use `Fix` and `Vec2F` from `fixed_math`. Three sanctioned exceptions, each `#[allow]`-fenced with a written reason: `Vec2F::to_f32` for explicit sim→render conversion (called only in render systems), `sim::LastSimTickTime` (a wall-clock timestamp for render interpolation — never rolled back, never checksummed, never read by sim logic), and `sim::tick_duration()` (the float-typed Bevy clock config for test harnesses). `crates/sim/clippy.toml` and `crates/fixed_math/clippy.toml` enforce the ban at lint time; a new exception needs its own fence and reason.
 - **No `bevy::transform`, `bevy::render`, or `glam` imports in the `sim` crate.**
 - **No `Instant::now()`, `SystemTime`, or `Time<Real>` inside `GgrsSchedule`.** Use `FrameCount` resource or `Time<GgrsTime>`.
 - **No `HashMap` or `HashSet` in sim code.** Use `BTreeMap`, `BTreeSet`, or `Vec<(K,V)>`. If you absolutely must use `HashMap`, configure with `ahash::AHasher` seeded with a constant.
