@@ -13,6 +13,8 @@ produce bit-identical state on every platform, because two phones on
 opposite ends of a connection either agree exactly or the match desyncs.
 That one constraint shapes the whole codebase.
 
+**Status: shipping.** The gameplay loop, netplay, seven arenas, signed results, replays, and the CI/APK/Pages pipelines are built and green. The two-phone cross-carrier field test has not been run.
+
 Android is the product platform today, and the same build runs in a
 browser (wasm32 + WebGL2, deployed to Pages); iOS is on the roadmap. The
 desktop build is a dev tool: couch versus on one keyboard, plus the
@@ -154,3 +156,9 @@ scripts/phone.sh
 # Replay viewer (desktop; phones use the built-in REPLAYS screen):
 cargo run -p replay_viewer -- tests/demos/canonical/match_v1.bmrg
 ```
+
+## Weak spots
+
+The relay path is verified server-side but has never been played on two phones on different carriers. Until that parking-lot test happens, cross-carrier NAT traversal is a deployment that looks correct rather than a match that worked.
+
+Determinism is proven across four lanes; wasm32 is the fifth and is not yet in the matrix, so browser netplay is unverified. Desktop packaging does not exist.
