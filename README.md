@@ -157,6 +157,18 @@ scripts/phone.sh
 cargo run -p replay_viewer -- tests/demos/canonical/match_v1.bmrg
 ```
 
+## Verification
+
+Determinism is the whole product, so it is the thing CI proves rather than the thing the README asserts. Six workflows run against this repo:
+
+- **Determinism** replays the canonical demo on four targets, `x86_64-unknown-linux-gnu`, `aarch64-unknown-linux-gnu`, `aarch64-apple-darwin`, and `aarch64-linux-android`, and diffs per-frame checksums. A single divergent frame fails the run.
+- **Wasm Determinism** adds a fifth lane, recomputing the same checksums inside headless Chrome.
+- **Fuzz Soak** drives `replay_sync` over batches of seeded random inputs looking for a desync no hand-written test would find.
+- **CI** runs `cargo nextest run --workspace --locked` and clippy with `-D warnings`.
+- **APK** and **Web** build the shipping artifacts, so a broken release fails before a human notices.
+
+570 `#[test]` functions back that up, and the simulation is Q16.16 fixed-point with no floats, because float behavior varies across the exact architectures that matrix covers.
+
 ## Weak spots
 
 The relay path is verified server-side but has never been played on two phones on different carriers. Until that parking-lot test happens, cross-carrier NAT traversal is a deployment that looks correct rather than a match that worked.
