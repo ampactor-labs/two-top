@@ -4,8 +4,9 @@ name: Audit
 # everywhere) because toolchain and dependency drift are determinism risks
 # (MORGAN_NOTES, CONVENTIONS). Pins need a complement: nothing would notice
 # a RUSTSEC advisory against `fixed`, `cordic` (frozen upstream), `tiny_http`,
-# or `ureq`. This job is that complement — weekly, and it files an issue
-# instead of failing PRs, so pins move on evidence instead of noise.
+# or `ureq`. This job is that complement — weekly, and scheduled-only, so an
+# advisory mails the owner instead of blocking a PR: pins move on evidence
+# instead of noise.
 
 on:
   schedule:
@@ -14,7 +15,6 @@ on:
 
 permissions:
   contents: read
-  issues: write
 
 jobs:
   audit:
@@ -22,8 +22,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
-      # On scheduled runs this action files an issue per advisory instead
-      # of failing a build; it installs cargo-audit itself.
-      - uses: rustsec/audit-check@v2
+      # Prebuilt binary, not `cargo install`: building cargo-audit from
+      # source drags in deps whose MSRV outruns the pinned 1.95 toolchain,
+      # which is what broke this job every Monday from 2026-08-03.
+      - uses: taiki-e/install-action@v2
         with:
-          token: ${{ secrets.GITHUB_TOKEN }}
+          tool: cargo-audit
+      - name: Run cargo audit
+        run: cargo audit
