@@ -73,6 +73,7 @@ fn sign_decided_match(
     profile: Res<crate::profile::LocalProfile>,
     peer: Res<PeerProfile>,
     peer_keys: Res<PeerKeys>,
+    lobby: Res<net::LobbyState>,
     last_saved: Res<LastSavedReplay>,
     mut attest: ResMut<AttestState>,
     mut queue: ResMut<NetSendQueue>,
@@ -89,6 +90,12 @@ fn sign_decided_match(
         return;
     }
     if netplay.room_url.is_none() || practice.0 || theater.active() {
+        return;
+    }
+    if matches!(*lobby, net::LobbyState::Desynced { .. }) {
+        // A score this phone reached on its own is not a shared deciding
+        // moment either — and a divergent statement would only ever be
+        // REJECTED by the peer, desynchronizing `match_index` for good.
         return;
     }
     if score.p0 < MATCH_WIN_THRESHOLD && score.p1 < MATCH_WIN_THRESHOLD {
@@ -304,6 +311,7 @@ mod tests {
         app.insert_resource(profile);
         app.insert_resource(PeerProfile(Some(peer_profile)));
         app.insert_resource(PeerKeys(Some(net::pubkey_for(&their_key))));
+        app.init_resource::<net::LobbyState>(); // Idle: not desynced
         app.init_resource::<PeerSig>();
         app.init_resource::<NetSendQueue>();
         app.insert_resource(LastSavedReplay(None));

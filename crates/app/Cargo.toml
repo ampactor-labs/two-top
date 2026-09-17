@@ -175,7 +175,14 @@ uses_cleartext_traffic = true
 
 [package.metadata.android.application.activity]
 orientation = "portrait"
-config_changes = "orientation|keyboardHidden|screenSize"
+# Every config change we can absorb in-process. Anything NOT listed here
+# destroys and recreates the activity, which re-enters `android_main` in
+# the same process: the scheduled dark theme flipping at sunset (uiMode),
+# battery saver on several OEM skins (uiMode), a Display Size or font
+# change (density/fontScale), split-screen or a foldable unfolding
+# (smallestScreenSize/screenLayout). The renderer doesn't care about any
+# of them; `init_logging` survives a second call regardless.
+config_changes = "orientation|keyboardHidden|keyboard|screenSize|smallestScreenSize|screenLayout|density|uiMode|fontScale|layoutDirection|locale|navigation|touchscreen|mcc|mnc"
 launch_mode = "singleTask"
 exported = true
 

@@ -148,7 +148,12 @@ fn update_summoning(
                 Some(format!("{challenger} FLED\nthe field is yours"))
             }
         }
-        LobbyState::Idle | LobbyState::Connected { .. } => None,
+        LobbyState::SummonFailed => Some(
+            "COULDN'T REACH THE ROOM SERVER\n\ncheck this phone's connection,\nthen CANCEL and try again"
+                .to_string(),
+        ),
+        // A desync ends at MatchOver, where the summary card owns the screen.
+        LobbyState::Idle | LobbyState::Connected { .. } | LobbyState::Desynced { .. } => None,
     };
     match msg {
         Some(m) => {
@@ -222,6 +227,13 @@ fn update_overlay(
         LobbyState::Forfeited { peer_id } => {
             format!("lobby: FORFEIT (peer={})", &peer_id.0.to_string()[..8])
         }
+        LobbyState::Desynced { peer_id, frame } => {
+            format!(
+                "lobby: DESYNC at f{frame} (peer={})",
+                &peer_id.0.to_string()[..8]
+            )
+        }
+        LobbyState::SummonFailed => "lobby: summons FAILED (signaling lost)".to_string(),
     };
     text.0 = label;
 }

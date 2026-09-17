@@ -313,6 +313,12 @@ fn record_match_result(
     let Some(handle) = local.0 else {
         return;
     };
+    if matches!(*lobby, net::LobbyState::Desynced { .. }) {
+        // Two phones that stopped agreeing played two different matches;
+        // neither result is a fact the other phone shares. Record nothing.
+        tracing::warn!(target: "two_top::grudge", "match desynced — no result recorded");
+        return;
+    }
     let (ours, theirs) = if handle == 0 {
         (score.p0, score.p1)
     } else {
@@ -355,8 +361,51 @@ pub fn note_rival_tape(record: &mut CareerRecord, peer: net::ProfileData, filena
     save_career(record);
 }
 
+/// The last rung that changes the opponent. `bot.rs`'s three knobs
+/// saturate by difficulty 10 (`difficulty = tier + kills / 2`), so a
+/// tier-10 bot opens fully sharpened and every tier past it is the same
+/// duelist under a bigger number. The counter stops here and says so.
+pub const GAUNTLET_MAX_TIER: u32 = 10;
+
+/// The tier a win climbs to.
+pub fn next_tier_after_win(tier: u32) -> u32 {
+    (tier + 1).min(GAUNTLET_MAX_TIER)
+}
+
+/// The tier a loss (or a quit from a live match) falls to: two rungs under
+/// the best ever reached, never back to the passive dummy once it has been
+/// cleared. A loss at tier 8 used to mean a full five-kill match against
+/// something that cannot fight back before the ladder resumed; the dummy
+/// is worth exactly one visit.
+pub fn loss_tier(best: u32) -> u32 {
+    best.saturating_sub(2).max(1).min(best)
+}
+
+/// At the cap the label says so, instead of promising a next rung.
+pub fn gauntlet_mastered(tier: u32) -> bool {
+    tier >= GAUNTLET_MAX_TIER
+}
+
+/// Quitting a live gauntlet match is a loss, the same as quitting a live
+/// duel — the ladder's only downward pressure used to be choosing to sit
+/// through a loss. Called by the in-match QUIT path; a match still in its
+/// countdown, or a shade spar, stakes nothing and never reaches here.
+pub fn record_gauntlet_quit(record: &mut CareerRecord) {
+    if record.gauntlet_tier == 0 {
+        return;
+    }
+    record.gauntlet_tier = loss_tier(record.gauntlet_best);
+    tracing::info!(
+        target: "two_top::grudge",
+        tier = record.gauntlet_tier,
+        "gauntlet match quit — tier falls",
+    );
+    save_career(record);
+}
+
 /// The practice ladder: a decided bot match moves the gauntlet. Win → the
-/// tier climbs (and the best-ever remembers); lose → back to the bottom.
+/// tier climbs to the cap (and the best-ever remembers); lose → two rungs
+/// under the best, never back to the dummy.
 fn record_gauntlet_result(
     state: Res<MatchState>,
     score: Res<MatchScore>,
@@ -380,7 +429,7 @@ fn record_gauntlet_result(
     }
     // The human is always handle 0 in practice.
     if score.p0 >= MATCH_WIN_THRESHOLD {
-        record.gauntlet_tier += 1;
+        record.gauntlet_tier = next_tier_after_win(record.gauntlet_tier);
         record.gauntlet_best = record.gauntlet_best.max(record.gauntlet_tier);
         tracing::info!(
             target: "two_top::grudge",
@@ -389,7 +438,7 @@ fn record_gauntlet_result(
             "gauntlet tier climbed",
         );
     } else {
-        record.gauntlet_tier = 0;
+        record.gauntlet_tier = loss_tier(record.gauntlet_best);
     }
     save_career(&record);
 }
@@ -498,6 +547,39 @@ mod tests {
         assert_eq!(fresh.wins, 0);
         assert!(!dir.join("never_written.json.corrupt").exists());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_ladder_caps_where_the_bot_stops_changing() {
+        assert_eq!(next_tier_after_win(0), 1);
+        assert_eq!(next_tier_after_win(9), GAUNTLET_MAX_TIER);
+        assert_eq!(next_tier_after_win(GAUNTLET_MAX_TIER), GAUNTLET_MAX_TIER);
+        assert!(gauntlet_mastered(GAUNTLET_MAX_TIER));
+        assert!(!gauntlet_mastered(GAUNTLET_MAX_TIER - 1));
+    }
+
+    #[test]
+    fn a_loss_falls_two_rungs_and_never_back_to_the_dummy() {
+        assert_eq!(loss_tier(0), 0, "never cleared the dummy: it waits");
+        assert_eq!(loss_tier(1), 1);
+        assert_eq!(loss_tier(2), 1);
+        assert_eq!(loss_tier(3), 1);
+        assert_eq!(loss_tier(8), 6);
+        assert_eq!(loss_tier(GAUNTLET_MAX_TIER), 8);
+    }
+
+    #[test]
+    fn quitting_a_live_gauntlet_match_costs_the_same_as_losing_it() {
+        let mut record = CareerRecord {
+            gauntlet_tier: 7,
+            gauntlet_best: 7,
+            ..Default::default()
+        };
+        record_gauntlet_quit(&mut record);
+        assert_eq!(record.gauntlet_tier, loss_tier(7));
+        let mut fresh = CareerRecord::default();
+        record_gauntlet_quit(&mut fresh);
+        assert_eq!(fresh.gauntlet_tier, 0, "tier 0 has nothing to lose");
     }
 
     #[test]

@@ -840,6 +840,16 @@ pub enum LobbyState {
     /// is over; the next `tick_match_state` round will read
     /// `MatchScore` and crown the surviving peer.
     Forfeited { peer_id: PeerId },
+    /// The two sims stopped agreeing (ggrs `DesyncDetected` at `frame`).
+    /// Terminal like `Forfeited`, but nothing about this match is a
+    /// shared fact any more: the app records no result, signs nothing,
+    /// writes no tape, and refuses a rematch on the corrupt session.
+    Desynced { peer_id: PeerId, frame: u32 },
+    /// The signaling socket died before a peer was paired (a phone with
+    /// no network, ~6 s after FIND OPPONENT). Nothing to recover: the
+    /// player is told, and CANCEL / PLAY THE BOT are the exits. Replaces
+    /// a fall-back to `Idle`, which rendered nothing at all.
+    SummonFailed,
 }
 
 impl LobbyState {
@@ -860,6 +870,17 @@ impl LobbyState {
         matches!(
             self,
             LobbyState::Connected { .. } | LobbyState::Disconnected { .. }
+        )
+    }
+
+    /// True iff the match ended without the sim deciding it — a forfeit
+    /// or a desync. The app drops the ggrs `Session` on these so the
+    /// out-of-band `MatchOver` write cannot be rolled back
+    /// (`netplay::freeze_terminal_session`).
+    pub fn is_terminal(&self) -> bool {
+        matches!(
+            self,
+            LobbyState::Forfeited { .. } | LobbyState::Desynced { .. }
         )
     }
 }
@@ -1310,6 +1331,40 @@ mod tests {
             .is_in_match()
         );
         assert!(!LobbyState::Forfeited { peer_id: peer }.is_in_match());
+        assert!(
+            !LobbyState::Desynced {
+                peer_id: peer,
+                frame: 7
+            }
+            .is_in_match()
+        );
+        assert!(!LobbyState::SummonFailed.is_in_match());
+    }
+
+    #[test]
+    fn terminal_is_forfeit_or_desync_only() {
+        let peer = dummy_peer();
+        assert!(LobbyState::Forfeited { peer_id: peer }.is_terminal());
+        assert!(
+            LobbyState::Desynced {
+                peer_id: peer,
+                frame: 7
+            }
+            .is_terminal()
+        );
+        for s in [
+            LobbyState::Idle,
+            LobbyState::Connecting,
+            LobbyState::SummonFailed,
+            LobbyState::WaitingForPeer { our_id: peer },
+            LobbyState::Connected { peer_id: peer },
+            LobbyState::Disconnected {
+                peer_id: peer,
+                since_frame: 1,
+            },
+        ] {
+            assert!(!s.is_terminal(), "{s:?}");
+        }
     }
 
     #[test]

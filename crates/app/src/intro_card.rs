@@ -31,7 +31,9 @@ pub fn intro_lines(
     rivalry: Option<String>,
 ) -> (String, String) {
     if practice {
-        let stakes = if gauntlet_tier > 0 {
+        let stakes = if crate::grudge::gauntlet_mastered(gauntlet_tier) {
+            format!("GAUNTLET TIER {gauntlet_tier} - MASTERED")
+        } else if gauntlet_tier > 0 {
             format!("GAUNTLET TIER {gauntlet_tier}")
         } else {
             "SPARRING".to_string()

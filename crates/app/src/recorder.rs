@@ -173,6 +173,14 @@ fn save_replay_on_match_over(
     if rec.saved || rec.frames.is_empty() {
         return;
     }
+    if matches!(*lobby, net::LobbyState::Desynced { .. }) {
+        // Two phones that stopped agreeing recorded two different matches;
+        // a tape that re-simulates to one of them is not a record of
+        // anything both players saw. No tape, no share, no rival ring.
+        rec.saved = true;
+        tracing::warn!(target: "two_top::recorder", "match desynced — no tape written");
+        return;
+    }
     match rec.save_in {
         None => rec.save_in = Some(SAVE_DELAY_FRAMES),
         Some(0) => {

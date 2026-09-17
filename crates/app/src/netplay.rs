@@ -245,6 +245,8 @@ impl Plugin for MatchboxPlugin {
                     world.remove_resource::<PendingIce>();
                 },
             )
+            .add_systems(OnEnter(crate::screen::AppScreen::InMatch), reset_absence)
+            .add_systems(PostUpdate, freeze_terminal_session)
             .add_systems(
                 Update,
                 (
@@ -473,10 +475,12 @@ fn drive_netplay(world: &mut World) {
     // unreachable after matchbox's built-in retries), the plain call
     // unwraps the closed channel and ABORTS the app — a phone with no
     // network crashed ~6 s after tapping FIND OPPONENT. A dead socket
-    // reads as a refusal instead: drop the driver, park the lobby at
-    // Idle. The SUMMONING overlay's stall diagnosis has already told the
-    // player to check the connection; QUIT and PLAY THE BOT stay one tap
-    // away.
+    // reads as a refusal instead: drop the driver and park the lobby at
+    // `SummonFailed`, which the overlay renders. It used to park at
+    // `Idle`, the one state with no text at all — the summons vanished
+    // mid-breath and nothing replaced it, at ~6 s, well before the 15 s
+    // stall diagnosis this comment once claimed had already spoken.
+    // CANCEL and PLAY THE BOT stay one tap away.
     let polled = {
         let mut driver = world.non_send_resource_mut::<MatchboxDriver>();
         let our_id = driver.socket.id();
@@ -491,7 +495,7 @@ fn drive_netplay(world: &mut World) {
                 "signaling connection lost before pairing — abandoning the summons",
             );
             world.remove_non_send_resource::<MatchboxDriver>();
-            *world.resource_mut::<LobbyState>() = LobbyState::Idle;
+            *world.resource_mut::<LobbyState>() = LobbyState::SummonFailed;
             return;
         }
     };
@@ -608,9 +612,13 @@ fn perform_swap(world: &mut World, peer_id: PeerId) {
 /// mirroring `net::tick_disconnection_grace`'s forfeit handoff).
 fn drain_session_events(world: &mut World) {
     let mut forfeited_peer = None;
+    let mut desynced_at: Option<(sim::NetAddr, u32)> = None;
     let mut interruption_edge: Option<bool> = None;
     {
-        let mut session = world.resource_mut::<Session<GgrsCfg>>();
+        // Absent once a terminal lobby state froze it (`freeze_terminal_session`).
+        let Some(mut session) = world.get_resource_mut::<Session<GgrsCfg>>() else {
+            return;
+        };
         if let Session::P2P(s) = &mut *session {
             for event in s.events() {
                 match event {
@@ -652,6 +660,7 @@ fn drain_session_events(world: &mut World) {
                             ?addr,
                             "DESYNC DETECTED — local and remote state diverged",
                         );
+                        desynced_at = Some((addr, u32::try_from(frame).unwrap_or(0)));
                     }
                 }
             }
@@ -676,6 +685,43 @@ fn drain_session_events(world: &mut World) {
             peer_id: addr_to_peer(addr),
         };
         *world.resource_mut::<sim::MatchState>() = sim::MatchState::MatchOver;
+    }
+    if let Some((addr, frame)) = desynced_at {
+        // Terminal, like a forfeit — but nothing here is a shared fact any
+        // more. The summary says so; the ledger, the attestation and the
+        // recorder all skip a desynced match, and the rematch gate refuses
+        // to run it back on a corrupt session. Same out-of-band `MatchOver`
+        // as the forfeit; `freeze_terminal_session` is what makes it stick.
+        *world.resource_mut::<LobbyState>() = LobbyState::Desynced {
+            peer_id: addr_to_peer(addr),
+            frame,
+        };
+        *world.resource_mut::<sim::MatchState>() = sim::MatchState::MatchOver;
+    }
+}
+
+/// Once the lobby is terminal (forfeit, goodbye, desync), drop the ggrs
+/// `Session`. The paths that end such a match write
+/// `sim::MatchState::MatchOver` from outside `GgrsSchedule`, which
+/// CONVENTIONS forbids for a reason: on the goodbye path the session is
+/// still alive with the peer's trailing inputs in flight, and the next
+/// rollback restores the snapshot's `MatchState` — the summary vanishes,
+/// the match resumes against a frozen opponent, and the result is
+/// recorded twice when the disconnect timeout ends it again. No session,
+/// no rollback: the write stands. `PostUpdate`, so it lands in the same
+/// frame as the write, before the next `PreUpdate` can advance ggrs.
+/// bevy_ggrs tolerates the absence (the Title runs sessionless), and
+/// `leave_online_match` removing it again is a no-op.
+fn freeze_terminal_session(world: &mut World) {
+    if !world.resource::<LobbyState>().is_terminal() {
+        return;
+    }
+    if world.remove_resource::<Session<GgrsCfg>>().is_some() {
+        tracing::info!(
+            target: "two_top::net",
+            lobby = ?*world.resource::<LobbyState>(),
+            "terminal lobby state — ggrs session dropped so MatchOver cannot roll back",
+        );
     }
 }
 
@@ -788,25 +834,30 @@ impl RecentAbsence {
     }
 }
 
-/// A frozen frame this long means the OS held the process (or the window
-/// manager starved us) — either way, the peer watched us vanish.
-const ABSENCE_FREEZE_SECS: f32 = 2.0;
+/// Was a frozen frame long enough that the PEER's ggrs would have timed
+/// us out? That is the only freeze that can turn into a forfeit blamed on
+/// this phone, so it is the only one that counts as an absence. The first
+/// cut stamped one on any 2 s hitch — thermal throttling, a GC pause, an
+/// asset load — and on every `WindowFocused(false)`, which a pulled-down
+/// notification shade fires; either could convict this phone of walking
+/// out of a match the OPPONENT then abandoned.
+pub fn freeze_is_absence(delta_secs: f32) -> bool {
+    delta_secs >= DISCONNECT_TIMEOUT.as_secs_f32()
+}
 
-/// Track absences: window focus loss and main-loop freezes.
-pub fn track_absence(
-    time: Res<Time<Real>>,
-    mut focus_events: MessageReader<bevy::window::WindowFocused>,
-    mut absence: ResMut<RecentAbsence>,
-) {
-    let now = time.elapsed_secs();
-    if time.delta_secs() > ABSENCE_FREEZE_SECS {
-        absence.0 = Some(now);
+/// Track absences: main-loop freezes long enough to have forfeited us on
+/// the other phone. `Time<Real>`, not `Virtual` — the virtual clock clamps
+/// a resume-after-suspend to 250 ms and would never see one.
+pub fn track_absence(time: Res<Time<Real>>, mut absence: ResMut<RecentAbsence>) {
+    if freeze_is_absence(time.delta_secs()) {
+        absence.0 = Some(time.elapsed_secs());
     }
-    for ev in focus_events.read() {
-        if !ev.focused {
-            absence.0 = Some(now);
-        }
-    }
+}
+
+/// A fresh match starts with a clean slate: an absence taken on the Title
+/// screen must not convict a match decided nineteen seconds later.
+fn reset_absence(mut absence: ResMut<RecentAbsence>) {
+    absence.0 = None;
 }
 
 /// The ONLINE rematch gate (`ReadInputs`, after every input source): during
@@ -909,6 +960,7 @@ pub fn leave_online_match(world: &mut World) {
     *world.resource_mut::<RematchConsent>() = RematchConsent::default();
     world.resource_mut::<NetSendQueue>().0.clear();
     world.resource_mut::<LocalPlayerHandle>().0 = None;
+    world.resource_mut::<RecentAbsence>().0 = None;
     world.resource_mut::<render::PerspectiveFlip>().0 = 1.0;
     {
         use rand::SeedableRng as _;
@@ -921,6 +973,14 @@ pub fn leave_online_match(world: &mut World) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_a_freeze_the_peer_would_time_out_counts_as_absence() {
+        assert!(!freeze_is_absence(0.016));
+        assert!(!freeze_is_absence(2.1), "a thermal hitch is not a walk-out");
+        assert!(freeze_is_absence(DISCONNECT_TIMEOUT.as_secs_f32()));
+        assert!(freeze_is_absence(30.0));
+    }
 
     #[test]
     fn ice_response_parses_into_matchbox_config() {

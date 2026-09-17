@@ -300,6 +300,23 @@ canonical demos and their checksums are untouched.
 | P4 #1 — XFF rate-limit bypass in `tape_drop` and `ice_vendor` | One shared shape in both: `TRUSTED_PROXY_HOPS` (default 1, Railway's edge) picks the entry the outermost trusted proxy appended, never the client's leftmost; `0` ignores the header outright. The inverted comment is gone | `forwarded_ip_tests` in both services |
 | P3 #1 — a corrupt `career.json` is silently replaced | `paths::quarantine_corrupt` — one helper, now used by both `profile.json` and `career.json` — moves the bytes aside as `.corrupt` and logs at `error!` | `grudge::a_corrupt_career_file_is_quarantined_not_overwritten` |
 
+### Second pass, 2026-09-17
+
+The structural tier that needs no `SIM_VERSION` bump. Verified the same
+way (593 passed, 0 failed; clippy `-D warnings`; fmt). Where the
+proof column says *read*, there is no unit seam and no two-peer harness
+(P2 #10 still stands): the mechanism was traced, not exercised.
+
+| Finding | Fix | Proof |
+|---|---|---|
+| P2 #4 — the `Bye`/forfeit paths write `MatchState` out-of-band; a rollback un-ends the match and double-records it | Terminal lobby states (`Forfeited`, `Desynced`) drop the ggrs `Session` in `PostUpdate` the same frame — no session, no rollback, the write stands. bevy_ggrs fetches the session with `get_resource_mut`, and the Title already runs sessionless | `net::terminal_is_forfeit_or_desync_only`; mechanism read |
+| P2 #5 — a desync is a log line and nothing else | `LobbyState::Desynced` is terminal: the summary reads THE TWO PHONES STOPPED AGREEING / this one doesn't count, and the ledger, the attestation, the recorder and the rematch gate all skip it | state pinned in `net` tests; skips read |
+| P1 #3 — signaling death parks the lobby at `Idle`, which renders nothing | `LobbyState::SummonFailed`, rendered: COULDN'T REACH THE ROOM SERVER / check this phone's connection / then CANCEL and try again; PLAY THE BOT arms at once | `net` tests; copy read |
+| P1 #2 — a double-tap on FIND OPPONENT lands in a bot match | PLAY THE BOT arms only after `BOT_OFFER_DELAY_SECS = 5` of waiting (at once on `SummonFailed`); the fled-opponent summary offers it as before | `screen::bot_offer_tests` |
+| P6 #4 — a 2 s hitch or a pulled notification shade convicts this phone of walking out; never cleared | An absence is a freeze ≥ `DISCONNECT_TIMEOUT`, the only freeze that can forfeit us on the other phone; `WindowFocused` is ignored; cleared on `OnEnter(InMatch)` and on teardown | `netplay::only_a_freeze_the_peer_would_time_out_counts_as_absence` |
+| P3 #3 / #4 / #10 — quitting keeps the tier; the counter climbs past the bot; a loss resets to the dummy | `GAUNTLET_MAX_TIER = 10` (where the bot's last knob saturates), labelled MASTERED; a loss or a live-match quit falls to `loss_tier(best)` — two rungs under the best, never the dummy again | three `grudge` tests |
+| P6 #3 — dark theme at sunset recreates the activity, re-enters `android_main`, and `init_logging` panics on re-registration | `try_init` in every branch, the panic hook installs once, and the manifest absorbs uiMode, density, fontScale, smallestScreenSize, screenLayout, locale and the rest | `logging::init_logging_twice_does_not_panic`; the manifest is unverified on a device |
+
 ### Corrections to the record
 
 Things this pass found while fixing that the reports above got wrong or
@@ -331,14 +348,26 @@ would otherwise verify the wrong thing.
   this pass: it is a one-line sim change, which means a `SIM_VERSION`
   bump and a matrix run, and it should ride the same bump as
   `GAME_DESIGN_AUDIT` #1 rather than take one of its own.
+- **P2 #4's prescription does not exist.** It named `sim::apply_rematch`
+  as "the pattern the codebase already documents as canonical — a
+  non-rolled-back flag consumed by a `GgrsSchedule` system."
+  `apply_rematch` is input-driven: it restarts on a THROW rising edge
+  derived from the rolled-back input history, exactly as CONVENTIONS §4
+  requires, and no `RematchRequested` resource exists anywhere. A forfeit
+  has no inputs to derive an edge from — the peer is gone — so the honest
+  fix is not to route it through the sim at all, but to make the
+  out-of-band write unrollbackable by dropping the session. The finding
+  was right; the fix it proposed was not.
 
 ### Next
 
 In the order the "where to start" list gives, minus what landed: the
-lifecycle handler (P6 #2/#3/#5/#6 — sunset still kills the app), the
-forfeit ledger (P2 #3 — record *unfinished*, not two wins), `Desync`
-as a terminal state (P2 #5), the out-of-band `MatchState` write on the
-`Bye` path (P2 #4), the rollback window (P2 #1), and ingest validation
-plus socket timeouts on `tape_drop` (P4 #2/#3). The first sim-affecting
-batch — the round scoring, the respawn taunt, the sudden-death respawn
-margin — wants one `SIM_VERSION` bump and one matrix run together.
+lifecycle handler proper (P6 #2/#5/#6 — a phone call is still a 9 s
+forfeit with no reconnect, and there is no `WAKE_LOCK`; #3's re-init
+panic is closed), the forfeit ledger (P2 #3 — record *unfinished*, not
+two wins), the rollback window (P2 #1), the ledger and attestation
+committing on a predicted `MatchOver` (P2 #6), the side-channel sender
+check (P2 #8), and ingest validation plus socket timeouts on `tape_drop`
+(P4 #2/#3). The first sim-affecting batch — the round scoring, the
+respawn taunt, the sudden-death respawn margin — wants one `SIM_VERSION`
+bump and one matrix run together.

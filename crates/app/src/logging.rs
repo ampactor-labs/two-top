@@ -77,9 +77,6 @@ fn android_log_dir() -> Option<std::path::PathBuf> {
     Some(dir)
 }
 
-/// Build the global subscriber. Idempotency: this calls `init()` once;
-/// re-invoking it would panic on subscriber re-registration. The app
-/// crate enforces single-call by making this private to `run()`.
 /// Persist panics where a human can hand them back.
 ///
 /// A panic on the phone kills the process and prints to logcat, which is a
@@ -90,6 +87,12 @@ fn android_log_dir() -> Option<std::path::PathBuf> {
 /// `adb pull /sdcard/Android/data/<pkg>/files/crash.log`.
 #[cfg(not(target_family = "wasm"))]
 fn install_panic_hook() {
+    // A recreated activity keeps the hook it already has: chaining a
+    // second copy would write crash.log twice per panic.
+    static INSTALLED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    if INSTALLED.swap(true, std::sync::atomic::Ordering::SeqCst) {
+        return;
+    }
     let previous = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
         let location = info
@@ -114,6 +117,21 @@ fn install_panic_hook() {
     }));
 }
 
+/// A second `init_logging` in one process. `run()` IS `android_main`, and
+/// Android invokes it again whenever it recreates the activity without
+/// killing the process — the scheduled dark theme at sunset, a font-scale
+/// change, a foldable unfolding (see the manifest's `config_changes`,
+/// which absorbs the ones we know of). `.init()` panicked on the
+/// re-registration; keeping the subscriber that is already there is the
+/// whole answer, and the recreated activity logs through it.
+#[cfg(not(target_family = "wasm"))]
+fn note_reinit(e: &impl std::fmt::Display) {
+    eprintln!("two-top: tracing subscriber already installed ({e}) — keeping it");
+}
+
+/// Build the global subscriber. Safe to call more than once per process:
+/// a second call keeps the first subscriber (`note_reinit`) and the panic
+/// hook installs exactly once.
 pub fn init_logging() -> LogGuard {
     #[cfg(not(target_family = "wasm"))]
     install_panic_hook();
@@ -134,10 +152,13 @@ pub fn init_logging() -> LogGuard {
 
     #[cfg(all(debug_assertions, not(target_family = "wasm")))]
     {
-        tracing_subscriber::registry()
+        if let Err(e) = tracing_subscriber::registry()
             .with(filter)
             .with(tracing_subscriber::fmt::layer().with_writer(std::io::stderr))
-            .init();
+            .try_init()
+        {
+            note_reinit(&e);
+        }
         tracing::info!(
             target: "two_top::logging",
             static_max_level = ?static_max,
@@ -166,7 +187,7 @@ pub fn init_logging() -> LogGuard {
             Some((layer, guard, dir)) => (Some(layer), Some(guard), Some(dir)),
             None => (None, None, None),
         };
-        tracing_subscriber::registry()
+        if let Err(e) = tracing_subscriber::registry()
             .with(filter)
             .with(
                 tracing_subscriber::fmt::layer()
@@ -174,7 +195,10 @@ pub fn init_logging() -> LogGuard {
                     .with_ansi(false),
             )
             .with(file_layer)
-            .init();
+            .try_init()
+        {
+            note_reinit(&e);
+        }
         tracing::info!(
             target: "two_top::logging",
             static_max_level = ?static_max,
@@ -216,14 +240,17 @@ pub fn init_logging() -> LogGuard {
         let _ = std::fs::create_dir_all(&log_dir);
         let appender = tracing_appender::rolling::daily(&log_dir, "two_top.log");
         let (non_blocking, guard) = tracing_appender::non_blocking(appender);
-        tracing_subscriber::registry()
+        if let Err(e) = tracing_subscriber::registry()
             .with(filter)
             .with(
                 tracing_subscriber::fmt::layer()
                     .with_writer(non_blocking)
                     .with_ansi(false),
             )
-            .init();
+            .try_init()
+        {
+            note_reinit(&e);
+        }
         eprintln!(
             "two-top: release logging to {}/two_top.log.<date>",
             log_dir.display()
@@ -258,4 +285,15 @@ fn log_dir() -> std::path::PathBuf {
         return parent.join("logs");
     }
     PathBuf::from("./logs")
+}
+
+#[cfg(test)]
+mod tests {
+    /// The activity-recreation shape: `run()` twice in one process. The
+    /// old `.init()` panicked here on the second registration.
+    #[test]
+    fn init_logging_twice_does_not_panic() {
+        let _first = super::init_logging();
+        let _second = super::init_logging();
+    }
 }

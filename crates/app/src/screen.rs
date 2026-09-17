@@ -42,6 +42,31 @@ use input_touch::WindowSize;
 #[derive(Resource, Default)]
 pub struct AwaitingPeer(pub bool);
 
+/// Seconds a summons must hang before PLAY THE BOT is offered. The title
+/// PLAY and the waiting room's PLAY THE BOT share one rect, and the offer
+/// used to appear on the first `InMatch` frame — so a mashed double-tap
+/// on FIND OPPONENT landed the second tap on the bot, leaving the other
+/// phone waiting alone. A summons that has hung this long is the case
+/// the button's own doc describes.
+pub const BOT_OFFER_DELAY_SECS: f32 = 5.0;
+
+/// Whether the bot may be offered to a player still waiting for a peer.
+/// A summons that failed outright (`SummonFailed`) is offered at once —
+/// there is nothing left to wait for.
+pub fn bot_offer_armed(waited_secs: f32, summons_failed: bool) -> bool {
+    summons_failed || waited_secs >= BOT_OFFER_DELAY_SECS
+}
+
+/// PLAY THE BOT's arming state while awaiting a peer: when the wait began
+/// and whether the offer is live. Derived every frame from [`AwaitingPeer`]
+/// by `update_bot_offer`; the fled-opponent summary offers the bot on its
+/// own, immediately, and does not go through this.
+#[derive(Resource, Default, Debug, Clone, Copy)]
+pub struct BotOffer {
+    pub since: Option<f32>,
+    pub armed: bool,
+}
+
 /// Armed when the player converts an online state into a bot match (the
 /// hanging summons, or a fled opponent's summary). `bot_fallback_input`
 /// tears the online attempt down and bounces through Title — the
@@ -119,6 +144,7 @@ pub struct ScreenPlugin;
 impl Plugin for ScreenPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<AwaitingPeer>()
+            .init_resource::<BotOffer>()
             .init_resource::<VictoryPose>()
             .init_resource::<PendingUiThrow>()
             .init_resource::<PendingBotMatch>()
@@ -138,6 +164,7 @@ impl Plugin for ScreenPlugin {
                 Update,
                 (
                     update_awaiting_peer,
+                    update_bot_offer.after(update_awaiting_peer),
                     pick_arena.run_if(in_state(AppScreen::Title)),
                     title_buttons_input.run_if(in_state(AppScreen::Title)),
                     back_to_lobby.run_if(in_state(AppScreen::InMatch)),
@@ -1128,7 +1155,9 @@ fn update_title_buttons(
                         // underway; the filled/inverted box stays the on/off
                         // state either way.
                         TitleAction::Practice => {
-                            if career.gauntlet_tier > 0 {
+                            if crate::grudge::gauntlet_mastered(career.gauntlet_tier) {
+                                "GAUNTLET MASTERED".to_string()
+                            } else if career.gauntlet_tier > 0 {
                                 format!("GAUNTLET {}", career.gauntlet_tier)
                             } else {
                                 "PRACTICE".to_string()
@@ -1195,6 +1224,23 @@ fn update_awaiting_peer(
         && !practice.0
         && !theater.active()
         && !lobby.is_in_match();
+}
+
+/// Arm PLAY THE BOT only once the summons has actually hung (or failed).
+fn update_bot_offer(
+    time: Res<Time<Real>>,
+    awaiting: Res<AwaitingPeer>,
+    lobby: Res<net::LobbyState>,
+    mut offer: ResMut<BotOffer>,
+) {
+    if !awaiting.0 {
+        *offer = BotOffer::default();
+        return;
+    }
+    let now = time.elapsed_secs();
+    let since = *offer.since.get_or_insert(now);
+    let failed = matches!(*lobby, net::LobbyState::SummonFailed);
+    offer.armed = bot_offer_armed(now - since, failed);
 }
 
 /// While online and still unpaired, the far seat stays EMPTY: you wait at
@@ -1285,6 +1331,7 @@ fn summary_text(
     rivalry: Option<String>,
     opponent_gone: bool,
     we_fled: bool,
+    desynced: bool,
     saved: bool,
 ) -> String {
     let p0_won = score.p0 >= MATCH_WIN_THRESHOLD;
@@ -1308,6 +1355,14 @@ fn summary_text(
     // score is the verdict; a forfeit goes to whoever stayed at the table
     // (same rule the grudge ledger scores by) — the old score-only check
     // crowned the FLED player whenever nobody had reached the threshold.
+    // A desync: this phone's score is not a fact the other phone shares.
+    // Say so, crown nobody, and promise no tape and no ledger line.
+    if desynced {
+        return format!(
+            "THE TWO PHONES STOPPED AGREEING\n\n{}  -  {}\n\nthis one doesn't count",
+            score.p0, score.p1
+        );
+    }
     let me = local_handle.unwrap_or(0);
     let peer_name = crate::profile::peer_name(peer);
     let threshold_hit = score.p0 >= MATCH_WIN_THRESHOLD || score.p1 >= MATCH_WIN_THRESHOLD;
@@ -1392,6 +1447,7 @@ fn update_summary_overlay(
     if *screen.get() == AppScreen::InMatch && matches!(*state, MatchState::MatchOver) {
         *vis = Visibility::Visible;
         let opponent_gone = matches!(*lobby, net::LobbyState::Forfeited { .. });
+        let desynced = matches!(*lobby, net::LobbyState::Desynced { .. });
         // If OUR phone went away just before the forfeit, the walk-out is
         // ours — the card owns the blame line (the summoning overlay that
         // used to carry it stands down at MatchOver).
@@ -1411,6 +1467,7 @@ fn update_summary_overlay(
             career.rivalry_line(peer.0),
             opponent_gone,
             we_fled,
+            desynced,
             saved.0.is_some(),
         );
     } else {
@@ -1620,16 +1677,25 @@ fn quit_button_input(world: &mut World) {
             .resource::<crate::netplay::LocalPlayerHandle>()
             .0
             .is_some();
-        let peer_fled = matches!(
-            *world.resource::<net::LobbyState>(),
-            net::LobbyState::Forfeited { .. }
-        );
+        let peer_fled = world.resource::<net::LobbyState>().is_terminal();
         if established && !peer_fled {
             let peer = world.resource::<net::PeerProfile>().0;
             let mut record = world.resource_mut::<crate::grudge::CareerRecord>();
             crate::grudge::record_abandoned_loss(&mut record, peer);
         }
         crate::netplay::leave_online_match(world);
+    } else if world.resource::<crate::bot::PracticeMode>().0
+        && world.resource::<crate::bot::ShadeStyle>().0.is_none()
+        && matches!(
+            *world.resource::<MatchState>(),
+            MatchState::InRound { .. } | MatchState::RoundOver { .. }
+        )
+    {
+        // Quitting a live gauntlet match is a loss — the same rule as the
+        // duel above. The countdown stakes nothing; a shade spar moves
+        // nothing.
+        let mut record = world.resource_mut::<crate::grudge::CareerRecord>();
+        crate::grudge::record_gauntlet_quit(&mut record);
     }
     world
         .resource_mut::<NextState<AppScreen>>()
@@ -1743,16 +1809,16 @@ fn spawn_bot_offer_button(commands: &mut Commands) {
 /// The fled-opponent summary offers the same escape through the summary
 /// primary (`primary_label`), so this one keys off [`AwaitingPeer`] alone.
 fn update_bot_offer_button(
-    awaiting: Res<AwaitingPeer>,
+    offer: Res<BotOffer>,
     mut q: Query<(&BotOfferButton, &mut Visibility, Option<&mut Text2d>)>,
 ) {
     for (btn, mut vis, text) in &mut q {
-        *vis = if awaiting.0 {
+        *vis = if offer.armed {
             Visibility::Visible
         } else {
             Visibility::Hidden
         };
-        if awaiting.0
+        if offer.armed
             && btn.role == BtnRole::Label
             && let Some(mut t) = text
         {
@@ -1777,12 +1843,9 @@ fn bot_fallback_input(world: &mut World) {
     if !online {
         return;
     }
-    let awaiting = world.resource::<AwaitingPeer>().0;
+    let awaiting = world.resource::<BotOffer>().armed;
     let fled_summary = matches!(*world.resource::<MatchState>(), MatchState::MatchOver)
-        && matches!(
-            *world.resource::<net::LobbyState>(),
-            net::LobbyState::Forfeited { .. }
-        );
+        && world.resource::<net::LobbyState>().is_terminal();
     if !(awaiting || fled_summary) {
         return;
     }
@@ -1836,7 +1899,8 @@ fn update_summary_buttons(
         // rematch button — the summary card alone says TAPE ENDS.
         && !theater.active();
     let online = netplay.room_url.is_some();
-    let opponent_gone = matches!(*lobby, net::LobbyState::Forfeited { .. });
+    // Fled or desynced: either way the slot reads PLAY THE BOT.
+    let opponent_gone = lobby.is_terminal();
     let peer_name = crate::profile::peer_name(peer.0);
     let primary = primary_label(online, practice.0, *consent, &peer_name, opponent_gone);
     // Local consent shows as a pressed/armed button: inverted fill — unless
@@ -1937,8 +2001,8 @@ fn summary_buttons_input(
         pending.0 = UI_THROW_FRAMES;
         return;
     }
-    if matches!(*lobby, net::LobbyState::Forfeited { .. }) {
-        return; // nobody left to run it back with
+    if lobby.is_terminal() {
+        return; // nobody left to run it back with, or no session worth it
     }
     if !consent.local {
         consent.local = true;
@@ -2055,6 +2119,7 @@ mod tests {
             Some("2ND MEETING with TAGC - tied 1-1".into()),
             gone,
             false, // we_fled
+            false, // desynced
             true,
         )
     }
@@ -2076,6 +2141,7 @@ mod tests {
             None,
             true, // opponent_gone
             we_fled,
+            false, // desynced
             false,
         )
     }
@@ -2171,6 +2237,7 @@ mod tests {
             None,
             false,
             false,
+            false, // desynced
             false,
         );
         assert!(text.contains("TAGC WINS"), "{text}");
@@ -2194,9 +2261,26 @@ mod tests {
             None,
             false,
             false,
+            false, // desynced
             true,
         );
         assert!(text.contains("CUR WINS"), "{text}");
         assert!(text.contains("replay saved"), "{text}");
+    }
+}
+
+#[cfg(test)]
+mod bot_offer_tests {
+    use super::*;
+
+    #[test]
+    fn the_bot_is_offered_only_once_the_summons_has_hung() {
+        // A mashed double-tap lands ~150 ms after the first: no offer.
+        assert!(!bot_offer_armed(0.0, false));
+        assert!(!bot_offer_armed(0.15, false));
+        assert!(!bot_offer_armed(BOT_OFFER_DELAY_SECS - 0.01, false));
+        assert!(bot_offer_armed(BOT_OFFER_DELAY_SECS, false));
+        // A summons that failed outright has nothing left to wait for.
+        assert!(bot_offer_armed(0.0, true));
     }
 }

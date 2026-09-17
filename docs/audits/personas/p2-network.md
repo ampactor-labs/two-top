@@ -261,6 +261,13 @@ a forfeit provable at all.
 
 ## 4. 🔴 The forfeit write goes into a rolled-back resource — the rulebook's own worked example
 
+> **Correction (2026-09-17, on fixing):** the finding stands; the fix below
+> does not. `sim::apply_rematch` is input-driven (a THROW edge from the
+> rolled-back history), not a non-rolled-back flag, and a forfeit has no
+> peer inputs to derive an edge from. What shipped instead: terminal lobby
+> states drop the ggrs `Session` in `PostUpdate` the same frame, so no
+> rollback can follow the write. See `ROLEPLAY_AUDIT.md` § Corrections.
+
 `CONVENTIONS.md:14`, verbatim:
 
 > **Match/round state transitions are input-driven; never mutate `MatchState`
