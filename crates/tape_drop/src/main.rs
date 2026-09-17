@@ -75,19 +75,47 @@ impl RateLimiter {
     }
 }
 
-fn client_ip(request: &tiny_http::Request) -> Option<IpAddr> {
-    request
+/// How many proxies in front of us are trusted to have appended to
+/// `X-Forwarded-For`. Railway's edge is one hop, so `1` is the default;
+/// a direct or local run sets `TRUSTED_PROXY_HOPS=0` to ignore the header
+/// outright, because there the socket address is the truth and any XFF
+/// present was typed by the client.
+fn trusted_proxy_hops() -> usize {
+    std::env::var("TRUSTED_PROXY_HOPS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(1)
+}
+
+/// The address the bucket keys on. Each proxy APPENDS the address it
+/// accepted the connection from, so after `trusted_hops` trusted proxies
+/// the rightmost `trusted_hops` entries are theirs and the client sits at
+/// index `len - trusted_hops` — for one hop, the LAST entry. Everything to
+/// the left of that was supplied by the client and is worth nothing:
+/// taking the leftmost entry (the previous code) handed every caller a
+/// fresh bucket per forged header, behind exactly the proxy that made the
+/// header trustworthy in the first place. A header with fewer entries than
+/// trusted hops is malformed for this deployment and falls back to the
+/// socket address, as does an absent header.
+fn forwarded_ip(xff: Option<&str>, remote: Option<IpAddr>, trusted_hops: usize) -> Option<IpAddr> {
+    if trusted_hops == 0 {
+        return remote;
+    }
+    let from_header = xff.and_then(|v| {
+        let entries: Vec<&str> = v.split(',').map(str::trim).collect();
+        let idx = entries.len().checked_sub(trusted_hops)?;
+        entries[idx].parse().ok()
+    });
+    from_header.or(remote)
+}
+
+fn client_ip(request: &tiny_http::Request, trusted_hops: usize) -> Option<IpAddr> {
+    let xff = request
         .headers()
         .iter()
         .find(|h| h.field.equiv("x-forwarded-for"))
-        .and_then(|h| {
-            h.value
-                .as_str()
-                .split(',')
-                .next()
-                .and_then(|s| s.trim().parse().ok())
-        })
-        .or_else(|| request.remote_addr().map(|a| a.ip()))
+        .map(|h| h.value.as_str());
+    forwarded_ip(xff, request.remote_addr().map(|a| a.ip()), trusted_hops)
 }
 
 /// The store: id → (bytes, expiry). BTreeMap keeps eviction scans
@@ -190,6 +218,7 @@ fn main() {
     let budget = env_u64("TAPE_BUDGET_BYTES", DEFAULT_BUDGET_BYTES as u64) as usize;
     let mut drop = Drop_::new(ttl, budget);
     let mut limiter = RateLimiter::new();
+    let trusted_hops = trusted_proxy_hops();
     let server = tiny_http::Server::http(("0.0.0.0", port))
         .unwrap_or_else(|e| panic!("tape_drop: cannot bind port {port}: {e}"));
     println!(
@@ -205,7 +234,7 @@ fn main() {
         let (status, body, content_type) = match (method, url.as_str()) {
             (tiny_http::Method::Get, "/healthz") => (200, b"ok".to_vec(), "text/plain"),
             (tiny_http::Method::Post, "/tape") => {
-                if !client_ip(&request).is_none_or(|ip| limiter.allow_at(ip, now)) {
+                if !client_ip(&request, trusted_hops).is_none_or(|ip| limiter.allow_at(ip, now)) {
                     (
                         429,
                         b"{\"error\":\"slow down\"}".to_vec(),
@@ -343,5 +372,56 @@ mod tests {
         }
         assert!(!limiter.allow_at(ip, t0));
         assert!(limiter.allow_at(ip, t0 + Duration::from_secs(BUCKET_REFILL_SECS)));
+    }
+}
+
+#[cfg(test)]
+mod forwarded_ip_tests {
+    use super::forwarded_ip;
+    use std::net::IpAddr;
+
+    fn ip(s: &str) -> IpAddr {
+        s.parse().unwrap()
+    }
+
+    #[test]
+    fn one_trusted_hop_takes_the_entry_the_edge_appended_not_the_forged_one() {
+        // A client behind Railway sends a forged leftmost entry; the edge
+        // appends what it actually saw. The bucket must key on the latter.
+        let got = forwarded_ip(Some("1.2.3.4, 203.0.113.9"), Some(ip("10.0.0.1")), 1);
+        assert_eq!(got, Some(ip("203.0.113.9")));
+        // Rotating the forged entry does not rotate the bucket.
+        let again = forwarded_ip(Some("5.6.7.8, 203.0.113.9"), Some(ip("10.0.0.1")), 1);
+        assert_eq!(again, got);
+    }
+
+    #[test]
+    fn zero_trusted_hops_ignores_the_header_entirely() {
+        let got = forwarded_ip(Some("1.2.3.4"), Some(ip("198.51.100.7")), 0);
+        assert_eq!(got, Some(ip("198.51.100.7")));
+    }
+
+    #[test]
+    fn absent_or_short_header_falls_back_to_the_socket() {
+        assert_eq!(
+            forwarded_ip(None, Some(ip("198.51.100.7")), 1),
+            Some(ip("198.51.100.7"))
+        );
+        // Two trusted hops but only one entry: malformed for this
+        // deployment, so the socket address wins over a guess.
+        assert_eq!(
+            forwarded_ip(Some("203.0.113.9"), Some(ip("198.51.100.7")), 2),
+            Some(ip("198.51.100.7"))
+        );
+        assert_eq!(
+            forwarded_ip(Some("garbage"), Some(ip("198.51.100.7")), 1),
+            Some(ip("198.51.100.7"))
+        );
+    }
+
+    #[test]
+    fn two_trusted_hops_reach_past_the_inner_proxy() {
+        let got = forwarded_ip(Some("forged, 203.0.113.9, 10.1.1.1"), None, 2);
+        assert_eq!(got, Some(ip("203.0.113.9")));
     }
 }

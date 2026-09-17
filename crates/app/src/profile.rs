@@ -307,12 +307,7 @@ fn read_profile(path: &std::path::Path) -> LocalProfile {
                 error = %e,
                 "profile.json is corrupt — quarantining it and reminting",
             );
-            let mut name = path
-                .file_name()
-                .map(std::ffi::OsStr::to_os_string)
-                .unwrap_or_default();
-            name.push(".corrupt");
-            let _ = std::fs::rename(path, path.with_file_name(name));
+            crate::paths::quarantine_corrupt(path);
             LocalProfile::default()
         }
     }

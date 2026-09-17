@@ -24,6 +24,10 @@ bincode = { version = "2.0", default-features = false, features = [
 # convention (MORGAN_NOTES § postcard over bincode). The bincode above
 # exists only to mirror matchbox's ggrs reference codec byte-for-byte
 # on channel 0.
+# Mirrors ggrs's own input-stream compression so the channel-0 guard can
+# size a remote's frames BEFORE ggrs `expect`s on them (lib.rs § Wire-format
+# guard). The version ggrs 0.12 itself pins; nothing else here touches it.
+bitfield-rle = "0.2"
 postcard = { version = "1", default-features = false, features = ["alloc"] }
 serde = { version = "1", default-features = false, features = ["derive"] }
 # Phase 13: tracing replaces the prior `log` crate dependency. bevy_log

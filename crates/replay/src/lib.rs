@@ -40,7 +40,18 @@ pub enum ReplayError {
     Postcard(postcard::Error),
     InvalidMagic([u8; 4]),
     UnsupportedFormatVersion(u16),
-    SimVersionMismatch { expected: u32, got: u32 },
+    SimVersionMismatch {
+        expected: u32,
+        got: u32,
+    },
+    /// The header's `frame_count` disagrees with the number of input
+    /// frames actually in the tape. The count drives the theater's
+    /// playhead and scrub clamp, so a tape that lies about it is either
+    /// crafted or truncated — refused at the codec boundary.
+    FrameCountMismatch {
+        declared: u32,
+        actual: usize,
+    },
 }
 
 impl core::fmt::Display for ReplayError {
@@ -57,6 +68,12 @@ impl core::fmt::Display for ReplayError {
                 write!(
                     f,
                     "sim_version mismatch: replay was recorded with {got}, this binary is {expected}"
+                )
+            }
+            ReplayError::FrameCountMismatch { declared, actual } => {
+                write!(
+                    f,
+                    "frame_count mismatch: header declares {declared} frames, tape holds {actual}"
                 )
             }
         }
@@ -91,6 +108,12 @@ pub fn decode(bytes: &[u8]) -> Result<Replay, ReplayError> {
         return Err(ReplayError::UnsupportedFormatVersion(
             replay.header.format_version,
         ));
+    }
+    if replay.header.frame_count as usize != replay.inputs.len() {
+        return Err(ReplayError::FrameCountMismatch {
+            declared: replay.header.frame_count,
+            actual: replay.inputs.len(),
+        });
     }
     Ok(replay)
 }

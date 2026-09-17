@@ -229,13 +229,31 @@ fn career_path() -> Option<PathBuf> {
 }
 
 fn load_career() -> CareerRecord {
-    let Some(path) = career_path() else {
+    career_path().map_or_else(CareerRecord::default, |p| read_career(&p))
+}
+
+/// Read + parse the ledger. An absent file is a fresh career. A file that
+/// exists but will not parse is quarantined as a `.corrupt` sibling — the
+/// same treatment `profile.json` gets, and for a stronger reason: this
+/// file is the gauntlet tier, every rivalry and every tape ring, and the
+/// old path handed back a default that the next decided match then wrote
+/// over the only evidence of what happened.
+fn read_career(path: &std::path::Path) -> CareerRecord {
+    let Ok(text) = std::fs::read_to_string(path) else {
         return CareerRecord::default();
     };
-    std::fs::read_to_string(&path)
-        .ok()
-        .and_then(|text| serde_json::from_str(&text).ok())
-        .unwrap_or_default()
+    match serde_json::from_str(&text) {
+        Ok(record) => record,
+        Err(e) => {
+            tracing::error!(
+                target: "two_top::grudge",
+                error = %e,
+                "career.json is corrupt — quarantining it and starting a fresh ledger",
+            );
+            crate::paths::quarantine_corrupt(path);
+            CareerRecord::default()
+        }
+    }
 }
 
 fn save_career(record: &CareerRecord) {
@@ -458,6 +476,28 @@ mod tests {
         assert!(milestone_meeting(100));
         assert!(!milestone_meeting(9));
         assert!(!milestone_meeting(11));
+    }
+
+    #[test]
+    fn a_corrupt_career_file_is_quarantined_not_overwritten() {
+        let dir = crate::paths::test_scratch("career_corrupt");
+        let path = dir.join("career.json");
+        std::fs::write(&path, b"{ this is not json").unwrap();
+        let career = read_career(&path);
+        assert_eq!(career.wins, 0);
+        assert_eq!(career.gauntlet_tier, 0);
+        assert!(career.rivals.is_empty());
+        assert!(!path.exists(), "the corrupt file is moved aside");
+        assert_eq!(
+            std::fs::read(dir.join("career.json.corrupt")).unwrap(),
+            b"{ this is not json",
+            "the evidence survives for a human to hand back"
+        );
+        // And an absent file is simply a fresh career, no quarantine.
+        let fresh = read_career(&dir.join("never_written.json"));
+        assert_eq!(fresh.wins, 0);
+        assert!(!dir.join("never_written.json.corrupt").exists());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

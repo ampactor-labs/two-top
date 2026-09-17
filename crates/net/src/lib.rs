@@ -113,6 +113,234 @@ pub fn encode_message(msg: &Message) -> Packet {
         .into_boxed_slice()
 }
 
+// ---- Wire-format guard for ggrs channel 0 ----
+//
+// ggrs 0.12 trusts its own wire. `to_player_inputs` (network/protocol.rs)
+// `expect`s the bincode decode of every per-player slice, and the delta
+// decoder (network/compression.rs) sizes each frame from a two-byte length
+// prefix that the REMOTE wrote. So a peer whose `Input` stream decodes to
+// a three-byte frame panics this process inside `poll_remote_clients`, on
+// the main thread — from the public quick-match room, where the peer is
+// whoever queued next. `MessageBody` is `pub(crate)` in ggrs, so nothing
+// can inspect a decoded `Message`; the guard instead decodes a private
+// mirror of the same layout and refuses the packet before ggrs sees it.
+// The mirror's layout is pinned by `input_stream_tests`: bytes the mirror
+// emits must decode as a real `ggrs::Message`, or the guard is inert.
+//
+// The RLE layer underneath is hostile-input-unsafe too, and ggrs calls it
+// on every Input it receives: `bitfield_rle` (via `varinteger`) reads
+// `buf[off]` past the end of a stream that ends on a varint continuation
+// byte, and sizes its output allocation straight from the remote's repeat
+// count (`vec![0; 2^30]` from six bytes). `rle_decoded_len` vets the
+// stream with checked arithmetic and hard bounds BEFORE the crate's
+// decoder runs, so the guard is the first — and only — caller that ever
+// hands it something it cannot survive.
+//
+// Still open upstream, and not closable at this boundary: protocol.rs also
+// `assert!(last_recv_frame + 1 >= body.start_frame)` on the wire's own
+// `start_frame`. Checking that needs ggrs's private receive bookkeeping,
+// so a hostile peer can still trip it mid-match. The honest fix is a
+// warn-and-drop in ggrs itself.
+
+/// One player's input on the wire, as ggrs sizes it: the bincode-1 fixint
+/// encoding of `sim::PlayerInput`, four one-byte fields. `size_of` is
+/// exact here because the type is `repr(C)` + `Pod`; the equivalence is
+/// pinned by `input_stream_tests::one_input_on_the_wire_is_four_bytes`.
+const INPUT_BYTES_PER_PLAYER: usize = std::mem::size_of::<sim::PlayerInput>();
+
+/// Players each remote endpoint speaks for. 2-Top seats one player per
+/// phone, and ggrs sizes a frame as `bytes_per_player × handles.len()` on
+/// both ends, so this is the one number the guard must agree with it on.
+const PLAYERS_PER_PEER: usize = 1;
+
+/// The exact frame width an honest peer sends, every frame.
+const INPUT_FRAME_BYTES: usize = INPUT_BYTES_PER_PLAYER * PLAYERS_PER_PEER;
+
+#[allow(dead_code)] // consumed positionally by serde; only `bytes` is read by hand
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+struct WireHeader {
+    magic: u16,
+}
+
+#[allow(dead_code)] // consumed positionally by serde; only `bytes` is read by hand
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+struct WireConnStatus {
+    disconnected: bool,
+    last_frame: i32,
+}
+
+#[allow(dead_code)] // consumed positionally by serde; only `bytes` is read by hand
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+struct WireSyncRequest {
+    random_request: u32,
+}
+
+#[allow(dead_code)] // consumed positionally by serde; only `bytes` is read by hand
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+struct WireSyncReply {
+    random_reply: u32,
+}
+
+#[allow(dead_code)] // consumed positionally by serde; only `bytes` is read by hand
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+struct WireInput {
+    peer_connect_status: Vec<WireConnStatus>,
+    disconnect_requested: bool,
+    start_frame: i32,
+    ack_frame: i32,
+    bytes: Vec<u8>,
+}
+
+#[allow(dead_code)] // consumed positionally by serde; only `bytes` is read by hand
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+struct WireInputAck {
+    ack_frame: i32,
+}
+
+#[allow(dead_code)] // consumed positionally by serde; only `bytes` is read by hand
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+struct WireQualityReport {
+    frame_advantage: i16,
+    ping: u128,
+}
+
+#[allow(dead_code)] // consumed positionally by serde; only `bytes` is read by hand
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+struct WireQualityReply {
+    pong: u128,
+}
+
+#[allow(dead_code)] // consumed positionally by serde; only `bytes` is read by hand
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+struct WireChecksumReport {
+    checksum: u128,
+    frame: i32,
+}
+
+/// `ggrs::network::messages::MessageBody`, variant for variant, in the
+/// same order: bincode encodes the discriminant by index, so the order IS
+/// the format.
+#[allow(dead_code)] // consumed positionally by serde; only `bytes` is read by hand
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+enum WireBody {
+    SyncRequest(WireSyncRequest),
+    SyncReply(WireSyncReply),
+    Input(WireInput),
+    InputAck(WireInputAck),
+    QualityReport(WireQualityReport),
+    QualityReply(WireQualityReply),
+    ChecksumReport(WireChecksumReport),
+    KeepAlive,
+}
+
+/// `ggrs::Message`, field for field.
+#[allow(dead_code)] // consumed positionally by serde; only `bytes` is read by hand
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+struct WireMessage {
+    header: WireHeader,
+    body: WireBody,
+}
+
+/// Bound for the RLE-decoded delta stream. An honest packet is six bytes
+/// per pending frame and ggrs's pending window is tens of frames; this is
+/// over a thousand frames of slack — far above honest, far below harm.
+const MAX_DELTA_STREAM_BYTES: usize = 8 * 1024;
+
+/// Longest varint the vet accepts, in bytes. Four bytes is 2^28: every
+/// run length an honest ≤8 KiB stream can carry fits in two, and staying
+/// well under `varinteger`'s ten-byte u64 limit keeps both decoders in
+/// the region where they agree exactly and nothing overflows.
+const MAX_RLE_VARINT_BYTES: u32 = 4;
+
+/// Vet an RLE stream the way `bitfield_rle::decode_len_with_offset` will
+/// walk it — varint header, low bit = repeat run, else a literal run of
+/// that many bytes follows — with every read bounds-checked and every
+/// sum checked. Returns the decoded length, which is ≤ the cap. Once this
+/// passes, the crate's own decoder cannot index past the buffer, overflow
+/// a shift, or allocate more than the cap.
+fn rle_decoded_len(buf: &[u8]) -> Result<usize, &'static str> {
+    let mut offset = 0usize;
+    let mut total = 0usize;
+    while offset < buf.len() {
+        let mut value = 0u64;
+        let mut shift = 0u32;
+        loop {
+            let Some(&byte) = buf.get(offset) else {
+                return Err("truncated varint");
+            };
+            offset += 1;
+            if shift >= 7 * MAX_RLE_VARINT_BYTES {
+                return Err("varint too long");
+            }
+            value |= u64::from(byte & 0x7f) << shift;
+            shift += 7;
+            if (byte & 0x80) == 0 {
+                break;
+            }
+        }
+        let repeat = (value & 1) == 1;
+        let run = if repeat { value >> 2 } else { value >> 1 };
+        let run = usize::try_from(run).map_err(|_| "run too long")?;
+        total = total.checked_add(run).ok_or("run too long")?;
+        if total > MAX_DELTA_STREAM_BYTES {
+            return Err("delta stream too long");
+        }
+        if !repeat {
+            offset = offset
+                .checked_add(run)
+                .ok_or("literal run overruns stream")?;
+            if offset > buf.len() {
+                return Err("literal run overruns stream");
+            }
+        }
+    }
+    Ok(total)
+}
+
+/// Walk an `Input` body's stream exactly the way ggrs's decoder will —
+/// RLE first, then a `u16` little-endian length prefix per frame — and
+/// refuse it unless every frame is exactly [`INPUT_FRAME_BYTES`] wide.
+/// Returns the frame count on success, for the log.
+fn input_stream_frames(input: &WireInput) -> Result<usize, &'static str> {
+    rle_decoded_len(&input.bytes)?;
+    let raw = bitfield_rle::decode(&input.bytes).map_err(|_| "rle stream undecodable")?;
+    let mut pos = 0;
+    let mut frames = 0;
+    while pos < raw.len() {
+        let Some(prefix) = raw.get(pos..pos + 2) else {
+            return Err("truncated length prefix");
+        };
+        let len = usize::from(u16::from_le_bytes([prefix[0], prefix[1]]));
+        pos += 2;
+        if len != INPUT_FRAME_BYTES {
+            return Err("frame is not one input wide");
+        }
+        if raw.get(pos..pos + len).is_none() {
+            return Err("truncated input data");
+        }
+        pos += len;
+        frames += 1;
+    }
+    Ok(frames)
+}
+
+/// `Some(why)` if handing this packet to ggrs would panic it. Bytes the
+/// mirror cannot decode pass through as `None`: ggrs's own decode of the
+/// same layout fails next and drops them with the existing log. The guard
+/// refuses only what is well-formed AND lethal — it is never a second
+/// parser that could take netplay down if it drifted.
+fn refuse_reason(bytes: &[u8]) -> Option<&'static str> {
+    let decoded =
+        bincode::serde::decode_from_slice::<WireMessage, _>(bytes, bincode::config::standard());
+    let Ok((wire, _)) = decoded else {
+        return None;
+    };
+    match wire.body {
+        WireBody::Input(input) => input_stream_frames(&input).err(),
+        _ => None,
+    }
+}
+
 /// Decode a packet back into `(NetAddr, ggrs::Message)`, or `None` for
 /// bytes that don't parse. Peers that send malformed bincode are either
 /// lying or running an incompatible build; the matchbox reference impl
@@ -120,12 +348,23 @@ pub fn encode_message(msg: &Message) -> Packet {
 /// mid-duel — drop the packet and let the silence FSM score the abuser
 /// as the walk-away ([`DISCONNECT_AFTER_FRAMES`] →
 /// [`FORFEIT_AFTER_FRAMES`]). The public room pairs strangers, and no
-/// stranger's bytes get to crash the table. (ggrs itself still `expect`s
-/// on per-player input bytes inside a well-formed `Message` — an
-/// upstream issue; this closes the cheap half.) The inbound `PeerId` is
-/// mapped to the neutral `sim::NetAddr` ggrs expects (see module docs).
+/// stranger's bytes get to crash the table. A well-formed `Message` whose
+/// `Input` stream would panic ggrs's own decoder is refused the same way
+/// by the wire-format guard above (see that section for the one upstream
+/// assert it cannot reach). The inbound `PeerId` is mapped to the neutral
+/// `sim::NetAddr` ggrs expects (see module docs).
 pub fn decode_packet(message: (PeerId, Packet)) -> Option<(NetAddr, Message)> {
     let (peer, bytes) = message;
+    if let Some(reason) = refuse_reason(&bytes) {
+        tracing::warn!(
+            target: "two_top::net",
+            peer = %peer.0,
+            len = bytes.len(),
+            reason,
+            "ggrs input packet that would panic the session dropped",
+        );
+        return None;
+    }
     match bincode::serde::decode_from_slice(&bytes, bincode::config::standard()) {
         Ok((msg, _)) => Some((peer_to_addr(peer), msg)),
         Err(e) => {
@@ -1302,5 +1541,189 @@ mod tests {
             PendingP2PSwap(None),
             "no re-fire when state unchanged"
         );
+    }
+}
+
+#[cfg(test)]
+mod input_stream_tests {
+    use super::*;
+    use matchbox_socket::PeerId;
+    use uuid::Uuid;
+
+    fn packet(msg: &WireMessage) -> Packet {
+        bincode::serde::encode_to_vec(msg, bincode::config::standard())
+            .unwrap()
+            .into_boxed_slice()
+    }
+
+    /// The exact stream ggrs's delta encoder emits: a `u16` LE length per
+    /// frame, then the frame's (XORed) bytes, then RLE over the lot. The
+    /// XOR content is irrelevant to the guard — only widths are checked.
+    fn input_message(frames: &[Vec<u8>]) -> WireMessage {
+        let mut delta = Vec::new();
+        for f in frames {
+            delta.extend_from_slice(&(f.len() as u16).to_le_bytes());
+            delta.extend_from_slice(f);
+        }
+        WireMessage {
+            header: WireHeader { magic: 0x1234 },
+            body: WireBody::Input(WireInput {
+                peer_connect_status: vec![
+                    WireConnStatus {
+                        disconnected: false,
+                        last_frame: -1,
+                    };
+                    2
+                ],
+                disconnect_requested: false,
+                start_frame: 0,
+                ack_frame: -1,
+                bytes: bitfield_rle::encode(delta),
+            }),
+        }
+    }
+
+    #[test]
+    fn one_input_on_the_wire_is_four_bytes() {
+        // Four one-byte fields, repr(C), Pod — the width ggrs computes via
+        // bincode-1 fixint `serialized_size(&PlayerInput::default())`.
+        assert_eq!(INPUT_BYTES_PER_PLAYER, 4);
+        assert_eq!(INPUT_FRAME_BYTES, 4);
+    }
+
+    #[test]
+    fn mirror_matches_ggrs_layout() {
+        // Bytes the mirror emits must be a real `ggrs::Message`, or the
+        // guard is reading a format nobody sends and is silently inert.
+        // `decode_packet` runs the guard AND ggrs's own `Deserialize`, so
+        // `Some` here means both agreed on every variant exercised.
+        let peer = PeerId(Uuid::from_u128(1));
+        let honest = [
+            input_message(&[vec![0; 4], vec![1, 2, 3, 4], vec![0xff; 4]]),
+            input_message(&[]),
+            WireMessage {
+                header: WireHeader { magic: 7 },
+                body: WireBody::KeepAlive,
+            },
+            WireMessage {
+                header: WireHeader { magic: 7 },
+                body: WireBody::SyncRequest(WireSyncRequest { random_request: 9 }),
+            },
+            WireMessage {
+                header: WireHeader { magic: 7 },
+                body: WireBody::SyncReply(WireSyncReply { random_reply: 9 }),
+            },
+            WireMessage {
+                header: WireHeader { magic: 7 },
+                body: WireBody::InputAck(WireInputAck { ack_frame: 3 }),
+            },
+            WireMessage {
+                header: WireHeader { magic: 7 },
+                body: WireBody::QualityReport(WireQualityReport {
+                    frame_advantage: -2,
+                    ping: 12,
+                }),
+            },
+            WireMessage {
+                header: WireHeader { magic: 7 },
+                body: WireBody::QualityReply(WireQualityReply { pong: 12 }),
+            },
+            WireMessage {
+                header: WireHeader { magic: 7 },
+                body: WireBody::ChecksumReport(WireChecksumReport {
+                    checksum: 99,
+                    frame: 60,
+                }),
+            },
+        ];
+        for msg in honest {
+            assert!(
+                decode_packet((peer, packet(&msg))).is_some(),
+                "honest {msg:?} must reach ggrs"
+            );
+        }
+    }
+
+    #[test]
+    fn an_input_frame_of_the_wrong_width_is_refused_before_ggrs_can_expect_on_it() {
+        let peer = PeerId(Uuid::from_u128(0xbad));
+        let lethal: [Vec<Vec<u8>>; 5] = [
+            vec![vec![0; 3]],             // bincode-1 EOF inside PlayerInput
+            vec![vec![0; 4], vec![0; 5]], // one good frame, then a bad one
+            vec![vec![]],                 // zero-width frame
+            vec![vec![0; 8]],             // two players' worth from a one-seat peer
+            vec![vec![0; 1]],
+        ];
+        for frames in lethal {
+            assert!(
+                decode_packet((peer, packet(&input_message(&frames)))).is_none(),
+                "{frames:?} must not reach ggrs"
+            );
+        }
+    }
+
+    /// `varinteger`'s encoding: 7-bit little-endian groups, high bit set
+    /// on every byte but the last.
+    fn varint_bytes(mut v: u64) -> Vec<u8> {
+        let mut out = Vec::new();
+        loop {
+            let byte = (v & 0x7f) as u8;
+            v >>= 7;
+            if v == 0 {
+                out.push(byte);
+                return out;
+            }
+            out.push(byte | 0x80);
+        }
+    }
+
+    /// An Input body carrying `rle` verbatim as its stream — the shapes
+    /// the real encoder would never produce.
+    fn input_with_stream(rle: Vec<u8>) -> WireMessage {
+        let mut msg = input_message(&[]);
+        let WireBody::Input(input) = &mut msg.body else {
+            unreachable!()
+        };
+        input.bytes = rle;
+        msg
+    }
+
+    fn refused(rle: Vec<u8>) -> bool {
+        let peer = PeerId(Uuid::from_u128(0xbad));
+        decode_packet((peer, packet(&input_with_stream(rle)))).is_none()
+    }
+
+    #[test]
+    fn hostile_rle_streams_are_refused_before_the_decoder_sees_them() {
+        // The shapes that panic or abort `bitfield_rle::decode` itself —
+        // which ggrs runs on every Input it receives.
+        // A varint that never terminates: the crate reads buf[off] off the end.
+        assert!(refused(vec![0x80, 0x80, 0x80]));
+        // A repeat run of 2^30 zero bytes: a 1 GiB allocation from five bytes.
+        assert!(refused(varint_bytes(((1u64 << 30) << 2) | 1)));
+        // A literal run promising fifty bytes over a two-byte body.
+        assert!(refused(vec![50 << 1, 0xaa, 0xbb]));
+        // Eleven continuation bytes: past u64, where the crate's `fac <<= 7`
+        // wraps; refused long before that.
+        assert!(refused(vec![0x81; 11]));
+        // The vet agrees with the crate on honest shapes, including runs.
+        for delta in [
+            vec![4u8, 0, 1, 2, 3, 4],
+            vec![0u8; 300],
+            vec![0xffu8; 300],
+            Vec::new(),
+        ] {
+            let enc = bitfield_rle::encode(&delta);
+            assert_eq!(rle_decoded_len(&enc), Ok(delta.len()), "{delta:?}");
+            assert_eq!(bitfield_rle::decode(&enc).unwrap(), delta);
+        }
+    }
+
+    #[test]
+    fn truncated_streams_are_refused() {
+        // A length prefix promising four bytes over a two-byte body.
+        assert!(refused(bitfield_rle::encode([4u8, 0, 0xaa, 0xbb])));
+        // A lone trailing byte where a two-byte prefix should be.
+        assert!(refused(bitfield_rle::encode([4u8, 0, 0, 0, 0, 0, 0x01])));
     }
 }

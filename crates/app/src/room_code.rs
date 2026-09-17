@@ -76,7 +76,10 @@ impl RoomCode {
     /// of the room NAME on every path (quick and private), so two peers in
     /// one room have structurally agreed on the table — no handshake, no
     /// authority, no way to disagree. Friends coordinate out loud: "dial
-    /// CURS, pick the Pit."
+    /// CURS, pick the Pit." The sim version rides the name the same way:
+    /// two APKs sideloaded a week apart on different `SIM_VERSION`s land
+    /// in different rooms and simply never see each other, instead of
+    /// pairing, diverging, and each recording its own winner.
     pub fn room_url(&self, arena: sim::ArenaId) -> Option<String> {
         let base = self.base_url.as_ref()?;
         let code = self.custom.then(|| self.code_string());
@@ -84,6 +87,7 @@ impl RoomCode {
             base,
             code.as_deref(),
             arena_room_tag(arena),
+            sim::SIM_VERSION,
         ))
     }
 }
@@ -102,13 +106,17 @@ pub fn arena_room_tag(arena: sim::ArenaId) -> &'static str {
     }
 }
 
-/// Append the (optional) code and the arena tag to the room *name*,
-/// preserving any query string: `ws://host/two-top?next=2` + `CURS` + `pit`
-/// → `ws://host/two-top-CURS-pit?next=2`. Pure for testing.
-pub fn room_url_with_parts(base: &str, code: Option<&str>, tag: &str) -> String {
+/// Append the (optional) code, the arena tag and the sim version to the
+/// room *name*, preserving any query string: `ws://host/two-top?next=2` +
+/// `CURS` + `pit` + `14` → `ws://host/two-top-CURS-pit-v14?next=2`. Pure
+/// for testing. The version segment is what keeps mismatched builds
+/// apart — the live wire has no other version check (the handshake
+/// carries identity and keys only), and a desync between two builds is
+/// otherwise a log line nobody reads.
+pub fn room_url_with_parts(base: &str, code: Option<&str>, tag: &str, sim_version: u32) -> String {
     let suffix = match code {
-        Some(c) => format!("-{c}-{tag}"),
-        None => format!("-{tag}"),
+        Some(c) => format!("-{c}-{tag}-v{sim_version}"),
+        None => format!("-{tag}-v{sim_version}"),
     };
     match base.split_once('?') {
         Some((path, query)) => format!("{path}{suffix}?{query}"),
@@ -595,13 +603,24 @@ mod tests {
     #[test]
     fn code_and_arena_suffix_the_room_name_not_the_query() {
         assert_eq!(
-            room_url_with_parts("ws://h:3536/two-top?next=2", Some("CURS"), "pit"),
-            "ws://h:3536/two-top-CURS-pit?next=2"
+            room_url_with_parts("ws://h:3536/two-top?next=2", Some("CURS"), "pit", 7),
+            "ws://h:3536/two-top-CURS-pit-v7?next=2"
         );
         assert_eq!(
-            room_url_with_parts("ws://h/two-top", None, "forest"),
-            "ws://h/two-top-forest"
+            room_url_with_parts("ws://h/two-top", None, "forest", 7),
+            "ws://h/two-top-forest-v7"
         );
+    }
+
+    #[test]
+    fn different_sim_versions_never_share_a_room() {
+        // The whole point: a stale sideload and a fresh one, same code,
+        // same table, must land in two rooms rather than one desync.
+        let a = room_url_with_parts("ws://h/two-top?next=2", Some("CURS"), "pit", 13);
+        let b = room_url_with_parts("ws://h/two-top?next=2", Some("CURS"), "pit", 14);
+        assert_ne!(a, b);
+        assert!(a.ends_with("-v13?next=2"));
+        assert!(b.ends_with("-v14?next=2"));
     }
 
     #[test]
@@ -625,8 +644,8 @@ mod tests {
             base_url: Some("ws://h/two-top?next=2".into()),
         };
         assert_eq!(
-            code.room_url(sim::ArenaId::Vigil).as_deref(),
-            Some("ws://h/two-top-vigil?next=2")
+            code.room_url(sim::ArenaId::Vigil),
+            Some(format!("ws://h/two-top-vigil-v{}?next=2", sim::SIM_VERSION))
         );
     }
 
@@ -638,8 +657,11 @@ mod tests {
             base_url: Some("ws://h/two-top?next=2".into()),
         };
         assert_eq!(
-            code.room_url(sim::ArenaId::Pit).as_deref(),
-            Some("ws://h/two-top-CURS-pit?next=2")
+            code.room_url(sim::ArenaId::Pit),
+            Some(format!(
+                "ws://h/two-top-CURS-pit-v{}?next=2",
+                sim::SIM_VERSION
+            ))
         );
     }
 

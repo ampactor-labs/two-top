@@ -62,6 +62,15 @@ No `WinitSettings`, no `Time<Virtual>` tuning, no surface-loss path.
 
 ### 1. 🔴 A stranger's packet kills the app — and the repo already knows
 
+> **Correction (2026-09-17, on fixing):** the reachable panic is not the
+> `assert!` — a 2-Top peer speaks for one handle, so `len % 1` never fires.
+> It is the delta decoder trusting a remote-written two-byte length prefix
+> per frame (`compression.rs`), plus three hazards underneath in
+> `bitfield_rle`/`varinteger` (an unchecked read past the buffer, an
+> attacker-sized allocation, a wrapping shift). All closed by the guard in
+> `crates/net`. One upstream `assert!` on `start_frame` remains open — see
+> `ROLEPLAY_AUDIT.md` § Corrections.
+
 `crates/net/src/lib.rs:116-127` closes half of a hole and documents the other half:
 
 > "…the matchbox reference impl panics on them, but this app has a better

@@ -4388,6 +4388,7 @@ version = "0.0.0"
 dependencies = [
  "bevy",
  "bincode 2.0.1",
+ "bitfield-rle",
  "ed25519-dalek",
  "ggrs",
  "matchbox_socket",

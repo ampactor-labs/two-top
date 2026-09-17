@@ -75,6 +75,22 @@ pub fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     })
 }
 
+/// Move a file that exists but will not parse aside as a `.corrupt`
+/// sibling: evidence a human can hand back, instead of bytes the next
+/// save silently replaces. With [`write_atomic`] on every save, the only
+/// way to a corrupt file is outside interference (a hand edit, a bad
+/// disk) — and that is exactly when the bytes should survive. One helper,
+/// so every persisted file gets the same answer (the profile had it; the
+/// career ledger, which holds strictly more, did not).
+pub fn quarantine_corrupt(path: &Path) {
+    let mut name = path
+        .file_name()
+        .map(std::ffi::OsStr::to_os_string)
+        .unwrap_or_default();
+    name.push(".corrupt");
+    let _ = std::fs::rename(path, path.with_file_name(name));
+}
+
 /// A per-test scratch directory under the repo's `target/` (never the
 /// system temp dir — the dev box's /tmp is a small tmpfs with a hard
 /// quota). Shared by the persistence tests across this crate's modules.

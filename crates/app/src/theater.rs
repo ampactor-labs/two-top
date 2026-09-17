@@ -854,8 +854,12 @@ fn theater_input(
         .min_by_key(|t| t.id());
     if let Some(t) = scrub_touch {
         let fx = (t.position().x / win.x).clamp(0.0, 1.0);
-        if scrub_debounce(fx, &mut controls.scrub_anchor) {
-            let target = ((fx * total as f32) as u32).clamp(1, total.saturating_sub(1));
+        // A tape under two frames has no interior to scrub to — and
+        // `clamp(1, 0)` is a release-mode panic (`min > max`). The codec
+        // now refuses a header that lies about its count, but a 0- or
+        // 1-frame tape is a legitimate encoding, so the guard stays.
+        if total >= 2 && scrub_debounce(fx, &mut controls.scrub_anchor) {
+            let target = ((fx * total as f32) as u32).clamp(1, total - 1);
             controls.paused = true;
             controls.seek_target = Some(target);
         }

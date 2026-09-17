@@ -190,7 +190,7 @@ the title copy changes to `TAP TO FIND OPPONENT`; tapping the lower half
 or pressing Start enters `InMatch`, and `MatchboxPlugin` opens the
 signaling connection from `OnEnter(InMatch)`. The arena pick happens on the
 Title's roster screen before connecting, and it becomes part of the room
-name — `two-top-<arena>?next=2`, or `two-top-<CODE>-<arena>?next=2` for a
+name — `two-top-<arena>-v<SIM_VERSION>?next=2`, or `two-top-<CODE>-<arena>-v<SIM_VERSION>?next=2` for a
 private room — so two peers in one room have structurally agreed on the
 table; there is no arena handshake to get wrong. `TWOTOP_ARENA=<name|id>`
 still seeds the pick for desktop automation.

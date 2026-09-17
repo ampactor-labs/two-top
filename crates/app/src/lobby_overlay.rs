@@ -75,6 +75,7 @@ fn update_summoning(
     state: Res<LobbyState>,
     match_state: Res<sim::MatchState>,
     room: Res<RoomCode>,
+    selected: Res<sim::SelectedArena>,
     peer_profile: Res<net::PeerProfile>,
     absence: Res<crate::netplay::RecentAbsence>,
     mut stall: Local<Option<(std::mem::Discriminant<LobbyState>, f32)>>,
@@ -102,10 +103,16 @@ fn update_summoning(
     };
 
     let dots = [".", "..", "...", ".."][(now * 2.0) as usize % 4];
+    // The table is part of the room NAME (`room_code::room_url`), so two
+    // phones on one code but two tables are in two rooms — and used to
+    // render byte-identical waiting text while the stall hint blamed the
+    // network. Naming the table here is what lets two people compare
+    // screens and spot the mismatch.
+    let table = crate::arena_select::arena_title(selected.0);
     let room_line = if room.custom {
-        format!("room {}", code_spaced(&room.code_string()))
+        format!("room {}\n{table}", code_spaced(&room.code_string()))
     } else {
-        "quick match".to_string()
+        format!("quick match\n{table}")
     };
     let challenger = crate::profile::peer_name(peer_profile.0);
     let msg = match &*state {
@@ -118,11 +125,13 @@ fn update_summoning(
         }
         LobbyState::WaitingForPeer { .. } => {
             let mut m = format!(
-                "AWAITING A CHALLENGER{dots}\n\n{room_line}\ndial the same code over there"
+                "AWAITING A CHALLENGER{dots}\n\n{room_line}\nsame code, same table, over there"
             );
             if since > STALL_DIAGNOSIS_SECS {
+                // Lead with the mismatch a player can fix from the seat;
+                // the relay is the second guess, not the first.
                 m.push_str(
-                    "\n\nif the other phone shows this too,\nthe networks may need the relay (TURN)",
+                    "\n\nif the other phone shows this too:\ncheck both picked the same table -\nelse the networks may need the relay (TURN)",
                 );
             }
             Some(m)

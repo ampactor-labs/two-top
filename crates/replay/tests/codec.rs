@@ -131,3 +131,32 @@ fn decode_for_sim_version_rejects_mismatch() {
         other => panic!("expected SimVersionMismatch, got {other:?}"),
     }
 }
+
+#[test]
+fn frame_count_must_match_the_inputs() {
+    // The theater drives its playhead and scrub clamp straight off the
+    // header's count. A header that lies — fewer frames than declared, or
+    // a u32::MAX that strands a forward seek forever — is a crafted or
+    // truncated tape, and it is refused at the codec, not in the UI.
+    let mut short = sample_replay();
+    short.header.frame_count = 1; // three frames in the body
+    let bytes = encode(&short).unwrap();
+    match decode(&bytes) {
+        Err(ReplayError::FrameCountMismatch {
+            declared: 1,
+            actual: 3,
+        }) => {}
+        other => panic!("expected FrameCountMismatch, got {other:?}"),
+    }
+
+    let mut inflated = sample_replay();
+    inflated.header.frame_count = u32::MAX;
+    let bytes = encode(&inflated).unwrap();
+    assert!(matches!(
+        decode(&bytes),
+        Err(ReplayError::FrameCountMismatch { .. })
+    ));
+
+    // The honest count still round-trips, including the empty tape.
+    assert!(decode(&encode(&sample_replay()).unwrap()).is_ok());
+}

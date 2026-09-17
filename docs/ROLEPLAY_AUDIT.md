@@ -276,3 +276,69 @@ Ordered by (damage × reachability) ÷ cost, across all seven seats.
   a full filesystem, the same failure `determinism.yml` already documents.
   The 570-test figure in `CLAUDE.md` matches a static count of `#[test]`
   functions; CI is the place that signal comes from, not this audit.
+
+---
+
+## Status
+
+First pass, 2026-09-17: the six "now — cheap" items plus the packet
+panic. Six carry a test written against the failure; the lobby copy has
+no unit seam and was read, not run. Verified by
+`cargo test --workspace --locked` (586 passed, 0 failed),
+`cargo clippy --workspace --all-targets --locked -- -D warnings` and
+`cargo fmt --all --check`, all run in this session with their real exit
+codes captured. **The cross-platform determinism matrix has not run**;
+none of these touch the sim, so no `SIM_VERSION` bump was taken, and the
+canonical demos and their checksums are untouched.
+
+| Finding | Fix | Proof |
+|---|---|---|
+| P6 #1 — a peer's packet panics the process inside ggrs | A wire-format guard in `crates/net` mirrors ggrs's `Message` layout, walks an `Input` stream the way ggrs's decoder will, and refuses any frame that is not exactly one `PlayerInput` wide. The RLE layer underneath is vetted first with checked bounds (see corrections below). | `net::input_stream_tests` — the mirror's bytes must decode as a real `ggrs::Message`, or the guard is inert |
+| P3 #2 — scrubbing a `frame_count ≤ 1` tape panics in release | `replay::decode` refuses a header whose `frame_count` disagrees with the input count (`FrameCountMismatch`); the theater additionally skips scrubbing under two frames | `replay/tests/codec.rs::frame_count_must_match_the_inputs` |
+| P1 #5 / P6 #7c — mismatched builds pair and desync | `sim::SIM_VERSION` rides the room name (`two-top-CURS-pit-v14`); two builds never see each other. `PLAYBOOK.md` and `SIGNALING.md` updated | `room_code::different_sim_versions_never_share_a_room` |
+| P1 #1 — arena pick silently partitions the room, then blames TURN | The waiting overlay names the table on both paths, and the 15 s stall hint leads with "check both picked the same table" | UI copy; no unit seam |
+| P4 #1 — XFF rate-limit bypass in `tape_drop` and `ice_vendor` | One shared shape in both: `TRUSTED_PROXY_HOPS` (default 1, Railway's edge) picks the entry the outermost trusted proxy appended, never the client's leftmost; `0` ignores the header outright. The inverted comment is gone | `forwarded_ip_tests` in both services |
+| P3 #1 — a corrupt `career.json` is silently replaced | `paths::quarantine_corrupt` — one helper, now used by both `profile.json` and `career.json` — moves the bytes aside as `.corrupt` and logs at `error!` | `grudge::a_corrupt_career_file_is_quarantined_not_overwritten` |
+
+### Corrections to the record
+
+Things this pass found while fixing that the reports above got wrong or
+missed. Recorded here because a reader working from the persona files
+would otherwise verify the wrong thing.
+
+- **P6 #1's mechanism was wrong in detail, and the hole is wider than it
+  said.** The panic is not "5 raw bytes trips the assert"; a 2-Top peer
+  speaks for one handle, so ggrs's `assert!(len % handles.len() == 0)`
+  is `len % 1` and never fires. The reachable panic is the delta
+  decoder (`ggrs/src/network/compression.rs`): each frame's width comes
+  from a two-byte length prefix the *remote* wrote, so a stream decoding
+  to a 3-byte frame hits `expect("input deserialization failed")` in
+  `to_player_inputs`. Underneath that, `bitfield_rle` (via `varinteger`)
+  reads `buf[off]` past the end of a stream ending on a continuation
+  byte, and sizes its output allocation from the remote's repeat count —
+  a 1 GiB `vec!` from five bytes. All three are closed by the guard.
+  **One remains, and is not closable at this boundary:** protocol.rs
+  also `assert!(last_recv_frame + 1 >= body.start_frame)` on the wire's
+  own `start_frame`; checking it needs ggrs's private receive
+  bookkeeping. A hostile peer can still trip it mid-match. The honest
+  fix is a warn-and-drop in ggrs itself — filed as a follow-up, not
+  fixed.
+- **`GAME_DESIGN_AUDIT.md` § Not findings says `SpawnGuard`'s
+  break-on-act rule "closes the obvious offensive-shield exploit."
+  P7 #1 shows the taunt is the exception** — taunting is not in the
+  break list, `TAUNT_FRAMES = 42` fits inside `SPAWN_GUARD_FRAMES = 45`,
+  and the payout lands with three guard frames to spare. Not fixed in
+  this pass: it is a one-line sim change, which means a `SIM_VERSION`
+  bump and a matrix run, and it should ride the same bump as
+  `GAME_DESIGN_AUDIT` #1 rather than take one of its own.
+
+### Next
+
+In the order the "where to start" list gives, minus what landed: the
+lifecycle handler (P6 #2/#3/#5/#6 — sunset still kills the app), the
+forfeit ledger (P2 #3 — record *unfinished*, not two wins), `Desync`
+as a terminal state (P2 #5), the out-of-band `MatchState` write on the
+`Bye` path (P2 #4), the rollback window (P2 #1), and ingest validation
+plus socket timeouts on `tape_drop` (P4 #2/#3). The first sim-affecting
+batch — the round scoring, the respawn taunt, the sudden-death respawn
+margin — wants one `SIM_VERSION` bump and one matrix run together.

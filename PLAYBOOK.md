@@ -299,9 +299,11 @@ For the second phone, either repeat the ADB install or send that same
 Both phones boot to the Title screen with **"TAP TO FIND OPPONENT"**. Tap the
 arena line under the table to open the roster (seven tables, each with its
 floor and rules) and pick one. The pick is part of the room name
-(`two-top-pit?next=2`), so **both phones must pick the same arena to meet** —
+(`two-top-pit-v14?next=2`), so **both phones must pick the same arena to meet** —
 quick match queues per-arena now, and a private code pairs with the arena the
-same way ("dial CURS, pick the Pit"). Then both players tap PLAY.
+same way ("dial CURS, pick the Pit"). The `-v14` is `sim::SIM_VERSION`: two
+APKs on different sim versions land in different rooms and never pair, which
+is the only version check the live wire has. Then both players tap PLAY.
 
 ### 4f. What to verify (Phase 12, Gate 1)
 

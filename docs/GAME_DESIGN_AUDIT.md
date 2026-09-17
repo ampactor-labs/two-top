@@ -289,7 +289,8 @@ inherit whatever "score" means. Settle it before more is built on top.
 ### Not findings
 
 Checked and sound: `SpawnGuard`'s break-on-act rule (`sim:182`) closes the
-obvious offensive-shield exploit; `RESPAWN_FRAMES = 180` is defensible for
+obvious offensive-shield exploit (**superseded** — `ROLEPLAY_AUDIT.md` P7 #1:
+the taunt is not in the break list and completes inside the guard); `RESPAWN_FRAMES = 180` is defensible for
 a kill race though it would want re-tuning under fix (b); the anchor
 system's `AutoMin` re-derivation (`anchor.rs:92`) is correct and its
 "keep last good rect" guard handles the un-populated-window case cleanly.
