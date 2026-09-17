@@ -42,6 +42,10 @@ pub struct RivalRecord {
     pub last_met_unix: u64,
     /// The current run: +n = our last n meetings were wins, -n = theirs.
     pub streak: i32,
+    /// Meetings a silent drop ended — nobody's win, nobody's loss, and
+    /// the streak untouched. Counted so the rivalry still remembers it
+    /// happened.
+    pub unfinished: u32,
     /// Filenames (not paths) of recent tapes against this rival, newest
     /// last, capped at [`RIVAL_TAPE_RING`]. The rivals screen plays them
     /// straight from `recorder::replays_dir()`.
@@ -109,7 +113,7 @@ fn arm_milestone_flare(
 
 impl RivalRecord {
     pub fn meetings(&self) -> u32 {
-        self.wins + self.losses
+        self.wins + self.losses + self.unfinished
     }
 }
 
@@ -121,6 +125,8 @@ impl RivalRecord {
 pub struct CareerRecord {
     pub wins: u32,
     pub losses: u32,
+    /// Online matches a silent drop ended (see [`Outcome::Unfinished`]).
+    pub unfinished: u32,
     /// Current practice-ladder tier (resets to 0 on a loss to the bot).
     pub gauntlet_tier: u32,
     /// Highest tier ever reached.
@@ -270,26 +276,69 @@ fn save_career(record: &CareerRecord) {
     }
 }
 
-/// Did we win this decided match? Score settles it when someone actually
-/// reached the threshold; a forfeit goes to whoever stayed at the table.
-/// Pure for testing.
-pub fn match_won(our_score: u8, their_score: u8, forfeited: bool, we_went_absent: bool) -> bool {
+/// How a forfeit reached us. Read off `LobbyState::Forfeited.conceded`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ForfeitKind {
+    /// The peer said goodbye: a deliberate quit, and their app filed the
+    /// loss before sending it. The stayer may bank the win.
+    Conceded,
+    /// ggrs timed the peer out, or the silence FSM fired. A tunnel, a
+    /// Wi-Fi→cellular handoff, a pulled cable — or airplane mode from a
+    /// player down 1-4. Nothing here says which.
+    Silent,
+}
+
+/// The forfeit kind the lobby is reporting, if any.
+pub fn forfeit_kind(lobby: &net::LobbyState) -> Option<ForfeitKind> {
+    match lobby {
+        net::LobbyState::Forfeited { conceded: true, .. } => Some(ForfeitKind::Conceded),
+        net::LobbyState::Forfeited {
+            conceded: false, ..
+        } => Some(ForfeitKind::Silent),
+        _ => None,
+    }
+}
+
+/// How a decided online match lands on the ledger.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Outcome {
+    Won,
+    Lost,
+    /// Nobody reached the threshold and nobody conceded. Counts as a
+    /// meeting; moves neither W/L nor the streak.
+    Unfinished,
+}
+
+/// Score settles it when someone actually reached the threshold. Otherwise
+/// a forfeit decided it, and only two facts can honestly be banked: a
+/// goodbye is a concession, and our own freeze long enough to time us out
+/// on the other phone is our loss. A silent drop proves nothing about who
+/// left — both phones used to record a WIN for it, so every network drop
+/// was double-credited and airplane mode was a free win. Pure for testing.
+pub fn match_outcome(
+    our_score: u8,
+    their_score: u8,
+    forfeit: Option<ForfeitKind>,
+    we_went_absent: bool,
+) -> Outcome {
     if our_score >= MATCH_WIN_THRESHOLD {
-        return true;
+        return Outcome::Won;
     }
     if their_score >= MATCH_WIN_THRESHOLD {
-        return false;
+        return Outcome::Lost;
     }
-    // Nobody reached the threshold: a forfeit decided it. If our own phone
-    // went away, the walk-out is ours to own; otherwise the field is ours.
-    forfeited && !we_went_absent
+    match forfeit {
+        Some(ForfeitKind::Conceded) => Outcome::Won,
+        _ if we_went_absent => Outcome::Lost,
+        Some(ForfeitKind::Silent) | None => Outcome::Unfinished,
+    }
 }
 
 /// Commit the result on the tick a match is decided. Online only; the local
 /// handle decides which side of the score is "ours".
 #[allow(clippy::too_many_arguments)]
 fn record_match_result(
-    state: Res<MatchState>,
+    settled: Res<crate::attest::MatchOverSettled>,
     score: Res<MatchScore>,
     netplay: Res<NetplayConfig>,
     practice: Res<crate::bot::PracticeMode>,
@@ -302,7 +351,10 @@ fn record_match_result(
     mut record: ResMut<CareerRecord>,
     mut prev_over: Local<bool>,
 ) {
-    let over = matches!(*state, MatchState::MatchOver);
+    // On the SETTLED edge, not the raw MatchOver one: a predicted deciding
+    // kill stands for up to the prediction window before a rollback
+    // un-ends it, and this used to write the ledger twice for one match.
+    let over = settled.settled;
     let entered = over && !*prev_over;
     *prev_over = over;
     // Only live duels count — beating the bot is the gauntlet's business,
@@ -324,24 +376,29 @@ fn record_match_result(
     } else {
         (score.p1, score.p0)
     };
-    let forfeited = matches!(*lobby, net::LobbyState::Forfeited { .. });
+    let forfeit = forfeit_kind(&lobby);
     let we_went_absent = absence.within(time.elapsed_secs(), RecentAbsence::FORFEIT_BLAME_SECS);
-    let won = match_won(ours, theirs, forfeited, we_went_absent);
+    let outcome = match_outcome(ours, theirs, forfeit, we_went_absent);
 
-    if won {
-        record.wins += 1;
-    } else {
-        record.losses += 1;
+    match outcome {
+        Outcome::Won => record.wins += 1,
+        Outcome::Lost => record.losses += 1,
+        Outcome::Unfinished => record.unfinished += 1,
     }
     if let Some(peer) = peer.0 {
         let rival = record.rivals.entry(rival_key(peer.install_id)).or_default();
         rival.name = crate::profile::peer_name(Some(peer));
-        if won {
-            rival.wins += 1;
-        } else {
-            rival.losses += 1;
+        match outcome {
+            Outcome::Won => {
+                rival.wins += 1;
+                rival.streak = next_streak(rival.streak, true);
+            }
+            Outcome::Lost => {
+                rival.losses += 1;
+                rival.streak = next_streak(rival.streak, false);
+            }
+            Outcome::Unfinished => rival.unfinished += 1,
         }
-        rival.streak = next_streak(rival.streak, won);
         rival.last_met_unix = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs())
@@ -452,7 +509,7 @@ impl Plugin for GrudgePlugin {
             .add_systems(
                 Update,
                 (
-                    record_match_result,
+                    record_match_result.after(crate::attest::settle_match_over),
                     record_gauntlet_result,
                     arm_milestone_flare,
                 ),
@@ -479,19 +536,51 @@ mod tests {
 
     #[test]
     fn earned_scores_beat_forfeit_reasoning() {
+        use ForfeitKind::*;
         // Threshold reached: the score is the verdict, absence irrelevant.
-        assert!(match_won(MATCH_WIN_THRESHOLD, 3, true, true));
-        assert!(!match_won(2, MATCH_WIN_THRESHOLD, true, false));
+        assert_eq!(
+            match_outcome(MATCH_WIN_THRESHOLD, 3, Some(Silent), true),
+            Outcome::Won
+        );
+        assert_eq!(
+            match_outcome(2, MATCH_WIN_THRESHOLD, Some(Conceded), false),
+            Outcome::Lost
+        );
     }
 
     #[test]
-    fn forfeits_go_to_whoever_stayed() {
-        // The v1 bug: the survivor of a fled match must record a WIN.
-        assert!(match_won(2, 1, true, false));
-        // The one whose phone went away owns the loss.
-        assert!(!match_won(2, 1, true, true));
-        // No forfeit and no threshold: not a win (shouldn't happen online).
-        assert!(!match_won(2, 1, false, false));
+    fn only_a_goodbye_concedes_and_only_our_own_freeze_loses() {
+        use ForfeitKind::*;
+        // A goodbye is a deliberate quit: the stayer banks the win.
+        assert_eq!(match_outcome(2, 1, Some(Conceded), false), Outcome::Won);
+        // Our own phone froze long enough to be timed out: the loss is ours.
+        assert_eq!(match_outcome(2, 1, Some(Silent), true), Outcome::Lost);
+        assert_eq!(match_outcome(2, 1, None, true), Outcome::Lost);
+        // A silent drop with no fact behind it: BOTH phones used to bank a
+        // win here, and airplane mode at 1-4 was a free one. Unfinished.
+        assert_eq!(
+            match_outcome(2, 1, Some(Silent), false),
+            Outcome::Unfinished
+        );
+        assert_eq!(
+            match_outcome(1, 4, Some(Silent), false),
+            Outcome::Unfinished
+        );
+        assert_eq!(match_outcome(2, 1, None, false), Outcome::Unfinished);
+    }
+
+    #[test]
+    fn an_unfinished_meeting_still_counts_as_a_meeting() {
+        let r = RivalRecord {
+            wins: 2,
+            losses: 1,
+            unfinished: 3,
+            ..Default::default()
+        };
+        assert_eq!(r.meetings(), 6);
+        // And a v1 row without the field reads as zero.
+        let v1: RivalRecord = serde_json::from_str(r#"{ "wins": 1, "losses": 1 }"#).unwrap();
+        assert_eq!(v1.unfinished, 0);
     }
 
     #[test]

@@ -1332,6 +1332,7 @@ fn summary_text(
     opponent_gone: bool,
     we_fled: bool,
     desynced: bool,
+    unfinished: bool,
     saved: bool,
 ) -> String {
     let p0_won = score.p0 >= MATCH_WIN_THRESHOLD;
@@ -1377,6 +1378,19 @@ fn summary_text(
         format!("{peer_name} WINS")
     };
     let rivalry_line = rivalry.map(|r| format!("\n{r}")).unwrap_or_default();
+    // Nobody reached the threshold, nobody conceded, and we did not freeze:
+    // a dropped link is not a result. Crown nobody.
+    //
+    // `!threshold_hit` is load-bearing and matches `grudge::match_outcome`,
+    // which tests the score BEFORE the forfeit: a peer whose link dies in
+    // the same window as the deciding kill still lost 5-2, and this card
+    // read CONNECTION LOST over a win the ledger had already banked.
+    if unfinished && !threshold_hit {
+        return format!(
+            "CONNECTION LOST\n\n{}  -  {}{rivalry_line}\n\nunfinished - nobody's win",
+            score.p0, score.p1
+        );
+    }
     let gone_line = if opponent_gone {
         if we_fled {
             "\n\nmatch abandoned - you left the duel"
@@ -1456,6 +1470,15 @@ fn update_summary_overlay(
                 time.elapsed_secs(),
                 crate::netplay::RecentAbsence::FORFEIT_BLAME_SECS,
             );
+        // A silent drop nobody conceded and we did not cause: unfinished,
+        // the same verdict the ledger reaches (`grudge::match_outcome`).
+        let unfinished = matches!(
+            *lobby,
+            net::LobbyState::Forfeited {
+                conceded: false,
+                ..
+            }
+        ) && !we_fled;
         text.0 = summary_text(
             *score,
             netplay.room_url.is_some(),
@@ -1468,6 +1491,7 @@ fn update_summary_overlay(
             opponent_gone,
             we_fled,
             desynced,
+            unfinished,
             saved.0.is_some(),
         );
     } else {
@@ -2120,6 +2144,7 @@ mod tests {
             gone,
             false, // we_fled
             false, // desynced
+            false, // unfinished
             true,
         )
     }
@@ -2142,6 +2167,7 @@ mod tests {
             true, // opponent_gone
             we_fled,
             false, // desynced
+            false, // unfinished
             false,
         )
     }
@@ -2238,6 +2264,7 @@ mod tests {
             false,
             false,
             false, // desynced
+            false, // unfinished
             false,
         );
         assert!(text.contains("TAGC WINS"), "{text}");
@@ -2262,6 +2289,7 @@ mod tests {
             false,
             false,
             false, // desynced
+            false, // unfinished
             true,
         );
         assert!(text.contains("CUR WINS"), "{text}");
@@ -2282,5 +2310,77 @@ mod bot_offer_tests {
         assert!(bot_offer_armed(BOT_OFFER_DELAY_SECS, false));
         // A summons that failed outright has nothing left to wait for.
         assert!(bot_offer_armed(0.0, true));
+    }
+}
+
+#[cfg(test)]
+mod unfinished_summary_tests {
+    use super::*;
+
+    /// An earned score outranks a dropped link, on the card exactly as in
+    /// the ledger — the two must never disagree about the same match.
+    #[test]
+    fn a_decided_score_still_crowns_the_winner_even_if_the_link_then_dies() {
+        let peer = net::ProfileData {
+            install_id: 7,
+            name: net::name_slots(&[19, 0, 6, 2]), // TAGC
+        };
+        let text = summary_text(
+            MatchScore {
+                p0: MATCH_WIN_THRESHOLD,
+                p1: 2,
+            },
+            true,
+            false,
+            None,
+            Some(0),
+            "CURS",
+            Some(peer),
+            None,
+            true,  // opponent_gone
+            false, // we_fled
+            false, // desynced
+            true,  // unfinished — but the score was reached
+            false,
+        );
+        assert!(text.contains("CURS WINS"), "{text}");
+        assert!(!text.contains("CONNECTION LOST"), "{text}");
+        // And the ledger agrees on the same inputs.
+        assert_eq!(
+            crate::grudge::match_outcome(
+                MATCH_WIN_THRESHOLD,
+                2,
+                Some(crate::grudge::ForfeitKind::Silent),
+                false
+            ),
+            crate::grudge::Outcome::Won
+        );
+    }
+
+    #[test]
+    fn a_silent_drop_crowns_nobody() {
+        let peer = net::ProfileData {
+            install_id: 7,
+            name: net::name_slots(&[19, 0, 6, 2]), // TAGC
+        };
+        let text = summary_text(
+            MatchScore { p0: 2, p1: 1 },
+            true,
+            false,
+            None,
+            Some(0),
+            "CURS",
+            Some(peer),
+            Some("3RD MEETING with TAGC - tied 1-1".into()),
+            true,  // opponent_gone
+            false, // we_fled
+            false, // desynced
+            true,  // unfinished
+            false,
+        );
+        assert!(text.contains("CONNECTION LOST"), "{text}");
+        assert!(text.contains("nobody's win"), "{text}");
+        assert!(!text.contains("WINS"), "{text}");
+        assert!(text.contains("3RD MEETING"), "{text}");
     }
 }

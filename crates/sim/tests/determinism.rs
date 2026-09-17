@@ -25,6 +25,11 @@ fn build_app(check_distance: usize) -> App {
     let mut sb = SessionBuilder::<GgrsCfg>::new()
         .with_num_players(2)
         .unwrap()
+        // ggrs requires `check_dist < max_prediction` strictly
+        // ("Check distance too big."), so the window sits one frame above
+        // the depth under test. 16 is the live session's window
+        // (`app::netplay::MAX_PREDICTION_FRAMES`).
+        .with_max_prediction_window(check_distance + 1)
         .with_check_distance(check_distance)
         .with_input_delay(2);
     for i in 0..2 {
@@ -56,7 +61,9 @@ fn build_app(check_distance: usize) -> App {
 
 #[test]
 fn determinism_locked_600_frame_synctest() {
-    let mut app = build_app(7);
+    // 16 = `app::netplay::MAX_PREDICTION_FRAMES`: the deepest rollback the
+    // live session can perform is a depth this gate has actually verified.
+    let mut app = build_app(16);
     for f in 0..600u32 {
         let dir = if (f / 60) % 2 == 0 { 100i8 } else { -100i8 };
         app.world_mut().resource_mut::<SynthesizedInputs>().0 = PlayerInput {

@@ -224,8 +224,16 @@ fn update_overlay(
                 &peer_id.0.to_string()[..8]
             )
         }
-        LobbyState::Forfeited { peer_id } => {
-            format!("lobby: FORFEIT (peer={})", &peer_id.0.to_string()[..8])
+        LobbyState::Forfeited { peer_id, conceded } => {
+            format!(
+                "lobby: FORFEIT{} (peer={})",
+                if *conceded {
+                    " - conceded"
+                } else {
+                    " - silent"
+                },
+                &peer_id.0.to_string()[..8]
+            )
         }
         LobbyState::Desynced { peer_id, frame } => {
             format!(

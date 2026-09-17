@@ -202,6 +202,23 @@ impl Drop_ {
     }
 }
 
+/// A postcard `ReplayHeader` starts with its `[u8; 4]` magic unprefixed,
+/// so the first four bytes of every tape are literally `BMRG` — enough to
+/// turn "any bytes up to 64 KB, served back to any origin" into "this
+/// game's tapes" without pulling the codec (and Bevy) into a 200-line
+/// server. Not a validation of the tape; the theater does that, on
+/// screen, when it plays.
+///
+/// The length floor only rejects a bare magic probe. It is deliberately
+/// low: an empty dev tape (no inputs, no handles, zero timestamp) varints
+/// down to about fifteen bytes, so a floor near that size could refuse a
+/// legitimate tape at upload — a worse failure than storing a short one.
+const TAPE_MIN_BYTES: usize = 8;
+
+fn looks_like_a_tape(bytes: &[u8]) -> bool {
+    bytes.len() >= TAPE_MIN_BYTES && bytes.starts_with(b"BMRG")
+}
+
 fn env_u64(key: &str, default: u64) -> u64 {
     std::env::var(key)
         .ok()
@@ -247,7 +264,7 @@ fn main() {
                         .take(TAPE_MAX_BYTES as u64 + 1)
                         .read_to_end(&mut bytes);
                     match take {
-                        Ok(_) if bytes.len() <= TAPE_MAX_BYTES && !bytes.is_empty() => {
+                        Ok(_) if bytes.len() <= TAPE_MAX_BYTES && looks_like_a_tape(&bytes) => {
                             let receipt = drop.store(bytes, now);
                             match serde_json::to_string(&receipt) {
                                 Ok(json) => (200, json.into_bytes(), "application/json"),
@@ -258,9 +275,14 @@ fn main() {
                                 ),
                             }
                         }
-                        Ok(_) => (
+                        Ok(_) if bytes.len() > TAPE_MAX_BYTES => (
                             413,
                             b"{\"error\":\"tape too large\"}".to_vec(),
+                            "application/json",
+                        ),
+                        Ok(_) => (
+                            400,
+                            b"{\"error\":\"not a tape\"}".to_vec(),
                             "application/json",
                         ),
                         Err(_) => (
@@ -272,10 +294,21 @@ fn main() {
                 }
             }
             (tiny_http::Method::Get, path) if path.starts_with("/tape/") => {
-                let id = &path["/tape/".len()..];
-                match drop.get(id, now) {
-                    Some(bytes) => (200, bytes, "application/octet-stream"),
-                    None => (404, b"not found".to_vec(), "text/plain"),
+                // Same bucket as POST: a viewer opens a link once, and an
+                // unmetered GET was free outbound bandwidth against a
+                // single-threaded process.
+                if !client_ip(&request, trusted_hops).is_none_or(|ip| limiter.allow_at(ip, now)) {
+                    (
+                        429,
+                        b"{\"error\":\"slow down\"}".to_vec(),
+                        "application/json",
+                    )
+                } else {
+                    let id = &path["/tape/".len()..];
+                    match drop.get(id, now) {
+                        Some(bytes) => (200, bytes, "application/octet-stream"),
+                        None => (404, b"not found".to_vec(), "text/plain"),
+                    }
                 }
             }
             _ => (404, b"not found".to_vec(), "text/plain"),
@@ -290,6 +323,11 @@ fn main() {
         // this one header is the whole story.
         response.add_header(
             tiny_http::Header::from_bytes("Access-Control-Allow-Origin", "*")
+                .expect("static header"),
+        );
+        // A served blob is a blob: never let a browser sniff it into a page.
+        response.add_header(
+            tiny_http::Header::from_bytes("X-Content-Type-Options", "nosniff")
                 .expect("static header"),
         );
         let _ = request.respond(response);
@@ -423,5 +461,23 @@ mod forwarded_ip_tests {
     fn two_trusted_hops_reach_past_the_inner_proxy() {
         let got = forwarded_ip(Some("forged, 203.0.113.9, 10.1.1.1"), None, 2);
         assert_eq!(got, Some(ip("203.0.113.9")));
+    }
+}
+
+#[cfg(test)]
+mod ingest_tests {
+    use super::looks_like_a_tape;
+
+    #[test]
+    fn only_bytes_that_start_like_a_tape_are_stored() {
+        let mut tape = b"BMRG".to_vec();
+        tape.extend_from_slice(&[1u8; 40]);
+        assert!(looks_like_a_tape(&tape));
+        assert!(!looks_like_a_tape(b"BMRG"), "a bare magic is not a tape");
+        // A minimal dev tape (empty inputs, no handles) must still pass.
+        assert!(looks_like_a_tape(b"BMRG\x01\x00\x0e\x00\x02\x3c\x00"));
+        assert!(!looks_like_a_tape(b"GIF89a....................."));
+        assert!(!looks_like_a_tape(&[0u8; 64]));
+        assert!(!looks_like_a_tape(b""));
     }
 }

@@ -192,12 +192,14 @@ fn save_replay_on_match_over(
             // applies. The first cut stamped `else 1`, which named the
             // Stag winner of a match the Cur won by walkover (caught by
             // the automated Rung 2 smoke's tape filename).
-            let winner = if score.p0 >= MATCH_WIN_THRESHOLD {
-                0
+            // A silent drop crowns nobody (`winner: None`) — the same
+            // verdict the ledger reaches in `grudge::match_outcome`.
+            let winner: Option<u8> = if score.p0 >= MATCH_WIN_THRESHOLD {
+                Some(0)
             } else if score.p1 >= MATCH_WIN_THRESHOLD {
-                1
+                Some(1)
             } else {
-                let forfeited = matches!(*lobby, net::LobbyState::Forfeited { .. });
+                let forfeit = crate::grudge::forfeit_kind(&lobby);
                 let local_handle = local.0.unwrap_or(0);
                 let we_went_absent = absence.within(
                     time.elapsed_secs(),
@@ -208,10 +210,10 @@ fn save_replay_on_match_over(
                 } else {
                     (score.p1, score.p0)
                 };
-                if crate::grudge::match_won(ours, theirs, forfeited, we_went_absent) {
-                    local_handle as u8
-                } else {
-                    1 - local_handle as u8
+                match crate::grudge::match_outcome(ours, theirs, forfeit, we_went_absent) {
+                    crate::grudge::Outcome::Won => Some(local_handle as u8),
+                    crate::grudge::Outcome::Lost => Some(1 - local_handle as u8),
+                    crate::grudge::Outcome::Unfinished => None,
                 }
             };
             let recorded_at = std::time::SystemTime::now()
@@ -228,7 +230,7 @@ fn save_replay_on_match_over(
                     frame_rate: TICK_HZ as u8,
                     frame_count: rec.frames.len() as u32,
                     recorded_at,
-                    winner: Some(winner),
+                    winner,
                     player_handles: header_names(
                         &netplay,
                         practice.0,
@@ -256,7 +258,7 @@ fn save_replay_on_match_over(
 }
 
 /// Encode + write the tape. Returns the path on success.
-fn write_replay(replay: &Replay, recorded_at: u64, winner: u8) -> Option<PathBuf> {
+fn write_replay(replay: &Replay, recorded_at: u64, winner: Option<u8>) -> Option<PathBuf> {
     let bytes = match encode(replay) {
         Ok(b) => b,
         Err(e) => {
@@ -273,8 +275,12 @@ fn write_replay(replay: &Replay, recorded_at: u64, winner: u8) -> Option<PathBuf
         return None;
     }
     let name = format!(
-        "match_{recorded_at}_{}wins.bmrg",
-        if winner == 0 { "cur" } else { "stag" }
+        "match_{recorded_at}_{}.bmrg",
+        match winner {
+            Some(0) => "curwins",
+            Some(_) => "stagwins",
+            None => "unfinished",
+        }
     );
     let path = dir.join(name);
     match crate::paths::write_atomic(&path, &bytes) {

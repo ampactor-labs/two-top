@@ -425,7 +425,7 @@ Diagnostic events written to `.bmrg.log` companion file (JSON Lines).
 
 Three-layer determinism defense:
 
-**Layer 1: SyncTestSession.** Single-machine. Runs every CI job via `cargo nextest run --workspace --locked` in `ci.yml`, which executes `crates/sim/tests/determinism.rs::determinism_locked_600_frame_synctest` — a 600-frame SyncTest with `check_distance: 7`, `input_delay: 2`. Catches intra-machine non-determinism. (The live app + `replay_sync` use `check_distance: 2` to keep the per-frame resimulation cost down; the test bumps it to 7 for stricter coverage.)
+**Layer 1: SyncTestSession.** Single-machine. Runs every CI job via `cargo nextest run --workspace --locked` in `ci.yml`, which executes `crates/sim/tests/determinism.rs::determinism_locked_600_frame_synctest` — a 600-frame SyncTest with `check_distance: 16` (the live session's prediction window), `input_delay: 2`. Catches intra-machine non-determinism. (The live app + `replay_sync` use `check_distance: 2` to keep the per-frame resimulation cost down; the test bumps it to 7 for stricter coverage.)
 
 **Layer 2: Cross-platform replay matrix.** `replay_sync` binary runs `tests/demos/canonical/match_v1.bmrg` headlessly on each platform, dumps per-frame per-component checksum log. Diff job compares all logs against linux-x64 baseline. Platforms: linux-x64, linux-aarch64 (qemu), macos-14 (native ARM), aarch64-linux-android (now `--workspace --exclude app --tests`: build-only, no replay-sync run — see `.github/workflows/determinism.yml`). `app` is excluded on every non-native cross target because its `bevy_audio` → `cpal` → `alsa-sys` and `bevy_winit` → `wgpu` chains need target-side system libs the cross-toolchains don't ship.
 

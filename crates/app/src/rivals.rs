@@ -232,6 +232,9 @@ fn build_rivals_ui(world: &mut World) {
                     s => format!("THEY HAVE TAKEN THE LAST {}", -s),
                 });
             }
+            if r.unfinished > 0 {
+                facts.push(format!("{} UNFINISHED - CONNECTION LOST", r.unfinished));
+            }
             if r.attested_wins > 0 {
                 facts.push(format!("{} OF YOUR WINS ARE SEALED", r.attested_wins));
             }

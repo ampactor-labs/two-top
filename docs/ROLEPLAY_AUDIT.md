@@ -317,6 +317,22 @@ proof column says *read*, there is no unit seam and no two-peer harness
 | P3 #3 / #4 / #10 — quitting keeps the tier; the counter climbs past the bot; a loss resets to the dummy | `GAUNTLET_MAX_TIER = 10` (where the bot's last knob saturates), labelled MASTERED; a loss or a live-match quit falls to `loss_tier(best)` — two rungs under the best, never the dummy again | three `grudge` tests |
 | P6 #3 — dark theme at sunset recreates the activity, re-enters `android_main`, and `init_logging` panics on re-registration | `try_init` in every branch, the panic hook installs once, and the manifest absorbs uiMode, density, fontScale, smallestScreenSize, screenLayout, locale and the rest | `logging::init_logging_twice_does_not_panic`; the manifest is unverified on a device |
 
+### Third pass, 2026-09-17
+
+The netcode tier and the ledger's honesty, still with no `SIM_VERSION`
+bump. Verified the same way (598 passed, 0 failed; clippy
+`-D warnings`; fmt). Same caveat: no two-peer harness, so the netplay
+mechanisms are traced, not exercised.
+
+| Finding | Fix | Proof |
+|---|---|---|
+| P2 #3 — both phones record a WIN for a match a network drop ended; airplane mode banks a win | `Forfeited` carries `conceded`; `grudge::match_outcome` is three-way. A goodbye is a concession (the leaver filed the loss first), our own freeze ≥ `DISCONNECT_TIMEOUT` is our loss, and a silent drop is **unfinished** — a meeting, but nobody's win, nobody's loss, streak untouched. The summary reads CONNECTION LOST; the tape's winner is `None`; RIVALS counts it | `grudge::only_a_goodbye_concedes_and_only_our_own_freeze_loses` and two more; `screen::a_silent_drop_crowns_nobody` |
+| P2 #6 — the ledger and the attestation commit on a *predicted* `MatchOver` | `attest::MatchOverSettled` carries both edges: `over` (the raw `MatchOver`, which a rollback can still undo) and `settled` (the session's confirmed frame has passed the frame `MatchOver` was first seen at — at once when there is no P2P session to roll anything back). The ledger and the signer commit on `settled`; `tape_before` is captured on `over` so the tape/attestation pairing survives either order of save and settle | `attest` test still signs on tick 1; mechanism read |
+| P2 #1 — the rollback session runs at ggrs's LAN default of 8 predicted frames | `with_max_prediction_window(16)`, `ONLINE_INPUT_DELAY` 2 → 3, and the CI SyncTest / `sync_test` default raised from 7 to 16 so the deepest live rollback is a depth CI verifies (ggrs requires `check_dist < max_prediction` strictly, so those sessions size their window one frame above the depth) | `determinism_locked_600_frame_synctest` at depth 16 |
+| P2 #8 — the side channel trusts any sender; a mid-match `Profile` rewrites the ledger key | `netplay::side_channel_verdict`: a message not from the paired peer is ignored; a `Profile` whose install-id differs from the one on file is refused | `netplay::the_side_channel_trusts_only_the_paired_peer_and_its_first_identity` |
+| (self-review) — the summary card and the ledger disagreed about a decided score whose link then died | `summary_text`'s unfinished branch now tests `!threshold_hit`, matching `grudge::match_outcome`, which checks the score before the forfeit. Found by re-reading the batch's own diff, not by a test | `screen::a_decided_score_still_crowns_the_winner_even_if_the_link_then_dies`, which also asserts the ledger agrees on the same inputs |
+| P4 #2 — `tape_drop` is an anonymous 64 KB blob host | Ingest requires the `BMRG` magic and a minimum length (postcard puts the `[u8; 4]` first, unprefixed); GET is metered like POST; every response carries `X-Content-Type-Options: nosniff` | `tape_drop::ingest_tests` |
+
 ### Corrections to the record
 
 Things this pass found while fixing that the reports above got wrong or
@@ -358,16 +374,25 @@ would otherwise verify the wrong thing.
   fix is not to route it through the sim at all, but to make the
   out-of-band write unrollbackable by dropping the session. The finding
   was right; the fix it proposed was not.
+- **P2 #1 overstated "`WaitRecommendation` is discarded."** The event is
+  logged and unused, but bevy_ggrs already corrects the skew it reports,
+  continuously: the clock runs 10% slow for as long as
+  `session.frames_ahead() > 0` (`bevy_ggrs/src/schedule_systems.rs`).
+  What was actually missing was the prediction window, which is now 16.
+- **P4 #3's socket timeouts cannot be done with `tiny_http` 0.12.** It
+  exposes only `recv_timeout` on the accept loop; a client that trickles a
+  body holds the request thread with no deadline the library can set. A
+  worker pool would bound the damage to the pool size, not remove it.
+  Still open; it needs a different server.
 
 ### Next
 
-In the order the "where to start" list gives, minus what landed: the
-lifecycle handler proper (P6 #2/#5/#6 — a phone call is still a 9 s
-forfeit with no reconnect, and there is no `WAKE_LOCK`; #3's re-init
-panic is closed), the forfeit ledger (P2 #3 — record *unfinished*, not
-two wins), the rollback window (P2 #1), the ledger and attestation
-committing on a predicted `MatchOver` (P2 #6), the side-channel sender
-check (P2 #8), and ingest validation plus socket timeouts on `tape_drop`
-(P4 #2/#3). The first sim-affecting batch — the round scoring, the
-respawn taunt, the sudden-death respawn margin — wants one `SIM_VERSION`
-bump and one matrix run together.
+What is left, in value order: the lifecycle handler proper (P6 #2/#5/#6
+— a phone call is still a 9 s forfeit with no reconnect, and there is
+no `WAKE_LOCK`), a two-peer in-process harness so the netplay mechanisms
+above stop being "read, not run" (P2 #10), the tape hash in
+`MatchStatement` (P4 #4b), a recorder ring and a DUELS/PRACTICE filter
+on REPLAYS (P3 #5/#6), the shade's honesty (P3 #7/#8), and a server for
+`tape_drop` that can set a deadline (P4 #3). The first sim-affecting
+batch — the round scoring, the respawn taunt, the sudden-death respawn
+margin — wants one `SIM_VERSION` bump and one matrix run together.

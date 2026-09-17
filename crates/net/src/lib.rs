@@ -836,10 +836,13 @@ pub enum LobbyState {
     /// the peer — the disconnection countdown is
     /// `frame.0 - since_frame >= GRACE_FRAMES`.
     Disconnected { peer_id: PeerId, since_frame: u32 },
-    /// Disconnection persisted past the forfeit threshold. The match
-    /// is over; the next `tick_match_state` round will read
-    /// `MatchScore` and crown the surviving peer.
-    Forfeited { peer_id: PeerId },
+    /// The match ended without the sim deciding it. `conceded` is the
+    /// fact the ledger can bank: true when the peer said goodbye (a
+    /// deliberate quit — their app filed the loss before sending it),
+    /// false when ggrs timed them out or the silence FSM fired, which
+    /// proves nothing about who left. Both phones used to record a WIN
+    /// for the latter; `grudge::match_outcome` records it as unfinished.
+    Forfeited { peer_id: PeerId, conceded: bool },
     /// The two sims stopped agreeing (ggrs `DesyncDetected` at `frame`).
     /// Terminal like `Forfeited`, but nothing about this match is a
     /// shared fact any more: the app records no result, signs nothing,
@@ -1010,7 +1013,10 @@ pub fn next_lobby_state_for_silence(
             })
         }
         LobbyState::Disconnected { peer_id, .. } if elapsed >= FORFEIT_AFTER_FRAMES => {
-            Some(LobbyState::Forfeited { peer_id: *peer_id })
+            Some(LobbyState::Forfeited {
+                peer_id: *peer_id,
+                conceded: false,
+            })
         }
         LobbyState::Disconnected { peer_id, .. } if elapsed < DISCONNECT_AFTER_FRAMES => {
             Some(LobbyState::Connected { peer_id: *peer_id })
@@ -1313,7 +1319,13 @@ mod tests {
             }
             .is_connected()
         );
-        assert!(!LobbyState::Forfeited { peer_id: peer }.is_connected());
+        assert!(
+            !LobbyState::Forfeited {
+                peer_id: peer,
+                conceded: false,
+            }
+            .is_connected()
+        );
     }
 
     #[test]
@@ -1330,7 +1342,13 @@ mod tests {
             }
             .is_in_match()
         );
-        assert!(!LobbyState::Forfeited { peer_id: peer }.is_in_match());
+        assert!(
+            !LobbyState::Forfeited {
+                peer_id: peer,
+                conceded: false,
+            }
+            .is_in_match()
+        );
         assert!(
             !LobbyState::Desynced {
                 peer_id: peer,
@@ -1344,7 +1362,13 @@ mod tests {
     #[test]
     fn terminal_is_forfeit_or_desync_only() {
         let peer = dummy_peer();
-        assert!(LobbyState::Forfeited { peer_id: peer }.is_terminal());
+        assert!(
+            LobbyState::Forfeited {
+                peer_id: peer,
+                conceded: false,
+            }
+            .is_terminal()
+        );
         assert!(
             LobbyState::Desynced {
                 peer_id: peer,
@@ -1434,7 +1458,10 @@ mod tests {
                     peer_id: peer,
                     since_frame: 100
                 },
-                &LobbyState::Forfeited { peer_id: peer }
+                &LobbyState::Forfeited {
+                    peer_id: peer,
+                    conceded: false,
+                }
             ),
             None,
         );
@@ -1499,7 +1526,10 @@ mod tests {
                 now,
                 last_msg
             ),
-            Some(LobbyState::Forfeited { peer_id: peer }),
+            Some(LobbyState::Forfeited {
+                peer_id: peer,
+                conceded: false,
+            }),
         );
     }
 
@@ -1527,7 +1557,14 @@ mod tests {
         let peer = dummy_peer();
         // Even with very long silence, a Forfeited state stays Forfeited.
         assert_eq!(
-            next_lobby_state_for_silence(&LobbyState::Forfeited { peer_id: peer }, 10_000, 0),
+            next_lobby_state_for_silence(
+                &LobbyState::Forfeited {
+                    peer_id: peer,
+                    conceded: false,
+                },
+                10_000,
+                0
+            ),
             None,
         );
     }

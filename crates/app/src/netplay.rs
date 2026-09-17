@@ -44,10 +44,24 @@ use net::{
 };
 use sim::GgrsCfg;
 
-/// Online input delay (frames). 2 hides a couple frames of network jitter
-/// behind local prediction without a perceptible feel cost — the couch
-/// build runs 0 because there's no network to hide.
-const ONLINE_INPUT_DELAY: usize = 2;
+/// Online input delay (frames). 3 hides a few frames of network jitter
+/// behind local prediction; every frame here is one more frame of
+/// prediction headroom bought for 16.7 ms of feel (the couch build runs 0
+/// because there's no network to hide). The budget: touch sample ≤ 1
+/// frame + this + interpolation ≤ 1 frame ≈ 83 ms online before the
+/// panel, against a freeze the moment the window fills.
+const ONLINE_INPUT_DELAY: usize = 3;
+
+/// How far ahead of the last confirmed remote input the session may run.
+/// ggrs's default is 8, which is a LAN number: at a cellular 300 ms RTT a
+/// remote input for frame N cannot arrive before our N+9, so the session
+/// sat permanently against the stop, advancing only as confirmations
+/// arrived and turning every dropped packet into a visible freeze. 16 is
+/// ~250 ms one-way of headroom at 60 Hz. The CI SyncTest's check
+/// distance matches it (`crates/sim/tests/determinism.rs`), so the
+/// deepest rollback the product can perform online is a depth CI has
+/// actually verified.
+const MAX_PREDICTION_FRAMES: usize = 16;
 
 /// ggrs desync-detection cadence: exchange a state checksum every N frames.
 /// 30 @ 60 Hz = twice a second — frequent enough to catch a divergence
@@ -557,6 +571,7 @@ fn perform_swap(world: &mut World, peer_id: PeerId) {
         .with_num_players(2)
         .expect("2 players")
         .with_input_delay(ONLINE_INPUT_DELAY)
+        .with_max_prediction_window(MAX_PREDICTION_FRAMES)
         .with_disconnect_timeout(DISCONNECT_TIMEOUT)
         .with_desync_detection_mode(DesyncDetection::On {
             interval: DESYNC_CHECK_INTERVAL,
@@ -640,6 +655,9 @@ fn drain_session_events(world: &mut World) {
                         interruption_edge = Some(false);
                     }
                     GgrsEvent::WaitRecommendation { skip_frames } => {
+                        // Logged, not acted on: bevy_ggrs already corrects the
+                        // skew continuously, running the clock 10% slow for
+                        // as long as `frames_ahead() > 0` (schedule_systems).
                         tracing::debug!(target: "two_top::net", skip_frames, "wait recommendation");
                     }
                     GgrsEvent::Disconnected { addr } => {
@@ -681,8 +699,10 @@ fn drain_session_events(world: &mut World) {
     }
 
     if let Some(addr) = forfeited_peer {
+        // ggrs timed the peer out: a silent drop, nobody's concession.
         *world.resource_mut::<LobbyState>() = LobbyState::Forfeited {
             peer_id: addr_to_peer(addr),
+            conceded: false,
         };
         *world.resource_mut::<sim::MatchState>() = sim::MatchState::MatchOver;
     }
@@ -710,8 +730,10 @@ fn drain_session_events(world: &mut World) {
 /// recorded twice when the disconnect timeout ends it again. No session,
 /// no rollback: the write stands. `PostUpdate`, so it lands in the same
 /// frame as the write, before the next `PreUpdate` can advance ggrs.
-/// bevy_ggrs tolerates the absence (the Title runs sessionless), and
-/// `leave_online_match` removing it again is a no-op.
+/// bevy_ggrs tolerates the absence (the Title runs sessionless; its
+/// sessionless branch resets `LocalPlayers` and the rollback frame
+/// counters, the same state `leave_online_match` already leaves the
+/// summary in), and `leave_online_match` removing it again is a no-op.
 fn freeze_terminal_session(world: &mut World) {
     if !world.resource::<LobbyState>().is_terminal() {
         return;
@@ -760,6 +782,23 @@ fn pump_side_channel(world: &mut World) {
             tracing::warn!(target: "two_top::net", ?from, len = bytes.len(), "unreadable side-channel message ignored");
             continue;
         };
+        let claimed = match &msg {
+            NetMsg::Profile(p) => Some(p.install_id),
+            NetMsg::Profile2(d) => Some(d.install_id),
+            _ => None,
+        };
+        let known = world.resource::<PeerProfile>().0.map(|p| p.install_id);
+        match side_channel_verdict(from, peer, known, claimed) {
+            SideChannelVerdict::Accept => {}
+            SideChannelVerdict::Stranger => {
+                tracing::warn!(target: "two_top::net", ?from, "side-channel message from a peer we are not playing — ignored");
+                continue;
+            }
+            SideChannelVerdict::IdentitySwap => {
+                tracing::warn!(target: "two_top::net", ?from, "peer tried to change its install-id mid-session — ignored");
+                continue;
+            }
+        }
         match msg {
             NetMsg::Profile(profile) => {
                 tracing::info!(
@@ -788,11 +827,49 @@ fn pump_side_channel(world: &mut World) {
             }
             NetMsg::Bye => {
                 tracing::info!(target: "two_top::net", ?from, "peer said goodbye — forfeit without the grace wait");
-                *world.resource_mut::<LobbyState>() = LobbyState::Forfeited { peer_id: from };
+                *world.resource_mut::<LobbyState>() = LobbyState::Forfeited {
+                    peer_id: from,
+                    conceded: true,
+                };
                 *world.resource_mut::<sim::MatchState>() = sim::MatchState::MatchOver;
             }
         }
     }
+}
+
+/// What to do with a side-channel message. Pure for testing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SideChannelVerdict {
+    Accept,
+    /// Not the peer we are playing. Two-peer rooms are a deployment
+    /// convention (`?next=2`), not something the client enforced, and a
+    /// `Bye` from a third connection ended someone else's duel.
+    Stranger,
+    /// A `Profile` whose install-id differs from the one already on
+    /// file. The install-id is the ledger key: a peer who re-sent a
+    /// throwaway id a second before losing filed the loss under a rival
+    /// that does not exist. Names may change between meetings; the
+    /// identity behind a session may not.
+    IdentitySwap,
+}
+
+/// `known` is the install-id already on file for this session (if any),
+/// `claimed` the one this message asserts (Profile / Profile2 only).
+pub fn side_channel_verdict(
+    from: PeerId,
+    lobby_peer: Option<PeerId>,
+    known: Option<u128>,
+    claimed: Option<u128>,
+) -> SideChannelVerdict {
+    if lobby_peer != Some(from) {
+        return SideChannelVerdict::Stranger;
+    }
+    if let (Some(k), Some(c)) = (known, claimed)
+        && k != c
+    {
+        return SideChannelVerdict::IdentitySwap;
+    }
+    SideChannelVerdict::Accept
 }
 
 /// "Our table": the cosmetic stream (stains, embers, the dark beyond's
@@ -973,6 +1050,43 @@ pub fn leave_online_match(world: &mut World) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_side_channel_trusts_only_the_paired_peer_and_its_first_identity() {
+        use SideChannelVerdict::*;
+        let us_peer = addr_to_peer(sim::NetAddr(1));
+        let stranger = addr_to_peer(sim::NetAddr(2));
+        // Nobody paired yet: everything is a stranger.
+        assert_eq!(side_channel_verdict(us_peer, None, None, None), Stranger);
+        // The paired peer's first Profile is accepted and sets the identity.
+        assert_eq!(
+            side_channel_verdict(us_peer, Some(us_peer), None, Some(0xaaa)),
+            Accept
+        );
+        // The same identity again (a name change) is fine.
+        assert_eq!(
+            side_channel_verdict(us_peer, Some(us_peer), Some(0xaaa), Some(0xaaa)),
+            Accept
+        );
+        // A different identity mid-session is refused.
+        assert_eq!(
+            side_channel_verdict(us_peer, Some(us_peer), Some(0xaaa), Some(0xbbb)),
+            IdentitySwap
+        );
+        // Messages that carry no identity ride on the sender check alone.
+        assert_eq!(
+            side_channel_verdict(us_peer, Some(us_peer), Some(0xaaa), None),
+            Accept
+        );
+        assert_eq!(
+            side_channel_verdict(stranger, Some(us_peer), Some(0xaaa), None),
+            Stranger
+        );
+        assert_eq!(
+            side_channel_verdict(stranger, Some(us_peer), None, Some(0xccc)),
+            Stranger
+        );
+    }
 
     #[test]
     fn only_a_freeze_the_peer_would_time_out_counts_as_absence() {

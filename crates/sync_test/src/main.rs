@@ -12,13 +12,15 @@ use sim::{
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     let frames: u32 = arg_value(&args, "--frames").unwrap_or(600);
-    let check_distance: usize = arg_value(&args, "--check-distance").unwrap_or(7);
+    let check_distance: usize = arg_value(&args, "--check-distance").unwrap_or(16);
 
     println!("sync_test: frames={frames} check_distance={check_distance}");
 
     let mut sb = SessionBuilder::<GgrsCfg>::new()
         .with_num_players(2)
         .expect("with_num_players(2) accepted")
+        // ggrs requires `check_dist < max_prediction` strictly.
+        .with_max_prediction_window(check_distance + 1)
         .with_check_distance(check_distance)
         .with_input_delay(2);
     for i in 0..2 {

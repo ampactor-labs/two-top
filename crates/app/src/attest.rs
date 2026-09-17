@@ -57,12 +57,57 @@ impl AttestState {
     }
 }
 
-/// On the tick a match is observed decided on score: build the canonical
-/// statement, sign it, send the signature. Same guards as the grudge
-/// ledger's recorder, plus the threshold and the Profile2 handshake.
+/// True once the current `MatchOver` can no longer be rolled back. A
+/// deciding kill is predicted like any other tick, so `MatchOver` can
+/// stand for up to the prediction window before a correction un-ends it.
+/// The recorder waits 30 render frames for that (`SAVE_DELAY_FRAMES`); the
+/// ledger and the attestation fired on the raw edge — a phantom decision
+/// wrote the ledger twice and bumped `decided` (the statement's
+/// `match_index`) on one phone only, after which no statement in the
+/// session could ever verify. Exact rather than a delay: settled when the
+/// session's confirmed frame has passed the frame `MatchOver` was first
+/// observed at, or at once when no P2P session exists to roll anything
+/// back (couch, practice, theater — and a forfeit or desync, which froze
+/// the session). The ledger orders after `settle_match_over` too.
+#[derive(Resource, Default, Debug, Clone, Copy)]
+pub struct MatchOverSettled {
+    /// `MatchState::MatchOver` this frame — the raw edge a rollback can
+    /// still undo. Consumers reset on its fall and capture on its rise.
+    pub over: bool,
+    /// `over`, and no rollback can undo it any more. Consumers commit on
+    /// its rise.
+    pub settled: bool,
+}
+
+pub fn settle_match_over(
+    state: Res<MatchState>,
+    session: Option<Res<bevy_ggrs::Session<sim::GgrsCfg>>>,
+    mut observed_at: Local<Option<i32>>,
+    mut settled: ResMut<MatchOverSettled>,
+) {
+    settled.over = matches!(*state, MatchState::MatchOver);
+    if !settled.over {
+        *observed_at = None;
+        settled.settled = false;
+        return;
+    }
+    if settled.settled {
+        return;
+    }
+    let Some(bevy_ggrs::Session::P2P(s)) = session.as_deref() else {
+        settled.settled = true;
+        return;
+    };
+    let at = *observed_at.get_or_insert(s.current_frame());
+    settled.settled = s.confirmed_frame() >= at;
+}
+
+/// On the tick a match is decided on score AND that decision has settled
+/// (`MatchOverSettled`): build the canonical statement, sign it, send the
+/// signature. Same guards as the grudge ledger's recorder, plus the
+/// threshold and the Profile2 handshake.
 #[allow(clippy::too_many_arguments)]
 fn sign_decided_match(
-    state: Res<MatchState>,
     score: Res<MatchScore>,
     selected: Res<sim::SelectedArena>,
     netplay: Res<NetplayConfig>,
@@ -77,16 +122,29 @@ fn sign_decided_match(
     last_saved: Res<LastSavedReplay>,
     mut attest: ResMut<AttestState>,
     mut queue: ResMut<NetSendQueue>,
-    mut prev_over: Local<bool>,
+    settled: Res<MatchOverSettled>,
+    // (prev_over, prev_settled): one `Local`, because Bevy systems take at
+    // most sixteen parameters and this one is at the limit.
+    mut edges: Local<(bool, bool)>,
 ) {
-    let over = matches!(*state, MatchState::MatchOver);
-    let entered = over && !*prev_over;
-    *prev_over = over;
+    let over = settled.over;
+    let entered = over && !edges.0;
+    edges.0 = over;
     if !over {
         attest.reset_match();
+        edges.1 = false;
         return;
     }
-    if !entered {
+    if entered {
+        // The tape this match saves lands after this point; remember what
+        // was there so `write_attestation` can tell the two apart whichever
+        // of the save and the settle comes first.
+        attest.tape_before = last_saved.0.clone();
+    }
+    // Sign once, on the tick the decision can no longer roll back.
+    let sign_now = settled.settled && !edges.1;
+    edges.1 = settled.settled;
+    if !sign_now {
         return;
     }
     if netplay.room_url.is_none() || practice.0 || theater.active() {
@@ -143,7 +201,6 @@ fn sign_decided_match(
     attest.decided += 1;
     attest.statement = Some(statement);
     attest.ours = Some(sig);
-    attest.tape_before = last_saved.0.clone();
     queue.0.push(NetMsg::MatchSig { sig });
     tracing::info!(
         target: "two_top::attest",
@@ -258,10 +315,18 @@ pub struct AttestPlugin;
 
 impl Plugin for AttestPlugin {
     fn build(&self, app: &mut App) {
-        app.init_resource::<AttestState>().add_systems(
-            Update,
-            (sign_decided_match, verify_peer_sig, write_attestation).chain(),
-        );
+        app.init_resource::<AttestState>()
+            .init_resource::<MatchOverSettled>()
+            .add_systems(
+                Update,
+                (
+                    settle_match_over,
+                    sign_decided_match,
+                    verify_peer_sig,
+                    write_attestation,
+                )
+                    .chain(),
+            );
     }
 }
 
