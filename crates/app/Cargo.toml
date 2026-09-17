@@ -138,6 +138,16 @@ ndk-context = "0.1"
 package = "com.ampactorlabs.twotop"
 build_targets = ["aarch64-linux-android"]
 strip = "default"
+# An explicit, monotonic version. Without one every build carried
+# cargo-apk's default, so Android's downgrade protection — which is keyed
+# on versionCode — never engaged: an OLDER apk installed over a newer one
+# as a same-version reinstall, kept /data, and then wrote `profile.json`
+# back through a struct that predates `signing_key`. That silently drops
+# the result-signing key, orphaning every `.attest.json` the phone holds
+# and every peer's `attested_wins` against it. Bump `version_code` on
+# every published build; `version_name` is what a human sees in app info.
+version_code = 15
+version_name = "0.15.0"
 # Bundle the runtime assets into the APK. The app loads sprites
 # (assets/sprites/**), the arena floor, and the 12 synthesized audio cues
 # (assets/audio/*.wav) via the AssetServer at runtime; without this the
@@ -151,6 +161,7 @@ assets = "../../assets"
 [package.metadata.android.sdk]
 min_sdk_version = 24
 target_sdk_version = 34
+
 
 [[package.metadata.android.uses_permission]]
 name = "android.permission.INTERNET"
@@ -167,7 +178,17 @@ required = true
 
 [package.metadata.android.application]
 label = "2-Top"
-debuggable = true
+# NOT debuggable. A debuggable APK lets `adb shell run-as
+# com.ampactorlabs.twotop` read and write the private data dir without
+# root — including `profile.json`, which holds the ed25519 seed the whole
+# dual-signed-results pillar rests on (NORTH N2). This flag is
+# independent of the cargo profile, so `--release` shipped it too, and
+# apk.yml publishes that build to a public GitHub release. Anyone could
+# extract their own signing key, forge an attestation, or edit
+# `career.json`. For local debugging flip this to `true` in a working
+# copy — do not commit it. `adb logcat` needs no such flag, and
+# `crash.log` lands in the external files dir, readable either way.
+debuggable = false
 theme = "@android:style/Theme.Black.NoTitleBar.Fullscreen"
 extract_native_libs = true
 # Local same-Wi-Fi play uses a ws:// signaling URL hosted on the laptop.

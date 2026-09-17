@@ -11,9 +11,10 @@ use bevy_ggrs::GgrsPlugin;
 use bevy_ggrs::prelude::*;
 use fixed_math::Vec2F;
 use sim::{
-    Boomerang, BoomerangState, CatchStreak, Dead, DefaultInputsPlugin, GgrsCfg, Player,
-    PlayerInput, PositionF, PreviousPositionF, RESPAWN_FRAMES, SPAWN_GUARD_FRAMES, SimPlugin,
-    SpawnGuard, SynthesizedInputs, TAUNT_FRAMES, Taunt, VelocityF,
+    Boomerang, BoomerangState, COUNTDOWN_DIGIT_FRAMES, CatchStreak, Dead, DefaultInputsPlugin,
+    GgrsCfg, Player, PlayerInput, PositionF, PreviousPositionF, RESPAWN_FRAMES,
+    ROUND_DURATION_FRAMES, ROUND_OVER_FRAMES, SPAWN_GUARD_FRAMES, SimPlugin, SpawnGuard,
+    SynthesizedInputs, TAUNT_FRAMES, Taunt, VelocityF,
 };
 
 fn build_two_player_app_cd(check_distance: usize) -> App {
@@ -329,5 +330,126 @@ fn respawn_grants_guard_that_breaks_on_offense() {
         guard_of(&mut app, 1),
         0,
         "throwing must forfeit the spawn guard"
+    );
+}
+
+/// P7 #1: `TAUNT_FRAMES` (42) fits inside `SPAWN_GUARD_FRAMES` (45), so a
+/// taunt begun on the respawn tick used to complete entirely inside
+/// invulnerability — a free `CatchStreak` tier every death, with none of
+/// the vulnerability the move is priced around, and against `SpawnGuard`'s
+/// own promise that it "can never be an offensive shield". Taunting is
+/// acting: it forfeits the guard, and the flex is public like any other.
+#[test]
+fn taunting_on_respawn_forfeits_the_guard_instead_of_hiding_behind_it() {
+    let mut app = build_two_player_app_cd(0);
+    app.update();
+
+    // Kill p1 with a passing enemy fang.
+    let p1 = Vec2F::from_cm(0, 400);
+    app.world_mut().spawn((
+        Boomerang {
+            owner_handle: 0,
+            state: BoomerangState::Flying,
+        },
+        PositionF(p1),
+        PreviousPositionF(p1),
+        VelocityF(Vec2F::ZERO),
+    ));
+    app.update();
+    app.update();
+    assert!(is_dying(&mut app, 1), "setup: p1 should be dying");
+
+    for _ in 0..(RESPAWN_FRAMES as usize + 3) {
+        app.update();
+    }
+    assert!(!is_dying(&mut app, 1), "p1 should have respawned");
+    let guarded = guard_of(&mut app, 1);
+    assert!(guarded > 0, "revive grants the guard (got {guarded})");
+    assert_eq!(streak_of(&mut app, 1), 0, "death took the streak");
+
+    // Taunt from inside the guard window.
+    set_inputs(
+        &mut app,
+        PlayerInput {
+            stick_x: 0,
+            stick_y: 0,
+            aim_angle: 0,
+            buttons: PlayerInput::TAUNT_DOWN,
+        },
+    );
+    app.update();
+    assert!(taunt_of(&mut app, 1) > 0, "the taunt should have armed");
+    assert_eq!(
+        guard_of(&mut app, 1),
+        0,
+        "arming a taunt forfeits the spawn guard — the flex is punishable",
+    );
+
+    // Release, and let the flex run to completion: the tier is still
+    // EARNED, it is simply no longer earned for free.
+    set_inputs(&mut app, PlayerInput::default());
+    for _ in 0..(TAUNT_FRAMES as usize + 4) {
+        app.update();
+    }
+    assert_eq!(taunt_of(&mut app, 1), 0, "the taunt completed");
+    assert_eq!(
+        streak_of(&mut app, 1),
+        1,
+        "a completed taunt still pays its tier",
+    );
+    assert_eq!(guard_of(&mut app, 1), 0, "and the guard stayed spent");
+}
+
+/// SIM_VERSION 15, the headline: a round boundary no longer confiscates
+/// `CatchStreak`. The match ends on kills, checked identically in
+/// `InRound` and `RoundOver`, so the boundary decides nothing — and the
+/// one piece of state it DID touch was the perfect-catch ladder, making
+/// the clock's only gameplay effect "delete the ladder of whoever is
+/// playing best".
+///
+/// The streak here is EARNED in-sim (a completed taunt pays a tier)
+/// rather than written out-of-band: `CatchStreak` is a rolled-back
+/// component, so a hand-poked value is reverted by snapshot restore at
+/// any check distance above 0 — the hazard this file's header warns
+/// about. The first cut of this test poked one and failed against
+/// correct code, proving nothing either way.
+#[test]
+fn the_round_boundary_does_not_confiscate_an_earned_streak() {
+    let mut app = build_two_player_app_cd(0);
+
+    // Into the round proper: taunting is gated on `is_in_round`.
+    for _ in 0..(3 * COUNTDOWN_DIGIT_FRAMES as usize + 2) {
+        app.update();
+    }
+
+    // Earn a tier.
+    set_inputs(
+        &mut app,
+        PlayerInput {
+            stick_x: 0,
+            stick_y: 0,
+            aim_angle: 0,
+            buttons: PlayerInput::TAUNT_DOWN,
+        },
+    );
+    app.update();
+    set_inputs(&mut app, PlayerInput::default());
+    for _ in 0..(TAUNT_FRAMES as usize + 4) {
+        app.update();
+    }
+    assert_eq!(streak_of(&mut app, 0), 1, "a completed taunt pays a tier");
+
+    // Cross the boundary: the rest of the round, the beat, the countdown.
+    let remaining = ROUND_DURATION_FRAMES as usize
+        + ROUND_OVER_FRAMES as usize
+        + COUNTDOWN_DIGIT_FRAMES as usize * 2;
+    for _ in 0..remaining {
+        app.update();
+    }
+
+    assert_eq!(
+        streak_of(&mut app, 0),
+        1,
+        "the boundary must not take an earned ladder",
     );
 }

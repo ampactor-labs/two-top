@@ -269,7 +269,7 @@ inherit whatever "score" means. Settle it before more is built on top.
 
 | # | Finding | Severity | Evidence |
 |---|---------|----------|----------|
-| 1 | The round does not score; the clock taxes the better player | 🔴 structural | `sim:1873`, `sim:2996`, `sim:1032` + play report |
+| 1 | The round does not score; the clock taxes the better player | ✅ **resolved** (SIM_VERSION 15) — the tax is gone; the scoring rule was never the bug | `sim:1873`, `sim:2996`, `sim:1032` + play report |
 | 2 | Two screen-coordinate conventions, hand-converted | 🔴 root cause | `profile.rs:59-63` vs `anchor.rs` + play report |
 | 3 | Vector-font verdict shipped on 1 surface of ~10 | 🟠 open | ~96 vector `Text` sites; no pixel font |
 | 4 | Nearest-neighbour UI at fractional scale during kill-cam hold | 🟠 open | `lib.rs:118`, `anchor.rs:142` |

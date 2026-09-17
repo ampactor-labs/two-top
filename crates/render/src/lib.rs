@@ -2117,8 +2117,22 @@ impl Plugin for EffectsPlugin {
 mod tests {
     use super::*;
 
+    /// `publish_depth_projection` writes a process-global, and the two
+    /// tests below need it at different values — so by default they raced:
+    /// cargo runs a binary's tests on parallel threads, and whichever lost
+    /// read the other's write. The perspective test failed as `75 vs 75`
+    /// (75 = `100 * WORLD_TILT_Y`, exactly the linear fallback the OTHER
+    /// test publishes). It is a genuine intermittent CI failure, unrelated
+    /// to whatever change is in flight when it fires. Serializing the two
+    /// is the fix; the poison-tolerant lock keeps a real assertion failure
+    /// in one from cascading into a confusing `PoisonError` in the other.
+    static DEPTH_PROJECTION_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     #[test]
     fn depth_projection_fallback_is_the_linear_tilt() {
+        let _serialized = DEPTH_PROJECTION_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         publish_depth_projection(0.0, DEPTH_FOCAL_DEFAULT);
         assert_eq!(tilt_y(400.0), 400.0 * WORLD_TILT_Y);
         assert_eq!(depth_scale(400.0), 1.0);
@@ -2126,6 +2140,9 @@ mod tests {
 
     #[test]
     fn depth_projection_maps_edges_to_span_and_magnifies_near() {
+        let _serialized = DEPTH_PROJECTION_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let span = 2400.0;
         publish_depth_projection(span, DEPTH_FOCAL_DEFAULT);
         // Table edges land exactly at the span's edges.

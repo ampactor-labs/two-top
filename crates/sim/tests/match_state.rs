@@ -172,9 +172,29 @@ fn round_over_loops_back_to_countdown_for_next_round() {
         app.update();
     }
     assert!(
-        matches!(match_state(&app), MatchState::Countdown { digit: 3, .. }),
-        "after RoundOver expires, expect a fresh digit-3 Countdown; got {:?}",
+        matches!(
+            match_state(&app),
+            MatchState::Countdown {
+                digit: sim::MID_MATCH_COUNTDOWN_DIGITS,
+                ..
+            }
+        ),
+        "a mid-match boundary is one beat and a GO, not a re-introduction; got {:?}",
         match_state(&app),
+    );
+}
+
+/// SIM_VERSION 15: the boundary decides nothing, so it stops charging
+/// 4.0 s to cross. Half a `RoundOver` beat plus one countdown digit is
+/// 1.5 s — 150 frames handed back to play, every 30 s.
+#[test]
+fn the_round_boundary_costs_a_beat_not_four_seconds() {
+    let boundary =
+        ROUND_OVER_FRAMES + COUNTDOWN_DIGIT_FRAMES * u32::from(sim::MID_MATCH_COUNTDOWN_DIGITS);
+    assert_eq!(boundary, 90, "0.5 s beat + one 1 s digit");
+    assert!(
+        boundary * 2 < 240,
+        "the old boundary was 240 frames (4.0 s); this must be a fraction of it",
     );
 }
 

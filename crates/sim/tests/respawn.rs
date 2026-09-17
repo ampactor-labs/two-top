@@ -14,8 +14,9 @@ use bevy_ggrs::GgrsPlugin;
 use bevy_ggrs::prelude::*;
 use fixed_math::Vec2F;
 use sim::{
-    Boomerang, BoomerangState, DashState, Dead, DefaultInputsPlugin, GgrsCfg, Player, PositionF,
-    PreviousPositionF, RESPAWN_FRAMES, SimPlugin, StunFrames, VelocityF, respawn_position,
+    ARENA_HALF_HEIGHT_CM, ARENA_HALF_WIDTH_CM, Boomerang, BoomerangState, DashState, Dead,
+    DefaultInputsPlugin, GgrsCfg, Player, PositionF, PreviousPositionF, RESPAWN_FRAMES,
+    SUDDEN_DEATH_MIN_FACTOR, SimPlugin, StunFrames, VelocityF, respawn_position,
 };
 
 fn build_two_player_app() -> App {
@@ -194,4 +195,33 @@ fn respawn_position_is_symmetric_on_y_axis() {
     let p1 = respawn_position(1);
     assert_eq!(p0.x, p1.x, "respawn points share x");
     assert_eq!(p0.y, -p1.y, "respawn points should mirror on y");
+}
+
+/// P7 #2: the sudden-death crumble shrinks the safe floor toward the
+/// centre, and `SpawnGuard` deliberately leaves the void lethal — so a
+/// respawn point outside the crumbled floor is a revive straight into a
+/// 45-frame death clock. At the old `SUDDEN_DEATH_MIN_FACTOR = 0.4` the
+/// safe half-height was `750 × 0.4 = 300`, exactly the |y| of both spawns
+/// (and, in I16F16, a hair OUTSIDE: `lit("0.4")` is 26214/65536, so the
+/// product lands at 299.995). It survived only because the one frame
+/// where it bit is the frame `oob_death` stops running. This pins the
+/// margin so a future retune of either number cannot quietly restore it.
+#[test]
+fn respawn_points_stay_inside_the_crumbled_floor() {
+    use fixed_math::Fix;
+    let min_half_w = Fix::const_from_int(ARENA_HALF_WIDTH_CM) * SUDDEN_DEATH_MIN_FACTOR;
+    let min_half_h = Fix::const_from_int(ARENA_HALF_HEIGHT_CM) * SUDDEN_DEATH_MIN_FACTOR;
+    for handle in 0..2 {
+        let p = respawn_position(handle);
+        assert!(
+            p.x.abs() < min_half_w,
+            "handle {handle} spawns at x={:?}, outside the crumbled floor (±{min_half_w:?})",
+            p.x,
+        );
+        assert!(
+            p.y.abs() < min_half_h,
+            "handle {handle} spawns at y={:?}, outside the crumbled floor (±{min_half_h:?})",
+            p.y,
+        );
+    }
 }

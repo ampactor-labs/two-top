@@ -115,7 +115,19 @@ pub fn tick_duration() -> core::time::Duration {
 /// ricochet is that pickup's identity — it now rides cover, not just the
 /// Pit ring); Heavy's plow-through and Multishot's die-on-first-wall are
 /// unchanged. Same `BoomerangMods` layout (field renamed), no new state.
-pub const SIM_VERSION: u32 = 14;
+///
+/// `15` = the clock stops taxing the better player. The match has always
+/// ended on [`MATCH_WIN_THRESHOLD`] kills (this constant's own comment
+/// says so); the round boundary decided nothing and yet charged 4.0 s of
+/// dead time per crossing and deleted [`CatchStreak`] — so its only
+/// gameplay effect was punishing whoever had built the ladder. Four
+/// changes, one bump: the streak now survives a boundary (only death and
+/// a missed catch take it); taunting breaks [`SpawnGuard`], closing the
+/// free-tier-per-death the 42 < 45 gap allowed; the sudden-death floor
+/// stops at 0.45 so it can no longer shrink past the respawn points; and
+/// the boundary costs 1.5 s instead of 4.0 s (half the `RoundOver` beat,
+/// one countdown digit mid-match). No new state, no wire change.
+pub const SIM_VERSION: u32 = 15;
 
 // ---- Components ----
 
@@ -595,7 +607,16 @@ pub const RECALL_STEER_CM_PER_TICK: i32 = 10;
 pub const SUDDEN_DEATH_FRAMES: u32 = 480; // final 8 s of the 30 s round
 
 /// Fraction of the arena half-extents still safe at frame zero of the round.
-pub const SUDDEN_DEATH_MIN_FACTOR: Fix = Fix::lit("0.4");
+/// 0.45, not 0.4: at 0.4 the safe half-height is `750 × 0.4 = 300`, exactly
+/// the |y| of both respawn points, so a death late in a crumbling round put
+/// the revived player on (in I16F16, five thousandths of a centimetre
+/// outside) the boundary of the surviving floor — where [`SpawnGuard`]
+/// deliberately does not protect, on the tightened
+/// [`SUDDEN_DEATH_OOB_GRACE_FRAMES`] clock. 0.45 leaves 37.5 cm of margin
+/// under the spawns, pinned by `respawn_points_stay_inside_the_crumbled_floor`.
+/// Widening the floor rather than moving the spawns keeps the opening duel
+/// distance — a tuned feel value — untouched.
+pub const SUDDEN_DEATH_MIN_FACTOR: Fix = Fix::lit("0.45");
 
 /// OOB grace while the floor is crumbling. Much tighter than the open-play
 /// [`OOB_GRACE_FRAMES`]: past the receding edge you have under a second.
@@ -1017,10 +1038,18 @@ pub const COUNTDOWN_DIGIT_FRAMES: u32 = 60;
 /// § Phase 11 and is short enough that a stalemate doesn't drag.
 pub const ROUND_DURATION_FRAMES: u32 = 1800;
 
-/// Beat between rounds. 60 = 1 s @ 60 Hz; long enough for an animated
-/// "round won" flourish in Phase 15, short enough that the next round
-/// drops in cleanly.
-pub const ROUND_OVER_FRAMES: u32 = 60;
+/// Beat between rounds. 30 = 0.5 s @ 60 Hz. The boundary decides nothing
+/// (see [`MATCH_WIN_THRESHOLD`]), so every frame it costs is dead time in
+/// a kill race: the old 60 + a full three-digit countdown spent 240 frames
+/// (4.0 s) per boundary, every 30 s, to change nothing on the scoreboard.
+pub const ROUND_OVER_FRAMES: u32 = 60 / 2;
+
+/// Countdown digits at the top of a MID-MATCH round. The match's first
+/// countdown is the full 3-2-1 ceremony; a boundary the players are
+/// already warmed into needs one beat and a GO, not a re-introduction.
+/// Together with the halved [`ROUND_OVER_FRAMES`] this returns 150 frames
+/// (2.5 s) of the boundary's 4.0 s to play.
+pub const MID_MATCH_COUNTDOWN_DIGITS: u8 = 1;
 
 /// Total kills required to end the match (`InRound`/`RoundOver` →
 /// `MatchOver`). Cycle 6's simplest scoring rule is "first to 5
@@ -1480,7 +1509,14 @@ pub fn tick_taunt_and_guard(
         let dashing = matches!(dash, DashState::Dashing { .. });
         let threw = just_pressed(curr, prev, PlayerInput::THROW_DOWN);
         if guard.0 > 0 {
-            if dashing || charge.0 > 0 || threw {
+            // Taunting counts as acting. [`TAUNT_FRAMES`] (42) fits inside
+            // [`SPAWN_GUARD_FRAMES`] (45) with three frames to spare, so a
+            // taunt begun on the respawn tick used to complete entirely
+            // inside invulnerability — banking a free [`CatchStreak`] tier
+            // every death, with none of the vulnerability the move is
+            // priced around, and against this guard's own promise that it
+            // "can never be an offensive shield".
+            if dashing || charge.0 > 0 || threw || taunt.0 > 0 {
                 guard.0 = 0;
             } else {
                 guard.0 -= 1;
@@ -1877,7 +1913,6 @@ pub fn reset_round_state(
     mut players: Query<(
         &mut ThrowCapacity,
         &mut ThrowCharge,
-        &mut CatchStreak,
         &mut Taunt,
         &mut SpawnGuard,
     )>,
@@ -1888,14 +1923,19 @@ pub fn reset_round_state(
     for entity in &boomerangs {
         commands.entity(entity).despawn();
     }
-    for (mut cap, mut charge, mut streak, mut taunt, mut guard) in &mut players {
+    for (mut cap, mut charge, mut taunt, mut guard) in &mut players {
         cap.0 = 1;
         charge.0 = 0;
-        streak.0 = 0;
         taunt.0 = 0;
         // Round start is symmetric — no camp to guard against.
         guard.0 = 0;
     }
+    // [`CatchStreak`] is deliberately NOT reset here. The boundary decides
+    // nothing — the match ends on [`MATCH_WIN_THRESHOLD`] kills, checked
+    // identically in `InRound` and `RoundOver` — so wiping the streak made
+    // the clock's ONLY gameplay effect "delete the ladder of whoever is
+    // playing best". The streak is a skill ladder: dying takes it
+    // (`tick_respawn`) and a non-perfect catch takes it. A timer does not.
 }
 
 /// `GgrsSchedule` system: catch a Returning boomerang the moment its
@@ -2904,6 +2944,11 @@ pub fn snap_position(pos: &mut PositionF, prev: &mut PreviousPositionF, new: Vec
 /// Per-handle respawn point. Symmetric on the Y axis: P0 near/bottom,
 /// P1 far/top — the depth-duel axis. Both players re-enter the round
 /// on equal footing rather than spawning on top of where they last died.
+/// Fixed per handle, symmetric on the duel axis. Must stay inside the
+/// sudden-death floor at its smallest — [`SpawnGuard`] leaves the void
+/// lethal by design, so a spawn outside the crumbled floor is a revive
+/// straight into a 45-frame death clock. Pinned by
+/// `respawn_points_stay_inside_the_crumbled_floor`.
 pub fn respawn_position(handle: usize) -> Vec2F {
     match handle {
         0 => Vec2F::from_cm(0, -300),
@@ -3034,7 +3079,7 @@ pub fn tick_match_state(
                 MatchState::MatchOver
             } else if frame.0 >= expires_at_frame {
                 MatchState::Countdown {
-                    digit: 3,
+                    digit: MID_MATCH_COUNTDOWN_DIGITS,
                     expires_at_frame: frame.0 + COUNTDOWN_DIGIT_FRAMES,
                 }
             } else {

@@ -333,6 +333,51 @@ mechanisms are traced, not exercised.
 | (self-review) — the summary card and the ledger disagreed about a decided score whose link then died | `summary_text`'s unfinished branch now tests `!threshold_hit`, matching `grudge::match_outcome`, which checks the score before the forfeit. Found by re-reading the batch's own diff, not by a test | `screen::a_decided_score_still_crowns_the_winner_even_if_the_link_then_dies`, which also asserts the ledger agrees on the same inputs |
 | P4 #2 — `tape_drop` is an anonymous 64 KB blob host | Ingest requires the `BMRG` magic and a minimum length (postcard puts the `[u8; 4]` first, unprefixed); GET is metered like POST; every response carries `X-Content-Type-Options: nosniff` | `tape_drop::ingest_tests` |
 
+### Fourth pass, 2026-09-17 — the sim batch (SIM_VERSION 15)
+
+The first changes in this program that touch the simulation, taken
+together under one bump so they share one matrix run. Verified by
+`cargo test --workspace --locked` (602 passed, 0 failed), clippy
+`-D warnings`, fmt. The canonical demo and its checksum TSV were
+regenerated (`gen_canonical --write`), as `CONVENTIONS.md` § replay
+requires on any bump. Note what that regeneration showed: the demo's
+checksums come back **byte-identical** across the bump. It runs 1800
+frames, the round expires at 1980, and it presses no TAUNT — so it
+crosses no boundary and takes no taunt, and `CatchStreak` is not a
+checksummed column regardless. The canonical demo therefore exercises
+none of this batch; the dedicated sim suites do, but the MATRIX does
+not. That is a real coverage gap, worth closing with a demo long enough
+to cross a boundary. **The cross-platform matrix has still not run
+here** — that is CI's job, and until it does, the determinism claim for
+this bump is unverified on every target but linux-x64.
+
+| Change | Why | Proof |
+|---|---|---|
+| `reset_round_state` no longer wipes `CatchStreak` | The headline. The match ends on kills, checked identically in `InRound` and `RoundOver`, so the boundary decides nothing — and the one piece of state it touched was the perfect-catch ladder. The clock's only gameplay effect was punishing whoever was playing best | `match_state::the_round_boundary_no_longer_confiscates_the_catch_streak` |
+| Taunting breaks `SpawnGuard` (P7 #1) | `TAUNT_FRAMES` (42) fits inside `SPAWN_GUARD_FRAMES` (45), so a taunt begun on the respawn tick completed entirely inside invulnerability — a free streak tier every death, against the guard's own promise that it "can never be an offensive shield" | `taunt::taunting_on_respawn_forfeits_the_guard_instead_of_hiding_behind_it` |
+| `SUDDEN_DEATH_MIN_FACTOR` 0.4 → 0.45 (P7 #2) | At 0.4 the crumbled floor's half-height was `750 × 0.4 = 300`, exactly the respawn points' \|y\| — and in I16F16 a hair outside. Widening the floor rather than moving the spawns keeps the opening duel distance untouched | `respawn::respawn_points_stay_inside_the_crumbled_floor` |
+| The boundary costs 1.5 s, not 4.0 s | Half the `RoundOver` beat, one countdown digit mid-match (the match's first countdown keeps the full 3‑2‑1). 150 frames per boundary handed back to play | `match_state::the_round_boundary_costs_a_beat_not_four_seconds` |
+
+One more thing this batch fixed, found by running the suite more times in
+a day than it usually sees: **`render`'s two `depth_projection_*` tests
+raced.** Both write one process-global — one publishes the linear
+fallback, the other a perspective span — and cargo runs a binary's tests
+on parallel threads, so the loser read the winner's value. It failed as
+`75 vs 75` (75 = `100 × WORLD_TILT_Y`, exactly the fallback). It
+predates this whole program; `git diff` on `crates/render/` is empty in
+both directions. The pair is now serialized behind a poison-tolerant
+lock, proven over 20 consecutive parallel runs. It matters beyond the
+one test: while it was live, **any** single green run on this repo had a
+chance of being green for the wrong reason.
+
+Two ship blockers went with it, both in the Android manifest and neither
+sim-affecting: `debuggable` is now **false** (it shipped `true` in the
+public release APK, so `adb shell run-as` could read `profile.json` — the
+ed25519 seed the whole signed-results pillar rests on), and the build
+carries an explicit monotonic `version_code`/`version_name` so Android's
+downgrade protection engages instead of letting an older APK reinstall
+over a newer one and write `profile.json` back without `signing_key`.
+
 ### Corrections to the record
 
 Things this pass found while fixing that the reports above got wrong or
@@ -374,6 +419,23 @@ would otherwise verify the wrong thing.
   fix is not to route it through the sim at all, but to make the
   out-of-band write unrollbackable by dropping the session. The finding
   was right; the fix it proposed was not.
+- **`GAME_DESIGN_AUDIT` #1's framing was half wrong, and it is worth
+  saying plainly because it drove this program's priority list.** "The
+  round does not score" reads as a defect; it is a design choice, and the
+  code says so — `MATCH_WIN_THRESHOLD`'s own comment states that the
+  scoring rule is first-to-5-kills and that "the round timer still
+  rotates state for input-gating and future cleanup pulses, but doesn't
+  independently end the match." In a one-hit-kill game with a 3 s
+  respawn, the kill IS the dramatic beat; rounds would double-count it
+  and charge dead time for the privilege. The real defects were narrower
+  and are what SIM_VERSION 15 fixes: the boundary confiscating the
+  skill ladder, and costing 4 s to decide nothing. The scoring rule was
+  never the bug.
+- **The two-phone field test HAS been run** — Wi-Fi against mobile data,
+  at an earlier revision, by the operator. `README.md` said flatly that
+  it had not. It now says what is true: verified once, then drifted, with
+  the netplay layer substantially changed since. That distinction matters
+  for how much the online path can be trusted.
 - **P2 #1 overstated "`WaitRecommendation` is discarded."** The event is
   logged and unused, but bevy_ggrs already corrects the skew it reports,
   continuously: the clock runs 10% slow for as long as

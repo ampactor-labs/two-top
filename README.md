@@ -13,7 +13,7 @@ produce bit-identical state on every platform, because two phones on
 opposite ends of a connection either agree exactly or the match desyncs.
 That one constraint shapes the whole codebase.
 
-**Status: shipping.** The gameplay loop, netplay, seven arenas, signed results, replays, and the CI/APK/Pages pipelines are built and green. The two-phone cross-carrier field test has not been run.
+**Status: shipping.** The gameplay loop, netplay, seven arenas, signed results, replays, and the CI/APK/Pages pipelines are built and green. The two-phone cross-carrier field test (Wi-Fi against mobile data) was run and passed at an earlier revision; it has **not** been re-run since, and the netplay layer has changed substantially since then — see `docs/ROLEPLAY_AUDIT.md` § Status. Treat the online path as verified-then-drifted, not verified.
 
 Android is the product platform today, and the same build runs in a
 browser (wasm32 + WebGL2, deployed to Pages); iOS is on the roadmap. The
@@ -68,7 +68,7 @@ A determinism-first systems project that happens to be a game.
 - Thirteen crates, 570 tests, clippy-clean under `-D warnings`, a pinned
   toolchain, and a committed `Cargo.lock` enforced with `--locked`.
   Replays are strictly version-matched with no migration path, so any
-  change that touches the simulation bumps `sim_version` (currently 14).
+  change that touches the simulation bumps `sim_version` (currently 15).
 
 The same problems turn up in any competitive online system that has to
 stay honest: reproducing state exactly, and getting two machines to agree
