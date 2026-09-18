@@ -138,16 +138,17 @@ ndk-context = "0.1"
 package = "com.ampactorlabs.twotop"
 build_targets = ["aarch64-linux-android"]
 strip = "default"
-# An explicit, monotonic version. Without one every build carried
-# cargo-apk's default, so Android's downgrade protection — which is keyed
-# on versionCode — never engaged: an OLDER apk installed over a newer one
-# as a same-version reinstall, kept /data, and then wrote `profile.json`
-# back through a struct that predates `signing_key`. That silently drops
-# the result-signing key, orphaning every `.attest.json` the phone holds
-# and every peer's `attested_wins` against it. Bump `version_code` on
-# every published build; `version_name` is what a human sees in app info.
-version_code = 15
-version_name = "0.15.0"
+# NOTE: `version_code` / `version_name` must NOT be set here. cargo-apk
+# DERIVES both from the crate version — `VersionCode::from_semver(pkg
+# .version).to_code(1)` — and panics outright if either appears in this
+# table ("version_name should not be set in TOML", cargo-apk 0.10.0
+# apk.rs:83). The monotonic version lives in `[workspace.package]
+# version` at the repo root; bump THAT on every published build. It is
+# what makes Android's downgrade protection engage: keyed on versionCode,
+# it never engaged while every build carried the same default, so an
+# OLDER apk installed over a newer one as a same-version reinstall, kept
+# /data, and wrote `profile.json` back through a struct predating
+# `signing_key` — silently orphaning every `.attest.json` on the phone.
 # Bundle the runtime assets into the APK. The app loads sprites
 # (assets/sprites/**), the arena floor, and the 12 synthesized audio cues
 # (assets/audio/*.wav) via the AssetServer at runtime; without this the
