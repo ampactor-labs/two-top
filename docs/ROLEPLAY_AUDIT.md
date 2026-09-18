@@ -458,3 +458,86 @@ on REPLAYS (P3 #5/#6), the shade's honesty (P3 #7/#8), and a server for
 `tape_drop` that can set a deadline (P4 #3). The first sim-affecting
 batch — the round scoring, the respawn taunt, the sudden-death respawn
 margin — wants one `SIM_VERSION` bump and one matrix run together.
+
+---
+
+## Playtest round 1 — the operator on a real phone
+
+Three findings from the first sideload of the shipped APK. Two were
+cosmetic, one was a hang. All three were reproduced here before being
+fixed, and the two visual ones were verified with headless captures
+(`TWOTOP_CAPTURE` + `TWOTOP_AUTOSTART`, lavapipe under Xvfb) rather than
+argued about — which is how the QR's first bad placement was caught too,
+and how this round caught an audit theory that was simply wrong.
+
+### 🔴 The gauntlet bot froze on the spot, strobing
+
+Not a render bug. `bot_decide`'s housekeeping branch walked at a dropped
+fang **unconditionally**, and it sits above both the recall and the
+throw. But every movement intent the policy emits runs through `steer`,
+which refuses to cross the edge cushion (`edge_safe`, 82% of the safe
+bounds) or enter cover's padded ring. A fang that settles in either
+place — and a fang knocked Loose near the rim settles there often — is
+one the bot is permitted to want and forbidden to reach. The wanting and
+the refusing alternate frame by frame, so the bot oscillated around the
+cushion boundary: stuck in place, and strobing, because the sprite's
+facing row is chosen from the velocity sign. It also never threw again
+for the rest of the round, because the branch it was trapped in preempts
+the throw. Up to 30 s of punching bag, every time it happened.
+
+The fix is not a bigger cushion. A Loose fang is **hold-recallable** —
+`recall_boomerangs` turns it Returning on a THROW press edge when the
+owner has no free slot — so the unreachable case has a clean answer that
+was already in the sim. The walk now runs only when the fang is
+genuinely reachable (inside the box the retrieval walk is allowed to
+enter, clear of every padded ring); otherwise the bot pulses THROW and
+reels it home while it keeps orbiting. The retrieval walk also gets its
+own, looser edge margin, so a fang in the cushion is reachable rather
+than merely wanted.
+
+Sim-neutral: the policy is an input source, not sim state. No
+`SIM_VERSION` bump.
+
+### 🟠 The settings screen read as floating words
+
+Six bare centered strings over the live table, with `<` and `>` buried
+mid-string while the tap zones are the entire left and right screen
+halves — so the glyph you aim at is not the thing you hit, and nothing
+said the rows were controls at all. The group headers sat almost exactly
+equidistant between the group above them and their own rows (0.060 vs
+0.072 of screen height), so each one captioned whichever group your eye
+reached first.
+
+Rows are now bordered boxes in the same language as every other control
+in the game, with the arrows as their own entities parked at the box's
+ends (world-unit offsets, not normalized fractions — a fraction would
+slide them off a fixed-width box on any aspect but the phone's). The
+header gaps are now 0.109 before and 0.049 after.
+
+*Correction to this document's own first pass:* the rows were diagnosed
+here as "the string wraps onto three lines." They do not.
+`Text2d`'s `TextBounds` defaults to `UNBOUNDED`, so nothing in this
+screen has ever wrapped. The capture is what settled it.
+
+### 🟠 The join QR was unscannable
+
+110 world units ≈ 100 px on a 1080-wide phone: about three pixels per
+module, which no camera holds focus on across a table. The sit-down
+ritual's entire display half was therefore decorative. Now 330 units
+(~10 px/module) with a `SCAN TO JOIN` caption — the ritual asks a
+stranger to point a camera at a square of noise, so it should say so.
+Clearance from the portrait and the screen edge verified at 1080x2400
+and 1920x1080.
+
+### 🟠 Nothing local could catch the manifest error that broke the release
+
+The APK job runs only on a push to `main`, and nothing else in the tree
+reads `[package.metadata.android]` — so the cargo-apk panic that killed
+the first publish (`version_name` set in a table cargo-apk derives
+itself) was undetectable until after the merge. `scripts/check_android_
+manifest.py` now runs on every branch and PR (`ci.yml`, `manifest` job):
+the parse-time rules cargo-apk enforces, plus the two ship blockers that
+can ride an otherwise-green build — `debuggable = false`, and no
+`TWOTOP_TURN_*` baked into the public APK. Each gate was checked against
+a deliberately reintroduced regression before landing, including the
+exact one that broke the release.

@@ -178,12 +178,25 @@ fn push_deadzone(
 // spawner and the tap hit-test — the rows you see and the rows you hit can
 // never drift apart. Everything fits between the heading and BACK with
 // air to spare, so the screen never needs to scroll.
-const GROUPS_TOP: f32 = 0.21;
-const GROUP_HEADER_H: f32 = 0.045;
-const ROW_PITCH: f32 = 0.075;
-const GROUP_GAP: f32 = 0.012;
-const HEADING_FY: f32 = 0.12;
+// A header used to sit almost exactly halfway between the group above it
+// and its own rows (0.060 vs 0.072 apart), so it read as a caption for
+// whichever group your eye reached first. The gap BEFORE a header is now
+// most of twice the gap after it, and the rows inside a group are tight —
+// which is the whole job of a group header.
+const GROUPS_TOP: f32 = 0.205;
+const GROUP_HEADER_H: f32 = 0.028;
+const ROW_PITCH: f32 = 0.070;
+const GROUP_GAP: f32 = 0.060;
+const HEADING_FY: f32 = 0.115;
 const ROW_COUNT: usize = 6;
+/// The tappable row's box, in world units — the same bordered-box
+/// language as every other control in the game. Bare floating words gave
+/// no clue they could be tapped, and read as noise over the live table.
+const ROW_FILL: Vec2 = Vec2::new(700.0, 92.0);
+/// Where each row's arrow sits, as a world-unit offset from the screen
+/// centre (never a normalized fraction — that would slide the arrows off
+/// a fixed-width box on any aspect but the phone's).
+const ROW_ARROW_X: f32 = 300.0;
 /// The groups, naming rows by their settled indices (0 haptics, 1 sfx,
 /// 2 music, 3 deadzone, 4 southpaw, 5 shake — `adjust_settings`' keys).
 const GROUPS: [(&str, [usize; 2]); 3] = [("FEEL", [0, 5]), ("AUDIO", [1, 2]), ("CONTROL", [3, 4])];
@@ -224,15 +237,27 @@ fn row_at(fy: f32) -> Option<usize> {
         .position(|(top, bottom)| (*top..*bottom).contains(&fy))
 }
 
-/// One piece of the settings screen. `Setting(i)` is a tappable row,
-/// `GroupHeader` a family label (text fixed at spawn), `Heading` the
-/// screen title — one component, so one system shows and hides the whole
-/// screen.
+/// One piece of the settings screen. `Row(i, part)` is a tappable row's
+/// chrome or text, `GroupHeader` a family label (text fixed at spawn),
+/// `Heading` the screen title — one component, so one system shows and
+/// hides the whole screen.
 #[derive(Component)]
 enum SettingsPiece {
-    Setting(usize),
+    Row(usize, RowPart),
     GroupHeader,
     Heading,
+}
+
+/// The parts of a setting row. The arrows are their own entities parked at
+/// the box's ends, so the glyph you tap is where the tap actually lands —
+/// they used to be characters buried in the middle of the label.
+#[derive(Clone, Copy, PartialEq)]
+enum RowPart {
+    Border,
+    Fill,
+    Label,
+    ArrowLeft,
+    ArrowRight,
 }
 
 /// The bordered BACK button's parts (the same button chrome every other
@@ -271,20 +296,63 @@ fn spawn_setting_rows(mut commands: Commands) {
         ));
     }
     for (row, (top, bottom)) in l.row_bands.iter().enumerate() {
-        let fy = (top + bottom) * 0.5;
+        let anchor_y = 1.0 - (top + bottom);
         commands.spawn((
-            SettingsPiece::Setting(row),
+            SettingsPiece::Row(row, RowPart::Border),
+            Sprite {
+                color: render::palette::HOT_BONE.with_alpha(0.55),
+                custom_size: Some(ROW_FILL + Vec2::splat(18.0)),
+                ..default()
+            },
+            crate::anchor::ScreenAnchor::new(0.0, anchor_y, 0.0, 0.0),
+            Transform::from_xyz(0.0, 0.0, 208.0),
+            Visibility::Hidden,
+        ));
+        commands.spawn((
+            SettingsPiece::Row(row, RowPart::Fill),
+            Sprite {
+                color: render::palette::DEEP_ASH,
+                custom_size: Some(ROW_FILL),
+                ..default()
+            },
+            crate::anchor::ScreenAnchor::new(0.0, anchor_y, 0.0, 0.0),
+            Transform::from_xyz(0.0, 0.0, 208.5),
+            Visibility::Hidden,
+        ));
+        commands.spawn((
+            SettingsPiece::Row(row, RowPart::Label),
             Text2d::new(String::new()),
             TextFont {
                 font_size: 40.0,
                 ..default()
             },
-            TextColor(render::palette::BONE.with_alpha(0.85)),
-            TextLayout::new_with_justify(Justify::Center),
-            crate::anchor::ScreenAnchor::new(0.0, 1.0 - 2.0 * fy, 0.0, 0.0),
+            TextColor(render::palette::BONE),
+            TextLayout {
+                justify: Justify::Center,
+                linebreak: bevy::text::LineBreak::NoWrap,
+            },
+            crate::anchor::ScreenAnchor::new(0.0, anchor_y, 0.0, 0.0),
             Transform::from_xyz(0.0, 0.0, 210.0),
             Visibility::Hidden,
         ));
+        for (part, glyph, dx) in [
+            (RowPart::ArrowLeft, "<", -ROW_ARROW_X),
+            (RowPart::ArrowRight, ">", ROW_ARROW_X),
+        ] {
+            commands.spawn((
+                SettingsPiece::Row(row, part),
+                Text2d::new(glyph.to_string()),
+                TextFont {
+                    font_size: 46.0,
+                    ..default()
+                },
+                TextColor(render::palette::HOT_BONE),
+                TextLayout::new_with_justify(Justify::Center),
+                crate::anchor::ScreenAnchor::new(0.0, anchor_y, dx, 0.0),
+                Transform::from_xyz(0.0, 0.0, 210.0),
+                Visibility::Hidden,
+            ));
+        }
     }
     // BACK in the shared bordered-box language, at the shared band.
     let back_anchor_y = 1.0 - (BACK_BAND.0 + BACK_BAND.1);
@@ -306,17 +374,34 @@ fn spawn_setting_rows(mut commands: Commands) {
     }
 }
 
+/// A row's label: the knob's name and where it currently sits. The tap
+/// arrows are their own entities at the box's ends, so they are no longer
+/// part of this string.
+fn row_text(settings: &Settings, row: usize) -> String {
+    match row {
+        0 => format!("haptics {}", if settings.haptics { "on" } else { "off" }),
+        1 => format!("sfx {:.0}%", settings.sfx_volume * 100.0),
+        2 => format!("music {:.0}%", settings.music_volume * 100.0),
+        3 => format!("deadzone {:.0}%", settings.stick_deadzone * 100.0),
+        4 => format!("southpaw {}", if settings.southpaw { "on" } else { "off" }),
+        _ => format!("shake {:.0}%", settings.shake * 100.0),
+    }
+}
+
 /// Render each piece; the whole screen shows together. Rows carry their
 /// tap arrows; the BACK chrome colors like every other bordered button.
 #[allow(clippy::type_complexity)]
 fn update_setting_rows(
     screen: Res<State<crate::screen::AppScreen>>,
     settings: Res<Settings>,
-    mut pieces: Query<(&SettingsPiece, &mut Text2d, &mut Visibility), Without<SettingsBack>>,
+    mut pieces: Query<
+        (&SettingsPiece, Option<&mut Text2d>, &mut Visibility),
+        Without<SettingsBack>,
+    >,
     mut back: Query<(&SettingsBack, &mut Visibility, Option<&mut Text2d>), Without<SettingsPiece>>,
 ) {
     let open = *screen.get() == crate::screen::AppScreen::Settings;
-    for (piece, mut text, mut vis) in &mut pieces {
+    for (piece, text, mut vis) in &mut pieces {
         *vis = if open {
             Visibility::Visible
         } else {
@@ -325,21 +410,10 @@ fn update_setting_rows(
         if !open {
             continue;
         }
-        if let SettingsPiece::Setting(row) = piece {
-            text.0 = match row {
-                0 => format!(
-                    "<  haptics {}  >",
-                    if settings.haptics { "on" } else { "off" }
-                ),
-                1 => format!("<  sfx {:.0}%  >", settings.sfx_volume * 100.0),
-                2 => format!("<  music {:.0}%  >", settings.music_volume * 100.0),
-                3 => format!("<  deadzone {:.0}%  >", settings.stick_deadzone * 100.0),
-                4 => format!(
-                    "<  southpaw {}  >",
-                    if settings.southpaw { "on" } else { "off" }
-                ),
-                _ => format!("<  shake {:.0}%  >", settings.shake * 100.0),
-            };
+        if let SettingsPiece::Row(row, RowPart::Label) = piece
+            && let Some(mut text) = text
+        {
+            text.0 = row_text(&settings, *row);
         }
     }
     for (part, mut vis, text) in &mut back {

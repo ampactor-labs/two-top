@@ -232,12 +232,37 @@ pub fn bot_decide(v: &BotView) -> PlayerInput {
     }
 
     // 2) Housekeeping: a dropped fang is a liability (the human can steal
-    //    it) — walk it down.
+    //    it) — walk it down when the steering can actually deliver the bot
+    //    to it, and REEL IT IN when it can't.
+    //
+    //    The walk used to be unconditional, and that was a hang. Every
+    //    movement intent runs through `steer`, which refuses to cross the
+    //    edge cushion or enter cover's padded ring; a fang that settles in
+    //    either place is one the bot walks at forever and never arrives
+    //    at. Worse, the refusal alternates with the intent frame by frame,
+    //    so the bot vibrated on the spot (the sprite's facing flips with
+    //    the velocity sign — on screen it read as a duelist stuck in place,
+    //    strobing) and, because this branch preempts both the recall and
+    //    the throw, it stayed a punching bag for the rest of the round.
+    //    A Loose fang is hold-recallable (`recall_boomerangs`), so the
+    //    unreachable case has a clean answer: pulse THROW to make the
+    //    press edge and let the fang come to the bot.
     if v.fangs_out > 0
         && let Some(loose) = v.my_loose
     {
-        let dir = (loose - v.me).normalize_or_zero();
-        return input_from(steer(v, dir), 0);
+        let to_loose = loose - v.me;
+        if retrievable(v, loose) {
+            let dir = edge_clamp(v, to_loose.normalize_or_zero(), RETRIEVE_MARGIN);
+            let reach = to_loose.length().min(AVOID_LOOKAHEAD);
+            return input_from(slide_around_cover_within(v, dir, reach), 0);
+        }
+        // Out of walking reach: hold-recall it (the edge is what fires the
+        // recall, so pulse rather than hold) and keep orbiting meanwhile.
+        let press = v.frame % 24 < 2;
+        return input_from(
+            steer(v, orbit_dir(v)),
+            if press { PlayerInput::THROW_DOWN } else { 0 },
+        );
     }
 
     // 3) A fang in flight: steer the recall arc at the foe (Returning), or
@@ -325,11 +350,19 @@ fn wander_dir(v: &BotView) -> Vec2 {
     steer(v, drift) * 0.42
 }
 
+/// Cushion the orbit keeps between itself and the (possibly crumbling)
+/// island rim: the bot never *fights* for the outer fifth of the floor.
+const EDGE_MARGIN: f32 = 0.82;
+/// The retrieval walk is allowed closer to the rim than the orbit is —
+/// otherwise a fang that settles in the cushion is a fang the bot is
+/// permitted to want and forbidden to reach.
+const RETRIEVE_MARGIN: f32 = 0.94;
+
 /// Clamp a movement intent so it never walks the bot over the (possibly
-/// crumbling) edge.
-fn edge_safe(v: &BotView, dir: Vec2) -> Vec2 {
+/// crumbling) edge. `margin` is the fraction of the safe bounds the intent
+/// is allowed to push out to.
+fn edge_clamp(v: &BotView, dir: Vec2, margin: f32) -> Vec2 {
     let mut d = dir;
-    let margin = 0.82;
     if v.me.x.abs() > v.bounds.x * margin && (d.x * v.me.x.signum()) > 0.0 {
         d.x = -v.me.x.signum() * 0.6;
     }
@@ -337,6 +370,65 @@ fn edge_safe(v: &BotView, dir: Vec2) -> Vec2 {
         d.y = -v.me.y.signum() * 0.6;
     }
     d
+}
+
+/// The orbit's edge clamp — the default cushion.
+fn edge_safe(v: &BotView, dir: Vec2) -> Vec2 {
+    edge_clamp(v, dir, EDGE_MARGIN)
+}
+
+/// Can the retrieval walk actually *arrive* at this dropped fang? Three
+/// things must hold, and each one is a way the walk could otherwise
+/// approach forever without arriving:
+///
+///   * the fang lies inside the box the walk is allowed to enter (else
+///     `edge_clamp` shoves back exactly as hard as the walk pushes out);
+///   * it is clear of every padded ring `slide_around_cover` refuses to
+///     cross (else the slide skims past it, every pass);
+///   * and the straight corridor to it is clear of those rings too — with
+///     cover in the way the slide steers around the block, and around is
+///     a detour the walk has no memory to complete.
+///
+/// Anything else is a recall, not a walk — see the housekeeping branch.
+/// Recall is no worse tactically (a Returning fang is lethal, and only
+/// its owner can catch it); it is just less of a stroll.
+fn retrievable(v: &BotView, loose: Vec2) -> bool {
+    if loose.x.abs() > v.bounds.x * RETRIEVE_MARGIN || loose.y.abs() > v.bounds.y * RETRIEVE_MARGIN
+    {
+        return false;
+    }
+    !v.obstacles.iter().any(|(center, half)| {
+        segment_hits_box(v.me, loose, *center, *half + Vec2::splat(AVOID_PAD))
+    })
+}
+
+/// Slab test: does the segment `a`→`b` touch the axis-aligned box? Used
+/// on the padded rings, so "touches" already means "close enough that the
+/// steering would refuse to go through here".
+fn segment_hits_box(a: Vec2, b: Vec2, center: Vec2, pad: Vec2) -> bool {
+    let d = b - a;
+    let (mut t0, mut t1) = (0.0f32, 1.0f32);
+    for axis in 0..2 {
+        let (lo, hi) = (center[axis] - pad[axis], center[axis] + pad[axis]);
+        if d[axis].abs() < 1e-6 {
+            // Parallel to this slab: inside it for all t, or never.
+            if a[axis] < lo || a[axis] > hi {
+                return false;
+            }
+            continue;
+        }
+        let mut near = (lo - a[axis]) / d[axis];
+        let mut far = (hi - a[axis]) / d[axis];
+        if near > far {
+            std::mem::swap(&mut near, &mut far);
+        }
+        t0 = t0.max(near);
+        t1 = t1.min(far);
+        if t0 > t1 {
+            return false;
+        }
+    }
+    true
 }
 
 /// How far ahead (cm) a movement intent is probed for cover — ~12 ticks of
@@ -360,11 +452,18 @@ const AVOID_PAD: f32 = 44.0;
 ///     walk along/off the face, biased toward the foe so the detour stays
 ///     a duel move.
 fn slide_around_cover(v: &BotView, dir: Vec2) -> Vec2 {
+    slide_around_cover_within(v, dir, AVOID_LOOKAHEAD)
+}
+
+/// [`slide_around_cover`] with an explicit probe distance. The retrieval
+/// walk shortens it to the fang, so the last stride cannot read a block
+/// BEHIND the fang and slide the bot past the thing it came for.
+fn slide_around_cover_within(v: &BotView, dir: Vec2, lookahead: f32) -> Vec2 {
     let d = dir.clamp_length_max(1.0);
     if d.length_squared() < 1e-4 {
         return d;
     }
-    let probe = v.me + d.normalize_or_zero() * AVOID_LOOKAHEAD;
+    let probe = v.me + d.normalize_or_zero() * lookahead;
     for (center, half) in &v.obstacles {
         let pad = *half + Vec2::splat(AVOID_PAD);
         let rel = probe - *center;
@@ -756,6 +855,111 @@ mod tests {
         let d = steer(&v, Vec2::new(1.0, 0.0));
         assert!(d.x.abs() < 1e-4, "not into the wall");
         assert!(d.y > 0.0, "rounds toward the foe: {d:?}");
+    }
+
+    /// The hang the gauntlet showed: the bot's own fang knocked Loose into
+    /// the edge cushion. The walk wanted out, `edge_safe` shoved back in,
+    /// and the two alternated frame by frame — a duelist stuck on the spot,
+    /// strobing (the facing row flips with the velocity sign), and, because
+    /// this branch preempts the throw, disarmed for the rest of the round.
+    #[test]
+    fn a_fang_dropped_past_the_cushion_is_recalled_not_chased() {
+        let mut v = base_view();
+        v.me = Vec2::new(0.0, 300.0);
+        v.fangs_out = 1;
+        v.my_loose = Some(Vec2::new(v.bounds.x * 0.97, 300.0)); // out in the rim
+        assert!(!retrievable(&v, v.my_loose.unwrap()));
+
+        // Over a full pulse period the bot both MOVES and lands a recall
+        // press — never the frozen, buttonless stare the walk produced.
+        let mut moved = false;
+        let mut recalled = false;
+        for f in 0..24 {
+            v.frame = 600 + f;
+            let input = bot_decide(&v);
+            moved |= input.stick_x != 0 || input.stick_y != 0;
+            recalled |= input.buttons & PlayerInput::THROW_DOWN != 0;
+        }
+        assert!(moved, "keeps orbiting instead of vibrating in place");
+        assert!(recalled, "pulses THROW so the loose fang is reeled home");
+    }
+
+    #[test]
+    fn a_fang_dropped_inside_cover_is_recalled_not_chased() {
+        let mut v = view_with_block();
+        v.fangs_out = 1;
+        // Settled against the block's west face, inside the padded ring the
+        // cover slide will not cross.
+        v.my_loose = Some(Vec2::new(-70.0, 0.0));
+        assert!(!retrievable(&v, v.my_loose.unwrap()));
+        let mut recalled = false;
+        for f in 0..24 {
+            v.frame = 600 + f;
+            recalled |= bot_decide(&v).buttons & PlayerInput::THROW_DOWN != 0;
+        }
+        assert!(recalled, "reels it out of the cover it cannot walk into");
+    }
+
+    /// Cover between the bot and the fang is the third way the walk could
+    /// approach forever: the slide steers AROUND the block, and around is
+    /// a detour a memoryless policy re-decides every frame.
+    #[test]
+    fn a_fang_behind_cover_is_recalled_not_chased() {
+        let mut v = view_with_block(); // block at origin, bot at (-200, 0)
+        v.fangs_out = 1;
+        // Open floor, well clear of the block's ring — but straight through
+        // the block from where the bot is standing.
+        v.my_loose = Some(Vec2::new(200.0, 0.0));
+        assert!(!retrievable(&v, v.my_loose.unwrap()), "corridor is blocked");
+        // Step around to the same distance with the block off the line, and
+        // the bot walks it down as before.
+        v.me = Vec2::new(0.0, -300.0);
+        v.my_loose = Some(Vec2::new(0.0, -450.0));
+        assert!(retrievable(&v, v.my_loose.unwrap()), "clear corridor walks");
+    }
+
+    #[test]
+    fn a_short_probe_does_not_read_past_the_fang() {
+        // The fang is 60 cm east. A block sits behind it, near enough that
+        // the full-length probe (AVOID_LOOKAHEAD = 130) lands inside the
+        // block's padded ring — so the slide swerves the bot sideways past
+        // the very thing it walked over for, on every pass.
+        let mut v = base_view();
+        v.me = Vec2::new(0.0, 0.0);
+        v.obstacles = vec![(Vec2::new(180.0, 0.0), Vec2::new(60.0, 60.0))];
+        let fang = Vec2::new(60.0, 0.0); // clear of the ring, which starts at 76
+        assert!(retrievable(&v, fang), "the corridor to the fang is clear");
+        assert!(
+            slide_around_cover(&v, Vec2::new(1.0, 0.0)).x < 1.0,
+            "the full-length probe reads the block behind the fang and swerves"
+        );
+        let short = slide_around_cover_within(&v, Vec2::new(1.0, 0.0), fang.length());
+        assert_eq!(
+            short,
+            Vec2::new(1.0, 0.0),
+            "clamped probe walks straight in"
+        );
+    }
+
+    #[test]
+    fn a_fang_on_open_ground_is_still_walked_down() {
+        let mut v = base_view();
+        v.fangs_out = 1;
+        v.my_loose = Some(Vec2::new(200.0, 300.0)); // open floor, east of it
+        assert!(retrievable(&v, v.my_loose.unwrap()));
+        let input = bot_decide(&v);
+        assert!(input.stick_x > 0, "walks at it: {input:?}");
+        assert_eq!(input.buttons, 0, "no recall needed, no charge armed");
+    }
+
+    #[test]
+    fn the_retrieval_walk_reaches_further_out_than_the_orbit() {
+        let mut v = base_view();
+        v.me = Vec2::new(v.bounds.x * 0.88, 0.0); // inside the orbit cushion
+        // The orbit refuses to push further out here...
+        assert!(edge_safe(&v, Vec2::new(1.0, 0.0)).x < 0.0);
+        // ...while the retrieval walk is allowed to finish the job.
+        assert!(edge_clamp(&v, Vec2::new(1.0, 0.0), RETRIEVE_MARGIN).x > 0.0);
     }
 
     #[test]

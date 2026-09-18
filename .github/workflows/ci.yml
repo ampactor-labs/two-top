@@ -48,3 +48,19 @@ jobs:
       # duelists must read apart by silhouette, not color (audit D-VQ-01).
       - run: python3 scripts/check_palette.py
       - run: python3 scripts/check_silhouettes.py
+
+  # The APK workflow only runs on a push to main, and nothing else in the
+  # tree reads [package.metadata.android] — so a manifest mistake stayed
+  # invisible until it had already broken the published release (cargo-apk
+  # panics at config-parse time on a version_code/version_name it derives
+  # itself). These are the parse-time rules plus the two ship blockers
+  # that can ride a green build; seconds, no NDK, every branch and PR.
+  manifest:
+    name: android manifest gates
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python3 scripts/check_android_manifest.py

@@ -476,12 +476,24 @@ fn update_pad(
 /// as a QR beside the dial — the other phone's system camera opens the
 /// join page, whose OPEN IN 2-TOP button deep-links the app straight to
 /// this code and table. Reuses the share module's renderer.
+/// The join QR's side, in world units. A code this size lands near ten
+/// pixels per module on a 1080-wide phone, which is what a second phone's
+/// camera needs to lock on across a table.
+const QR_SIDE: f32 = 330.0;
+/// The caption under the code. The ritual asks a stranger to point their
+/// camera at a square of noise; it should say so.
+const QR_CAPTION: &str = "SCAN TO JOIN";
+
 #[derive(Component)]
 struct JoinQr {
     /// The link currently rendered, so the image only re-mints on change.
     link: Option<String>,
     handle: Option<Handle<Image>>,
 }
+
+/// The one-line instruction under the code.
+#[derive(Component)]
+struct JoinQrCaption;
 
 #[allow(clippy::too_many_arguments)]
 fn update_join_qr(
@@ -493,6 +505,7 @@ fn update_join_qr(
     selected: Res<sim::SelectedArena>,
     screen: Res<State<AppScreen>>,
     mut q: Query<(&mut JoinQr, &mut Sprite, &mut Visibility)>,
+    mut caption: Query<&mut Visibility, (With<JoinQrCaption>, Without<JoinQr>)>,
 ) {
     let Some(watch) = share.watch_url.as_deref() else {
         return;
@@ -510,21 +523,49 @@ fn update_join_qr(
             // overwrites anchored scale every frame with the view scale
             // (that is how text stays screen-constant), which silently
             // shrank the first three placements of this code to a chip.
+            // 110 was about 100 px on a 1080-wide phone: roughly three
+            // pixels per module, which another phone's camera could not
+            // hold focus on. The right-hand backdrop has room for three
+            // times that — the portrait's left edge is the only neighbour,
+            // and QR_SIDE keeps clear of it at every aspect.
             Sprite {
-                custom_size: Some(Vec2::splat(110.0)),
+                custom_size: Some(Vec2::splat(QR_SIDE)),
                 ..default()
             },
             // Upper-right arena space: the one region of the Title that is
             // guaranteed dead backdrop at every aspect (first placement sat
             // inside the QUICK MATCH pill, unscannable at 2.4x — the
             // capture harness caught it).
-            ScreenAnchor::new(0.64, 0.30, 0.0, 0.0),
+            ScreenAnchor::new(0.55, 0.30, 0.0, 0.0),
+            Transform::from_xyz(0.0, 0.0, 204.0),
+            Visibility::Hidden,
+        ));
+        commands.spawn((
+            JoinQrCaption,
+            Text2d::new(QR_CAPTION.to_string()),
+            TextFont {
+                font_size: 26.0,
+                ..default()
+            },
+            TextColor(render::palette::BONE),
+            TextLayout {
+                justify: Justify::Center,
+                linebreak: bevy::text::LineBreak::NoWrap,
+            },
+            ScreenAnchor::new(0.55, 0.30, 0.0, -(QR_SIDE * 0.5 + 34.0)),
             Transform::from_xyz(0.0, 0.0, 204.0),
             Visibility::Hidden,
         ));
         return;
     }
     let show = *screen.get() == AppScreen::Title && code.custom;
+    for mut vis in &mut caption {
+        *vis = if show {
+            Visibility::Visible
+        } else {
+            Visibility::Hidden
+        };
+    }
     for (mut qr, mut sprite, mut vis) in &mut q {
         *vis = if show {
             Visibility::Visible
