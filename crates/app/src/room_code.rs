@@ -228,7 +228,7 @@ fn load_room_code() -> RoomCode {
     let Some(path) = room_code_path() else {
         return RoomCode::default();
     };
-    let mut code: RoomCode = std::fs::read_to_string(&path)
+    let mut code: RoomCode = crate::paths::read_document(&path)
         .ok()
         .and_then(|text| serde_json::from_str(&text).ok())
         .unwrap_or_default();

@@ -245,7 +245,7 @@ fn load_career() -> CareerRecord {
 /// old path handed back a default that the next decided match then wrote
 /// over the only evidence of what happened.
 fn read_career(path: &std::path::Path) -> CareerRecord {
-    let Ok(text) = std::fs::read_to_string(path) else {
+    let Ok(text) = crate::paths::read_document(path) else {
         return CareerRecord::default();
     };
     match serde_json::from_str(&text) {

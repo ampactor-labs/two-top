@@ -296,7 +296,7 @@ fn load_profile() -> LocalProfile {
 /// happened — and with `paths::write_atomic` on every save, the only way
 /// to get here anymore is outside interference (a hand edit, a bad disk).
 fn read_profile(path: &std::path::Path) -> LocalProfile {
-    let Ok(text) = std::fs::read_to_string(path) else {
+    let Ok(text) = crate::paths::read_document(path) else {
         return LocalProfile::default();
     };
     match serde_json::from_str(&text) {

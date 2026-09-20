@@ -94,7 +94,15 @@ pub struct TouchControlsPlugin;
 
 impl Plugin for TouchControlsPlugin {
     fn build(&self, app: &mut App) {
+        // Anywhere the only input device is a finger. The browser build
+        // was left off this list, so every phone that opened the Pages
+        // link got a game it could touch but not see the controls of —
+        // `InputTouchPlugin` is registered unconditionally, so the stick
+        // and buttons WORKED, invisibly. An iPhone has no keyboard to
+        // fall back on, which made the web build effectively unplayable
+        // for exactly the people it exists to reach.
         let shown = cfg!(target_os = "android")
+            || cfg!(target_family = "wasm")
             || std::env::var("TWOTOP_SHOW_TOUCH").is_ok_and(|v| v == "1");
         app.insert_resource(TouchControlsShown(shown))
             .init_resource::<HintsUsed>()

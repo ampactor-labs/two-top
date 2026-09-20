@@ -44,11 +44,23 @@ jobs:
           curl -sL "https://github.com/wasm-bindgen/wasm-bindgen/releases/download/${WBG}/wasm-bindgen-${WBG}-x86_64-unknown-linux-musl.tar.gz" \
             | tar xz
           echo "$PWD/wasm-bindgen-${WBG}-x86_64-unknown-linux-musl" >> "$GITHUB_PATH"
+      # The deploy (web.yml) size-optimizes the module before publishing
+      # it. Run the identical pass here so the 1800-frame checksum probe
+      # is validating the bytes a visitor actually receives -- an
+      # optimizer that changed behaviour would otherwise be invisible
+      # until someone played the deployed site.
+      - name: Install binaryen (wasm-opt)
+        run: |
+          BIN=version_123
+          curl -sL "https://github.com/WebAssembly/binaryen/releases/download/${BIN}/binaryen-${BIN}-x86_64-linux.tar.gz" \
+            | tar xz
+          echo "$PWD/binaryen-${BIN}/bin" >> "$GITHUB_PATH"
       - name: Run the probe in headless Chrome
         run: |
           wasm-bindgen --target web --no-typescript \
             --out-dir probe_dist --out-name app \
             target/wasm32-unknown-unknown/release/app.wasm
+          scripts/wasm_opt.sh probe_dist/app_bg.wasm
           cp web/check.html probe_dist/
           python3 -m http.server 18099 --bind 127.0.0.1 -d probe_dist &
           sleep 1

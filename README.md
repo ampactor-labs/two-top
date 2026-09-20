@@ -16,9 +16,11 @@ That one constraint shapes the whole codebase.
 **Status: shipping.** The gameplay loop, netplay, seven arenas, signed results, replays, and the CI/APK/Pages pipelines are built and green. The two-phone cross-carrier field test (Wi-Fi against mobile data) was run and passed at an earlier revision; it has **not** been re-run since, and the netplay layer has changed substantially since then — see `docs/ROLEPLAY_AUDIT.md` § Status. Treat the online path as verified-then-drifted, not verified.
 
 Android is the product platform today, and the same build runs in a
-browser (wasm32 + WebGL2, deployed to Pages); iOS is on the roadmap. The
-desktop build is a dev tool: couch versus on one keyboard, plus the
-capture and loopback harnesses.
+browser (wasm32 + WebGL2, deployed to Pages) — which is how an iPhone
+plays it: Safari, no App Store, Add to Home Screen for a fullscreen
+icon. A native iOS app is on the roadmap. The desktop build is a dev
+tool: couch versus on one keyboard, plus the capture and loopback
+harnesses.
 
 > **Naming.** The displayed name is **2-Top**. Code identifiers stay
 > textual as `two-top` (directory), `two_top` (Rust crate), and `twotop`
@@ -35,11 +37,18 @@ https://github.com/ampactor-labs/two-top/releases/download/apk-latest/two-top.ap
 ```
 
 Install it on two Android phones ([`SIDELOAD.md`](./SIDELOAD.md)), tap
-FIND OPPONENT on both, and the public room pairs you. The game also runs
-in a browser at [ampactor.dev/two-top](https://ampactor.dev/two-top/),
-and a shared match plays there straight from its QR link
-(`#watch=<id>` — see PLAYBOOK § Sharing a match). Dial the same
-four-glyph code on both phones for a private duel. The public build
+FIND OPPONENT on both, and the public room pairs you. Dial the same
+four-glyph code on both phones for a private duel.
+
+**On an iPhone (or anything else), open
+[ampactor.dev/two-top](https://ampactor.dev/two-top/).** Same game, same
+netplay, nothing to install — and Share → Add to Home Screen gives it an
+icon and a fullscreen launch. The browser build keeps its identity,
+settings and rivalry ledger in `localStorage`, so it is the same
+opponent to everyone each visit; tapes and crash logs are the one thing
+it cannot keep, because a page cannot write files a human can hand back.
+A shared match also plays there straight from its QR link
+(`#watch=<id>` — see PLAYBOOK § Sharing a match). The public build
 carries no relay secrets: it fetches throwaway TURN credentials from a
 small credential service at match entry, so cross-carrier matches relay
 through Cloudflare and a leaked credential dies within hours.

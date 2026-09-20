@@ -250,6 +250,10 @@ bevy = { version = "=0.18.1", default-features = false, features = [
     "webgl2",
 ] }
 replay_sync = { path = "../replay_sync", optional = true }
+# The browser's persistence floor (crates/app/src/paths.rs): localStorage
+# is where the profile, settings, room code and career ledger live on the
+# web, since wasm32 has no filesystem for them at all.
+web-sys = { version = "0.3", features = ["Window", "Storage"] }
 getrandom02 = { package = "getrandom", version = "0.2", features = ["js"] }
 getrandom03 = { package = "getrandom", version = "0.3", features = ["wasm_js"] }
 # The browser entry (src/web.rs). Pinned exactly to the version the bevy

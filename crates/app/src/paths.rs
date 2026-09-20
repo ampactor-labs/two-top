@@ -10,6 +10,17 @@
 //! it right, by asking Android where its files go.
 //!
 //! One helper now, so there is a single place to be wrong.
+//!
+//! The browser is the third answer. wasm32 has no filesystem at all:
+//! `dirs` hands back `None` and every `std::fs` call returns
+//! `Unsupported`, so every save on the web build silently did nothing and
+//! every load came back empty. A visitor got a freshly minted identity,
+//! the name grid, and an empty rivalry ledger on EVERY page load. The
+//! backend for the browser is `localStorage`, reached through the same
+//! three seams the native path already went through — [`read_document`],
+//! [`write_atomic`] and [`quarantine_corrupt`] — so the four persisted
+//! documents (profile, settings, room code, career) keep their exact
+//! native shape and only the floor under them changes.
 
 use std::path::{Path, PathBuf};
 
@@ -23,9 +34,59 @@ pub fn config_dir() -> Option<PathBuf> {
             .get()
             .and_then(|app| app.internal_data_path())
     }
-    #[cfg(not(target_os = "android"))]
+    // The browser has no directories. This is a VIRTUAL root: nothing is
+    // ever created at it, and the three document seams below key
+    // `localStorage` off the file name under it. It exists so the callers
+    // can keep speaking in paths.
+    #[cfg(target_family = "wasm")]
+    {
+        Some(PathBuf::from(WEB_ROOT))
+    }
+    #[cfg(not(any(target_os = "android", target_family = "wasm")))]
     {
         dirs::config_dir().map(|d| d.join("two-top"))
+    }
+}
+
+/// The virtual config root for the browser build (see [`config_dir`]).
+#[cfg(target_family = "wasm")]
+const WEB_ROOT: &str = "/two-top";
+
+/// `localStorage` key for a document path. Keyed on the file name alone,
+/// namespaced so the game cannot collide with anything else served from
+/// the same origin (GitHub Pages hosts a whole account on one).
+#[cfg(target_family = "wasm")]
+fn web_key(path: &Path) -> Option<String> {
+    let name = path.file_name()?.to_str()?;
+    Some(format!("two-top/{name}"))
+}
+
+/// The page's `localStorage`, when there is one. Safari in Lockdown /
+/// private browsing and any "block all cookies" setting make this throw
+/// or hand back `None` rather than a store — the whole point of routing
+/// every access through here is that the game degrades to in-memory-only
+/// instead of panicking in someone's browser.
+#[cfg(target_family = "wasm")]
+fn local_storage() -> Option<web_sys::Storage> {
+    web_sys::window()?.local_storage().ok().flatten()
+}
+
+/// Read a persisted document. Native: the file. Browser: `localStorage`.
+/// The error shape matches `std::fs::read_to_string`, so callers that
+/// treat "no document" as a first boot need no browser-specific arm.
+pub fn read_document(path: &Path) -> std::io::Result<String> {
+    #[cfg(target_family = "wasm")]
+    {
+        let key = web_key(path).ok_or_else(|| std::io::Error::other("no document name in path"))?;
+        local_storage()
+            .ok_or_else(|| std::io::Error::other("no localStorage in this browser"))?
+            .get_item(&key)
+            .map_err(|_| std::io::Error::other("localStorage read refused"))?
+            .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "no such document"))
+    }
+    #[cfg(not(target_family = "wasm"))]
+    {
+        std::fs::read_to_string(path)
     }
 }
 
@@ -44,7 +105,14 @@ pub fn shared_dir() -> Option<PathBuf> {
             .get()
             .and_then(|app| app.external_data_path())
     }
-    #[cfg(not(target_os = "android"))]
+    // No browser equivalent: tapes and crash logs are files a human opens
+    // with a Files app, and a page cannot put one there unprompted. The
+    // recorder and the log file half simply stand down on the web.
+    #[cfg(target_family = "wasm")]
+    {
+        None
+    }
+    #[cfg(not(any(target_os = "android", target_family = "wasm")))]
     {
         dirs::download_dir()
             .or_else(dirs::data_dir)
@@ -62,6 +130,30 @@ pub fn shared_dir() -> Option<PathBuf> {
 /// identity at all, and the code downstream would mint a fresh install-id
 /// and orphan the rivalry ledger on both phones.
 pub fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    // The browser: one `localStorage` write, which is already atomic (the
+    // store is a map, not a byte stream — there is no torn half to leave
+    // behind, and no sibling to clean up). Quota is the failure that
+    // matters here, and it arrives as an Err the caller already logs.
+    #[cfg(target_family = "wasm")]
+    {
+        let key = web_key(path).ok_or_else(|| std::io::Error::other("no document name in path"))?;
+        let text = std::str::from_utf8(bytes)
+            .map_err(|_| std::io::Error::other("localStorage holds text, not bytes"))?;
+        return local_storage()
+            .ok_or_else(|| std::io::Error::other("no localStorage in this browser"))?
+            .set_item(&key, text)
+            .map_err(|_| {
+                std::io::Error::other("localStorage write refused (quota or private mode)")
+            });
+    }
+    #[cfg(not(target_family = "wasm"))]
+    {
+        write_atomic_fs(path, bytes)
+    }
+}
+
+#[cfg(not(target_family = "wasm"))]
+fn write_atomic_fs(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     let file_name = path
         .file_name()
         .ok_or_else(|| std::io::Error::other("write_atomic needs a file path"))?;
@@ -83,12 +175,29 @@ pub fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
 /// so every persisted file gets the same answer (the profile had it; the
 /// career ledger, which holds strictly more, did not).
 pub fn quarantine_corrupt(path: &Path) {
-    let mut name = path
-        .file_name()
-        .map(std::ffi::OsStr::to_os_string)
-        .unwrap_or_default();
-    name.push(".corrupt");
-    let _ = std::fs::rename(path, path.with_file_name(name));
+    // The browser keeps the same promise: the unparseable bytes move to a
+    // `.corrupt` key rather than being dropped, so they are still there
+    // to hand back from a console.
+    #[cfg(target_family = "wasm")]
+    {
+        let (Some(store), Some(key)) = (local_storage(), web_key(path)) else {
+            return;
+        };
+        if let Ok(Some(text)) = store.get_item(&key) {
+            let _ = store.set_item(&format!("{key}.corrupt"), &text);
+            let _ = store.remove_item(&key);
+        }
+        return;
+    }
+    #[cfg(not(target_family = "wasm"))]
+    {
+        let mut name = path
+            .file_name()
+            .map(std::ffi::OsStr::to_os_string)
+            .unwrap_or_default();
+        name.push(".corrupt");
+        let _ = std::fs::rename(path, path.with_file_name(name));
+    }
 }
 
 /// A per-test scratch directory under the repo's `target/` (never the

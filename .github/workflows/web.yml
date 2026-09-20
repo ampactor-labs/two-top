@@ -44,6 +44,19 @@ jobs:
           curl -sL "https://github.com/wasm-bindgen/wasm-bindgen/releases/download/${WBG}/wasm-bindgen-${WBG}-x86_64-unknown-linux-musl.tar.gz" \
             | tar xz
           echo "$PWD/wasm-bindgen-${WBG}-x86_64-unknown-linux-musl" >> "$GITHUB_PATH"
+      # binaryen's wasm-opt does the size pass rustc will not: it runs over
+      # the finished module, after bindgen has cut its glue. It buys ~2% of
+      # the gzipped download and ~22% of the RAW module, and the raw number
+      # is the one that matters -- that is what a phone decompresses,
+      # parses and holds. The exact same pass runs in wasm.yml's headless
+      # checksum probe, so a rewrite that broke the game fails a PR instead
+      # of reaching the site.
+      - name: Install binaryen (wasm-opt)
+        run: |
+          BIN=version_123
+          curl -sL "https://github.com/WebAssembly/binaryen/releases/download/${BIN}/binaryen-${BIN}-x86_64-linux.tar.gz" \
+            | tar xz
+          echo "$PWD/binaryen-${BIN}/bin" >> "$GITHUB_PATH"
       - name: Bindgen + assemble dist
         env:
           TWOTOP_DROP_URL: ${{ vars.TWOTOP_DROP_URL }}
@@ -51,8 +64,11 @@ jobs:
           wasm-bindgen --target web --no-typescript \
             --out-dir dist --out-name app \
             target/wasm32-unknown-unknown/release/app.wasm
+          scripts/wasm_opt.sh dist/app_bg.wasm
           cp web/index.html dist/
           cp web/join.html dist/
+          cp web/manifest.webmanifest dist/
+          cp web/icon-192.png web/icon-512.png web/apple-touch-icon.png dist/
           sed -i "s|__TWOTOP_DROP_URL__|${TWOTOP_DROP_URL}|" dist/index.html
           cp -r assets dist/assets
           ls -la dist

@@ -541,3 +541,89 @@ can ride an otherwise-green build — `debuggable = false`, and no
 `TWOTOP_TURN_*` baked into the public APK. Each gate was checked against
 a deliberately reintroduced regression before landing, including the
 exact one that broke the release.
+
+---
+
+## The browser build, and what it takes to reach an iPhone
+
+An iPhone has no APK to sideload, and a native iOS port needs a paid
+developer account, a Mac, and a port of every platform seam the Android
+build owns. The wasm build already deployed to Pages is the whole game,
+already online — so the question was never "how do we reach iOS", it was
+"why has nobody played it in a browser". Four reasons, all found by
+reading the code against a phone's constraints rather than a desktop's.
+
+### 🔴 The web build drew no touch controls
+
+`TouchControlsPlugin` gated its `shown` flag on `cfg!(target_os =
+"android")`. `InputTouchPlugin` is registered unconditionally, so on a
+phone browser the stick, throw and dash **worked** — they were simply
+never drawn. On Android that gate is invisible; on a desktop browser the
+keyboard covers for it. On an iPhone there is no keyboard and no visible
+control, which is an unplayable game that looks like a broken one. The
+gate now names the real condition: any target whose only input device is
+a finger.
+
+### 🔴 Nothing persisted in a browser, ever
+
+`paths::config_dir` fell through to `dirs::config_dir()` off Android, and
+on wasm32 that is `None` — every `std::fs` call on that target returns
+`Unsupported`. So every save silently did nothing and every load came
+back empty: a fresh install-id minted on **every page load**, the name
+grid every visit, an empty rivalry ledger, and settings that reset
+between rounds. The rivalry pillar cannot exist on a platform with no
+memory.
+
+The fix keeps the four persisted documents (profile, settings, room code,
+career) in their exact native shape and changes only the floor under
+them. Three seams — `read_document`, `write_atomic`, `quarantine_corrupt`
+— now dispatch to `localStorage` on wasm, keyed under a `two-top/`
+namespace because a GitHub Pages origin hosts a whole account. The
+corrupt-document promise is kept too: bad bytes move to a `.corrupt` key
+rather than being dropped. Every access degrades to in-memory-only rather
+than panicking, since Safari in private browsing and any "block all
+cookies" setting make `localStorage` throw rather than exist.
+
+Tapes and crash logs stay unavailable on the web (`shared_dir` is `None`
+there, and now says so explicitly): they are files a human opens with a
+Files app, and a page cannot put one there unprompted. The REPLAYS screen
+is empty in a browser by construction.
+
+### 🟠 No Add to Home Screen
+
+No manifest, no `apple-touch-icon`, no `apple-mobile-web-app-capable` —
+so the closest thing the web build has to an install did nothing. There
+are now generated icons (`scripts/generate_web_icons.py`, built from the
+duelist sheet and the locked palette so they cannot drift off either),
+a manifest for Android/desktop, and the `apple-*` tags iOS reads instead
+of it. The viewport also stops double-tap zoom, and the canvas sizes in
+`dvh` — iOS Safari's `vh` is the *tallest* the viewport ever gets, so
+`100vh` put the dash button underneath the URL bar.
+
+### 🟡 The bundle, and a number this document got wrong
+
+The first pass here called the wasm "28 MB, brutal on cellular". That is
+the **uncompressed** size. Pages serves it gzipped, and the byte count a
+phone actually waits for was already 6.9 MB — checked with a request,
+which is what the first claim should have been.
+
+The deploy now runs `wasm-opt -Oz`, and the measured result corrects the
+framing a second time: 28.5 MB → 22.1 MB raw, but only 6.94 MB → 6.78 MB
+gzipped. The **download** barely moves. The raw size is the actual
+payoff — that is what the browser decompresses, parses and holds, and
+iOS Safari discards tabs over precisely that. 6.4 MB less peak memory on
+an iPhone justifies the pass; 160 KB less transfer would not have.
+
+The pass is shared with the wasm determinism lane
+(`scripts/wasm_opt.sh`), so the 1800-frame headless checksum probe
+validates the exact bytes a visitor receives. Run here before landing:
+`CHECKSUMS-OK 1800 frames` against the optimized module in headless
+Chromium — the optimizer provably does not change the simulation.
+
+### Still unverified
+
+Nobody has pointed a real iPhone at the deployed URL. Everything above is
+a fix for a defect found by reading, and the checksum probe proves the
+browser build is the same game — but iOS Safari's WebGL2 and WebRTC
+behaviour under a real finger is not something this repo can test from
+CI. That is the next thing worth doing, and it costs nothing.

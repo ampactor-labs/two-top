@@ -98,7 +98,7 @@ fn load_settings() -> Settings {
     let Some(path) = settings_path() else {
         return Settings::default();
     };
-    match std::fs::read_to_string(&path) {
+    match crate::paths::read_document(&path) {
         Ok(text) => serde_json::from_str::<Settings>(&text)
             .map(Settings::clamped)
             .unwrap_or_default(),
