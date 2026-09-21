@@ -99,9 +99,75 @@ struct ShareLabel {
 struct ShareOverlayPiece;
 
 /// `<watch-url>#watch=<id>`, tolerant of a trailing slash on the bake.
-#[cfg(not(target_family = "wasm"))]
 pub(crate) fn compose_watch_url(watch_base: &str, id: &str) -> String {
     format!("{}#watch={id}", watch_base.trim_end_matches('/'))
+}
+
+/// The browser's twin of [`post_tape`]: the same POST, over the page's
+/// own `fetch`.
+#[cfg(target_family = "wasm")]
+async fn post_tape_web(
+    drop_url: String,
+    watch_url: String,
+    bytes: Vec<u8>,
+) -> Result<String, String> {
+    use wasm_bindgen::JsCast;
+
+    let body = js_sys::Uint8Array::from(bytes.as_slice());
+    let init = web_sys::RequestInit::new();
+    init.set_method("POST");
+    init.set_body(&body);
+    let request = web_sys::Request::new_with_str_and_init(
+        &format!("{}/tape", drop_url.trim_end_matches('/')),
+        &init,
+    )
+    .map_err(|_| "could not build the drop request".to_string())?;
+    let window = web_sys::window().ok_or_else(|| "no window".to_string())?;
+    let response = wasm_bindgen_futures::JsFuture::from(window.fetch_with_request(&request))
+        .await
+        .map_err(|_| "tape drop unreachable".to_string())?;
+    let response: web_sys::Response = response
+        .dyn_into()
+        .map_err(|_| "tape drop answered strangely".to_string())?;
+    if !response.ok() {
+        return Err(format!("tape drop answered {}", response.status()));
+    }
+    let text =
+        wasm_bindgen_futures::JsFuture::from(response.text().map_err(|_| "no body".to_string())?)
+            .await
+            .map_err(|_| "tape drop answered strangely".to_string())?
+            .as_string()
+            .ok_or_else(|| "tape drop answered strangely".to_string())?;
+    let receipt: DropReceipt =
+        serde_json::from_str(&text).map_err(|e| format!("tape drop answered strangely: {e}"))?;
+    Ok(compose_watch_url(&watch_url, &receipt.id))
+}
+
+/// Hand the viewer the tape as a file.
+///
+/// The one thing a page genuinely cannot do is write into someone's
+/// Files app unprompted — so it asks instead. This is the browser's
+/// answer to the APK's replays folder: an ordinary download, which is
+/// also how a browser player gets a tape OUT to swap with a friend
+/// (`.bmrg` files play on any platform, the whole point of the format).
+#[cfg(target_family = "wasm")]
+pub(crate) fn download_tape(name: &str, bytes: &[u8]) -> Option<()> {
+    use wasm_bindgen::JsCast;
+
+    let array = js_sys::Uint8Array::from(bytes);
+    let parts = js_sys::Array::new();
+    parts.push(&array.buffer());
+    let blob = web_sys::Blob::new_with_u8_array_sequence(&parts).ok()?;
+    let url = web_sys::Url::create_object_url_with_blob(&blob).ok()?;
+    let document = web_sys::window()?.document()?;
+    let anchor: web_sys::HtmlAnchorElement = document.create_element("a").ok()?.dyn_into().ok()?;
+    anchor.set_href(&url);
+    anchor.set_download(name);
+    anchor.click();
+    // The object URL holds the blob alive until it is revoked; the click
+    // has already handed the bytes to the download.
+    let _ = web_sys::Url::revoke_object_url(&url);
+    Some(())
 }
 
 /// Render a QR of `text` into a bevy `Image`: dark modules in Void on a
@@ -140,7 +206,6 @@ pub(crate) fn qr_image(text: &str) -> Option<(Image, u32)> {
 }
 
 /// The drop's receipt for a stored tape.
-#[cfg(not(target_family = "wasm"))]
 #[derive(serde::Deserialize)]
 struct DropReceipt {
     id: String,
@@ -160,13 +225,17 @@ fn post_tape(drop_url: String, watch_url: String, bytes: Vec<u8>) -> Result<Stri
 }
 
 fn spawn_share_labels(mut commands: Commands, config: Res<ShareConfig>) {
-    if !config.complete() {
+    // Native with no drop baked: nothing to offer. The browser always has
+    // something to offer, because it can hand the tape to the viewer as a
+    // download even when there is nowhere to post it — and a browser
+    // player has no replays folder to reach into otherwise.
+    if !config.complete() && !cfg!(target_family = "wasm") {
         return;
     }
     for (on_summary, (fx, fy)) in [(true, SUMMARY_ANCHOR), (false, THEATER_ANCHOR)] {
         commands.spawn((
             ShareLabel { on_summary },
-            Text2d::new("SHARE"),
+            Text2d::new(String::new()),
             TextFont {
                 font_size: 30.0,
                 ..default()
@@ -212,7 +281,7 @@ fn drive_share(
     window: Res<WindowSize>,
     mut images: ResMut<Assets<Image>>,
     mut state: ResMut<ShareState>,
-    mut labels: Query<(&ShareLabel, &mut Visibility)>,
+    mut labels: Query<(&ShareLabel, &mut Visibility, &mut Text2d)>,
     overlay: Query<Entity, With<ShareOverlayPiece>>,
 ) {
     if !config.complete() {
@@ -228,7 +297,8 @@ fn drive_share(
 
     // Labels track the shareable surface; both hide while the flow is busy.
     let busy = !matches!(*state, ShareState::Idle);
-    for (label, mut vis) in &mut labels {
+    let posts = config.complete();
+    for (label, mut vis, mut text) in &mut labels {
         let on = !busy
             && can_share
                 .as_ref()
@@ -238,6 +308,8 @@ fn drive_share(
         } else {
             Visibility::Hidden
         };
+        // A link if there is a drop to post to; otherwise a file.
+        text.0 = if posts { "SHARE" } else { "SAVE TAPE" }.to_string();
     }
 
     let win = window.0;
@@ -263,35 +335,44 @@ fn drive_share(
             if !(keys.just_pressed(KeyCode::KeyS) || tapped_at(band)) {
                 return;
             }
+            let Ok(bytes) = crate::paths::read_bytes(&path) else {
+                tracing::warn!(target: "two_top::share", path = %path.display(), "tape unreadable — not shared");
+                return;
+            };
             #[cfg(target_family = "wasm")]
-            {
-                let _ = path;
-                tracing::warn!(
-                    target: "two_top::share",
-                    "sharing from the browser is a follow-up — the web build is the destination",
-                );
+            if !posts {
+                let name = path
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("two-top-match.bmrg");
+                if download_tape(name, &bytes).is_none() {
+                    tracing::warn!(target: "two_top::share", "the browser refused the download");
+                }
+                return;
             }
+            let (drop_url, watch_url) = (
+                config.drop_url.clone().expect("checked complete"),
+                config.watch_url.clone().expect("checked complete"),
+            );
+            let (tx, rx) = std::sync::mpsc::channel();
+            // Native: a blocking post on the IO pool. Browser: the page's
+            // own fetch. The browser used to log "sharing is a follow-up"
+            // and do nothing, which made the web build share-only-inbound
+            // for no reason the platform actually imposes.
             #[cfg(not(target_family = "wasm"))]
-            {
-                let Ok(bytes) = std::fs::read(&path) else {
-                    tracing::warn!(target: "two_top::share", path = %path.display(), "tape unreadable — not shared");
-                    return;
-                };
-                let (drop_url, watch_url) = (
-                    config.drop_url.clone().expect("checked complete"),
-                    config.watch_url.clone().expect("checked complete"),
-                );
-                let (tx, rx) = std::sync::mpsc::channel();
-                bevy::tasks::IoTaskPool::get()
-                    .spawn(async move {
-                        let _ = tx.send(post_tape(drop_url, watch_url, bytes));
-                    })
-                    .detach();
-                *state = ShareState::Posting {
-                    rx: std::sync::Mutex::new(rx),
-                };
-                tracing::info!(target: "two_top::share", "tape posting to the drop");
-            }
+            bevy::tasks::IoTaskPool::get()
+                .spawn(async move {
+                    let _ = tx.send(post_tape(drop_url, watch_url, bytes));
+                })
+                .detach();
+            #[cfg(target_family = "wasm")]
+            wasm_bindgen_futures::spawn_local(async move {
+                let _ = tx.send(post_tape_web(drop_url, watch_url, bytes).await);
+            });
+            *state = ShareState::Posting {
+                rx: std::sync::Mutex::new(rx),
+            };
+            tracing::info!(target: "two_top::share", "tape posting to the drop");
         }
         ShareState::Posting { rx } => {
             let outcome = rx

@@ -29,6 +29,7 @@ mod attest;
 mod audio;
 mod bot;
 mod camera;
+mod capability;
 mod dark_beyond;
 mod debug_overlay;
 mod devour;
@@ -1015,57 +1016,24 @@ fn setup(
     // pickup auras) bloom, while `Tonemapping::None` keeps every other pixel
     // exactly on the locked 16-color palette. `Bloom::OLD_SCHOOL` carries a
     // high threshold so the matte cloaks and floor never wash out.
-    #[cfg(any(target_os = "android", target_family = "wasm"))]
-    {
-        const VIEW_MARGIN_CM: f32 = 80.0;
-        let min_width = (2 * sim::ARENA_HALF_WIDTH_CM) as f32 + 2.0 * VIEW_MARGIN_CM;
-        let min_height =
-            (2 * sim::ARENA_HALF_HEIGHT_CM) as f32 * render::WORLD_TILT_Y + 2.0 * VIEW_MARGIN_CM;
-        // Android renders LDR, no bloom, no MSAA — measured on a Galaxy A16
-        // (Mali class): the HDR+bloom chain cost ~65 ms/frame and default
-        // 4× MSAA + spare full-screen quads another ~17 ms, pinning the
-        // phone at 10 fps. Without them it locks to 60 (16.7 ms avg).
-        // Overdriven accent colors clamp to white instead of blooming —
-        // an acceptable trade on the product platform; desktop keeps the
-        // full HLD glow. MSAA buys nothing for a quad-sprite game anyway.
-        //
-        // The BROWSER takes this same cheap path, and used to take the
-        // desktop one: the wasm build is mostly opened on a phone, on the
-        // same class of GPU the 10 fps was measured on, through WebGL2 —
-        // which is a worse place to ask for an HDR target and a bloom
-        // chain than native GLES was. A phone browser paying a desktop's
-        // render cost is the single most expensive divergence between
-        // this build and the APK.
-        commands.spawn((
-            Camera2d,
-            Msaa::Off,
-            bevy::core_pipeline::tonemapping::Tonemapping::None,
-            Projection::from(OrthographicProjection {
-                scaling_mode: bevy::camera::ScalingMode::AutoMin {
-                    min_width,
-                    min_height,
-                },
-                ..OrthographicProjection::default_2d()
-            }),
-        ));
-    }
-    // Native desktop only: the full HLD glow, and the couch-play legend.
-    // The legend named keys on a touchscreen for as long as the browser
-    // build took this branch.
-    #[cfg(not(any(target_os = "android", target_family = "wasm")))]
+    // ONE camera, and the glow is a runtime decision (see `capability`).
+    // This used to be two `cfg` blocks, which meant a phone browser took
+    // the desktop one and paid ~65 ms/frame for an HDR + bloom chain it
+    // could not afford, while the APK on the same handset ran lean at 60.
+    // The cost tracks the GPU, not the target triple — so a phone browser
+    // now gets what the APK gets, and a desktop browser keeps the full
+    // HLD glow exactly like the native desktop build.
     {
         const VIEW_MARGIN_CM: f32 = 80.0;
         let min_width = (2 * sim::ARENA_HALF_WIDTH_CM) as f32 + 2.0 * VIEW_MARGIN_CM;
         // The arena renders Y-foreshortened, so frame the foreshortened height.
         let min_height =
             (2 * sim::ARENA_HALF_HEIGHT_CM) as f32 * render::WORLD_TILT_Y + 2.0 * VIEW_MARGIN_CM;
-        commands.spawn((
+        let mut camera = commands.spawn((
             Camera2d,
             // MSAA does nothing for quad sprites; skip its fill cost.
             Msaa::Off,
-            bevy::render::view::Hdr,
             bevy::core_pipeline::tonemapping::Tonemapping::None,
-            bevy::post_process::bloom::Bloom::OLD_SCHOOL,
             Projection::from(OrthographicProjection {
                 scaling_mode: bevy::camera::ScalingMode::AutoMin {
                     min_width,
@@ -1074,6 +1042,21 @@ fn setup(
                 ..OrthographicProjection::default_2d()
             }),
         ));
+        if capability::lean_render() {
+            // Overdriven accent colors clamp to white instead of
+            // blooming — the trade the product platform already makes.
+            tracing::info!(target: "two_top::app", "lean render: no HDR, no bloom");
+        } else {
+            camera.insert((
+                bevy::render::view::Hdr,
+                bevy::post_process::bloom::Bloom::OLD_SCHOOL,
+            ));
+        }
+    }
+    // Native desktop only: the couch-play legend. It named keys on a
+    // touchscreen for as long as the browser build took the desktop arm.
+    #[cfg(not(any(target_os = "android", target_family = "wasm")))]
+    {
         // Couch-play control legend (desktop only — touch needs none).
         // World-space Text2d (the app has no bevy_ui), pinned to the bottom
         // of the *screen* so it stays clear of the top-edge HUD (pips +

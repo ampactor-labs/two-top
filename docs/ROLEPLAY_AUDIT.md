@@ -695,23 +695,58 @@ a duration — the exact shape this module already speaks. Wired up;
 Chrome on Android honours it, iOS Safari does not implement it and the
 call stays the same silent nothing it was.
 
-### Divergences left standing, on purpose
+### Divergences I first called deliberate, and then closed
 
-These are real and worth knowing before trusting the web build:
+The original draft of this section filed four gaps under "on purpose".
+Pressed on whether the two builds should simply be the same game — which
+is the repo's own stated contract, `ARCHITECTURE.md` line 7, "Same Rust
+codebase across all three" — three of the four turned out to be backlog
+wearing a principle's coat. They are now closed:
 
-- **No TURN relay.** `fetch_ice` is `not(target_family = "wasm")` — a
-  browser cannot block a thread on `ureq`. The web build is STUN-only,
-  so a cross-carrier duel that the APK would relay through Cloudflare
-  can simply fail to connect. A `gloo-fetch` port is the fix.
-- **No tapes, so no REPLAYS.** `shared_dir` is `None` on wasm, by
-  construction: tapes and crash logs are files a human opens with a
-  Files app, and a page cannot leave one unprompted. The REPLAYS screen
-  is empty in a browser, and `.attest.json` is never written.
-- **No SHARE.** Posting a tape to the drop needs the same blocking HTTP
-  `fetch_ice` does; the button logs and does nothing. The web build is
-  the *destination* of a share link, not a source of one.
-- **No deep link.** `twotop://join/<CODE>` is an Android intent filter.
-  The browser's equivalent is `join.html`, which already exists.
+- **TURN relay — done.** The claim was that a browser cannot block a
+  thread on `ureq`, which is true and irrelevant: it can `fetch`.
+  `fetch_ice_web` feeds the same channel `finish_ice_fetch` already
+  polls, and that poll's existing timeout is what bounds the request (a
+  `fetch` has no timeout of its own). A browser duel can now relay
+  instead of failing to connect on a carrier NAT.
+- **Tapes, REPLAYS, rivalry rings, `.attest.json` — done.** "A page
+  cannot write a file" conflated two different things. A tape is ~14 KB
+  (8 bytes a frame); a 5 MB `localStorage` budget holds ~270 of them.
+  `shared_dir` now returns a virtual root on the web and two new seams
+  (`read_bytes`, `list_dir`) back it, so the recorder, the REPLAYS
+  screen, the rivalry tape rings and the shade all work in a browser
+  through the same code paths the APK uses. Binary rides base64 behind a
+  marker; JSON documents stay plain text so they are still readable in
+  devtools.
+- **SHARE — done.** `post_tape_web` is the same POST over `fetch`. And
+  where no drop is baked at all, the browser's button becomes **SAVE
+  TAPE**: an ordinary download, which is the honest answer to the one
+  thing a page genuinely cannot do — put a file in someone's Files app
+  unprompted. It asks instead. A `.bmrg` plays on any platform, so that
+  is also how a browser player swaps tapes with a friend.
+- **No deep link — still true, and correct.** `twotop://join/<CODE>` is
+  an Android intent filter; the browser's equivalent is a URL, which is
+  strictly better, and `join.html` already is one.
+
+**Audio** was the unverified item, and it had a real cause: browser
+autoplay policy suspends an `AudioContext` built before the first
+gesture, and cpal builds one at startup. Nothing in the Rust can reach
+that context, so the page keeps the handle — `web/index.html` wraps the
+constructor, remembers every context, and resumes them on the first
+pointer or key event, before the wasm module loads.
+
+### The render tier stopped being a compile-time guess
+
+D2 above was fixed by moving the browser onto the Android arm, which was
+right for a phone and wrong for a laptop. The real lesson was that the
+question — *how much GPU is there* — was being answered by the target
+triple. There is now a `capability` module: `touch_primary()` asks CSS
+`(pointer: coarse)`, and one camera decides its glow from that at
+startup. A phone browser gets what the APK gets; a desktop browser keeps
+the full HLD glow like the native build; a touchscreen laptop gets the
+right answer for the first time. The same capability drives whether the
+touch controls are drawn, replacing the `cfg!` that started this whole
+thread.
 
 ### Stopping the habit, not just these four
 

@@ -430,7 +430,7 @@ fn roll_tape(world: &mut World, filename: &str) {
     let Some(path) = crate::recorder::replays_dir().map(|d| d.join(filename)) else {
         return;
     };
-    let Ok(bytes) = std::fs::read(&path) else {
+    let Ok(bytes) = crate::paths::read_bytes(&path) else {
         tracing::warn!(target: "two_top::rivals", path = %path.display(), "rivalry tape unreadable");
         return;
     };
@@ -468,7 +468,7 @@ fn summon_shade(world: &mut World, key: &str) {
     };
     let mut stats = Vec::new();
     for tape in &tapes {
-        let Ok(bytes) = std::fs::read(dir.join(tape)) else {
+        let Ok(bytes) = crate::paths::read_bytes(&dir.join(tape)) else {
             continue;
         };
         let Ok(replay) = replay::decode_for_sim_version(&bytes, sim::SIM_VERSION) else {

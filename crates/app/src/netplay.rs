@@ -291,7 +291,6 @@ struct PendingIce {
 
 /// The vendor's `GET /ice` contract — field names in lockstep with
 /// `ice_vendor::IceResponse`.
-#[cfg(not(target_family = "wasm"))]
 #[derive(serde::Deserialize)]
 struct IceResponse {
     urls: Vec<String>,
@@ -301,8 +300,7 @@ struct IceResponse {
 
 /// Parse a vendor response body into matchbox's ICE config. `None` for
 /// anything malformed or empty — the caller falls back to the baked path.
-/// Pure for tests.
-#[cfg(not(target_family = "wasm"))]
+/// Pure for tests, and shared by both fetch paths.
 pub(crate) fn parse_ice_response(body: &str) -> Option<RtcIceServerConfig> {
     let parsed: IceResponse = serde_json::from_str(body).ok()?;
     if parsed.urls.is_empty() {
@@ -316,10 +314,9 @@ pub(crate) fn parse_ice_response(body: &str) -> Option<RtcIceServerConfig> {
 }
 
 /// Blocking fetch of the vendor's ICE config (runs on the IO task pool —
-/// never the main thread). Tight timeout: the fallback exists. Native
-/// only: a browser cannot block a thread, so the wasm build skips the
-/// vendor and runs the STUN-only path (a gloo-fetch port is the follow-up
-/// if browser duels ever need the relay).
+/// never the main thread). Tight timeout: the fallback exists. The
+/// browser's twin is [`fetch_ice_web`]; both feed the same channel that
+/// [`finish_ice_fetch`] polls, so the socket-open path is identical.
 #[cfg(not(target_family = "wasm"))]
 fn fetch_ice(url: &str, app_key: Option<&str>) -> Option<RtcIceServerConfig> {
     let mut request = ureq::get(url).timeout(Duration::from_secs(2));
@@ -334,6 +331,52 @@ fn fetch_ice(url: &str, app_key: Option<&str>) -> Option<RtcIceServerConfig> {
         })
         .ok()?;
     let body = response.into_string().ok()?;
+    let config = parse_ice_response(&body);
+    if config.is_none() {
+        tracing::warn!(target: "two_top::net", "ice vendor response unusable — falling back");
+    }
+    config
+}
+
+/// The browser's ICE fetch: the same `GET /ice`, over the page's own
+/// `fetch`. A browser cannot block a thread, which is why this path was
+/// skipped for as long as the web build existed — so a browser duel was
+/// STUN-only and simply failed to connect where the APK would have
+/// relayed. Nothing about the shape changes: the result lands in the
+/// same channel [`finish_ice_fetch`] already polls, and that poll's
+/// [`ICE_FETCH_TIMEOUT_SECS`] budget is what bounds this request (a
+/// `fetch` has no timeout of its own — the deadline lives in the poller).
+#[cfg(target_family = "wasm")]
+async fn fetch_ice_web(url: String, app_key: Option<String>) -> Option<RtcIceServerConfig> {
+    use wasm_bindgen::JsCast;
+
+    let init = web_sys::RequestInit::new();
+    init.set_method("GET");
+    let request = web_sys::Request::new_with_str_and_init(&url, &init).ok()?;
+    if let Some(key) = app_key.as_deref() {
+        // The vendor's turnstile. Absent is fine; an open vendor accepts.
+        let _ = request.headers().set("X-App-Key", key);
+    }
+    let window = web_sys::window()?;
+    let response = wasm_bindgen_futures::JsFuture::from(window.fetch_with_request(&request))
+        .await
+        .inspect_err(|_| {
+            tracing::warn!(target: "two_top::net", "ice vendor unreachable");
+        })
+        .ok()?;
+    let response: web_sys::Response = response.dyn_into().ok()?;
+    if !response.ok() {
+        tracing::warn!(
+            target: "two_top::net",
+            status = response.status(),
+            "ice vendor refused — falling back",
+        );
+        return None;
+    }
+    let body = wasm_bindgen_futures::JsFuture::from(response.text().ok()?)
+        .await
+        .ok()?
+        .as_string()?;
     let config = parse_ice_response(&body);
     if config.is_none() {
         tracing::warn!(target: "two_top::net", "ice vendor response unusable — falling back");
@@ -361,17 +404,22 @@ fn start_matchbox(world: &mut World) {
         return;
     };
 
-    #[cfg(target_family = "wasm")]
-    let _ = (&config.ice_url, &config.ice_key);
-    #[cfg(not(target_family = "wasm"))]
     if let Some(ice_url) = config.ice_url {
         let ice_key = config.ice_key;
         let (tx, rx) = std::sync::mpsc::channel();
+        // Native: a blocking request on the IO pool. Browser: the page's
+        // own `fetch`, driven by the JS event loop. Both hand the same
+        // `Option<RtcIceServerConfig>` to the same receiver below.
+        #[cfg(not(target_family = "wasm"))]
         bevy::tasks::IoTaskPool::get()
             .spawn(async move {
                 let _ = tx.send(fetch_ice(&ice_url, ice_key.as_deref()));
             })
             .detach();
+        #[cfg(target_family = "wasm")]
+        wasm_bindgen_futures::spawn_local(async move {
+            let _ = tx.send(fetch_ice_web(ice_url, ice_key).await);
+        });
         let started_at = world.resource::<Time<Real>>().elapsed_secs();
         world.insert_resource(PendingIce {
             rx: std::sync::Mutex::new(rx),

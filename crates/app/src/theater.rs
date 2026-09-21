@@ -230,16 +230,10 @@ fn scan_tapes() -> Vec<TapeEntry> {
     let Some(dir) = replays_dir() else {
         return Vec::new();
     };
-    let Ok(entries) = std::fs::read_dir(&dir) else {
-        return Vec::new();
-    };
-    let mut tapes: Vec<(u64, TapeEntry)> = entries
-        .filter_map(|e| {
-            let path = e.ok()?.path();
-            if path.extension().and_then(|s| s.to_str()) != Some("bmrg") {
-                return None;
-            }
-            let bytes = std::fs::read(&path).ok()?;
+    let mut tapes: Vec<(u64, TapeEntry)> = crate::paths::list_dir(&dir, "bmrg")
+        .into_iter()
+        .filter_map(|path| {
+            let bytes = crate::paths::read_bytes(&path).ok()?;
             let replay = replay::decode(&bytes).ok()?;
             let h = &replay.header;
             let foreign_version = (h.sim_version != sim::SIM_VERSION).then_some(h.sim_version);
@@ -555,7 +549,7 @@ fn replays_input(world: &mut World) {
         }
         entry.path.clone()
     };
-    let Ok(bytes) = std::fs::read(&path) else {
+    let Ok(bytes) = crate::paths::read_bytes(&path) else {
         tracing::warn!(target: "two_top::theater", path = %path.display(), "tape unreadable");
         raise_tape_notice(world, "that tape would not read from disk".to_string());
         return;

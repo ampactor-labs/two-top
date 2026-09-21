@@ -257,7 +257,27 @@ web-sys = { version = "0.3", features = [
     "Window",
     "Storage",
     "Navigator",
+    # The ICE vendor fetch (netplay.rs) — a browser cannot block a thread,
+    # so the relay credentials come over the page's own fetch instead.
+    "Request",
+    "RequestInit",
+    "Response",
+    "Headers",
+    # Handing a tape to the viewer as a download (share.rs) — the one
+    # thing a page must ask for rather than just do.
+    "Blob",
+    "Url",
+    "Document",
+    "Element",
+    "HtmlAnchorElement",
+    # Asking the device whether its primary pointer is a finger
+    # (crates/app/src/capability.rs).
+    "MediaQueryList",
 ] }
+js-sys = "0.3"
+wasm-bindgen-futures = "0.4"
+# localStorage holds strings; a tape is binary (crates/app/src/paths.rs).
+base64 = "0.22"
 getrandom02 = { package = "getrandom", version = "0.2", features = ["js"] }
 getrandom03 = { package = "getrandom", version = "0.3", features = ["wasm_js"] }
 # The browser entry (src/web.rs). Pinned exactly to the version the bevy

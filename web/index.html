@@ -56,6 +56,36 @@
     // Substituted by the Pages workflow from the repo's TWOTOP_DROP_URL
     // var; an empty value just disables #watch links.
     const DROP_URL = "__TWOTOP_DROP_URL__";
+
+    // Browser autoplay policy: an AudioContext constructed before the
+    // viewer has interacted starts SUSPENDED, and the game's audio
+    // backend (cpal, under bevy_audio) builds its context at startup —
+    // long before the first tap. Nothing in the Rust can reach that
+    // context to resume it, so the page keeps the handle: wrap the
+    // constructor to remember every context, and resume them on the
+    // first gesture. This must run BEFORE the wasm module initializes,
+    // which is why it sits above the import.
+    (() => {
+      const Native = window.AudioContext || window.webkitAudioContext;
+      if (!Native) return;
+      const live = [];
+      const Tracked = function (...args) {
+        const ctx = new Native(...args);
+        live.push(ctx);
+        return ctx;
+      };
+      Tracked.prototype = Native.prototype;
+      window.AudioContext = Tracked;
+      if (window.webkitAudioContext) window.webkitAudioContext = Tracked;
+      const wake = () => {
+        for (const ctx of live) {
+          if (ctx.state === "suspended") ctx.resume().catch(() => {});
+        }
+      };
+      for (const ev of ["pointerdown", "touchstart", "keydown"]) {
+        window.addEventListener(ev, wake, { passive: true });
+      }
+    })();
     const boot = document.getElementById("boot");
     const say = (t) => { boot.textContent = t; };
 

@@ -181,6 +181,7 @@ checksum = "7f202df86484c868dbad7eaa557ef785d5c66295e41b460ef922eca0723b842c"
 name = "app"
 version = "0.15.0"
 dependencies = [
+ "base64 0.22.1",
  "bevy",
  "bevy_ggrs",
  "console_error_panic_hook",
@@ -192,6 +193,7 @@ dependencies = [
  "input_desktop",
  "input_touch",
  "jni 0.21.1",
+ "js-sys",
  "ndk-context",
  "net",
  "qrcode",
@@ -208,6 +210,7 @@ dependencies = [
  "ureq",
  "uuid",
  "wasm-bindgen",
+ "wasm-bindgen-futures",
  "web-sys",
 ]
 

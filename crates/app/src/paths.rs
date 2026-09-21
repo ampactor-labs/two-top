@@ -52,13 +52,33 @@ pub fn config_dir() -> Option<PathBuf> {
 #[cfg(target_family = "wasm")]
 const WEB_ROOT: &str = "/two-top";
 
-/// `localStorage` key for a document path. Keyed on the file name alone,
-/// namespaced so the game cannot collide with anything else served from
-/// the same origin (GitHub Pages hosts a whole account on one).
+/// `localStorage` key for a document path: everything below the virtual
+/// root, namespaced so the game cannot collide with anything else served
+/// from the same origin (GitHub Pages hosts a whole account on one).
+/// Keeping the subpath (rather than the bare file name) is what lets
+/// `shared/replays/` be listed as if it were a directory.
 #[cfg(target_family = "wasm")]
 fn web_key(path: &Path) -> Option<String> {
-    let name = path.file_name()?.to_str()?;
-    Some(format!("two-top/{name}"))
+    let rel = path.strip_prefix(WEB_ROOT).ok()?;
+    Some(format!("two-top/{}", rel.to_str()?))
+}
+
+/// The marker that says a stored value is base64, not text. Tapes are
+/// binary and `localStorage` holds strings, but the JSON documents should
+/// stay readable in devtools — so only what needs encoding gets encoded.
+#[cfg(target_family = "wasm")]
+const WEB_B64: &str = "b64:";
+
+/// Decode one stored value back to bytes.
+#[cfg(target_family = "wasm")]
+fn web_decode(value: &str) -> Option<Vec<u8>> {
+    use base64::Engine as _;
+    match value.strip_prefix(WEB_B64) {
+        Some(encoded) => base64::engine::general_purpose::STANDARD
+            .decode(encoded)
+            .ok(),
+        None => Some(value.as_bytes().to_vec()),
+    }
 }
 
 /// The page's `localStorage`, when there is one. Safari in Lockdown /
@@ -78,11 +98,14 @@ pub fn read_document(path: &Path) -> std::io::Result<String> {
     #[cfg(target_family = "wasm")]
     {
         let key = web_key(path).ok_or_else(|| std::io::Error::other("no document name in path"))?;
-        local_storage()
+        let raw = local_storage()
             .ok_or_else(|| std::io::Error::other("no localStorage in this browser"))?
             .get_item(&key)
             .map_err(|_| std::io::Error::other("localStorage read refused"))?
-            .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "no such document"))
+            .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "no such document"))?;
+        let bytes =
+            web_decode(&raw).ok_or_else(|| std::io::Error::other("stored document is corrupt"))?;
+        String::from_utf8(bytes).map_err(|_| std::io::Error::other("document is not text"))
     }
     #[cfg(not(target_family = "wasm"))]
     {
@@ -105,18 +128,85 @@ pub fn shared_dir() -> Option<PathBuf> {
             .get()
             .and_then(|app| app.external_data_path())
     }
-    // No browser equivalent: tapes and crash logs are files a human opens
-    // with a Files app, and a page cannot put one there unprompted. The
-    // recorder and the log file half simply stand down on the web.
+    // The browser keeps its tapes in `localStorage` under the same
+    // virtual root the config documents use. A page still cannot drop a
+    // file into someone's Files app unprompted — that half is a download
+    // button (`share::download_tape`), not a directory — but "the web
+    // build cannot record" was never true, and cost it REPLAYS, SHARE
+    // and the rivalry tape rings for no reason. A tape is ~14 KB.
     #[cfg(target_family = "wasm")]
     {
-        None
+        Some(PathBuf::from(WEB_ROOT).join("shared"))
     }
     #[cfg(not(any(target_os = "android", target_family = "wasm")))]
     {
         dirs::download_dir()
             .or_else(dirs::data_dir)
             .map(|d| d.join("two-top"))
+    }
+}
+
+/// Read a persisted document as raw bytes — the tape path's twin of
+/// [`read_document`]. Native: the file. Browser: the (base64-decoded)
+/// `localStorage` value.
+pub fn read_bytes(path: &Path) -> std::io::Result<Vec<u8>> {
+    #[cfg(target_family = "wasm")]
+    {
+        let key = web_key(path).ok_or_else(|| std::io::Error::other("no document name in path"))?;
+        let raw = local_storage()
+            .ok_or_else(|| std::io::Error::other("no localStorage in this browser"))?
+            .get_item(&key)
+            .map_err(|_| std::io::Error::other("localStorage read refused"))?
+            .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "no such document"))?;
+        web_decode(&raw).ok_or_else(|| std::io::Error::other("stored document is corrupt"))
+    }
+    #[cfg(not(target_family = "wasm"))]
+    {
+        std::fs::read(path)
+    }
+}
+
+/// Every document directly inside `dir` whose extension is `ext`.
+///
+/// Native: a filtered `read_dir`. Browser: the `localStorage` keys under
+/// this directory's prefix — which is why [`web_key`] keeps the whole
+/// subpath. Returns paths the other seams here accept, so callers never
+/// learn which backend answered. Unordered on both (the tape screens
+/// sort by the header's own timestamp).
+pub fn list_dir(dir: &Path, ext: &str) -> Vec<PathBuf> {
+    #[cfg(target_family = "wasm")]
+    {
+        let (Some(store), Some(prefix)) = (local_storage(), web_key(dir)) else {
+            return Vec::new();
+        };
+        let prefix = format!("{}/", prefix.trim_end_matches('/'));
+        let mut out = Vec::new();
+        for i in 0..store.length().unwrap_or(0) {
+            let Ok(Some(key)) = store.key(i) else {
+                continue;
+            };
+            let Some(rest) = key.strip_prefix(&prefix) else {
+                continue;
+            };
+            // Directly inside: no further separator, and the right suffix.
+            if rest.contains('/') || !rest.ends_with(&format!(".{ext}")) {
+                continue;
+            }
+            out.push(dir.join(rest));
+        }
+        out
+    }
+    #[cfg(not(target_family = "wasm"))]
+    {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return Vec::new();
+        };
+        entries
+            .filter_map(|e| {
+                let path = e.ok()?.path();
+                (path.extension().and_then(|s| s.to_str()) == Some(ext)).then_some(path)
+            })
+            .collect()
     }
 }
 
@@ -136,9 +226,19 @@ pub fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     // matters here, and it arrives as an Err the caller already logs.
     #[cfg(target_family = "wasm")]
     {
+        use base64::Engine as _;
         let key = web_key(path).ok_or_else(|| std::io::Error::other("no document name in path"))?;
-        let text = std::str::from_utf8(bytes)
-            .map_err(|_| std::io::Error::other("localStorage holds text, not bytes"))?;
+        // Text stays text (a JSON document should be readable in
+        // devtools); anything that is not valid UTF-8 — a tape — rides
+        // base64 behind the marker.
+        let owned = match std::str::from_utf8(bytes) {
+            Ok(t) if !t.starts_with(WEB_B64) => t.to_string(),
+            _ => format!(
+                "{WEB_B64}{}",
+                base64::engine::general_purpose::STANDARD.encode(bytes)
+            ),
+        };
+        let text = owned.as_str();
         local_storage()
             .ok_or_else(|| std::io::Error::other("no localStorage in this browser"))?
             .set_item(&key, text)
