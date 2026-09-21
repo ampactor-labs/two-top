@@ -139,12 +139,12 @@ pub fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
         let key = web_key(path).ok_or_else(|| std::io::Error::other("no document name in path"))?;
         let text = std::str::from_utf8(bytes)
             .map_err(|_| std::io::Error::other("localStorage holds text, not bytes"))?;
-        return local_storage()
+        local_storage()
             .ok_or_else(|| std::io::Error::other("no localStorage in this browser"))?
             .set_item(&key, text)
             .map_err(|_| {
                 std::io::Error::other("localStorage write refused (quota or private mode)")
-            });
+            })
     }
     #[cfg(not(target_family = "wasm"))]
     {
@@ -187,7 +187,6 @@ pub fn quarantine_corrupt(path: &Path) {
             let _ = store.set_item(&format!("{key}.corrupt"), &text);
             let _ = store.remove_item(&key);
         }
-        return;
     }
     #[cfg(not(target_family = "wasm"))]
     {

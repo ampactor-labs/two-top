@@ -128,6 +128,8 @@ pub fn room_url_with_parts(base: &str, code: Option<&str>, tag: &str, sim_versio
 /// `#CURS-pit` fragment, or the bare `CURS-pit` — into dial slots plus
 /// the arena. `None` for anything that isn't exactly a code and a known
 /// table: a QR is typed by nobody, so there is no fuzziness to forgive.
+// platform-gate-ok: a lint allowance, not a behaviour switch — the deep
+// link is an Android intent filter and the browser has join.html.
 #[cfg_attr(not(target_os = "android"), allow(dead_code))]
 pub fn parse_join(uri: &str) -> Option<([u8; CODE_LEN], sim::ArenaId)> {
     let tail = uri.trim().rsplit(['/', '#']).next()?;

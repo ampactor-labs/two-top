@@ -249,6 +249,8 @@ pub fn run() {
         // The bot patches handle 1 after the touch source's insert applies.
         (read_android_touch_inputs, bot::drive_bot).chain(),
     );
+    // platform-gate-ok: the browser takes the keyboard source too, and
+    // layers the touch source below over it.
     #[cfg(not(target_os = "android"))]
     {
         app.add_plugins(input_desktop::DesktopInputsPlugin);
@@ -256,12 +258,37 @@ pub fn run() {
         // P1 window of a desktop loopback session needs the same world-Y
         // reflection as the P1 phone, and the bot's world-space inputs must
         // never be mirrored (it patches handle 1 afterwards).
+        //
+        // The browser gets a SECOND source layered on after the mirror.
+        // One wasm binary serves a phone and a laptop, and it was taking
+        // the keyboard-only branch on both: `read_android_touch_inputs`
+        // is the only thing anywhere that turns `TouchState` into
+        // `LocalInputs`, and it is Android-gated. So a phone browser drew
+        // controls (once they were un-gated) that fed nothing — the stick
+        // moved under the thumb and the duelist never did. `TouchState`
+        // is maintained on every platform; only the wire into ggrs was
+        // missing. The touch source runs last and overwrites only while a
+        // finger is actually down, so a laptop browser keeps WASD and
+        // couch versus.
+        #[cfg(not(target_family = "wasm"))]
         app.add_systems(
             bevy_ggrs::prelude::ReadInputs,
             (mirror_desktop_inputs_for_flip, bot::drive_bot)
                 .chain()
                 .after(input_desktop::read_local_desktop_inputs),
         );
+        #[cfg(target_family = "wasm")]
+        app.add_systems(
+            bevy_ggrs::prelude::ReadInputs,
+            (
+                mirror_desktop_inputs_for_flip,
+                read_web_touch_inputs,
+                bot::drive_bot,
+            )
+                .chain()
+                .after(input_desktop::read_local_desktop_inputs),
+        );
+        #[cfg(not(target_family = "wasm"))]
         app.add_systems(Update, toggle_fullscreen);
     }
     app.add_systems(
@@ -318,11 +345,51 @@ fn read_android_touch_inputs(
     commands.insert_resource(bevy_ggrs::LocalInputs::<GgrsCfg>(map));
 }
 
+/// The browser's touch source: the same `TouchState` -> `LocalInputs`
+/// step [`read_android_touch_inputs`] does, layered over the keyboard
+/// source instead of replacing it.
+///
+/// Overwrites the local handle's input ONLY while a finger is engaged
+/// ([`input_touch::is_engaged`]), because the same wasm binary serves a
+/// laptop browser where the keyboard is the only input device — an
+/// unconditional write would stamp neutral over every keystroke. Mirrors
+/// for the flipped (P1) client itself, exactly as the Android reader
+/// does, and therefore runs AFTER `mirror_desktop_inputs_for_flip` so the
+/// reflection is applied once, not twice.
+#[cfg(target_family = "wasm")]
+fn read_web_touch_inputs(
+    touch_state: Res<input_touch::TouchState>,
+    local_players: Res<bevy_ggrs::LocalPlayers>,
+    local_handle: Res<netplay::LocalPlayerHandle>,
+    flip: Res<render::PerspectiveFlip>,
+    inputs: Option<ResMut<bevy_ggrs::LocalInputs<GgrsCfg>>>,
+) {
+    if !input_touch::is_engaged(&touch_state) {
+        return;
+    }
+    let Some(mut inputs) = inputs else {
+        return;
+    };
+    let mut input = input_touch::quantize_inputs(&touch_state);
+    if flip.0 < 0.0 {
+        input = input_touch::mirror_input_y(input);
+    }
+    if let Some(handle) = local_handle.0 {
+        inputs.0.insert(handle, input);
+    } else {
+        for handle in &local_players.0 {
+            inputs.0.insert(*handle, input);
+        }
+    }
+}
+
 /// Desktop twin of the flip mirror inside `read_android_touch_inputs`: when
 /// this window is the flipped (P1) client of an online session, reflect the
 /// keyboard's world-Y before the wire so "up" on this screen moves the
 /// character up on this screen. Couch and practice run with flip = 1.0, so
 /// this is a no-op everywhere but a desktop loopback P1 window.
+// platform-gate-ok: the browser runs the keyboard source, so it needs
+// this mirror as much as a native desktop client does.
 #[cfg(not(target_os = "android"))]
 fn mirror_desktop_inputs_for_flip(
     flip: Res<render::PerspectiveFlip>,
@@ -340,8 +407,9 @@ fn mirror_desktop_inputs_for_flip(
 }
 
 /// Desktop: toggle borderless fullscreen on F11 — handy for showing a
-/// couch match on the big screen. Android manages its own fullscreen.
-#[cfg(not(target_os = "android"))]
+/// couch match on the big screen. Android manages its own fullscreen, and
+/// a browser's is the page's (the manifest asks for it on install).
+#[cfg(not(any(target_os = "android", target_family = "wasm")))]
 fn toggle_fullscreen(
     keys: Res<bevy::input::ButtonInput<bevy::input::keyboard::KeyCode>>,
     mut windows: Query<&mut Window>,
@@ -947,7 +1015,7 @@ fn setup(
     // pickup auras) bloom, while `Tonemapping::None` keeps every other pixel
     // exactly on the locked 16-color palette. `Bloom::OLD_SCHOOL` carries a
     // high threshold so the matte cloaks and floor never wash out.
-    #[cfg(target_os = "android")]
+    #[cfg(any(target_os = "android", target_family = "wasm"))]
     {
         const VIEW_MARGIN_CM: f32 = 80.0;
         let min_width = (2 * sim::ARENA_HALF_WIDTH_CM) as f32 + 2.0 * VIEW_MARGIN_CM;
@@ -960,6 +1028,14 @@ fn setup(
         // Overdriven accent colors clamp to white instead of blooming —
         // an acceptable trade on the product platform; desktop keeps the
         // full HLD glow. MSAA buys nothing for a quad-sprite game anyway.
+        //
+        // The BROWSER takes this same cheap path, and used to take the
+        // desktop one: the wasm build is mostly opened on a phone, on the
+        // same class of GPU the 10 fps was measured on, through WebGL2 —
+        // which is a worse place to ask for an HDR target and a bloom
+        // chain than native GLES was. A phone browser paying a desktop's
+        // render cost is the single most expensive divergence between
+        // this build and the APK.
         commands.spawn((
             Camera2d,
             Msaa::Off,
@@ -973,7 +1049,10 @@ fn setup(
             }),
         ));
     }
-    #[cfg(not(target_os = "android"))]
+    // Native desktop only: the full HLD glow, and the couch-play legend.
+    // The legend named keys on a touchscreen for as long as the browser
+    // build took this branch.
+    #[cfg(not(any(target_os = "android", target_family = "wasm")))]
     {
         const VIEW_MARGIN_CM: f32 = 80.0;
         let min_width = (2 * sim::ARENA_HALF_WIDTH_CM) as f32 + 2.0 * VIEW_MARGIN_CM;

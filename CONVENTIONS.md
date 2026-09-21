@@ -62,7 +62,25 @@ Hard rules. Violations cause subtle bugs that are expensive to find. The CI and 
 - **`--locked` is used in CI.**
 - **`rust-toolchain.toml` pins exact stable version.** Toolchain drift is itself a determinism risk.
 - **Bevy is pinned with `=` to a single patch version** (e.g. `bevy = "=0.18.1"`). Do not bump until `bevy_ggrs` and `bevy_matchbox` have shipped releases compatible with the new Bevy. Downstream rollback crates lag main `bevy` releases — chasing latest first guarantees broken determinism CI. (`bevy_roll_safe` was previously listed here; we cut the dep in Phase 11 — see MORGAN_NOTES § "Why we cut bevy_roll_safe".)
-- **`clippy -D warnings` is enforced** in the `ci` workflow.
+- **`clippy -D warnings` is enforced** in the `ci` workflow, for the host
+  target *and* `wasm32-unknown-unknown` (the browser is a third platform
+  with its own `cfg` arms; nothing else compiles them on a branch).
+- **Never gate on a bare `not(target_os = "android")`.** It reads like
+  "desktop" and means "desktop **and the browser**" — and the browser
+  build is mostly opened on a phone. That single habit shipped a web
+  build whose only input source was a keyboard (on a touchscreen), which
+  asked a phone GPU for a desktop's HDR + bloom chain, and which drew a
+  WASD legend over the arena. Name the platform you mean —
+  `not(any(target_os = "android", target_family = "wasm"))` is usually
+  it — or, where the browser genuinely belongs with desktop, say why on
+  the line above:
+
+  ```rust
+  // platform-gate-ok: the browser runs the keyboard source too
+  #[cfg(not(target_os = "android"))]
+  ```
+
+  `scripts/check_platform_gates.py` enforces this in CI.
 - **No `unsafe` in `sim` or `fixed_math` crates** without an `// SAFETY:` comment block explaining why.
 - **All public types in `sim` and `fixed_math` derive `Debug`.**
 

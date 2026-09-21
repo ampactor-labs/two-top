@@ -578,6 +578,25 @@ pub fn quantize_angle(rad: f32) -> u8 {
 /// stick_y is negated because Bevy reports y-down screen coords but
 /// the wire format follows game-space (y-up) convention so sim's
 /// movement code can use stick_y as a velocity multiplier directly.
+/// Is a finger (or the mouse-drag substitute) actually driving this
+/// state right now?
+///
+/// The browser build is one binary serving both a phone and a laptop, so
+/// it runs the keyboard source AND the touch source, and the touch source
+/// must only speak when it has something to say — otherwise it would
+/// overwrite every keyboard frame with a neutral input and the web build
+/// would have no working controls at all. Includes the one-frame
+/// sticky-release latch: that frame has no live touch but still carries
+/// the aim the throw is about to spawn along.
+pub fn is_engaged(state: &TouchState) -> bool {
+    !state.touches.is_empty()
+        || state.stick.is_some()
+        || state.throw_held
+        || state.dash_held
+        || state.taunt_held
+        || state.aim_release_sticky
+}
+
 pub fn quantize_inputs(state: &TouchState) -> PlayerInput {
     // While aiming (incl. the one sticky-release frame), the aim vector
     // occupies the wire stick — direction is the throw heading and magnitude

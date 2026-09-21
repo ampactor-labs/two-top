@@ -627,3 +627,124 @@ a fix for a defect found by reading, and the checksum probe proves the
 browser build is the same game — but iOS Safari's WebGL2 and WebRTC
 behaviour under a real finger is not something this repo can test from
 CI. That is the next thing worth doing, and it costs nothing.
+
+---
+
+## Audit: every way the browser build differs from the APK
+
+Prompted by two reports from the operator — "the web version is
+different than the apk version in ways", and **the controls did not work
+in Android Chrome**. The second one is mine: the previous batch made the
+touch controls *visible* on the web without checking whether anything
+consumed them. They rendered, moved under the thumb, and fed nothing.
+That is worse than the bug it replaced, because it looks like a broken
+game instead of a missing feature.
+
+The root cause is one habit, repeated: **`#[cfg(not(target_os =
+"android"))]` was used to mean "desktop"**. It does not. It means
+"desktop *and the browser*", and the browser is mostly a phone. Every
+finding below is that same sentence.
+
+### 🔴 D1 — touch never reached the simulation on the web
+
+`read_android_touch_inputs` is the only function anywhere that turns
+`TouchState` into `LocalInputs<GgrsCfg>`, and it is `#[cfg(target_os =
+"android")]`. The `not(android)` arm installs `DesktopInputsPlugin` —
+the keyboard. So the wasm build, on a phone with no keyboard, had **no
+input source at all**. `InputTouchPlugin` runs everywhere and keeps
+`TouchState` current, which is why the on-screen stick animated under
+the thumb; the wire into ggrs simply did not exist.
+
+Fixed by layering a browser touch source over the keyboard one rather
+than choosing between them: one wasm binary serves a phone and a laptop,
+so it needs both. `read_web_touch_inputs` overwrites the local handle
+only while a finger is actually engaged (`input_touch::is_engaged`,
+including the one-frame sticky-release latch that carries an aimed
+throw), so a laptop browser keeps WASD and couch versus. It mirrors for
+the flipped P1 client itself, exactly as the Android reader does, and is
+ordered after `mirror_desktop_inputs_for_flip` so the reflection is
+applied once rather than twice.
+
+### 🔴 D2 — the browser paid a desktop's render cost
+
+The camera block is `#[cfg(target_os = "android")]` (LDR, no bloom, no
+MSAA) versus `#[cfg(not(target_os = "android"))]` (HDR + `Bloom::
+OLD_SCHOOL` + the full HLD glow). The browser took the second. The
+Android comment explains exactly what that costs, measured: the HDR and
+bloom chain at ~65 ms/frame and MSAA at another ~17 ms **pinned a
+Galaxy A16 at 10 fps**. The web build asked a phone for that same chain
+through WebGL2, which is a worse place to request an HDR target than
+native GLES was. This is the most likely source of "different in ways"
+that is not the controls.
+
+The cheap path is now `any(android, wasm)`.
+
+### 🟠 D3 — the web build displayed the keyboard legend
+
+Riding in the same `not(android)` block: the three-line couch legend
+("P0: WASD - Space throw - LShift dash…") was rendered on top of the
+arena in every browser, naming keys that a touchscreen does not have.
+Now native-desktop only.
+
+### 🟠 D4 — haptics were dead in the browser
+
+`vibrate` was `#[cfg(target_os = "android")]` with a `not(android)`
+no-op, so the whole feel layer's haptic half was silently absent on the
+web. `navigator.vibrate` is the browser's one haptic primitive and takes
+a duration — the exact shape this module already speaks. Wired up;
+Chrome on Android honours it, iOS Safari does not implement it and the
+call stays the same silent nothing it was.
+
+### Divergences left standing, on purpose
+
+These are real and worth knowing before trusting the web build:
+
+- **No TURN relay.** `fetch_ice` is `not(target_family = "wasm")` — a
+  browser cannot block a thread on `ureq`. The web build is STUN-only,
+  so a cross-carrier duel that the APK would relay through Cloudflare
+  can simply fail to connect. A `gloo-fetch` port is the fix.
+- **No tapes, so no REPLAYS.** `shared_dir` is `None` on wasm, by
+  construction: tapes and crash logs are files a human opens with a
+  Files app, and a page cannot leave one unprompted. The REPLAYS screen
+  is empty in a browser, and `.attest.json` is never written.
+- **No SHARE.** Posting a tape to the drop needs the same blocking HTTP
+  `fetch_ice` does; the button logs and does nothing. The web build is
+  the *destination* of a share link, not a source of one.
+- **No deep link.** `twotop://join/<CODE>` is an Android intent filter.
+  The browser's equivalent is `join.html`, which already exists.
+
+### Stopping the habit, not just these four
+
+Every finding above is the same mistake, and it had already been made in
+four places before anyone went looking. Two guards now stand in `ci.yml`,
+both on every branch and PR:
+
+- **`scripts/check_platform_gates.py`** fails on a bare
+  `not(target_os = "android")`. Where the browser genuinely belongs on
+  the non-Android side (it runs the keyboard source, so it wants the
+  flip mirror), the gate carries a `// platform-gate-ok: <why>` line.
+  Checked against a deliberately reintroduced D2 before landing: the
+  reverted camera gate fails the guard.
+- **`cargo clippy -p app --lib --target wasm32-unknown-unknown -D
+  warnings`.** Nothing on a branch had ever compiled the browser target,
+  so a wasm-only error or a function left dead by a gate change reached
+  `main` and waited for the slow, main-only determinism lane. It earned
+  its place immediately: it caught two lints in this very batch's own
+  `paths.rs`, plus the `toggle_fullscreen` left dead on wasm by the
+  fix above.
+
+The rule is now in `CONVENTIONS.md` § Build / Tooling.
+
+### Unverified
+
+Audio. Browsers suspend an `AudioContext` until a user gesture, and
+nothing in `audio.rs` resumes one. The Title requires a tap before a
+match starts, so the gesture probably arrives before the first cue that
+matters — but "probably" is not a test, and nobody has listened to the
+web build on a phone.
+
+Everything in this section was found by reading, and the fixes are
+verified by compiling, linting and the 1800-frame browser checksum
+probe. None of it is verified by a finger on a phone. The controls fix
+in particular deserves one real tap before it is believed — the last
+one shipped looking correct.

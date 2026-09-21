@@ -94,8 +94,25 @@ fn vibrate(ms: i64) {
     }
 }
 
-/// Desktop / web / everything-not-Android: vibration is a no-op.
-#[cfg(not(target_os = "android"))]
+/// The browser's vibrator. `navigator.vibrate` is the web's one haptic
+/// primitive: a duration, nothing else — which is exactly the shape this
+/// module already speaks. Chrome on Android honours it, so the browser
+/// build keeps the feel layer on the phones most likely to open it;
+/// iOS Safari does not implement it and the call is a silent no-op
+/// there, which is the same nothing the build did before.
+#[cfg(target_family = "wasm")]
+fn vibrate(ms: i64) {
+    let Some(window) = web_sys::window() else {
+        return;
+    };
+    // Rejected by browsers outside a user gesture, and absent entirely on
+    // iOS — both surface as a bool/exception we deliberately drop. A
+    // missing vibrator must never take down the game loop.
+    let _ = window.navigator().vibrate_with_duration(ms.max(0) as u32);
+}
+
+/// Desktop and everything else: vibration is a no-op.
+#[cfg(not(any(target_os = "android", target_family = "wasm")))]
 fn vibrate(_ms: i64) {}
 
 /// Throw haptic: a local player's primary fang appearing (same edge the throw

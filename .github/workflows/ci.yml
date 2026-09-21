@@ -33,6 +33,14 @@ jobs:
       - run: cargo check --workspace --locked
       - run: cargo nextest run --workspace --locked
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      # The browser build is a THIRD platform with its own cfg arms, and
+      # nothing here ever compiled it — a wasm-only type error or a
+      # function left dead by a gate change reached main and waited for
+      # the (slow, main-only) wasm determinism lane to notice. Checking
+      # the lib for wasm32 is seconds and closes that window.
+      - name: Add wasm target
+        run: rustup target add wasm32-unknown-unknown
+      - run: cargo clippy -p app --lib --locked --target wasm32-unknown-unknown -- -D warnings
 
   art:
     name: art gates (palette + silhouette)
@@ -64,3 +72,7 @@ jobs:
         with:
           python-version: "3.12"
       - run: python3 scripts/check_android_manifest.py
+      # `not(target_os = "android")` reads like "desktop" and means
+      # "desktop AND the browser". That one habit shipped a web build
+      # whose only input source was a keyboard, on a touchscreen.
+      - run: python3 scripts/check_platform_gates.py
