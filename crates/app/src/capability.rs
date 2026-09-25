@@ -46,3 +46,24 @@ pub fn touch_primary() -> bool {
 pub fn lean_render() -> bool {
     touch_primary()
 }
+
+/// Should the GPU device be requested with only the portable core feature
+/// set, instead of every optional feature the driver advertises?
+///
+/// Bevy's default (`WgpuSettingsPriority::Functionality`) switches on
+/// *everything* the adapter reports — and, since wgpu 27, the experimental
+/// set too. A phone's Vulkan driver is exactly where "advertised" and
+/// "survives being enabled" part ways. The APK that runs on a Galaxy A16
+/// died instantly at launch on a Pixel 6 (Mali-G78) — no crash log survived
+/// to say where, but the device request is the first thing at startup whose
+/// behavior depends on the phone's GPU driver. This game draws 2D sprites
+/// and uses none of those features, so asking for them is pure risk. The
+/// adapter's own limits are kept — only the optional features go.
+///
+/// Android always; anywhere else with `TWOTOP_LEAN_GPU=1`, which is how the
+/// desktop build proves the renderer needs nothing beyond the core set.
+pub fn core_gpu_features_only() -> bool {
+    cfg!(target_os = "android")
+        || (cfg!(not(target_family = "wasm"))
+            && std::env::var("TWOTOP_LEAN_GPU").is_ok_and(|v| v == "1"))
+}
