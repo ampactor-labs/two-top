@@ -56,12 +56,10 @@ pub struct BotView {
     /// Current safe half-extents (sudden-death aware).
     pub bounds: Vec2,
     /// Practice difficulty: the persistent gauntlet tier plus a gentle
-    /// in-match ramp. 0 = passive sparring dummy. The ramp used to add a
-    /// notch for EVERY kill the player landed, so the bot sharpened fastest
-    /// exactly when you were winning and a 5-kill match could walk it up
-    /// five levels — a rubber band that punished doing well. It now moves
-    /// every SECOND kill, which keeps the "it's learning you" read without
-    /// the mid-match spike.
+    /// in-match ramp (`in_match_ramp`). 0 = passive sparring dummy. The ramp
+    /// used to add a notch for every kill, then every second kill — either
+    /// way the bot sharpened fastest exactly when you were winning. It is
+    /// now a single notch late in the match.
     pub difficulty: u32,
     /// Blocking solids on the field — cover blocks and standing trees, as
     /// (center, half-extents) in cm. The steering slides along these; the
@@ -109,49 +107,76 @@ const PREFERRED_RANGE: f32 = 440.0;
 const PLANT_TICKS: u32 = 5;
 
 // ---- Difficulty ramp (practice mode) ----
-// The bot starts as a passive dummy and sharpens one notch per player kill.
-// Level 0 never attacks or dodges; each level raises the commit charge (so
-// throws hit harder and reach farther), the dodge range (so it protects
-// itself sooner), and the aim accuracy.
+// The bot starts as a passive dummy and sharpens one notch per gauntlet
+// tier. Level 0 never attacks or dodges; each level raises the commit
+// charge (so throws hit harder and reach farther), the dodge range and the
+// odds it actually reacts, and the aim accuracy.
+//
+// The ramp used to cover its whole range in four levels: tier 2 already
+// dodged, tier 4 threw at 70% with a 210 cm frame-perfect dash reflex, and
+// with the in-match notch on top a new player met that bot on their second
+// or third match — "one or two rounds of practice, then he's cracked."
+// Every knob now climbs in small, even steps across the full ten-tier
+// ladder, dodging waits until tier 3, and even a sharp bot only reacts to
+// SOME throws (`dodge_chance`) instead of all of them.
 
-/// Charge the bot commits its throw at, by level. Level 1 lobs a barely-
-/// charged fang; level 4 throws at ~70% charge. Past 4 the GAUNTLET tiers
-/// take over: +3% per tier, capped at 85% — hard, never a full-power wall.
+/// Charge the bot commits its throw at, by level: a barely-charged lob at
+/// level 1, +4.5% per level, capped at 75% by tier 10 — hard, never a
+/// full-power wall.
 fn throw_at_charge(lvl: u32) -> u32 {
-    let frac = match lvl {
-        0 | 1 => 0.30,
-        2 => 0.42,
-        3 => 0.55,
-        4 => 0.70,
-        n => (0.70 + 0.03 * (n - 4) as f32).min(0.85),
-    };
+    let frac = (0.30 + 0.045 * lvl.saturating_sub(1) as f32).min(0.75);
     (CHARGE_MAX_FRAMES as f32 * frac) as u32
 }
 
 /// Fang distance that triggers the dodge reflex, by level. Dodging is off
-/// below level 2; then it reacts progressively sooner. Gauntlet tiers past
-/// 4 widen the reflex up to a 300 cm bubble.
+/// below level 3; then the bubble widens 20 cm a level up to 240 cm.
 fn threat_radius(lvl: u32) -> f32 {
-    match lvl {
-        0 | 1 => 0.0,
-        2 => 120.0,
-        3 => 165.0,
-        4 => 210.0,
-        n => (210.0 + 15.0 * (n - 4) as f32).min(300.0),
+    if lvl < 3 {
+        0.0
+    } else {
+        (100.0 + 20.0 * (lvl - 3) as f32).min(240.0)
+    }
+}
+
+/// How often the dodge reflex actually fires, by level: one throw in four
+/// at level 3, climbing to three in four at the cap. A reflex that fires
+/// every time is what made the bot unhittable — a human who reads the
+/// throw still eats one now and then, and so should the bot.
+fn dodge_chance(lvl: u32) -> f32 {
+    if lvl < 3 {
+        0.0
+    } else {
+        (0.25 + 0.07 * (lvl - 3) as f32).min(0.75)
     }
 }
 
 /// Peak aim wobble (radians), by level: a wide spray early, tightening as
-/// the bot levels up but never fully honing in — the gauntlet floor is
-/// 0.05 rad (~3°), beatable by a mover forever.
+/// the bot levels up but never fully honing in — the floor is 0.10 rad
+/// (~6°), beatable by a mover forever.
 fn wobble_amp(lvl: u32) -> f32 {
-    match lvl {
-        0 | 1 => 0.42,
-        2 => 0.30,
-        3 => 0.20,
-        4 => 0.12,
-        n => (0.12 - 0.015 * (n - 4) as f32).max(0.05),
-    }
+    (0.45 - 0.035 * lvl.saturating_sub(1) as f32).max(0.10)
+}
+
+/// Frames one dodge decision holds for. The roll is per window, not per
+/// frame: re-rolling every tick would turn a 25% reflex into a near-certain
+/// one over the dozen frames a fang spends inside the bubble.
+const DODGE_ROLL_WINDOW: u32 = 30;
+
+/// The in-match notch: +1 once the player has landed three kills, never
+/// more. Keeps the "it's learning you" read without a mid-match spike.
+fn in_match_ramp(player_kills: u8) -> u32 {
+    u32::from(player_kills >= 3)
+}
+
+/// Deterministic 0..1 roll for the dodge window containing `frame`. The bot
+/// is an input source, not sim state — but a pure function of the frame
+/// keeps `bot_decide` testable and the tape reproducible.
+fn dodge_roll(frame: u32) -> f32 {
+    let mut x = (frame / DODGE_ROLL_WINDOW).wrapping_mul(0x9E37_79B9) ^ 0x85EB_CA6B;
+    x ^= x >> 16;
+    x = x.wrapping_mul(0x7FEB_352D);
+    x ^= x >> 15;
+    (x % 1000) as f32 / 1000.0
 }
 
 fn quantize(dir: Vec2) -> (i8, i8) {
@@ -202,13 +227,12 @@ pub fn bot_decide(v: &BotView) -> PlayerInput {
     }
 
     // 1) Survival dodge: a lethal fang closing in → dash through it. The bot
-    //    only starts protecting itself once it has been beaten a couple of
-    //    times (level >= 2); below that it eats the player's throws. A
-    //    shade dodges from the first tick — its reflex is the rival's, not
-    //    the ladder's.
-    if (lvl >= 2 || v.style.is_some())
-        && let Some((tpos, tvel)) = v.threat
-    {
+    //    only starts protecting itself at level 3; below that it eats the
+    //    player's throws, and above it the reflex fires on some throws, not
+    //    all (`dodge_chance`). A shade dodges from the first tick and every
+    //    time — its reflex is the rival's, not the ladder's.
+    let reacts = v.style.is_some() || dodge_roll(v.frame) < dodge_chance(lvl);
+    if reacts && let Some((tpos, tvel)) = v.threat {
         let to_me = v.me - tpos;
         let radius = v
             .style
@@ -534,15 +558,14 @@ pub fn drive_bot(world: &mut World) {
     let frame = world.resource::<FrameCount>().0;
     let in_round = world.resource::<MatchState>().is_in_round();
 
-    // Difficulty = the persisted GAUNTLET tier plus the player's kills so
-    // far this match (score.p0 — the player is always handle 0 in
-    // practice). A fresh install starts at the passive dummy; a tier-6
-    // gauntlet runner faces a bot that opens sharp and still sharpens as
-    // it loses.
+    // Difficulty = the persisted GAUNTLET tier plus one late notch once the
+    // player has three kills this match (score.p0 — the player is always
+    // handle 0 in practice). A fresh install starts at the passive dummy,
+    // which wakes up into a lobber only near the end of the first match.
     let tier = world
         .resource::<crate::grudge::CareerRecord>()
         .gauntlet_tier;
-    let difficulty = tier + world.resource::<sim::MatchScore>().p0 as u32 / 2;
+    let difficulty = tier + in_match_ramp(world.resource::<sim::MatchScore>().p0);
 
     let mut view = BotView {
         frame,
@@ -772,31 +795,92 @@ mod tests {
     #[test]
     fn difficulty_ramps_commit_charge_and_dodge_range() {
         assert!(throw_at_charge(1) < throw_at_charge(4), "throws harden");
-        assert_eq!(threat_radius(1), 0.0, "no dodge below level 2");
-        assert!(threat_radius(2) < threat_radius(4), "dodges sooner");
+        assert_eq!(threat_radius(2), 0.0, "no dodge below level 3");
+        assert_eq!(dodge_chance(2), 0.0);
+        assert!(threat_radius(3) < threat_radius(6), "dodges sooner");
+        assert!(dodge_chance(3) < dodge_chance(6), "dodges more often");
         assert!(wobble_amp(1) > wobble_amp(4), "aim tightens");
+    }
+
+    /// The report that reshaped the ramp: after one or two matches the bot
+    /// was "way too cracked". A player's first few gauntlet tiers must
+    /// stay soft — low commit charge, no reflex, a wide spray.
+    #[test]
+    fn the_first_tiers_stay_practice_partners() {
+        for lvl in 0..=2 {
+            assert_eq!(dodge_chance(lvl), 0.0, "level {lvl} never dodges");
+            assert!(throw_at_charge(lvl) <= CHARGE_MAX_FRAMES * 2 / 5);
+            assert!(wobble_amp(lvl) >= 0.35);
+        }
+        // Even a tier-3 bot lets most throws through.
+        assert!(dodge_chance(3) <= 0.25);
+        // The in-match ramp is one late notch, not a notch per kill.
+        assert_eq!(in_match_ramp(0), 0);
+        assert_eq!(in_match_ramp(2), 0);
+        assert_eq!(in_match_ramp(3), 1);
+        assert_eq!(in_match_ramp(4), 1);
     }
 
     #[test]
     fn gauntlet_tiers_keep_sharpening_but_hit_ceilings() {
-        // Past level 4 the ramps keep moving...
+        // Up the ladder the ramps keep moving...
         assert!(throw_at_charge(6) > throw_at_charge(4));
         assert!(threat_radius(6) > threat_radius(4));
         assert!(wobble_amp(6) < wobble_amp(4));
-        // ...and saturate instead of becoming an aimbot wall.
-        assert_eq!(throw_at_charge(40), throw_at_charge(12));
-        assert_eq!(threat_radius(40), 300.0);
-        assert_eq!(wobble_amp(40), 0.05);
+        // ...and saturate by the ladder's top instead of becoming an
+        // aimbot wall.
+        let top = crate::grudge::GAUNTLET_MAX_TIER + 1; // cap + the late notch
+        assert_eq!(throw_at_charge(40), throw_at_charge(top));
+        assert_eq!(threat_radius(40), threat_radius(top));
+        assert_eq!(dodge_chance(40), dodge_chance(top));
+        assert_eq!(wobble_amp(40), wobble_amp(top));
+        assert_eq!(threat_radius(40), 240.0);
+        assert_eq!(dodge_chance(40), 0.75);
+        assert_eq!(wobble_amp(40), 0.10);
         // The commit charge never reaches a human's full-power shot.
         assert!(throw_at_charge(40) < CHARGE_MAX_FRAMES);
+    }
+
+    /// The first frame at or after `from` whose dodge window rolls `hit`.
+    fn frame_rolling(from: u32, lvl: u32, hit: bool) -> u32 {
+        (from..from + 100_000)
+            .step_by(DODGE_ROLL_WINDOW as usize)
+            .find(|&f| (dodge_roll(f) < dodge_chance(lvl)) == hit)
+            .expect("the roll covers both outcomes")
     }
 
     #[test]
     fn dashes_through_an_incoming_fang() {
         let mut v = base_view();
+        v.difficulty = 6;
         v.threat = Some((v.me + Vec2::new(0.0, -120.0), Vec2::new(0.0, 24.0)));
+        v.frame = frame_rolling(600, v.difficulty, true);
         let input = bot_decide(&v);
         assert!(input.buttons & PlayerInput::DASH_DOWN != 0, "graze reflex");
+    }
+
+    #[test]
+    fn the_reflex_misses_some_throws() {
+        let mut v = base_view();
+        v.difficulty = 6;
+        v.threat = Some((v.me + Vec2::new(0.0, -120.0), Vec2::new(0.0, 24.0)));
+        v.frame = frame_rolling(600, v.difficulty, false);
+        let input = bot_decide(&v);
+        assert!(
+            input.buttons & PlayerInput::DASH_DOWN == 0,
+            "an off-window throw goes unanswered"
+        );
+        // And the rate tracks the table: over many windows a tier-6 bot
+        // reacts roughly dodge_chance(6) of the time, never always.
+        let windows = 2000;
+        let hits = (0..windows)
+            .filter(|w| dodge_roll(w * DODGE_ROLL_WINDOW) < dodge_chance(6))
+            .count() as f32;
+        let rate = hits / windows as f32;
+        assert!((rate - dodge_chance(6)).abs() < 0.06, "rate {rate}");
+        // One decision per window: every frame inside it agrees.
+        let base = 90 * DODGE_ROLL_WINDOW;
+        assert!((base..base + DODGE_ROLL_WINDOW).all(|f| dodge_roll(f) == dodge_roll(base)));
     }
 
     #[test]

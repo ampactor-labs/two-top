@@ -107,8 +107,8 @@ a result-signing key that dual-signs decided matches, a per-opponent
 rivalry record ("4TH MEETING, you lead 2-1"), a consent-gated RUN IT BACK
 rematch, and honest forfeit blame: whoever walked away owns the loss, and
 quitting a live duel from the in-match QUIT chip is scored the same way.
-Offline there is a practice gauntlet against a bot that sharpens every
-time you beat it and resets when it beats you.
+Offline there is a practice gauntlet against a bot that sharpens a notch
+every time you beat it and eases off a notch every time it beats you.
 
 ## Design docs
 
