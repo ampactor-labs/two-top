@@ -158,6 +158,11 @@ strip = "default"
 # asset root, so the in-code load paths ("audio/throw.wav", "sprites/...") line
 # up unchanged. (Verify on first sideload — SIDELOAD.md.)
 assets = "../../assets"
+# Android resources compiled by aapt — today just the launcher icon
+# (adaptive for Android 8+, square PNGs for 7.x), generated from the game's
+# own sprites by scripts/generate_android_icons.py. Without it the launcher
+# drew the system's generic robot for 2-Top.
+resources = "res"
 
 [package.metadata.android.sdk]
 min_sdk_version = 24
@@ -179,6 +184,7 @@ required = true
 
 [package.metadata.android.application]
 label = "2-Top"
+icon = "@mipmap/ic_launcher"
 # NOT debuggable. A debuggable APK lets `adb shell run-as
 # com.ampactorlabs.twotop` read and write the private data dir without
 # root — including `profile.json`, which holds the ed25519 seed the whole
