@@ -84,6 +84,22 @@ def main() -> int:
             "committed code (flip it locally, never commit it)"
         )
 
+    # The launcher icon: without `icon` (and the res dir holding it) the
+    # phone shows the system's generic robot for the app.
+    icon = application.get("icon")
+    if icon != "@mipmap/ic_launcher":
+        fail(
+            "[package.metadata.android.application] icon must be "
+            '"@mipmap/ic_launcher" (scripts/generate_android_icons.py)'
+        )
+    res = android.get("resources")
+    res_dir = APP.parent / res if res else None
+    if res_dir is None or not (res_dir / "mipmap-anydpi-v26" / "ic_launcher.xml").exists():
+        fail(
+            "[package.metadata.android] resources must point at the res dir "
+            "holding the launcher icon (run scripts/generate_android_icons.py)"
+        )
+
     # TURN credentials are compile-time-baked and trivially extractable from
     # any distributed binary, so they must never enter the public APK build.
     if APK_WORKFLOW.exists():
