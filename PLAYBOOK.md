@@ -490,11 +490,13 @@ the share; `replay_sync --attest` verifies them wherever the files are.
 bot supplying player 2's inputs — it keeps range, plants visibly before it
 throws, dashes through your fangs, and steers its recalls. Beat it and your
 GAUNTLET TIER climbs (the button label carries the number); every tier the
-bot opens sharper — harder throws, earlier dodges, tighter aim, up to a
-beatable ceiling. Lose once and the tier resets to zero (best tier is
-remembered in `career.json`). A fresh install's bot starts as a passive
-dummy and sharpens one notch per kill you land, so the first match is the
-tutorial. Practice results never touch the online career W-L.
+bot opens a little sharper — harder throws, then (from tier 3) a dodge
+reflex that fires on some of your throws and more of them as it climbs,
+tighter aim — up to a beatable ceiling at tier 10. Lose and the tier drops
+one rung (never back to the dummy; best tier is remembered in
+`career.json`), so a losing streak keeps easing the bot off. A fresh
+install's bot starts as a passive dummy that only starts lobbing back once
+you have landed three kills, so the first match is the tutorial. Practice results never touch the online career W-L.
 `TWOTOP_PRACTICE=1` env arms it for desktop automation.
 
 **Trading tapes.** A match tape is a ~14 KB `.bmrg` file, and the sim is
