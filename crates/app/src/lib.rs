@@ -151,6 +151,22 @@ pub fn run() {
                 file_path: concat!(env!("CARGO_MANIFEST_DIR"), "/../../assets").to_string(),
                 ..default()
             });
+            // Phones request the GPU device with the core feature set only
+            // (see `capability::core_gpu_features_only`). The browser keeps
+            // Bevy's own WebGL2 settings untouched.
+            #[cfg(not(target_family = "wasm"))]
+            let plugins = if capability::core_gpu_features_only() {
+                plugins.set(bevy::render::RenderPlugin {
+                    render_creation: bevy::render::settings::WgpuSettings {
+                        disabled_features: Some(bevy::render::settings::WgpuFeatures::all()),
+                        ..default()
+                    }
+                    .into(),
+                    ..default()
+                })
+            } else {
+                plugins
+            };
             plugins
         })
         .add_plugins(GgrsPlugin::<GgrsCfg>::default())
