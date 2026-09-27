@@ -62,8 +62,9 @@ pub fn lean_render() -> bool {
 ///
 /// Android always; anywhere else with `TWOTOP_LEAN_GPU=1`, which is how the
 /// desktop build proves the renderer needs nothing beyond the core set.
+/// Not compiled for the browser: its one caller keeps Bevy's own WebGL2
+/// settings there, so a wasm definition would only be dead code.
+#[cfg(not(target_family = "wasm"))]
 pub fn core_gpu_features_only() -> bool {
-    cfg!(target_os = "android")
-        || (cfg!(not(target_family = "wasm"))
-            && std::env::var("TWOTOP_LEAN_GPU").is_ok_and(|v| v == "1"))
+    cfg!(target_os = "android") || std::env::var("TWOTOP_LEAN_GPU").is_ok_and(|v| v == "1")
 }
