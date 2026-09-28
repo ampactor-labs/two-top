@@ -22,8 +22,11 @@ edition = "2024"
 # derives both from this via `VersionCode::from_semver(..).to_code(1)`).
 # Android's downgrade protection is keyed on versionCode, so this MUST
 # rise on every published build or an older APK can reinstall over a
-# newer one. Tracks the sim generation: 0.15.0 ships SIM_VERSION 15.
-version = "0.15.0"
+# newer one. Tracks the sim generation: 0.15.x ships SIM_VERSION 15, and
+# the patch number rises for app-only builds (0.15.1: the Pixel launch fix,
+# icon and bot ramp were published as 0.15.0, same versionCode as the APK
+# that crashed).
+version = "0.15.1"
 license = "MIT OR Apache-2.0"
 publish = false
 rust-version = "1.95"
