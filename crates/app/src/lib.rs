@@ -151,6 +151,15 @@ pub fn run() {
                 file_path: concat!(env!("CARGO_MANIFEST_DIR"), "/../../assets").to_string(),
                 ..default()
             });
+            // The browser skips Bevy's `.meta` sidecar probe. By default every
+            // asset load first asks for `<asset>.meta`; this repo ships none,
+            // so on the web each one was a wasted round trip (a 404 in the
+            // console, ~40 of them on boot) before the real fetch could start.
+            #[cfg(target_family = "wasm")]
+            let plugins = plugins.set(bevy::asset::AssetPlugin {
+                meta_check: bevy::asset::AssetMetaCheck::Never,
+                ..default()
+            });
             // Phones request the GPU device with the core feature set only
             // (see `capability::core_gpu_features_only`). The browser keeps
             // Bevy's own WebGL2 settings untouched.
