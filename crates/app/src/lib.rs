@@ -151,6 +151,15 @@ pub fn run() {
                 file_path: concat!(env!("CARGO_MANIFEST_DIR"), "/../../assets").to_string(),
                 ..default()
             });
+            // The browser skips Bevy's `.meta` sidecar probe. By default every
+            // asset load first asks for `<asset>.meta`; this repo ships none,
+            // so on the web each one was a wasted round trip (a 404 in the
+            // console, ~40 of them on boot) before the real fetch could start.
+            #[cfg(target_family = "wasm")]
+            let plugins = plugins.set(bevy::asset::AssetPlugin {
+                meta_check: bevy::asset::AssetMetaCheck::Never,
+                ..default()
+            });
             // Phones request the GPU device with the core feature set only
             // (see `capability::core_gpu_features_only`). The browser keeps
             // Bevy's own WebGL2 settings untouched.
@@ -213,6 +222,7 @@ pub fn run() {
         .add_plugins(LobbyOverlayPlugin)
         .add_plugins(ScreenPlugin)
         .add_plugins(SettingsPlugin)
+        .init_resource::<FangTextures>()
         .init_resource::<netplay::LocalPlayerHandle>()
         .init_resource::<netplay::SessionIds>()
         .init_resource::<netplay::RecentAbsence>()
@@ -1211,9 +1221,35 @@ struct FloorStrip(u32);
 type NewBoomerangs<'w, 's> =
     Query<'w, 's, (Entity, &'static PositionF), (With<Boomerang>, Without<Sprite>)>;
 
+/// The fang's two textures, loaded once at startup and held for the run.
+///
+/// `ensure_boomerang_visuals` used to call `asset_server.load` for both at
+/// the top of EVERY frame. That costs nothing while something else holds
+/// the asset (`load` hands back the live handle), but on the Title and the
+/// other menus nothing held `shadow_blob.png`: the handle dropped at the
+/// end of the system, Bevy freed the texture, and the next frame loaded it
+/// from scratch. A file read and PNG decode per frame on the phone; a
+/// network request per frame in the browser (measured on the web Title:
+/// ~26 requests a second, one per frame, for as long as the page is open).
+#[derive(Resource)]
+struct FangTextures {
+    fang: Handle<Image>,
+    shadow: Handle<Image>,
+}
+
+impl FromWorld for FangTextures {
+    fn from_world(world: &mut World) -> Self {
+        let assets = world.resource::<AssetServer>();
+        Self {
+            fang: assets.load("sprites/projectiles/bone_fang.png"),
+            shadow: assets.load("sprites/fx/shadow_blob.png"),
+        }
+    }
+}
+
 fn ensure_boomerang_visuals(
     mut commands: Commands,
-    asset_server: Res<AssetServer>,
+    textures: Res<FangTextures>,
     flip: Res<render::PerspectiveFlip>,
     q: NewBoomerangs,
 ) {
@@ -1224,8 +1260,8 @@ fn ensure_boomerang_visuals(
     // Larger weapon sprite (2.6× the 20 cm fang) — the fang reads as a bigger,
     // more present threat per the portrait-fighter scale-up.
     let size_px = ((BOOMERANG_HALF_EXTENT_CM * 2) as f32) * 2.6;
-    let image = asset_server.load("sprites/projectiles/bone_fang.png");
-    let shadow_img = asset_server.load("sprites/fx/shadow_blob.png");
+    let image = &textures.fang;
+    let shadow_img = &textures.shadow;
     for (entity, pos) in &q {
         let (x, y) = pos.0.to_f32();
         let ty = render::tilt_y(y * flip.0);
