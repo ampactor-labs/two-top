@@ -3348,6 +3348,79 @@ pub fn advance_input_history(
 
 // ---- Plugin ----
 
+/// A hasher wrapper that makes fingerprints width-portable: every
+/// fixed-width write forwards untouched, while `usize`/`isize` — which
+/// std's derived `Hash` uses for enum discriminants, slice length
+/// prefixes, and handle fields — widen to 64-bit. `Hasher::write_usize`
+/// emits 4 bytes on wasm32 and 8 on the 64-bit natives, which skewed
+/// every enum-bearing column of the browser determinism lane's first
+/// run from frame 0. On 64-bit targets the widening writes the bytes
+/// `usize` already wrote, so native fingerprints are unchanged — the
+/// committed golden proved that before the browser did. Used by
+/// `replay_sync`'s fingerprint columns and by every online desync
+/// checksum registered in [`SimPlugin`] ([`portable_checksum`]), so a
+/// browser-vs-phone duel compares like with like. (Those registrations
+/// used bevy_ggrs's plain `Hash` path until 0.15.2, so a browser and a
+/// phone reported DESYNC at frame 30 over identical state.)
+pub struct PortableHasher<H: core::hash::Hasher>(pub H);
+
+impl<H: core::hash::Hasher> core::hash::Hasher for PortableHasher<H> {
+    fn finish(&self) -> u64 {
+        self.0.finish()
+    }
+    fn write(&mut self, bytes: &[u8]) {
+        self.0.write(bytes)
+    }
+    fn write_u8(&mut self, i: u8) {
+        self.0.write_u8(i)
+    }
+    fn write_u16(&mut self, i: u16) {
+        self.0.write_u16(i)
+    }
+    fn write_u32(&mut self, i: u32) {
+        self.0.write_u32(i)
+    }
+    fn write_u64(&mut self, i: u64) {
+        self.0.write_u64(i)
+    }
+    fn write_u128(&mut self, i: u128) {
+        self.0.write_u128(i)
+    }
+    fn write_i8(&mut self, i: i8) {
+        self.0.write_i8(i)
+    }
+    fn write_i16(&mut self, i: i16) {
+        self.0.write_i16(i)
+    }
+    fn write_i32(&mut self, i: i32) {
+        self.0.write_i32(i)
+    }
+    fn write_i64(&mut self, i: i64) {
+        self.0.write_i64(i)
+    }
+    fn write_i128(&mut self, i: i128) {
+        self.0.write_i128(i)
+    }
+    fn write_usize(&mut self, i: usize) {
+        self.0.write_u64(i as u64)
+    }
+    fn write_isize(&mut self, i: isize) {
+        self.0.write_i64(i as i64)
+    }
+}
+
+/// The online desync checksum of one component/resource value: bevy_ggrs's
+/// own `checksum_hasher` behind [`PortableHasher`]. The `fn`-pointer shape
+/// `checksum_component`/`checksum_resource` take. Identical bytes to the
+/// plain `Hash` path on 64-bit targets; on wasm32 it stops `usize` fields
+/// and enum discriminants from hashing at half width.
+pub fn portable_checksum<T: core::hash::Hash>(value: &T) -> u64 {
+    use core::hash::Hasher as _;
+    let mut h = PortableHasher(bevy_ggrs::checksum_hasher());
+    value.hash(&mut h);
+    h.finish()
+}
+
 /// Adds the sim's rollback registrations, schedules, and gameplay systems.
 /// **Does NOT** install an input source — pair with one of:
 /// - [`DefaultInputsPlugin`] for synthesized inputs (sync_test, dev)
@@ -3413,38 +3486,38 @@ impl Plugin for SimPlugin {
         // entity-count mismatches. PreviousPositionF participates because
         // a desync in the snapshot value would surface as a stuttering
         // visual even when the live position recovers.
-        app.checksum_component_with_hash::<PositionF>()
-            .checksum_component_with_hash::<PreviousPositionF>()
-            .checksum_component_with_hash::<VelocityF>()
-            .checksum_component_with_hash::<DashState>()
-            .checksum_component_with_hash::<StunFrames>()
-            .checksum_component_with_hash::<OobTimer>()
-            .checksum_component_with_hash::<Dead>()
-            .checksum_component_with_hash::<Boomerang>()
-            .checksum_component_with_hash::<ThrowOrigin>()
-            .checksum_component_with_hash::<ThrowReach>()
-            .checksum_component_with_hash::<ThrowCharge>()
-            .checksum_component_with_hash::<ThrowCapacity>()
-            .checksum_component_with_hash::<CatchStreak>()
-            .checksum_component_with_hash::<Taunt>()
-            .checksum_component_with_hash::<SpawnGuard>()
-            .checksum_component_with_hash::<LastClashFrame>()
-            .checksum_component_with_hash::<AnimState>()
-            .checksum_component_with_hash::<Empowered>()
-            .checksum_component_with_hash::<HeldModifier>()
-            .checksum_component_with_hash::<BoomerangMods>()
-            .checksum_component_with_hash::<Pickup>()
-            .checksum_component_with_hash::<FireTrailCell>()
-            .checksum_component_with_hash::<BonePyre>()
-            .checksum_component_with_hash::<BoneTree>()
-            .checksum_resource_with_hash::<FrameCount>()
-            .checksum_resource_with_hash::<MatchScore>()
-            .checksum_resource_with_hash::<MatchState>()
-            .checksum_resource_with_hash::<BridgeState>()
-            .checksum_resource_with_hash::<DoorCooldown>()
-            .checksum_resource_with_hash::<SimRng>()
-            .checksum_resource_with_hash::<PickupSpawnTimer>()
-            .checksum_resource_with_hash::<InputHistory>();
+        app.checksum_component::<PositionF>(portable_checksum::<PositionF>)
+            .checksum_component::<PreviousPositionF>(portable_checksum::<PreviousPositionF>)
+            .checksum_component::<VelocityF>(portable_checksum::<VelocityF>)
+            .checksum_component::<DashState>(portable_checksum::<DashState>)
+            .checksum_component::<StunFrames>(portable_checksum::<StunFrames>)
+            .checksum_component::<OobTimer>(portable_checksum::<OobTimer>)
+            .checksum_component::<Dead>(portable_checksum::<Dead>)
+            .checksum_component::<Boomerang>(portable_checksum::<Boomerang>)
+            .checksum_component::<ThrowOrigin>(portable_checksum::<ThrowOrigin>)
+            .checksum_component::<ThrowReach>(portable_checksum::<ThrowReach>)
+            .checksum_component::<ThrowCharge>(portable_checksum::<ThrowCharge>)
+            .checksum_component::<ThrowCapacity>(portable_checksum::<ThrowCapacity>)
+            .checksum_component::<CatchStreak>(portable_checksum::<CatchStreak>)
+            .checksum_component::<Taunt>(portable_checksum::<Taunt>)
+            .checksum_component::<SpawnGuard>(portable_checksum::<SpawnGuard>)
+            .checksum_component::<LastClashFrame>(portable_checksum::<LastClashFrame>)
+            .checksum_component::<AnimState>(portable_checksum::<AnimState>)
+            .checksum_component::<Empowered>(portable_checksum::<Empowered>)
+            .checksum_component::<HeldModifier>(portable_checksum::<HeldModifier>)
+            .checksum_component::<BoomerangMods>(portable_checksum::<BoomerangMods>)
+            .checksum_component::<Pickup>(portable_checksum::<Pickup>)
+            .checksum_component::<FireTrailCell>(portable_checksum::<FireTrailCell>)
+            .checksum_component::<BonePyre>(portable_checksum::<BonePyre>)
+            .checksum_component::<BoneTree>(portable_checksum::<BoneTree>)
+            .checksum_resource::<FrameCount>(portable_checksum::<FrameCount>)
+            .checksum_resource::<MatchScore>(portable_checksum::<MatchScore>)
+            .checksum_resource::<MatchState>(portable_checksum::<MatchState>)
+            .checksum_resource::<BridgeState>(portable_checksum::<BridgeState>)
+            .checksum_resource::<DoorCooldown>(portable_checksum::<DoorCooldown>)
+            .checksum_resource::<SimRng>(portable_checksum::<SimRng>)
+            .checksum_resource::<PickupSpawnTimer>(portable_checksum::<PickupSpawnTimer>)
+            .checksum_resource::<InputHistory>(portable_checksum::<InputHistory>);
 
         // Sim systems — explicitly ordered per CONVENTIONS.md.
         // snapshot_previous runs FIRST so the PositionF copy it captures

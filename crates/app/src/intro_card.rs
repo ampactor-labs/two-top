@@ -81,6 +81,7 @@ fn update_intro_card(
     theater: Res<crate::theater::TheaterMode>,
     netplay: Res<NetplayConfig>,
     practice: Res<crate::bot::PracticeMode>,
+    selected: Res<sim::SelectedArena>,
     career: Res<crate::grudge::CareerRecord>,
     profile: Res<crate::profile::LocalProfile>,
     peer: Res<net::PeerProfile>,
@@ -100,7 +101,7 @@ fn update_intro_card(
     }
     let online = netplay.room_url.is_some() && !practice.0;
     let peer_name = peer.0.map(|p| crate::profile::peer_name(Some(p)));
-    let (names, stakes) = intro_lines(
+    let (names, mut stakes) = intro_lines(
         online,
         practice.0,
         &profile.name_string(),
@@ -108,6 +109,16 @@ fn update_intro_card(
         career.gauntlet_tier,
         career.rivalry_line(peer.0),
     );
+    // Online the table was agreed at pairing and may not be the one this
+    // player picked — say where they are sitting.
+    if online {
+        let table = format!("AT {}", crate::arena_select::arena_title(selected.0));
+        stakes = if stakes.is_empty() {
+            table
+        } else {
+            format!("{stakes}\n{table}")
+        };
+    }
     for (line, mut text, mut vis) in &mut q {
         let content = if line.0 == 0 { &names } else { &stakes };
         text.0 = content.clone();

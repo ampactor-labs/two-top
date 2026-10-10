@@ -12,7 +12,7 @@ Live: https://ampactor.dev/two-top/
 
 ### Two Android phones
 
-Download `two-top.apk` from the newest release at https://github.com/ampactor-labs/two-top/releases/tag/apk-latest and install it on both phones (Android asks you to allow installs from that source; [`SIDELOAD.md`](SIDELOAD.md) covers `adb install`). Tap FIND OPPONENT on both and the public room pairs them. For a private duel tap PRIVATE and dial the same four glyphs on both phones. Both phones must pick the same arena, because the pick is part of the room name.
+Download `two-top.apk` from the newest release at https://github.com/ampactor-labs/two-top/releases/tag/apk-latest and install it on both phones (Android asks you to allow installs from that source; [`SIDELOAD.md`](SIDELOAD.md) covers `adb install`). Tap FIND OPPONENT on both and the public room pairs them. For a private duel tap PRIVATE and dial the same four glyphs on both phones. The two phones don't need to be on the same arena: once paired they agree on one (the first phone in's table wins). Both do need the same build — the version is part of the room name. No Android? The web build at https://ampactor.dev/two-top/ plays online too, and a private room's QR offers PLAY IN THE BROWSER.
 
 ### A browser
 

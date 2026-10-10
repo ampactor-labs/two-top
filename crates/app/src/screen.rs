@@ -123,7 +123,7 @@ const OBSTACLE_RISE: f32 = 52.0;
 /// render's `ArenaProp` marker instead; play-spawned entities (boomerangs,
 /// pickups, stains, effects) are despawned by their own component type.
 #[derive(Component)]
-struct MatchEntity;
+pub(crate) struct MatchEntity;
 
 /// Marker for the big static "2-TOP" banner (its own entity so the title can
 /// stay bold while the dynamic body below shrinks to fit the portrait window).
@@ -238,7 +238,44 @@ fn spawn_match(
     theater: Res<crate::theater::TheaterMode>,
     flip: Res<render::PerspectiveFlip>,
 ) {
-    let layout = player_atlas_layout(&mut atlases);
+    // Rollback numbering restarts with every match. bevy_ggrs hashes each
+    // entity's registration index into the desync checksum and never
+    // forgets one, so without this two phones with different histories
+    // (one had played the bot first) disagree from frame 0 and the first
+    // checksum exchange calls a healthy duel a DESYNC.
+    commands.insert_resource(bevy_ggrs::RollbackOrdered::default());
+    let shadow_img = spawn_duelists(&mut commands, &asset_server, &mut atlases, flip.0);
+    spawn_arena(
+        &mut commands,
+        &asset_server,
+        &mut atlases,
+        &selected,
+        flip.0,
+        shadow_img,
+    );
+
+    // Theater: the tape drives a playback session (check_distance 0 +
+    // input_delay 0 — the snapshot-scrub requirements). Couch + practice:
+    // a fresh local session starts the sim from frame 0 (practice forces
+    // local even on an online build — the bot supplies handle 1). Online:
+    // the matchbox driver inserts the P2P session once the peer connects.
+    if theater.active() {
+        commands.insert_resource(crate::theater::build_playback_session());
+    } else if netplay.room_url.is_none() || practice.0 {
+        commands.insert_resource(build_synctest_session());
+    }
+}
+
+/// The two duelists (sprite, shadow, charge ring, aim telegraph), in the
+/// fixed handle order the rollback numbering depends on. Returns the
+/// shadow texture for the table's cover to share.
+fn spawn_duelists(
+    commands: &mut Commands,
+    asset_server: &AssetServer,
+    atlases: &mut Assets<TextureAtlasLayout>,
+    flip: f32,
+) -> Handle<Image> {
+    let layout = player_atlas_layout(atlases);
     let sheets = [
         (
             0usize,
@@ -281,27 +318,41 @@ fn spawn_match(
             .id();
         // A drop shadow under the feet — the cheapest "stands on the floor" cue.
         render::spawn_ground_shadow(
-            &mut commands,
+            commands,
             shadow_img.clone(),
             player,
             PLAYER_FOOT_OFFSET,
             PLAYER_RENDER_SIZE * 0.72,
-            Vec2::new(sx, render::tilt_y(sy * flip.0)),
+            Vec2::new(sx, render::tilt_y(sy * flip)),
         );
         // A charge ring under the feet — hidden until they wind up a throw,
         // then it tightens + blooms toward full charge.
         let aura = render::spawn_charge_aura(
-            &mut commands,
+            commands,
             charge_ring_img.clone(),
             player,
             PLAYER_FOOT_OFFSET,
         );
         commands.entity(aura).insert(MatchEntity);
         // The aim telegraph — the public plant both duelists can read.
-        let beam = render::spawn_aim_telegraph(&mut commands, player, handle);
+        let beam = render::spawn_aim_telegraph(commands, player, handle);
         commands.entity(beam).insert(MatchEntity);
     }
+    shadow_img
+}
 
+/// The table itself: boundary walls, the arena's cover (collision body +
+/// raised 2.5D composite) and its props. Split from [`spawn_match`] so an
+/// online pair can lay it again once they agree on the table and know
+/// which edge each one sits at ([`rebuild_arena`]).
+fn spawn_arena(
+    commands: &mut Commands,
+    asset_server: &AssetServer,
+    atlases: &mut Assets<TextureAtlasLayout>,
+    selected: &SelectedArena,
+    flip: f32,
+    shadow_img: Handle<Image>,
+) {
     // Arena boundary walls — fixed order for bit-identical entity ids.
     for wall in arena_walls() {
         commands.spawn((MatchEntity, wall));
@@ -321,14 +372,14 @@ fn spawn_match(
         // shorter than near cover — the same perspective the duelists obey.
         // The footprint's WIDTH stays collision-true (the table's X axis is
         // not projected), so a fang that visually clears a corner really does.
-        let y0 = render::tilt_y(min_y_raw * flip.0);
-        let y1 = render::tilt_y(max_y_raw * flip.0);
+        let y0 = render::tilt_y(min_y_raw * flip);
+        let y1 = render::tilt_y(max_y_raw * flip);
         let (min_y, max_y) = if y0 < y1 { (y0, y1) } else { (y1, y0) };
-        let near_row = (min_y_raw * flip.0).min(max_y_raw * flip.0);
+        let near_row = (min_y_raw * flip).min(max_y_raw * flip);
         let rise = OBSTACLE_RISE * render::depth_scale(near_row);
         commands.spawn((MatchEntity, wall));
         spawn_obstacle_block(
-            &mut commands,
+            commands,
             shadow_img.clone(),
             selected.0,
             min_x,
@@ -340,24 +391,47 @@ fn spawn_match(
     }
 
     // Selected arena's props (pyres / chasm / doors) — tagged `ArenaProp`.
-    render::spawn_arena_props(
+    render::spawn_arena_props(commands, asset_server, atlases, selected, flip);
+}
+
+/// Online, after the table handshake and before the session starts: tear
+/// down what match entry laid and lay it again on the agreed table, now
+/// with this seat's `PerspectiveFlip` (the entry-time layout predates
+/// knowing which edge we sit at). The duelists are rebuilt too and the
+/// rollback numbering restarted, because entry numbered the props of
+/// whichever table THIS phone had picked — the two sides must number the
+/// agreed table identically. Runs on both peers, table changed or not; no
+/// session exists yet, so nothing here is rolled back.
+#[allow(clippy::type_complexity)]
+pub(crate) fn rebuild_match(
+    mut commands: Commands,
+    asset_server: Res<AssetServer>,
+    mut atlases: ResMut<Assets<TextureAtlasLayout>>,
+    selected: Res<SelectedArena>,
+    flip: Res<render::PerspectiveFlip>,
+    old: Query<
+        Entity,
+        Or<(
+            With<MatchEntity>,
+            With<render::ArenaProp>,
+            With<render::GroundShadow>,
+        )>,
+    >,
+) {
+    for entity in &old {
+        commands.entity(entity).despawn();
+    }
+    // Applied after the despawns, before the spawns' registration hooks.
+    commands.insert_resource(bevy_ggrs::RollbackOrdered::default());
+    let shadow_img = spawn_duelists(&mut commands, &asset_server, &mut atlases, flip.0);
+    spawn_arena(
         &mut commands,
         &asset_server,
         &mut atlases,
         &selected,
         flip.0,
+        shadow_img,
     );
-
-    // Theater: the tape drives a playback session (check_distance 0 +
-    // input_delay 0 — the snapshot-scrub requirements). Couch + practice:
-    // a fresh local session starts the sim from frame 0 (practice forces
-    // local even on an online build — the bot supplies handle 1). Online:
-    // the matchbox driver inserts the P2P session once the peer connects.
-    if theater.active() {
-        commands.insert_resource(crate::theater::build_playback_session());
-    } else if netplay.room_url.is_none() || practice.0 {
-        commands.insert_resource(build_synctest_session());
-    }
 }
 
 /// Per-arena cover skin: the front-face and lid colors plus which motif the
@@ -943,8 +1017,8 @@ fn spawn_overlays(mut commands: Commands) {
 
 /// Title-screen arena entry. Desktop: 1-7 pick directly. Touch: a tap on the
 /// arena line opens the roster screen (`crate::arena_select`) — couch AND
-/// online, since the pick now rides the room name (`room_code`) and both
-/// peers structurally agree. Mutating [`SelectedArena`] is safe here because
+/// online, since the pair agrees on a table after pairing
+/// (`netplay::agreed_table`). Mutating [`SelectedArena`] is safe here because
 /// there's no session (the sim is idle) and `spawn_match` only reads it on
 /// match start.
 fn pick_arena(
@@ -1300,8 +1374,8 @@ fn update_title_overlay(
     let _ = &practice; // practice state now reads on its own button
     if on_title {
         *vis = Visibility::Visible;
-        // The tappable arena line shows on BOTH modes now — the pick rides
-        // the room name online, so it's no longer couch-only. The career
+        // The tappable arena line shows on BOTH modes now — online it is
+        // this side's offer in the table handshake. The career
         // record joins it once there is one.
         let online = netplay.room_url.is_some();
         let arena_line = format!("< {} >", arena_name(selected.0));

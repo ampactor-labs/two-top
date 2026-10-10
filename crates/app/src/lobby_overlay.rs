@@ -75,7 +75,6 @@ fn update_summoning(
     state: Res<LobbyState>,
     match_state: Res<sim::MatchState>,
     room: Res<RoomCode>,
-    selected: Res<sim::SelectedArena>,
     peer_profile: Res<net::PeerProfile>,
     absence: Res<crate::netplay::RecentAbsence>,
     mut stall: Local<Option<(std::mem::Discriminant<LobbyState>, f32)>>,
@@ -103,16 +102,15 @@ fn update_summoning(
     };
 
     let dots = [".", "..", "...", ".."][(now * 2.0) as usize % 4];
-    // The table is part of the room NAME (`room_code::room_url`), so two
-    // phones on one code but two tables are in two rooms — and used to
-    // render byte-identical waiting text while the stall hint blamed the
-    // network. Naming the table here is what lets two people compare
-    // screens and spot the mismatch.
-    let table = crate::arena_select::arena_title(selected.0);
+    // The table no longer splits rooms (the pair agrees on one after
+    // pairing), so the line names what actually must match: the code, and
+    // the build — a stale APK sits in another version's room, and naming
+    // the build is what lets two people compare screens and spot it.
+    let build = env!("CARGO_PKG_VERSION");
     let room_line = if room.custom {
-        format!("room {}\n{table}", code_spaced(&room.code_string()))
+        format!("room {}\nbuild {build}", code_spaced(&room.code_string()))
     } else {
-        format!("quick match\n{table}")
+        format!("quick match\nbuild {build}")
     };
     let challenger = crate::profile::peer_name(peer_profile.0);
     let msg = match &*state {
@@ -124,14 +122,17 @@ fn update_summoning(
             Some(m)
         }
         LobbyState::WaitingForPeer { .. } => {
-            let mut m = format!(
-                "AWAITING A CHALLENGER{dots}\n\n{room_line}\nsame code, same table, over there"
-            );
+            let ask = if room.custom {
+                "same code on the other phone"
+            } else {
+                "the other phone taps FIND OPPONENT"
+            };
+            let mut m = format!("AWAITING A CHALLENGER{dots}\n\n{room_line}\n{ask}");
             if since > STALL_DIAGNOSIS_SECS {
                 // Lead with the mismatch a player can fix from the seat;
-                // the relay is the second guess, not the first.
+                // the network is the second guess, not the first.
                 m.push_str(
-                    "\n\nif the other phone shows this too:\ncheck both picked the same table -\nelse the networks may need the relay (TURN)",
+                    "\n\nif the other phone shows this too:\ncheck both show the same build -\nelse try both on Wi-Fi, or both on data",
                 );
             }
             Some(m)
