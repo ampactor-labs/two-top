@@ -293,6 +293,16 @@ fn cloudflare_credentials(
     })
 }
 
+/// CORS for the browser build's cross-origin `GET /ice`.
+fn cors_headers() -> [tiny_http::Header; 3] {
+    let h = |k: &str, v: &str| tiny_http::Header::from_bytes(k, v).expect("static header");
+    [
+        h("Access-Control-Allow-Origin", "*"),
+        h("Access-Control-Allow-Methods", "GET, OPTIONS"),
+        h("Access-Control-Allow-Headers", "X-App-Key"),
+    ]
+}
+
 fn main() {
     let port: u16 = std::env::var("PORT")
         .ok()
@@ -319,6 +329,20 @@ fn main() {
         // /healthz stays exempt from the key and the bucket: Railway's
         // healthcheck (railway.json) must never be throttled into a restart
         // loop, and it hands out nothing billable.
+        // The browser build fetches /ice cross-origin (the Pages site is
+        // not this host). Without CORS the page's fetch fails and the web
+        // game silently falls back to STUN-only — the very gap a relay
+        // closes. `X-App-Key` makes the request non-simple, so answer the
+        // preflight too. Open origin on purpose: the key (when set) and the
+        // rate limiter are the gates, never the Origin header.
+        if *request.method() == tiny_http::Method::Options {
+            let mut response = tiny_http::Response::empty(204);
+            for header in cors_headers() {
+                response.add_header(header);
+            }
+            let _ = request.respond(response);
+            continue;
+        }
         let (status, body, content_type) = match request.url() {
             "/ice" if !authorized(&request, app_key.as_deref()) => (
                 403,
@@ -344,9 +368,12 @@ fn main() {
         };
         let header =
             tiny_http::Header::from_bytes("Content-Type", content_type).expect("static header");
-        let response = tiny_http::Response::from_string(body)
+        let mut response = tiny_http::Response::from_string(body)
             .with_status_code(status)
             .with_header(header);
+        for header in cors_headers() {
+            response.add_header(header);
+        }
         let _ = request.respond(response);
     }
 }

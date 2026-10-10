@@ -33,7 +33,19 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: wasm
+      # The same endpoints apk.yml bakes, so the browser is the same game
+      # as the APK: online quick match + private rooms on the public room
+      # server, relay credentials from the ICE vendor, and the SHARE loop.
+      # Without TWOTOP_ROOM the browser build booted as a couch-only game
+      # (no FIND OPPONENT, no PRIVATE) — a join link's PLAY IN THE BROWSER
+      # had nowhere to go. All plain URLs, safe in a public bundle.
       - name: Build the app for wasm
+        env:
+          TWOTOP_ROOM: ${{ vars.TWOTOP_ROOM || 'wss://two-top-matchbox-production.up.railway.app/two-top?next=2' }}
+          TWOTOP_ICE_URL: ${{ vars.TWOTOP_ICE_URL }}
+          TWOTOP_ICE_KEY: ${{ secrets.TWOTOP_ICE_KEY }}
+          TWOTOP_DROP_URL: ${{ vars.TWOTOP_DROP_URL }}
+          TWOTOP_WATCH_URL: ${{ vars.TWOTOP_WATCH_URL }}
         run: cargo build -p app --lib --target wasm32-unknown-unknown --release --locked
       # The CLI must match the wasm-bindgen crate version exactly; read it
       # out of the lock so a future bump cannot skew them.

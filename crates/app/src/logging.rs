@@ -38,7 +38,6 @@
 //! immediately so it lives for the entire `App::run()` scope.
 
 use tracing_subscriber::EnvFilter;
-#[cfg(not(target_family = "wasm"))]
 use tracing_subscriber::prelude::*;
 
 /// Default filter when `RUST_LOG` is unset. Keeps wgpu/bevy chatter out
@@ -129,6 +128,33 @@ fn note_reinit(e: &impl std::fmt::Display) {
     eprintln!("two-top: tracing subscriber already installed ({e}) — keeping it");
 }
 
+/// One formatted tracing event, handed to `console.log` when the fmt
+/// layer drops the writer at the end of the event.
+#[cfg(target_family = "wasm")]
+struct ConsoleWriter(Vec<u8>);
+
+#[cfg(target_family = "wasm")]
+impl std::io::Write for ConsoleWriter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0.extend_from_slice(buf);
+        Ok(buf.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+#[cfg(target_family = "wasm")]
+impl Drop for ConsoleWriter {
+    fn drop(&mut self) {
+        let line = String::from_utf8_lossy(&self.0);
+        let line = line.trim_end();
+        if !line.is_empty() {
+            web_sys::console::log_1(&line.into());
+        }
+    }
+}
+
 /// Build the global subscriber. Safe to call more than once per process:
 /// a second call keeps the first subscriber (`note_reinit`) and the panic
 /// hook installs exactly once.
@@ -213,18 +239,28 @@ pub fn init_logging() -> LogGuard {
 
     #[cfg(target_family = "wasm")]
     {
-        // No subscriber at all in the browser, in every profile. The
-        // first draft installed a
-        // discarding fmt layer, and that nearly unshippable choice hid a
-        // real lesson: fmt's default timer stamps events with
-        // SystemTime::now(), which PANICS on wasm32-unknown — so any panic
-        // that our own hook then logged re-panicked inside the hook and
-        // aborted as a bare `unreachable` with no message at all. Events
-        // go nowhere (console routing via tracing-wasm is the follow-up);
-        // panics reach the console through console_error_panic_hook,
-        // installed first thing in web_start. The fs-writing panic hook
-        // stays native-only for the same reason.
-        let _ = filter;
+        // The browser console, one `console.log` per event. NO timer:
+        // fmt's default stamps events with SystemTime::now(), which PANICS
+        // on wasm32-unknown — the first draft's discarding fmt layer hit
+        // exactly that, and a panic our own hook then logged re-panicked
+        // inside the hook and aborted as a bare `unreachable`. Without the
+        // timer the layer is just string formatting. This is what makes a
+        // browser duel that won't connect diagnosable at all: before it,
+        // every `two_top::net` line went nowhere. Panics still reach the
+        // console through console_error_panic_hook (first thing in
+        // web_start); the fs-writing panic hook stays native-only.
+        if let Err(e) = tracing_subscriber::registry()
+            .with(filter)
+            .with(
+                tracing_subscriber::fmt::layer()
+                    .without_time()
+                    .with_ansi(false)
+                    .with_writer(|| ConsoleWriter(Vec::new())),
+            )
+            .try_init()
+        {
+            web_sys::console::log_1(&format!("two-top: subscriber already installed ({e})").into());
+        }
         LogGuard {}
     }
 

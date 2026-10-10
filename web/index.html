@@ -123,7 +123,11 @@
       } else {
         boot.remove();
       }
-      web_start(tape);
+      // A join page's PLAY IN THE BROWSER lands here as #join=CURS-pit:
+      // the game dials that code and table at boot, like a scanned link
+      // does in the APK.
+      const join = location.hash.match(/^#join=([A-Za-z]{4}-[a-z]+)$/);
+      web_start(tape, join ? join[1] : undefined);
     } catch (e) {
       // A bevy wasm app "exits" its main via an exception on purpose
       // (winit keeps running); anything else is a real boot failure.

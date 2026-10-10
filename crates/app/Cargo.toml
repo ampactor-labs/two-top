@@ -279,6 +279,9 @@ web-sys = { version = "0.3", features = [
     # Asking the device whether its primary pointer is a finger
     # (crates/app/src/capability.rs).
     "MediaQueryList",
+    # The browser build's log output (logging.rs) — tracing events go to
+    # the devtools console, the web's only log.
+    "console",
 ] }
 js-sys = "0.3"
 wasm-bindgen-futures = "0.4"
