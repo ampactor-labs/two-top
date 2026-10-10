@@ -137,9 +137,9 @@ sharpen.
 ## Pillar VI — the ritual of sitting down
 
 The name is a restaurant table for two. The depth-duel camera tilts the arena
-into a tabletop between you; arenas are tables; agreement is structural
-because the pick rides the room name ("dial CURS, pick the Pit" —
-MORGAN_NOTES). Finished, the physical ritual completes: the private dial
+into a tabletop between you; arenas are tables; the pair agrees on one the
+moment they connect (a pre-session handshake — MORGAN_NOTES § why the arena
+pick no longer rides the room name). Finished, the physical ritual completes: the private dial
 shows its join link as a QR, the other phone's system camera opens it, and a
 deep link drops both phones into the same room and arena with zero typing.
 No in-app scanner, no camera permission; the OS already owns that job.

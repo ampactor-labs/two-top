@@ -239,6 +239,46 @@ struct MatchboxDriver {
     /// net's silence FSM ages honestly into `Disconnected` (the
     /// OPPONENT AWAY overlay) and recovers when traffic resumes.
     interrupted: bool,
+    /// The pre-session table handshake with the connected peer.
+    table: TableHandshake,
+    /// Side-channel packets that arrived during the table handshake but
+    /// belong to the session (the peer swapped first and already sent its
+    /// `Profile`). [`pump_side_channel`] reads these before anything new.
+    backlog: Vec<(PeerId, Box<[u8]>)>,
+}
+
+/// Which table to play, agreed BEFORE the ggrs session starts: each side
+/// sends its pick the moment the peer connects ([`NetMsg::Table`]) and
+/// both adopt the lower peer id's — the same rule that makes it handle 0,
+/// so neither side needs the other to confirm anything.
+#[derive(Default)]
+struct TableHandshake {
+    /// The peer this handshake is with; a different peer starts it over.
+    peer: Option<PeerId>,
+    sent: bool,
+    theirs: Option<sim::ArenaId>,
+}
+
+/// The table both peers play: the lower peer id's pick. Pure for tests.
+pub fn agreed_table(
+    our_id: PeerId,
+    peer_id: PeerId,
+    ours: sim::ArenaId,
+    theirs: sim::ArenaId,
+) -> sim::ArenaId {
+    if our_id < peer_id { ours } else { theirs }
+}
+
+/// This player's own table pick, parked while an online match plays on
+/// the agreed one, and put back when they leave the match screen — the
+/// opponent's table never becomes your selection.
+#[derive(Resource, Default)]
+pub struct OwnTablePick(pub Option<sim::ArenaId>);
+
+fn restore_own_table(mut own: ResMut<OwnTablePick>, mut selected: ResMut<sim::SelectedArena>) {
+    if let Some(arena) = own.0.take() {
+        selected.0 = arena;
+    }
 }
 
 /// Phase 12 driver plugin. Added only when a room URL is present. The matchbox
@@ -259,6 +299,8 @@ impl Plugin for MatchboxPlugin {
                     world.remove_resource::<PendingIce>();
                 },
             )
+            .init_resource::<OwnTablePick>()
+            .add_systems(OnExit(crate::screen::AppScreen::InMatch), restore_own_table)
             .add_systems(OnEnter(crate::screen::AppScreen::InMatch), reset_absence)
             .add_systems(PostUpdate, freeze_terminal_session)
             .add_systems(
@@ -501,6 +543,8 @@ fn open_socket(world: &mut World, url: String, ice: RtcIceServerConfig) {
         socket,
         channel_taken: false,
         interrupted: false,
+        table: TableHandshake::default(),
+        backlog: Vec::new(),
     });
     *world.resource_mut::<LobbyState>() = LobbyState::Connecting;
 
@@ -584,18 +628,69 @@ fn drive_netplay(world: &mut World) {
             }
         }
     }
+    // A peer that left mid-handshake must not be swapped to later.
+    for (peer, state) in &peer_updates {
+        if matches!(state, PeerState::Disconnected) {
+            let mut pending = world.resource_mut::<PendingP2PSwap>();
+            if pending.0 == Some(*peer) {
+                pending.0 = None;
+            }
+        }
+    }
 
     // `net::detect_peer_connection_edge` (also in Update) turns the rising
-    // edge into `Connected` into a `PendingP2PSwap`; consume it here.
-    if let Some(peer_id) = world.resource::<PendingP2PSwap>().0 {
-        perform_swap(world, peer_id);
+    // edge into `Connected` into a `PendingP2PSwap`; agree on the table
+    // with that peer, then swap.
+    if let Some(peer_id) = world.resource::<PendingP2PSwap>().0
+        && let Some(theirs) = exchange_table(world, peer_id)
+    {
+        perform_swap(world, peer_id, theirs);
     }
+}
+
+/// One tick of the table handshake: send our pick once, read the peer's.
+/// `Some(their pick)` once it has arrived. Anything else the peer sent on
+/// the side channel meanwhile is kept for the session, never dropped.
+fn exchange_table(world: &mut World, peer_id: PeerId) -> Option<sim::ArenaId> {
+    let ours = world.resource::<sim::SelectedArena>().0;
+    let mut driver = world.non_send_resource_mut::<MatchboxDriver>();
+    let driver = &mut *driver;
+    if driver.table.peer != Some(peer_id) {
+        driver.table = TableHandshake {
+            peer: Some(peer_id),
+            ..default()
+        };
+        driver.backlog.clear();
+    }
+    if !driver.table.sent {
+        driver.socket.channel_mut(SIDE_CHANNEL).send(
+            encode_net_msg(&NetMsg::Table {
+                arena: ours.as_u8(),
+            }),
+            peer_id,
+        );
+        driver.table.sent = true;
+        tracing::info!(target: "two_top::net", arena = ours.as_u8(), "table pick sent");
+    }
+    for (from, bytes) in driver.socket.channel_mut(SIDE_CHANNEL).receive() {
+        if from != peer_id {
+            continue;
+        }
+        match decode_net_msg(&bytes) {
+            Some(NetMsg::Table { arena }) if driver.table.theirs.is_none() => {
+                tracing::info!(target: "two_top::net", arena, "peer's table pick received");
+                driver.table.theirs = Some(sim::ArenaId::from_u8(arena));
+            }
+            _ => driver.backlog.push((from, bytes)),
+        }
+    }
+    driver.table.theirs
 }
 
 /// Build the `P2PSession` and install it as the live `Session`, replacing
 /// the (absent) pre-connect session. Idempotent-ish: bails if our own
 /// `PeerId` isn't assigned yet (retried next frame).
-fn perform_swap(world: &mut World, peer_id: PeerId) {
+fn perform_swap(world: &mut World, peer_id: PeerId, their_table: sim::ArenaId) {
     let Some(our_id) = world.non_send_resource_mut::<MatchboxDriver>().socket.id() else {
         return; // id not assigned yet; retry next tick
     };
@@ -632,13 +727,31 @@ fn perform_swap(world: &mut World, peer_id: PeerId) {
         .expect("add remote player");
     let session = sb.start_p2p_session(bridge).expect("start p2p session");
 
+    // Which edge we sit at, then the agreed table laid from it — before
+    // the session exists, so frame 0 already stands on it.
+    world.resource_mut::<render::PerspectiveFlip>().0 = if local_handle == 1 { -1.0 } else { 1.0 };
+    let ours = world.resource::<sim::SelectedArena>().0;
+    let table = agreed_table(our_id, peer_id, ours, their_table);
+    if table != ours {
+        world.resource_mut::<OwnTablePick>().0 = Some(ours);
+        world.resource_mut::<sim::SelectedArena>().0 = table;
+    }
+    tracing::info!(
+        target: "two_top::net",
+        table = crate::room_code::arena_room_tag(table),
+        ours = crate::room_code::arena_room_tag(ours),
+        theirs = crate::room_code::arena_room_tag(their_table),
+        "table agreed",
+    );
+    if let Err(e) = world.run_system_cached(crate::screen::rebuild_match) {
+        tracing::error!(target: "two_top::net", error = %e, "could not lay the agreed table");
+    }
+
     world.insert_resource(Session::P2P(session));
     world.resource_mut::<PendingP2PSwap>().0 = None;
     // Record which player is us, so "your-action" feedback (haptics, summary
     // banner) can distinguish local from remote.
     world.resource_mut::<LocalPlayerHandle>().0 = Some(local_handle);
-    world.resource_mut::<render::PerspectiveFlip>().0 = if local_handle == 1 { -1.0 } else { 1.0 };
-
     // Pin the silence timer to "now" so net's grace timer never spuriously
     // forfeits a healthy session — real disconnects come via ggrs events.
     let frame = world.resource::<sim::FrameCount>().0;
@@ -822,7 +935,9 @@ fn pump_side_channel(world: &mut World) {
                 "side-channel messages dropped — no peer to address",
             );
         }
-        driver.socket.channel_mut(SIDE_CHANNEL).receive()
+        let mut inbound = std::mem::take(&mut driver.backlog);
+        inbound.extend(driver.socket.channel_mut(SIDE_CHANNEL).receive());
+        inbound
     };
 
     for (from, bytes) in inbound {
@@ -873,6 +988,8 @@ fn pump_side_channel(world: &mut World) {
             NetMsg::RematchWant => {
                 world.resource_mut::<RematchConsent>().peer = true;
             }
+            // Handshake leftovers (a duplicate) — the table is settled.
+            NetMsg::Table { .. } => {}
             NetMsg::Bye => {
                 tracing::info!(target: "two_top::net", ?from, "peer said goodbye — forfeit without the grace wait");
                 *world.resource_mut::<LobbyState>() = LobbyState::Forfeited {
@@ -1098,6 +1215,23 @@ pub fn leave_online_match(world: &mut World) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn both_peers_agree_on_the_lower_ids_table() {
+        let low = PeerId(uuid_from(1));
+        let high = PeerId(uuid_from(2));
+        let (pit, forest) = (sim::ArenaId::Pit, sim::ArenaId::Forest);
+        // The low side picked the Pit, the high side the Forest: each
+        // computes from its own seat and both land on the Pit.
+        assert_eq!(agreed_table(low, high, pit, forest), pit);
+        assert_eq!(agreed_table(high, low, forest, pit), pit);
+        // Same pick on both sides is simply that table.
+        assert_eq!(agreed_table(high, low, pit, pit), pit);
+    }
+
+    fn uuid_from(n: u128) -> uuid::Uuid {
+        uuid::Uuid::from_u128(n)
+    }
 
     #[test]
     fn the_side_channel_trusts_only_the_paired_peer_and_its_first_identity() {

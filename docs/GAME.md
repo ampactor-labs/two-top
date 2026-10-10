@@ -42,8 +42,8 @@ a phone, the top strip of the screen.
   fell a tree and a Heavy throw fells it in one; fire spreads from tree to
   tree and burns the cover down for the rest of the match.
 
-Online, the arena pick is part of the room name, so both phones must pick the
-same table to meet.
+Online, the two phones agree on a table after pairing: the lower peer id's
+pick wins, so different picks still meet.
 
 ## Seven pickups
 

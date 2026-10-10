@@ -47,8 +47,8 @@ cargo run -p app
   fell one, a Heavy fells in one — and FIRE spreads tree to tree, burning
   the cover down for the rest of the match). Tap the arena line to open the
   roster screen (keys 1-7 pick directly on couch; A opens the roster
-  anywhere); online, your pick rides the room name so both players must
-  pick the same table to meet.
+  anywhere); online, the two players agree on a table after pairing (the
+  lower peer id's pick wins), so different picks still meet.
 - Start a match. **Player 0 = WASD**, **Player 1 = arrow keys**.
 - Throw is the boomerang button (see the on-screen prompts); dash gives
   i-frames; one hit kills; first to 5 wins the match.
@@ -298,12 +298,13 @@ For the second phone, either repeat the ADB install or send that same
 
 Both phones boot to the Title screen with **"TAP TO FIND OPPONENT"**. Tap the
 arena line under the table to open the roster (seven tables, each with its
-floor and rules) and pick one. The pick is part of the room name
-(`two-top-pit-v15?next=2`), so **both phones must pick the same arena to meet** —
-quick match queues per-arena now, and a private code pairs with the arena the
-same way ("dial CURS, pick the Pit"). The `-v15` is `sim::SIM_VERSION`: two
-APKs on different sim versions land in different rooms and never pair, which
-is the only version check the live wire has. Then both players tap PLAY.
+floor and rules) and pick one. The pick does NOT need to match: the room is
+`two-top-v15?next=2` (or `two-top-CURS-v15?next=2` for a private code), and
+once two phones pair they agree on one table (the lower peer id's pick) before
+the session starts. The `-v15` is `sim::SIM_VERSION`: two APKs on different
+sim versions land in different rooms and never pair, which is the only
+version check the live wire has — the waiting screen shows the build number
+so two people can compare. Then both players tap PLAY.
 
 ### 4f. What to verify (Phase 12, Gate 1)
 

@@ -2,11 +2,11 @@
 //!
 //! Before this screen the arena picker was a text line that cycled blind on
 //! tap, couch-only, keys 1-3 covering three of seven arenas. Now: tap the
-//! arena line on the Title (couch OR online — the pick rides the room name,
-//! see `room_code`) and the roster opens: seven rows, each with its real
+//! arena line on the Title (couch OR online — online, the pair agrees on a
+//! table after pairing, see `netplay::agreed_table`) and the roster opens: seven rows, each with its real
 //! floor as the thumbnail, its name, and one line of the rules that make it
 //! that arena. Tap a row to pick it; the pick persists in the settings JSON
-//! and (online) becomes part of the room you summon in.
+//! and (online) is what you offer the table handshake.
 
 use bevy::prelude::*;
 use input_touch::WindowSize;

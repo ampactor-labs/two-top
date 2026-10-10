@@ -72,28 +72,25 @@ impl RoomCode {
             .collect()
     }
 
-    /// The room URL this code + arena pick selects. The arena tag is part
-    /// of the room NAME on every path (quick and private), so two peers in
-    /// one room have structurally agreed on the table — no handshake, no
-    /// authority, no way to disagree. Friends coordinate out loud: "dial
-    /// CURS, pick the Pit." The sim version rides the name the same way:
-    /// two APKs sideloaded a week apart on different `SIM_VERSION`s land
-    /// in different rooms and simply never see each other, instead of
-    /// pairing, diverging, and each recording its own winner.
-    pub fn room_url(&self, arena: sim::ArenaId) -> Option<String> {
+    /// The room URL this code selects. The table is NOT part of the room
+    /// name: two people who dial the same code (or both tap FIND
+    /// OPPONENT) meet whatever table each last looked at, and agree on
+    /// one after pairing (`netplay`'s table handshake — the lower peer
+    /// id's pick wins). It used to ride the name, which split a phone on
+    /// the Pit and a fresh install on the Anchor into two rooms that
+    /// never saw each other: "we both tapped play and nothing happened."
+    /// The sim version still rides the name: two APKs sideloaded a week
+    /// apart on different `SIM_VERSION`s land in different rooms instead
+    /// of pairing, diverging, and each recording its own winner.
+    pub fn room_url(&self) -> Option<String> {
         let base = self.base_url.as_ref()?;
         let code = self.custom.then(|| self.code_string());
-        Some(room_url_with_parts(
-            base,
-            code.as_deref(),
-            arena_room_tag(arena),
-            sim::SIM_VERSION,
-        ))
+        Some(room_url_with_parts(base, code.as_deref(), sim::SIM_VERSION))
     }
 }
 
-/// The arena's room-name token. Lowercase so the room name reads as one
-/// path segment: `two-top-CURS-pit?next=2`.
+/// The arena's join-link token (`join.html#CURS-pit`). Lowercase so it
+/// reads as one clean path segment.
 pub fn arena_room_tag(arena: sim::ArenaId) -> &'static str {
     match arena {
         sim::ArenaId::Anchor => "anchor",
@@ -106,17 +103,17 @@ pub fn arena_room_tag(arena: sim::ArenaId) -> &'static str {
     }
 }
 
-/// Append the (optional) code, the arena tag and the sim version to the
-/// room *name*, preserving any query string: `ws://host/two-top?next=2` +
-/// `CURS` + `pit` + `14` → `ws://host/two-top-CURS-pit-v14?next=2`. Pure
-/// for testing. The version segment is what keeps mismatched builds
-/// apart — the live wire has no other version check (the handshake
-/// carries identity and keys only), and a desync between two builds is
-/// otherwise a log line nobody reads.
-pub fn room_url_with_parts(base: &str, code: Option<&str>, tag: &str, sim_version: u32) -> String {
+/// Append the (optional) code and the sim version to the room *name*,
+/// preserving any query string: `ws://host/two-top?next=2` + `CURS` +
+/// `15` → `ws://host/two-top-CURS-v15?next=2`. Pure for testing. The
+/// version segment is what keeps mismatched builds apart — the live wire
+/// has no other version check (the handshake carries identity and keys
+/// only), and a desync between two builds is otherwise a log line nobody
+/// reads.
+pub fn room_url_with_parts(base: &str, code: Option<&str>, sim_version: u32) -> String {
     let suffix = match code {
-        Some(c) => format!("-{c}-{tag}-v{sim_version}"),
-        None => format!("-{tag}-v{sim_version}"),
+        Some(c) => format!("-{c}-v{sim_version}"),
+        None => format!("-v{sim_version}"),
     };
     match base.split_once('?') {
         Some((path, query)) => format!("{path}{suffix}?{query}"),
@@ -128,9 +125,11 @@ pub fn room_url_with_parts(base: &str, code: Option<&str>, tag: &str, sim_versio
 /// `#CURS-pit` fragment, or the bare `CURS-pit` — into dial slots plus
 /// the arena. `None` for anything that isn't exactly a code and a known
 /// table: a QR is typed by nobody, so there is no fuzziness to forgive.
-// platform-gate-ok: a lint allowance, not a behaviour switch — the deep
-// link is an Android intent filter and the browser has join.html.
-#[cfg_attr(not(target_os = "android"), allow(dead_code))]
+// Desktop has no launch link to read; the parser still runs in tests.
+#[cfg_attr(
+    not(any(target_os = "android", target_family = "wasm")),
+    allow(dead_code)
+)]
 pub fn parse_join(uri: &str) -> Option<([u8; CODE_LEN], sim::ArenaId)> {
     let tail = uri.trim().rsplit(['/', '#']).next()?;
     let (code, tag) = tail.split_once('-')?;
@@ -165,61 +164,211 @@ pub fn join_link(watch_base: &str, code: &str, arena: sim::ArenaId) -> String {
 /// Android: the URI this launch was opened with, if any — the deep-link
 /// half of the sit-down ritual (`twotop://join/...` from the join page's
 /// button). One JNI hop: activity.getIntent().getDataString().
+///
+/// Only a COLD start reaches us this way. The activity is `singleTask`
+/// and NativeActivity has no `onNewIntent`, so a link tapped while 2-Top
+/// is already running just brings it forward with the old intent — see
+/// [`claim_clipboard_join`] for that case.
 #[cfg(target_os = "android")]
 fn launch_uri() -> Option<String> {
+    with_activity(|env, activity| {
+        let intent = env
+            .call_method(activity, "getIntent", "()Landroid/content/Intent;", &[])?
+            .l()?;
+        if intent.is_null() {
+            return Ok(None);
+        }
+        let data = env
+            .call_method(&intent, "getDataString", "()Ljava/lang/String;", &[])?
+            .l()?;
+        if data.is_null() {
+            return Ok(None);
+        }
+        Ok(Some(
+            env.get_string(&jni::objects::JString::from(data))?.into(),
+        ))
+    })
+}
+
+/// Run a JNI closure against the activity, clearing any pending Java
+/// exception on failure so the thread's JNIEnv stays usable (a pending
+/// exception aborts the process on the next JNI call).
+#[cfg(target_os = "android")]
+fn with_activity<T>(
+    f: impl FnOnce(&mut jni::JNIEnv, &jni::objects::JObject) -> jni::errors::Result<Option<T>>,
+) -> Option<T> {
     let ctx = ndk_context::android_context();
     let vm = unsafe { jni::JavaVM::from_raw(ctx.vm().cast()) }.ok()?;
     let mut env = vm.attach_current_thread().ok()?;
     let activity = unsafe { jni::objects::JObject::from_raw(ctx.context().cast()) };
-    let intent = env
-        .call_method(&activity, "getIntent", "()Landroid/content/Intent;", &[])
-        .ok()?
-        .l()
-        .ok()?;
-    let data = env
-        .call_method(&intent, "getDataString", "()Ljava/lang/String;", &[])
-        .ok()?
-        .l()
-        .ok()?;
-    if data.is_null() {
-        return None;
+    match f(&mut env, &activity) {
+        Ok(v) => v,
+        Err(e) => {
+            let _ = env.exception_clear();
+            tracing::warn!(target: "two_top::room_code", error = %e, "jni call failed");
+            None
+        }
     }
-    let s: String = env
-        .get_string(&jni::objects::JString::from(data))
-        .ok()?
-        .into();
-    Some(s)
 }
 
-/// Android: a scanned join link lands both phones at the same table with
-/// zero typing — parse the launch URI into the dial and the arena pick.
-/// Runs once in PostStartup (after the persisted arena restore, so the
-/// link's pick wins the boot it arrived on).
+/// The prefix the join page writes to the clipboard. Only this exact form
+/// is ever acted on — anything else on the clipboard is not ours to read.
 #[cfg(target_os = "android")]
-fn apply_launch_join(
-    mut code: ResMut<RoomCode>,
-    mut selected: ResMut<sim::SelectedArena>,
-    mut settings: ResMut<crate::settings::Settings>,
-) {
-    let Some(uri) = launch_uri() else {
-        return;
-    };
-    let Some((slots, arena)) = parse_join(&uri) else {
-        tracing::info!(target: "two_top::room_code", %uri, "launch uri is not a join link");
-        return;
+const JOIN_SCHEME: &str = "twotop://join/";
+
+/// Android, warm start: the join page's OPEN IN 2-TOP button also copies
+/// its `twotop://join/...` link to the clipboard, because a running app
+/// never sees the new intent (see [`launch_uri`]). When 2-Top regains
+/// focus on the Title, a join link on the clipboard is claimed — applied
+/// to the dial, then wiped so it fires once. Nothing else on the
+/// clipboard is ever kept or logged.
+#[cfg(target_os = "android")]
+fn clipboard_join_link() -> Option<String> {
+    use jni::objects::{JObject, JValue};
+    with_activity(|env, activity| {
+        let name = env.new_string("clipboard")?;
+        let cm = env
+            .call_method(
+                activity,
+                "getSystemService",
+                "(Ljava/lang/String;)Ljava/lang/Object;",
+                &[JValue::Object(&name)],
+            )?
+            .l()?;
+        if cm.is_null() || !env.call_method(&cm, "hasPrimaryClip", "()Z", &[])?.z()? {
+            return Ok(None);
+        }
+        let clip = env
+            .call_method(&cm, "getPrimaryClip", "()Landroid/content/ClipData;", &[])?
+            .l()?;
+        if clip.is_null() || env.call_method(&clip, "getItemCount", "()I", &[])?.i()? < 1 {
+            return Ok(None);
+        }
+        let item = env
+            .call_method(
+                &clip,
+                "getItemAt",
+                "(I)Landroid/content/ClipData$Item;",
+                &[JValue::Int(0)],
+            )?
+            .l()?;
+        if item.is_null() {
+            return Ok(None);
+        }
+        let text = env
+            .call_method(&item, "getText", "()Ljava/lang/CharSequence;", &[])?
+            .l()?;
+        if text.is_null() {
+            return Ok(None);
+        }
+        let text = env
+            .call_method(&text, "toString", "()Ljava/lang/String;", &[])?
+            .l()?;
+        let text: String = env.get_string(&jni::objects::JString::from(text))?.into();
+        if !text.trim().starts_with(JOIN_SCHEME) {
+            return Ok(None);
+        }
+        // Claimed: wipe it so the next focus doesn't re-apply it. API 28+
+        // has clearPrimaryClip; older phones get an empty clip instead.
+        if env
+            .call_method(&cm, "clearPrimaryClip", "()V", &[])
+            .is_err()
+        {
+            let _ = env.exception_clear();
+            let empty = env.new_string("")?;
+            let label = JObject::from(env.new_string("")?);
+            let blank = env
+                .call_static_method(
+                    "android/content/ClipData",
+                    "newPlainText",
+                    "(Ljava/lang/CharSequence;Ljava/lang/CharSequence;)Landroid/content/ClipData;",
+                    &[
+                        JValue::Object(&label),
+                        JValue::Object(&JObject::from(empty)),
+                    ],
+                )?
+                .l()?;
+            env.call_method(
+                &cm,
+                "setPrimaryClip",
+                "(Landroid/content/ClipData;)V",
+                &[JValue::Object(&blank)],
+            )?;
+        }
+        Ok(Some(text))
+    })
+}
+
+/// Point the dial and the table at a join link. `false` (and nothing
+/// changed) for anything that isn't one.
+#[cfg(any(target_os = "android", target_family = "wasm"))]
+fn apply_join(
+    uri: &str,
+    code: &mut RoomCode,
+    selected: &mut sim::SelectedArena,
+    settings: &mut crate::settings::Settings,
+) -> bool {
+    let Some((slots, arena)) = parse_join(uri) else {
+        tracing::info!(target: "two_top::room_code", "launch link is not a join link");
+        return false;
     };
     code.slots = slots;
     code.custom = true;
     selected.0 = arena;
     settings.arena = arena.as_u8();
-    crate::settings::persist(&settings);
-    save_room_code(&code);
+    crate::settings::persist(settings);
+    save_room_code(code);
     tracing::info!(
         target: "two_top::room_code",
         code = %code.code_string(),
         arena = arena_room_tag(arena),
         "join link accepted — the table is set",
     );
+    true
+}
+
+/// A scanned join link lands both phones at the same table with zero
+/// typing — parse the launch link into the dial and the arena pick. Runs
+/// once in PostStartup (after the persisted arena restore, so the link's
+/// pick wins the boot it arrived on). Android reads the launch intent;
+/// the browser reads the page's `#join=` fragment (`web::join_link`).
+#[cfg(any(target_os = "android", target_family = "wasm"))]
+fn apply_launch_join(
+    mut code: ResMut<RoomCode>,
+    mut selected: ResMut<sim::SelectedArena>,
+    mut settings: ResMut<crate::settings::Settings>,
+) {
+    #[cfg(target_os = "android")]
+    let uri = launch_uri();
+    #[cfg(target_family = "wasm")]
+    let uri = crate::web::join_link();
+    if let Some(uri) = uri {
+        apply_join(&uri, &mut code, &mut selected, &mut settings);
+    }
+}
+
+/// Android warm start: claim a join link from the clipboard when 2-Top
+/// regains focus on the Title (see [`clipboard_join_link`]).
+#[cfg(target_os = "android")]
+fn claim_clipboard_join(
+    mut focus: MessageReader<bevy::window::WindowFocused>,
+    screen: Res<State<AppScreen>>,
+    mut code: ResMut<RoomCode>,
+    mut selected: ResMut<sim::SelectedArena>,
+    mut settings: ResMut<crate::settings::Settings>,
+) {
+    // Drain every focus message this frame (not `any`, which would stop
+    // early and leave the rest to re-trigger next frame).
+    let mut gained = false;
+    for f in focus.read() {
+        gained |= f.focused;
+    }
+    if !gained || *screen.get() != AppScreen::Title {
+        return;
+    }
+    if let Some(uri) = clipboard_join_link() {
+        apply_join(&uri, &mut code, &mut selected, &mut settings);
+    }
 }
 
 fn room_code_path() -> Option<PathBuf> {
@@ -308,30 +457,17 @@ fn spawn_pad(mut commands: Commands, netplay: Res<NetplayConfig>) {
 }
 
 /// Boot: capture the quickmatch base URL. Composition happens in
-/// [`sync_room_url`] — it needs the arena pick, which the roster restore
-/// (`arena_select`) may still be applying this Startup.
+/// [`sync_room_url`].
 fn init_room_code(mut code: ResMut<RoomCode>, netplay: Res<NetplayConfig>) {
     code.base_url = netplay.room_url.clone();
 }
 
-/// Recompose the live room URL whenever the dialed code OR the arena pick
-/// changes — the arena tag rides the room name, so the pick is part of
-/// where you summon. Change-detection gates the work; the theater's
-/// transient `SelectedArena` stomp during playback recomposes harmlessly
-/// (nothing reads the URL mid-tape — `start_matchbox` stands down for the
-/// theater — and the teardown's restore recomposes it back).
-fn sync_room_url(
-    code: Res<RoomCode>,
-    selected: Res<sim::SelectedArena>,
-    mut netplay: ResMut<NetplayConfig>,
-) {
-    if code.base_url.is_none() {
+/// Recompose the live room URL whenever the dialed code changes.
+fn sync_room_url(code: Res<RoomCode>, mut netplay: ResMut<NetplayConfig>) {
+    if code.base_url.is_none() || !code.is_changed() {
         return;
     }
-    if !(code.is_changed() || selected.is_changed()) {
-        return;
-    }
-    netplay.room_url = code.room_url(selected.0);
+    netplay.room_url = code.room_url();
 }
 
 /// Title-screen taps/keys on the pad. Any change rewrites the live
@@ -600,8 +736,10 @@ impl Plugin for RoomCodePlugin {
     fn build(&self, app: &mut App) {
         // The scanned join link lands after the persisted picks restore,
         // so the boot it arrived on is the boot it configures.
-        #[cfg(target_os = "android")]
+        #[cfg(any(target_os = "android", target_family = "wasm"))]
         app.add_systems(PostStartup, apply_launch_join);
+        #[cfg(target_os = "android")]
+        app.add_systems(Update, claim_clipboard_join);
         app.insert_resource(load_room_code())
             .add_systems(Startup, (init_room_code, spawn_pad))
             .add_systems(Update, update_join_qr)
@@ -644,23 +782,23 @@ mod tests {
     }
 
     #[test]
-    fn code_and_arena_suffix_the_room_name_not_the_query() {
+    fn code_suffixes_the_room_name_not_the_query() {
         assert_eq!(
-            room_url_with_parts("ws://h:3536/two-top?next=2", Some("CURS"), "pit", 7),
-            "ws://h:3536/two-top-CURS-pit-v7?next=2"
+            room_url_with_parts("ws://h:3536/two-top?next=2", Some("CURS"), 7),
+            "ws://h:3536/two-top-CURS-v7?next=2"
         );
         assert_eq!(
-            room_url_with_parts("ws://h/two-top", None, "forest", 7),
-            "ws://h/two-top-forest-v7"
+            room_url_with_parts("ws://h/two-top", None, 7),
+            "ws://h/two-top-v7"
         );
     }
 
     #[test]
     fn different_sim_versions_never_share_a_room() {
         // The whole point: a stale sideload and a fresh one, same code,
-        // same table, must land in two rooms rather than one desync.
-        let a = room_url_with_parts("ws://h/two-top?next=2", Some("CURS"), "pit", 13);
-        let b = room_url_with_parts("ws://h/two-top?next=2", Some("CURS"), "pit", 14);
+        // must land in two rooms rather than one desync.
+        let a = room_url_with_parts("ws://h/two-top?next=2", Some("CURS"), 13);
+        let b = room_url_with_parts("ws://h/two-top?next=2", Some("CURS"), 14);
         assert_ne!(a, b);
         assert!(a.ends_with("-v13?next=2"));
         assert!(b.ends_with("-v14?next=2"));
@@ -677,34 +815,31 @@ mod tests {
     }
 
     #[test]
-    fn quick_room_carries_the_arena_tag() {
-        // The tag is what un-sticks quick match: the old hash of a FIXED
-        // base room string landed every quick match on the same arena
-        // forever. Now you queue for the table you picked.
+    fn quick_room_is_one_room_whatever_the_table() {
+        // Regression: the arena tag used to ride the room name, so two
+        // phones on different tables tapped FIND OPPONENT into two rooms
+        // and never met. The quick room is the base plus the version.
         let code = RoomCode {
             slots: [1, 2, 3, 4],
             custom: false,
             base_url: Some("ws://h/two-top?next=2".into()),
         };
         assert_eq!(
-            code.room_url(sim::ArenaId::Vigil),
-            Some(format!("ws://h/two-top-vigil-v{}?next=2", sim::SIM_VERSION))
+            code.room_url(),
+            Some(format!("ws://h/two-top-v{}?next=2", sim::SIM_VERSION))
         );
     }
 
     #[test]
-    fn custom_room_carries_the_code_and_the_arena() {
+    fn custom_room_carries_the_code_and_no_table() {
         let code = RoomCode {
             slots: [0, 1, 2, 3],
             custom: true,
             base_url: Some("ws://h/two-top?next=2".into()),
         };
         assert_eq!(
-            code.room_url(sim::ArenaId::Pit),
-            Some(format!(
-                "ws://h/two-top-CURS-pit-v{}?next=2",
-                sim::SIM_VERSION
-            ))
+            code.room_url(),
+            Some(format!("ws://h/two-top-CURS-v{}?next=2", sim::SIM_VERSION))
         );
     }
 
