@@ -26,7 +26,7 @@ edition = "2024"
 # the patch number rises for app-only builds (0.15.1: the Pixel launch fix,
 # icon and bot ramp were published as 0.15.0, same versionCode as the APK
 # that crashed).
-version = "0.15.1"
+version = "0.15.2"
 license = "MIT OR Apache-2.0"
 publish = false
 rust-version = "1.95"
