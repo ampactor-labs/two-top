@@ -15,17 +15,29 @@ use wasm_bindgen::prelude::*;
 use crate::screen::AppScreen;
 
 static WATCH_TAPE: OnceLock<Vec<u8>> = OnceLock::new();
+static JOIN_LINK: OnceLock<String> = OnceLock::new();
 
 /// The page's entry point. `watch_tape` is the raw `.bmrg` bytes when the
 /// URL named a shared match (index.html already fetched them from the
-/// drop); `None` boots the game.
+/// drop); `None` boots the game. `join` is the `CURS-pit` of a
+/// `#join=CURS-pit` page URL — the join page's PLAY IN THE BROWSER
+/// button — which `room_code` dials in at boot exactly as the APK does
+/// with a scanned link.
 #[wasm_bindgen]
-pub fn web_start(watch_tape: Option<Vec<u8>>) {
+pub fn web_start(watch_tape: Option<Vec<u8>>, join: Option<String>) {
     console_error_panic_hook::set_once();
     if let Some(bytes) = watch_tape {
         let _ = WATCH_TAPE.set(bytes);
     }
+    if let Some(join) = join {
+        let _ = JOIN_LINK.set(join);
+    }
     crate::run();
+}
+
+/// The join link this page was opened with, if any.
+pub(crate) fn join_link() -> Option<String> {
+    JOIN_LINK.get().cloned()
 }
 
 /// The determinism lane's probe (wasm.yml + web/check.html): recompute

@@ -13,36 +13,71 @@
     }
     #code { font-size: 64px; letter-spacing: 0.35em; color: #fff3ca; }
     #arena { font-size: 20px; color: #ffdc70; }
-    a.open {
-      display: inline-block; padding: 0.8em 1.6em; border: 3px solid #fff3ca;
+    a.btn {
+      display: block; width: min(22em, 100%); box-sizing: border-box;
+      padding: 0.9em 1.2em; border: 3px solid #fff3ca;
       background: #201c42; color: #fff3ca; text-decoration: none;
       font-size: 20px;
     }
+    a.btn.alt { border-color: rgba(210,196,156,0.6); background: none; font-size: 17px; }
     .dim { color: rgba(210,196,156,0.6); font-size: 14px; max-width: 30em; }
+    .dim a { color: #ffdc70; }
   </style>
 </head>
 <body>
   <div class="dim">YOU HAVE BEEN SUMMONED</div>
   <div id="code">····</div>
   <div id="arena"></div>
-  <a class="open" id="open" href="#">OPEN IN 2-TOP</a>
-  <div class="dim">
-    installed and CLOSED: the button drops you at this table. already
-    OPEN on your phone: dial the four glyphs above by hand (a running
-    app keeps its own counsel about new links). not yet installed: get the APK
-    (<a style="color:#ffdc70" href="https://github.com/ampactor-labs/two-top/releases/download/apk-latest/two-top.apk">two-top.apk</a>),
-    then tap PRIVATE on the title and dial the code by hand.
+  <a class="btn" id="open" href="#">OPEN IN 2-TOP</a>
+  <a class="btn alt" id="web" href="./">PLAY IN THE BROWSER</a>
+  <div class="dim" id="help">
+    no app? <a href="https://github.com/ampactor-labs/two-top/releases/download/apk-latest/two-top.apk">get the Android APK</a>,
+    or play right here in the browser. either way: the other phone
+    shows the same code, and you both tap DUEL.
   </div>
   <script>
+    const APK = "https://github.com/ampactor-labs/two-top/releases/download/apk-latest/two-top.apk";
+    const PACKAGE = "com.ampactorlabs.twotop";
     const m = location.hash.match(/^#([A-Za-z]{4})-([a-z]+)$/);
+    const open = document.getElementById("open");
+    const web = document.getElementById("web");
     if (m) {
       const code = m[1].toUpperCase();
+      const join = `${code}-${m[2]}`;
+      const deep = `twotop://join/${join}`;
       document.getElementById("code").textContent = code.split("").join(" ");
       document.getElementById("arena").textContent = "THE TABLE: " + m[2].toUpperCase();
-      document.getElementById("open").href = `twotop://join/${code}-${m[2]}`;
+      web.href = `./#join=${join}`;
+
+      if (/android/i.test(navigator.userAgent)) {
+        // An intent: link names the package, so Chrome opens 2-Top when it
+        // is installed and falls back to the APK download when it is not
+        // (a bare twotop:// link just dead-ends without the app).
+        open.href = `intent://join/${join}#Intent;scheme=twotop;package=${PACKAGE};`
+          + `S.browser_fallback_url=${encodeURIComponent(APK)};end`;
+        // A 2-Top that is ALREADY running never sees a new link (Android
+        // hands it to the open game without the code). So the tap also
+        // puts the link on the clipboard, and the game claims it from
+        // there the moment it comes to the front.
+        open.addEventListener("click", async (ev) => {
+          ev.preventDefault();
+          try {
+            await Promise.race([
+              navigator.clipboard.writeText(deep),
+              new Promise((r) => setTimeout(r, 400)),
+            ]);
+          } catch (_) { /* cold start still works without it */ }
+          location.href = open.href;
+        });
+      } else {
+        // No Android app on this device (an iPhone, a laptop): the browser
+        // build is the way in, so it becomes the main button.
+        open.remove();
+        web.classList.remove("alt");
+      }
     } else {
       document.getElementById("code").textContent = "NO CODE";
-      document.getElementById("open").remove();
+      open.remove();
     }
   </script>
 </body>
