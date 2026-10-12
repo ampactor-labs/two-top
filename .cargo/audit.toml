@@ -1,0 +1,26 @@
+# cargo-audit configuration (read by `cargo audit` and .github/workflows/audit.yml).
+#
+# Every ignore below is an advisory with NO upgrade path from this tree, each
+# checked for reachability. Remove an entry the moment its path goes away:
+# `cargo tree -i rustls-webpki@0.101.7 --target all` printing nothing means
+# all three below can go.
+
+[advisories]
+ignore = [
+    # rustls-webpki 0.101.7, pulled ONLY by rustls 0.21 <- async-tls 0.13 <-
+    # async-tungstenite 0.32 <- matchbox_socket 0.14 (the signaling websocket
+    # on native builds). matchbox_socket 0.14 is the newest release and hard-
+    # enables async-tungstenite's `async-tls` feature; async-tls 0.13 is the
+    # newest release and pins rustls 0.21. Nothing in this workspace can move
+    # it without forking matchbox.
+    #
+    # Name constraints for URI / wildcard names were accepted incorrectly.
+    # Exploiting it needs a name-constrained CA in the webpki root set to
+    # mis-issue a certificate for our signaling host. The connection only
+    # carries matchmaking (SDP/ICE); the match itself rides WebRTC DTLS.
+    "RUSTSEC-2026-0098",
+    "RUSTSEC-2026-0099",
+    # Reachable panic in certificate revocation list parsing. async-tls's
+    # client connector never loads CRLs, so the parser is never invoked.
+    "RUSTSEC-2026-0104",
+]
