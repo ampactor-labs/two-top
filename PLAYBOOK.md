@@ -303,8 +303,8 @@ floor and rules) and pick one. The pick does NOT need to match: the room is
 once two phones pair they agree on one table (the lower peer id's pick) before
 the session starts. The `-v15` is `sim::SIM_VERSION`: two APKs on different
 sim versions land in different rooms and never pair, which is the only
-version check the live wire has — the waiting screen shows the build number
-so two people can compare. Then both players tap PLAY.
+version check the live wire has — the waiting screen shows the build and the
+sim version so two people can compare. Then both players tap PLAY.
 
 ### 4f. What to verify (Phase 12, Gate 1)
 

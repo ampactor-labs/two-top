@@ -38,7 +38,11 @@ jobs:
       # server, relay credentials from the ICE vendor, and the SHARE loop.
       # Without TWOTOP_ROOM the browser build booted as a couch-only game
       # (no FIND OPPONENT, no PRIVATE) — a join link's PLAY IN THE BROWSER
-      # had nowhere to go. All plain URLs, safe in a public bundle.
+      # had nowhere to go. Plain URLs plus the vendor's X-App-Key, which
+      # is a drive-by filter rather than a secret: it is extractable from
+      # the APK and from this bundle alike, and the vendor's per-IP rate
+      # limit is the real gate. The TURN credentials themselves are minted
+      # per match by the vendor and never baked into either build.
       - name: Build the app for wasm
         env:
           TWOTOP_ROOM: ${{ vars.TWOTOP_ROOM || 'wss://two-top-matchbox-production.up.railway.app/two-top?next=2' }}

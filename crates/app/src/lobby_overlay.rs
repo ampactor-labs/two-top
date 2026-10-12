@@ -104,13 +104,19 @@ fn update_summoning(
     let dots = [".", "..", "...", ".."][(now * 2.0) as usize % 4];
     // The table no longer splits rooms (the pair agrees on one after
     // pairing), so the line names what actually must match: the code, and
-    // the build — a stale APK sits in another version's room, and naming
-    // the build is what lets two people compare screens and spot it.
+    // the sim version — that is the segment in the room name, so a phone
+    // on another sim generation sits in a room this one never sees. The
+    // build number rides along because it is what people can read off an
+    // APK, but two builds on the same sim pair fine.
     let build = env!("CARGO_PKG_VERSION");
+    let sim_v = sim::SIM_VERSION;
     let room_line = if room.custom {
-        format!("room {}\nbuild {build}", code_spaced(&room.code_string()))
+        format!(
+            "room {}\nbuild {build} / sim v{sim_v}",
+            code_spaced(&room.code_string())
+        )
     } else {
-        format!("quick match\nbuild {build}")
+        format!("quick match\nbuild {build} / sim v{sim_v}")
     };
     let challenger = crate::profile::peer_name(peer_profile.0);
     let msg = match &*state {
@@ -132,7 +138,7 @@ fn update_summoning(
                 // Lead with the mismatch a player can fix from the seat;
                 // the network is the second guess, not the first.
                 m.push_str(
-                    "\n\nif the other phone shows this too:\ncheck both show the same build -\nelse try both on Wi-Fi, or both on data",
+                    "\n\nif the other phone shows this too:\ncheck both show the same sim number -\nelse try both on Wi-Fi, or both on data",
                 );
             }
             Some(m)
