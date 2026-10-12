@@ -216,6 +216,66 @@ fn with_activity<T>(
 #[cfg(target_os = "android")]
 const JOIN_SCHEME: &str = "twotop://join/";
 
+/// How long after the join page writes the clipboard its link still
+/// counts as meant for us. The tap that writes it is the tap that brings
+/// 2-Top to the front, so this only has to cover a slow phone.
+#[cfg(target_os = "android")]
+const CLIP_FRESH_MS: i64 = 2 * 60 * 1000;
+
+/// Whether the primary clip is plain text set within [`CLIP_FRESH_MS`],
+/// judged from `getPrimaryClipDescription` alone — the clipboard read
+/// Android 12+ does not announce with a toast. A description with no
+/// usable timestamp (before API 26, or a vendor that reports 0) counts as
+/// fresh so the link still works there; those phones pay the toast they
+/// already paid before this check existed.
+#[cfg(target_os = "android")]
+fn clip_is_fresh_text(
+    env: &mut jni::JNIEnv,
+    cm: &jni::objects::JObject,
+) -> jni::errors::Result<bool> {
+    use jni::objects::JValue;
+    let desc = env
+        .call_method(
+            cm,
+            "getPrimaryClipDescription",
+            "()Landroid/content/ClipDescription;",
+            &[],
+        )?
+        .l()?;
+    if desc.is_null() {
+        return Ok(false);
+    }
+    let text = env.new_string("text/*")?;
+    let is_text = env
+        .call_method(
+            &desc,
+            "hasMimeType",
+            "(Ljava/lang/String;)Z",
+            &[JValue::Object(&text)],
+        )?
+        .z()?;
+    if !is_text {
+        return Ok(false);
+    }
+    // getTimestamp is API 26+ and min_sdk is 24: a missing method is an
+    // unknown age, not a stale clip.
+    let set_at = match env.call_method(&desc, "getTimestamp", "()J", &[]) {
+        Ok(v) => v.j()?,
+        Err(_) => {
+            let _ = env.exception_clear();
+            0
+        }
+    };
+    if set_at <= 0 {
+        return Ok(true);
+    }
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(set_at);
+    Ok(now - set_at <= CLIP_FRESH_MS)
+}
+
 /// Android, warm start: the join page's OPEN IN 2-TOP button also copies
 /// its `twotop://join/...` link to the clipboard, because a running app
 /// never sees the new intent (see [`launch_uri`]). When 2-Top regains
@@ -236,6 +296,16 @@ fn clipboard_join_link() -> Option<String> {
             )?
             .l()?;
         if cm.is_null() || !env.call_method(&cm, "hasPrimaryClip", "()Z", &[])?.z()? {
+            return Ok(None);
+        }
+        // Android 12+ toasts "2-Top pasted from your clipboard" on every
+        // getPrimaryClip, and this runs on every return to the Title. The
+        // clip's DESCRIPTION is the one read that toast does not cover, so
+        // it decides first: only fresh plain text (the join page writes it
+        // on the very tap that brings 2-Top forward) is worth reading.
+        // Anything older, or of another kind, is someone else's clipboard
+        // and stays unread.
+        if !clip_is_fresh_text(env, &cm)? {
             return Ok(None);
         }
         let clip = env
