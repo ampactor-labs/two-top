@@ -112,6 +112,15 @@ TWOTOP_ICE_URL="https://<vendor-host>/ice" scripts/phone.sh
 # or set the TWOTOP_ICE_URL repo variable so CI bakes it into apk-latest
 ```
 
+`ICE_APP_KEY` on the vendor turns on its `X-App-Key` turnstile: `/ice`
+answers 403 to any caller without it (`/healthz` stays open). Builds
+bake the same value from `TWOTOP_ICE_KEY` (the repo secret for CI,
+the env for `scripts/phone.sh`); a build without it gets the 403 and
+falls back to STUN-only. The key ships inside every APK, so it filters
+drive-by scrapers rather than authenticating anyone; the per-IP bucket
+and the credential TTL are what bound abuse. Bake the key into the
+builds before setting it on the vendor.
+
 ---
 
 ## Choosing a signaling server
