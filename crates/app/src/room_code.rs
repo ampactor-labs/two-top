@@ -171,44 +171,16 @@ pub fn join_link(watch_base: &str, code: &str, arena: sim::ArenaId) -> String {
 /// [`claim_clipboard_join`] for that case.
 #[cfg(target_os = "android")]
 fn launch_uri() -> Option<String> {
-    with_activity(|env, activity| {
-        let intent = env
-            .call_method(activity, "getIntent", "()Landroid/content/Intent;", &[])?
-            .l()?;
-        if intent.is_null() {
-            return Ok(None);
-        }
-        let data = env
-            .call_method(&intent, "getDataString", "()Ljava/lang/String;", &[])?
-            .l()?;
-        if data.is_null() {
-            return Ok(None);
-        }
-        Ok(Some(
-            env.get_string(&jni::objects::JString::from(data))?.into(),
-        ))
-    })
+    crate::android::launch_uri()
 }
 
-/// Run a JNI closure against the activity, clearing any pending Java
-/// exception on failure so the thread's JNIEnv stays usable (a pending
-/// exception aborts the process on the next JNI call).
+/// Run a JNI closure against the activity (`android::with_activity` owns
+/// the local frame and the pending-exception rule); `None` on any failure.
 #[cfg(target_os = "android")]
 fn with_activity<T>(
     f: impl FnOnce(&mut jni::JNIEnv, &jni::objects::JObject) -> jni::errors::Result<Option<T>>,
 ) -> Option<T> {
-    let ctx = ndk_context::android_context();
-    let vm = unsafe { jni::JavaVM::from_raw(ctx.vm().cast()) }.ok()?;
-    let mut env = vm.attach_current_thread().ok()?;
-    let activity = unsafe { jni::objects::JObject::from_raw(ctx.context().cast()) };
-    match f(&mut env, &activity) {
-        Ok(v) => v,
-        Err(e) => {
-            let _ = env.exception_clear();
-            tracing::warn!(target: "two_top::room_code", error = %e, "jni call failed");
-            None
-        }
-    }
+    crate::android::with_activity("clipboard", f).flatten()
 }
 
 /// The prefix the join page writes to the clipboard. Only this exact form

@@ -4,13 +4,12 @@
 //! plugins, two synchronized Players in a SyncTestSession). It's called
 //! from two places:
 //!   * `crates/app/src/main.rs` — desktop binary; calls `app::run()`.
-//!   * the `android_main` extern generated below by `#[bevy_main]` —
-//!     loaded by the Android NativeActivity at app launch when the crate
-//!     is compiled as a `cdylib` and packaged into an APK by cargo-apk.
-//!
-//! The `#[bevy_main]` macro is a no-op on every non-android target, so
-//! the `fn main()` it wraps is just an unreachable private function in
-//! desktop builds — the real desktop entry is `src/main.rs`.
+//!   * the `android_main` export at the bottom of this file — looked up by
+//!     the Android NativeActivity glue at app launch when the crate is
+//!     compiled as a `cdylib` and packaged into an APK by cargo-apk. It
+//!     hands straight to `android::main`, which owns the process's
+//!     lifetime (what `#[bevy_main]` generated here did not).
+//!   * `web::web_start` — the browser entry.
 
 use bevy::prelude::*;
 use bevy_ggrs::GgrsPlugin;
@@ -24,12 +23,15 @@ use sim::{
 use std::collections::HashMap;
 
 mod anchor;
+#[cfg(target_os = "android")]
+mod android;
 mod arena_select;
 mod attest;
 mod audio;
 mod bot;
 mod camera;
 mod capability;
+mod crash_report;
 mod dark_beyond;
 mod debug_overlay;
 mod devour;
@@ -37,6 +39,7 @@ mod grudge;
 mod haptics;
 mod hud;
 mod intro_card;
+mod lifecycle;
 mod lobby_overlay;
 mod logging;
 mod netplay;
@@ -74,6 +77,30 @@ use screen::{AppScreen, ScreenPlugin};
 use settings::SettingsPlugin;
 use theater::TheaterPlugin;
 use touch_controls::TouchControlsPlugin;
+
+/// Run blocking work on a thread of its own.
+///
+/// Bevy's task pools are NOT that in this build. The curated feature list
+/// in `Cargo.toml` leaves `multi_threaded` off (one thread runs every
+/// system, which is what the phone build was tuned and verified on), and
+/// without it `IoTaskPool` is the single-threaded pool: `spawn` runs the
+/// task right there on the caller's thread until it first waits, and a
+/// task that never waits — a blocking HTTP request — simply runs to
+/// completion inside the frame that spawned it. The ICE credential fetch
+/// and the tape upload were both "on the IO pool" in exactly that sense:
+/// tapping FIND OPPONENT froze the game for the length of a DNS lookup, a
+/// TLS handshake and a request, and on a network that swallows packets
+/// that is seconds — long enough for Android to offer to close the app.
+///
+/// A thread that cannot be spawned drops `work` unrun, and with it the
+/// channel sender it holds, so the caller's poll sees a disconnect and
+/// takes its fallback.
+#[cfg(not(target_family = "wasm"))]
+pub(crate) fn off_main_thread(name: &'static str, work: impl FnOnce() + Send + 'static) {
+    if let Err(e) = std::thread::Builder::new().name(name.into()).spawn(work) {
+        tracing::warn!(target: "two_top::app", name, error = %e, "could not spawn a worker thread");
+    }
+}
 
 /// Desktop window size, overridable via `TWOTOP_WINDOW=WxH` (e.g. `540x1200`
 /// to preview a tall-phone aspect). Defaults to the 2:3 portrait that frames
@@ -222,6 +249,8 @@ pub fn run() {
         .add_plugins(LobbyOverlayPlugin)
         .add_plugins(ScreenPlugin)
         .add_plugins(SettingsPlugin)
+        .add_plugins(lifecycle::LifecyclePlugin)
+        .add_plugins(crash_report::CrashReportPlugin)
         .init_resource::<FangTextures>()
         .init_resource::<netplay::LocalPlayerHandle>()
         .init_resource::<netplay::SessionIds>()
@@ -263,6 +292,8 @@ pub fn run() {
     if online {
         app.add_plugins(MatchboxPlugin);
     }
+    #[cfg(target_os = "android")]
+    app.add_plugins(android::AndroidPlugin);
 
     // Platform input source (level signals only; exactly one source).
     // Android: touch. Everything else (PC): keyboard — WASD for P0, arrows
@@ -454,12 +485,6 @@ fn toggle_fullscreen(
     }
 }
 
-/// Phase 13: surface graceful-shutdown events into the diagnostic log.
-/// Bevy's `AppExit` event fires when the window closes or
-/// `app.send_event(AppExit::Success)` is invoked elsewhere. Reading it
-/// here gives the log a clear "shutdown initiated" line right before
-/// the `App::run()` loop unwinds — useful for distinguishing a clean
-/// exit from a panic-driven termination.
 /// Phase 18 Task 5.6 — frame-time instrumentation. Accumulates per-frame
 /// `Time<Real>` deltas and emits a periodic `two_top::perf` summary (avg / max
 /// / count over the 60 fps budget) so a profiling session surfaces slow
@@ -506,6 +531,12 @@ fn frame_time_watch(time: Res<Time<Real>>, mut stats: Local<FrameStats>) {
     }
 }
 
+/// Phase 13: surface graceful-shutdown events into the diagnostic log.
+/// Bevy's `AppExit` event fires when the window closes or
+/// `app.send_event(AppExit::Success)` is invoked elsewhere. Reading it
+/// here gives the log a clear "shutdown initiated" line right before
+/// the `App::run()` loop unwinds — useful for distinguishing a clean
+/// exit from a panic-driven termination.
 fn log_app_exit(mut events: MessageReader<AppExit>) {
     for ev in events.read() {
         tracing::info!(
@@ -516,9 +547,13 @@ fn log_app_exit(mut events: MessageReader<AppExit>) {
     }
 }
 
-#[bevy_main]
-fn main() {
-    run();
+/// The symbol `android-activity`'s NativeActivity glue calls on its own
+/// thread once the Java activity exists. Everything about that thread's
+/// lifetime — and the process's — is `android::main`'s business.
+#[cfg(target_os = "android")]
+#[unsafe(no_mangle)]
+fn android_main(android_app: bevy::android::android_activity::AndroidApp) {
+    android::main(android_app);
 }
 
 /// `Startup`: spawn the *persistent* scene — camera, the desktop control

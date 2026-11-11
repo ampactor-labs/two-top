@@ -355,8 +355,9 @@ pub(crate) fn parse_ice_response(body: &str) -> Option<RtcIceServerConfig> {
     })
 }
 
-/// Blocking fetch of the vendor's ICE config (runs on the IO task pool —
-/// never the main thread). Tight timeout: the fallback exists. The
+/// Blocking fetch of the vendor's ICE config (runs on its own thread via
+/// `crate::off_main_thread` — never the main one). Tight timeout: the
+/// fallback exists. The
 /// browser's twin is [`fetch_ice_web`]; both feed the same channel that
 /// [`finish_ice_fetch`] polls, so the socket-open path is identical.
 #[cfg(not(target_family = "wasm"))]
@@ -449,15 +450,13 @@ fn start_matchbox(world: &mut World) {
     if let Some(ice_url) = config.ice_url {
         let ice_key = config.ice_key;
         let (tx, rx) = std::sync::mpsc::channel();
-        // Native: a blocking request on the IO pool. Browser: the page's
-        // own `fetch`, driven by the JS event loop. Both hand the same
-        // `Option<RtcIceServerConfig>` to the same receiver below.
+        // Native: a blocking request on a thread of its own. Browser: the
+        // page's own `fetch`, driven by the JS event loop. Both hand the
+        // same `Option<RtcIceServerConfig>` to the same receiver below.
         #[cfg(not(target_family = "wasm"))]
-        bevy::tasks::IoTaskPool::get()
-            .spawn(async move {
-                let _ = tx.send(fetch_ice(&ice_url, ice_key.as_deref()));
-            })
-            .detach();
+        crate::off_main_thread("twotop-ice", move || {
+            let _ = tx.send(fetch_ice(&ice_url, ice_key.as_deref()));
+        });
         #[cfg(target_family = "wasm")]
         wasm_bindgen_futures::spawn_local(async move {
             let _ = tx.send(fetch_ice_web(ice_url, ice_key).await);

@@ -211,8 +211,8 @@ struct DropReceipt {
     id: String,
 }
 
-/// Post `bytes` to the drop and compose the watch link. Runs on the IO
-/// task pool; reports through the channel.
+/// Post `bytes` to the drop and compose the watch link. Runs on its own
+/// thread (`crate::off_main_thread`); reports through the channel.
 #[cfg(not(target_family = "wasm"))]
 fn post_tape(drop_url: String, watch_url: String, bytes: Vec<u8>) -> Result<String, String> {
     let receipt: DropReceipt = ureq::post(&format!("{}/tape", drop_url.trim_end_matches('/')))
@@ -355,16 +355,14 @@ fn drive_share(
                 config.watch_url.clone().expect("checked complete"),
             );
             let (tx, rx) = std::sync::mpsc::channel();
-            // Native: a blocking post on the IO pool. Browser: the page's
-            // own fetch. The browser used to log "sharing is a follow-up"
-            // and do nothing, which made the web build share-only-inbound
-            // for no reason the platform actually imposes.
+            // Native: a blocking post on a thread of its own. Browser: the
+            // page's own fetch. The browser used to log "sharing is a
+            // follow-up" and do nothing, which made the web build
+            // share-only-inbound for no reason the platform imposes.
             #[cfg(not(target_family = "wasm"))]
-            bevy::tasks::IoTaskPool::get()
-                .spawn(async move {
-                    let _ = tx.send(post_tape(drop_url, watch_url, bytes));
-                })
-                .detach();
+            crate::off_main_thread("twotop-share", move || {
+                let _ = tx.send(post_tape(drop_url, watch_url, bytes));
+            });
             #[cfg(target_family = "wasm")]
             wasm_bindgen_futures::spawn_local(async move {
                 let _ = tx.send(post_tape_web(drop_url, watch_url, bytes).await);

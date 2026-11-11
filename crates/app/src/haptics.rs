@@ -46,69 +46,44 @@ fn is_local(local: &LocalPlayerHandle, handle: usize) -> bool {
 
 /// Fire a `ms`-millisecond vibration one-shot on the device.
 ///
-/// Android: hop into the JVM via the activity's `ndk_context`, fetch the
-/// `Vibrator` system service, and call the (legacy, API-24-safe) `vibrate(long)`
-/// overload. Best-effort — any JNI error is logged and swallowed; a missing or
-/// permission-denied vibrator must never take down the game loop.
+/// Android: one JNI hop to the platform `Vibrator` (`android::vibrate`).
+/// Best-effort — a missing or permission-denied vibrator is logged and
+/// swallowed; it must never take down the game loop.
 #[cfg(target_os = "android")]
 fn vibrate(ms: i64) {
-    use jni::JavaVM;
-    use jni::objects::{JObject, JValue};
-
-    let ctx = ndk_context::android_context();
-    let vm = match unsafe { JavaVM::from_raw(ctx.vm().cast()) } {
-        Ok(vm) => vm,
-        Err(e) => {
-            tracing::warn!(target: "two_top::haptics", error = %e, "JavaVM::from_raw failed");
-            return;
-        }
-    };
-    let mut env = match vm.attach_current_thread() {
-        Ok(env) => env,
-        Err(e) => {
-            tracing::warn!(target: "two_top::haptics", error = %e, "attach_current_thread failed");
-            return;
-        }
-    };
-    // The activity is the JNI Context we call getSystemService on.
-    let activity = unsafe { JObject::from_raw(ctx.context().cast()) };
-
-    let result = (|| -> jni::errors::Result<()> {
-        let service_name = env.new_string("vibrator")?;
-        let vibrator = env
-            .call_method(
-                &activity,
-                "getSystemService",
-                "(Ljava/lang/String;)Ljava/lang/Object;",
-                &[JValue::Object(&service_name)],
-            )?
-            .l()?;
-        env.call_method(&vibrator, "vibrate", "(J)V", &[JValue::Long(ms)])?;
-        Ok(())
-    })();
-
-    if let Err(e) = result {
-        // Clear any pending Java exception so the thread's JNIEnv stays usable.
-        let _ = env.exception_clear();
-        tracing::warn!(target: "two_top::haptics", error = %e, "vibrate failed");
-    }
+    crate::android::vibrate(ms);
 }
 
 /// The browser's vibrator. `navigator.vibrate` is the web's one haptic
 /// primitive: a duration, nothing else — which is exactly the shape this
 /// module already speaks. Chrome on Android honours it, so the browser
-/// build keeps the feel layer on the phones most likely to open it;
-/// iOS Safari does not implement it and the call is a silent no-op
-/// there, which is the same nothing the build did before.
+/// build keeps the feel layer on the phones most likely to open it.
+///
+/// iOS Safari does not implement it AT ALL, and that is not the silent
+/// no-op the first cut took it for. web-sys binds `vibrate` as a plain
+/// method call with no `catch`, so on an iPhone the call was
+/// `undefined(...)`: a `TypeError` thrown straight through the wasm frames
+/// with winit's runner still borrowed. Every later event then queued
+/// behind that borrow forever — the game froze, without a panic or a log
+/// line, on the first throw or the first kill of every iPhone session.
+/// So the function is looked up and called by hand: a missing vibrator is
+/// a missing property, and a throwing one is an `Err` that is dropped.
 #[cfg(target_family = "wasm")]
 fn vibrate(ms: i64) {
+    use wasm_bindgen::{JsCast, JsValue};
     let Some(window) = web_sys::window() else {
         return;
     };
-    // Rejected by browsers outside a user gesture, and absent entirely on
-    // iOS — both surface as a bool/exception we deliberately drop. A
-    // missing vibrator must never take down the game loop.
-    let _ = window.navigator().vibrate_with_duration(ms.max(0) as u32);
+    let navigator = window.navigator();
+    let Ok(method) = js_sys::Reflect::get(&navigator, &JsValue::from_str("vibrate")) else {
+        return;
+    };
+    let Some(method) = method.dyn_ref::<js_sys::Function>() else {
+        return;
+    };
+    // Browsers refuse it outside a user gesture; that refusal is a `false`
+    // or an exception, and neither may take down the game loop.
+    let _ = method.call1(&navigator, &JsValue::from_f64(ms.max(0) as f64));
 }
 
 /// Desktop and everything else: vibration is a no-op.

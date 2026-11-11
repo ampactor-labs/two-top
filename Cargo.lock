@@ -179,7 +179,7 @@ checksum = "7f202df86484c868dbad7eaa557ef785d5c66295e41b460ef922eca0723b842c"
 
 [[package]]
 name = "app"
-version = "0.15.3"
+version = "0.15.4"
 dependencies = [
  "base64 0.22.1",
  "bevy",
@@ -194,7 +194,6 @@ dependencies = [
  "input_touch",
  "jni 0.21.1",
  "js-sys",
- "ndk-context",
  "net",
  "qrcode",
  "rand 0.8.6",
@@ -2937,7 +2936,7 @@ dependencies = [
 
 [[package]]
 name = "fixed_math"
-version = "0.15.3"
+version = "0.15.4"
 dependencies = [
  "cordic",
  "fixed",
@@ -3796,7 +3795,7 @@ dependencies = [
 
 [[package]]
 name = "input_desktop"
-version = "0.15.3"
+version = "0.15.4"
 dependencies = [
  "bevy",
  "bevy_ggrs",
@@ -3805,7 +3804,7 @@ dependencies = [
 
 [[package]]
 name = "input_touch"
-version = "0.15.3"
+version = "0.15.4"
 dependencies = [
  "bevy",
  "bevy_ggrs",
@@ -4386,7 +4385,7 @@ dependencies = [
 
 [[package]]
 name = "net"
-version = "0.15.3"
+version = "0.15.4"
 dependencies = [
  "bevy",
  "bincode 2.0.1",
@@ -5494,7 +5493,7 @@ dependencies = [
 
 [[package]]
 name = "render"
-version = "0.15.3"
+version = "0.15.4"
 dependencies = [
  "bevy",
  "fixed_math",
@@ -5510,7 +5509,7 @@ checksum = "19b30a45b0cd0bcca8037f3d0dc3421eaf95327a17cad11964fb8179b4fc4832"
 
 [[package]]
 name = "replay"
-version = "0.15.3"
+version = "0.15.4"
 dependencies = [
  "bevy",
  "bevy_ggrs",
@@ -5522,7 +5521,7 @@ dependencies = [
 
 [[package]]
 name = "replay_sync"
-version = "0.15.3"
+version = "0.15.4"
 dependencies = [
  "bevy",
  "bevy_ggrs",
@@ -5536,7 +5535,7 @@ dependencies = [
 
 [[package]]
 name = "replay_viewer"
-version = "0.15.3"
+version = "0.15.4"
 dependencies = [
  "bevy",
  "bevy_ggrs",
@@ -5990,7 +5989,7 @@ dependencies = [
 
 [[package]]
 name = "sim"
-version = "0.15.3"
+version = "0.15.4"
 dependencies = [
  "android-activity",
  "bevy",
@@ -6222,7 +6221,7 @@ dependencies = [
 
 [[package]]
 name = "sync_test"
-version = "0.15.3"
+version = "0.15.4"
 dependencies = [
  "bevy",
  "bevy_ggrs",
