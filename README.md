@@ -16,7 +16,7 @@ Download `two-top.apk` from the newest release at https://github.com/ampactor-la
 
 ### A browser
 
-Open https://ampactor.dev/two-top/ in a phone or desktop browser. The deployed page has no signaling room URL baked in (the address where two peers meet), so it boots into local mode: the practice bot (PRACTICE VS BOT), couch versus on a keyboard, the replay theater, and any shared match by its link (`#watch=<id>`). On an iPhone, Share then Add to Home Screen installs it as a fullscreen icon (`web/manifest.webmanifest`).
+Open https://ampactor.dev/two-top/ in a phone or desktop browser. It is the same game as the APK and meets it in the same rooms: FIND OPPONENT, PRIVATE codes, a join link's PLAY IN THE BROWSER (the Pages workflow bakes in the public room, as `apk.yml` does). It also has the practice bot, couch versus on one keyboard (WASD/Space/Left Shift against the arrows/Right Shift/Right Control), the replay theater, and any shared match by its link (`#watch=<id>`). On an iPhone, Share then Add to Home Screen installs it as a fullscreen icon that keeps its identity and rivalry ledger (`web/manifest.webmanifest`); the page says so on an iPhone's first visits.
 
 ### A desktop build, for development
 
