@@ -300,8 +300,15 @@ pub fn prepare_windows(
                         of your Linux GPU driver, so it can be safely ignored."
                 );
             }
+            // 2-TOP BACKPORT (see vendor/README.md). Upstream 0.18.1 panics
+            // here. A phone returns `Timeout` or `Lost` whenever the
+            // compositor stops taking frames while the surface still exists
+            // (screen off, the app sliding into the background), and the
+            // next lifecycle event tears the surface down properly. Skipping
+            // the frame is what upstream does after 0.18.1.
             Err(err) => {
-                panic!("Couldn't get swap chain texture, operation unrecoverable: {err}");
+                tracing::error!("Couldn't get swap chain texture: {err}");
+                continue;
             }
         }
         window.swap_chain_texture_format = Some(surface_data.configuration.format);

@@ -15,6 +15,9 @@ members = [
     "crates/ice_vendor",
     "crates/tape_drop",
 ]
+# Third-party source carried for a backport (vendor/README.md). Not ours to
+# lint or format: keep it out of `--workspace`.
+exclude = ["vendor"]
 
 [workspace.package]
 edition = "2024"
@@ -47,3 +50,11 @@ codegen-units = 1
 # panic hook logs source locations from panic metadata, which stripping
 # does not touch.
 strip = "symbols"
+
+# One backported fix to bevy_render 0.18.1, which has no later 0.18.x
+# release to move to: a swapchain acquire that times out or reports the
+# surface lost skips the frame instead of panicking. On a phone that panic
+# was a launch crash one step removed (vendor/README.md has the chain).
+# Drop this table and `vendor/bevy_render` with the next Bevy upgrade.
+[patch.crates-io]
+bevy_render = { path = "vendor/bevy_render" }
