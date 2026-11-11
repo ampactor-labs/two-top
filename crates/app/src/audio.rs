@@ -850,6 +850,49 @@ fn play_match_state_sfx(
     }
 }
 
+/// What a lifecycle change asks of the audio: `Some(true)` to pause every
+/// sink, `Some(false)` to resume them, `None` to leave them be. Pure for
+/// tests.
+pub fn pause_for(state: bevy::window::AppLifecycle) -> Option<bool> {
+    use bevy::window::AppLifecycle;
+    match state {
+        AppLifecycle::WillSuspend | AppLifecycle::Suspended => Some(true),
+        AppLifecycle::WillResume | AppLifecycle::Running => Some(false),
+        AppLifecycle::Idle => None,
+    }
+}
+
+/// Silence the game while it is away.
+///
+/// The music beds loop on the audio device's own thread, which does not
+/// stop when the app does. On Android, pressing Home, taking a call or
+/// switching to a chat app to send a room code left the title theme or the
+/// match groove playing over whatever came next, until the app was swiped
+/// away. The lifecycle message arrives on the last update before the app
+/// suspends and the first after it resumes. Nothing else in the game
+/// pauses a sink, so resuming all of them restores exactly what was there.
+/// (The browser's tab-hidden case is the page's: `web/index.html`.)
+fn pause_audio_while_away(
+    mut lifecycle: MessageReader<bevy::window::AppLifecycle>,
+    sinks: Query<&AudioSink>,
+) {
+    use bevy::audio::AudioSinkPlayback as _;
+    let Some(pause) = lifecycle
+        .read()
+        .filter_map(|state| pause_for(*state))
+        .last()
+    else {
+        return;
+    };
+    for sink in &sinks {
+        if pause {
+            sink.pause();
+        } else {
+            sink.play();
+        }
+    }
+}
+
 /// Plugin: loads the cue handles + starts both music beds, then runs the
 /// edge-detector playback systems and the per-frame music mixer in `Update`.
 pub struct GameAudioPlugin;
@@ -882,6 +925,13 @@ impl Plugin for GameAudioPlugin {
                     // Before the mixer, so a fresh bed's zero volume is
                     // raised the same frame it spawns.
                     arena_air_bed.before(mix_music),
+                    // Last: a cue spawned on the suspending frame is
+                    // paused with the rest.
+                    pause_audio_while_away
+                        .after(mix_music)
+                        .after(match_point_heartbeat)
+                        .after(arena_air_bed)
+                        .after(play_match_state_sfx),
                 ),
             );
     }
@@ -893,6 +943,16 @@ mod tests {
 
     fn unit(x: f32, y: f32) -> Vec2 {
         Vec2::new(x, y).normalize()
+    }
+
+    #[test]
+    fn audio_pauses_on_the_way_out_and_resumes_on_the_way_back() {
+        use bevy::window::AppLifecycle;
+        assert_eq!(pause_for(AppLifecycle::WillSuspend), Some(true));
+        assert_eq!(pause_for(AppLifecycle::Suspended), Some(true));
+        assert_eq!(pause_for(AppLifecycle::WillResume), Some(false));
+        assert_eq!(pause_for(AppLifecycle::Running), Some(false));
+        assert_eq!(pause_for(AppLifecycle::Idle), None);
     }
 
     #[test]

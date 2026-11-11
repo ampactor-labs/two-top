@@ -169,6 +169,10 @@ pub struct TouchState {
     pub taunt_touch: Option<u64>,
     /// True iff a taunt-strip touch is currently held.
     pub taunt_held: bool,
+    /// Taps that began and ended between two frames, tracked for exactly
+    /// one frame and dropped at the start of the next
+    /// ([`apply_touch_events`]).
+    pub ending: Vec<u64>,
 }
 
 impl TouchState {
@@ -387,9 +391,14 @@ pub fn apply_touch_events(
 ) {
     state.frame = frame;
 
+    // Last frame's lightning taps have had their one frame.
+    let ended = std::mem::take(&mut state.ending);
+    state.touches.retain(|t| !ended.contains(&t.id));
+
     let mut dropped: Vec<u64> = just_released.into_iter().collect();
     dropped.extend(just_canceled);
     state.touches.retain(|t| !dropped.contains(&t.id));
+    let active: Vec<(u64, Vec2)> = active.into_iter().collect();
 
     for (id, pos) in just_pressed {
         // Bevy reuses ids after a touch ends; treat reuse as a brand-new
@@ -402,6 +411,18 @@ pub fn apply_touch_events(
             anchor_pos: pos,
             start_frame: frame,
         });
+        // A finger that landed AND lifted since the last frame: Bevy
+        // reports it pressed and released, and not held. Releases are
+        // applied above, before presses, so it used to be added after its
+        // own release and then tracked forever — a quick tap on THROW
+        // during a frame hitch held THROW down (the duelist stood there
+        // charging, and the tap-throw never came) until that id happened
+        // to be reused. It lives for this one frame, so the press is seen,
+        // and goes at the start of the next, so the release is too. (Still
+        // held means the id was reused by a new finger: that one stays.)
+        if dropped.contains(&id) && !active.iter().any(|(held, _)| *held == id) {
+            state.ending.push(id);
+        }
     }
 
     for (id, pos) in active {
@@ -868,6 +889,85 @@ mod tests {
         assert_eq!(t.id, 11);
         assert_eq!(t.start_pos, second);
         assert_eq!(t.start_frame, 2);
+    }
+
+    #[test]
+    fn a_tap_inside_one_frame_is_seen_for_one_frame_then_released() {
+        // Bevy's shape for a finger that landed and lifted between two
+        // frames: just pressed, just released, not held.
+        let mut s = TouchState::default();
+        let pos = Vec2::new(700.0, 700.0);
+        apply_touch_events(
+            &mut s,
+            1,
+            vec![(4u64, pos)],
+            vec![4u64],
+            empty_canceled_helper(),
+            empty_active(),
+        );
+        assert_eq!(s.touches.len(), 1, "the press is seen");
+        apply_touch_events(
+            &mut s,
+            2,
+            empty_pressed(),
+            empty_id(),
+            empty_canceled_helper(),
+            empty_active(),
+        );
+        assert!(s.touches.is_empty(), "and released a frame later");
+        assert!(s.ending.is_empty());
+    }
+
+    #[test]
+    fn a_reused_id_that_is_still_held_is_not_cut_short() {
+        // A finger ended and a new one took its id in the same frame: the
+        // new one is held, and must survive the next frame.
+        let mut s = TouchState::default();
+        let pos = Vec2::new(300.0, 300.0);
+        apply_touch_events(
+            &mut s,
+            1,
+            vec![(11u64, pos)],
+            vec![11u64],
+            empty_canceled_helper(),
+            vec![(11u64, pos)],
+        );
+        apply_touch_events(
+            &mut s,
+            2,
+            empty_pressed(),
+            empty_id(),
+            empty_canceled_helper(),
+            vec![(11u64, pos)],
+        );
+        assert_eq!(s.touches.len(), 1);
+    }
+
+    #[test]
+    fn a_one_frame_tap_on_throw_fires_instead_of_sticking() {
+        let win = Vec2::new(1080.0, 2400.0);
+        let pos = Vec2::new(900.0, 1200.0);
+        let mut s = TouchState::default();
+        apply_touch_events(
+            &mut s,
+            1,
+            vec![(5u64, pos)],
+            vec![5u64],
+            empty_canceled_helper(),
+            empty_active(),
+        );
+        apply_throw_state(&mut s, win, false);
+        assert!(s.throw_held, "the tap is a press on its frame");
+        apply_touch_events(
+            &mut s,
+            2,
+            empty_pressed(),
+            empty_id(),
+            empty_canceled_helper(),
+            empty_active(),
+        );
+        apply_throw_state(&mut s, win, false);
+        assert!(!s.throw_held, "and a release on the next: the throw fires");
     }
 
     #[test]

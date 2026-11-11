@@ -352,6 +352,7 @@ pub fn run() {
     app.add_systems(
         bevy_ggrs::prelude::ReadInputs,
         (
+            screen::hold_rematch_until_settled,
             screen::inject_ui_throw,
             netplay::gate_rematch_inputs,
             replay::playback_inputs_system.run_if(resource_exists::<replay::ReplayPlayback>),

@@ -149,6 +149,7 @@ impl Plugin for ScreenPlugin {
             .init_resource::<PendingUiThrow>()
             .init_resource::<PendingBotMatch>()
             .init_resource::<QuitArm>()
+            .init_resource::<MatchOverSince>()
             .add_systems(Startup, spawn_overlays)
             .add_plugins(RollbackClockPlugin)
             .add_systems(OnEnter(AppScreen::InMatch), spawn_match)
@@ -163,6 +164,7 @@ impl Plugin for ScreenPlugin {
             .add_systems(
                 Update,
                 (
+                    track_match_over,
                     update_awaiting_peer,
                     update_bot_offer.after(update_awaiting_peer),
                     pick_arena.run_if(in_state(AppScreen::Title)),
@@ -1607,6 +1609,85 @@ pub struct PendingUiThrow(pub u8);
 /// next time.
 const UI_THROW_FRAMES: u8 = 4;
 
+/// Seconds after a match is decided before anything may restart it: the
+/// devouring's hold and flight (`devour.rs`, 0.7 + 0.9).
+///
+/// `MatchOver` begins on the very tick of the deciding kill, and the sim
+/// restarts on the next THROW press. The press right after a kill is the
+/// one every player makes — calling the fang home — so the match-winning
+/// kill ran straight into a fresh 0-0: no summary, no devouring, no
+/// gauntlet tier, often no tape. Online the same press latched RUN IT BACK
+/// consent before either player had seen the result.
+pub const REMATCH_LOCKOUT_SECS: f32 = 1.6;
+
+/// When (`Time<Real>` seconds) the current `MatchOver` began; `None`
+/// outside one. Kept by [`track_match_over`].
+#[derive(Resource, Default, Debug, Clone, Copy)]
+pub struct MatchOverSince(pub Option<f32>);
+
+impl MatchOverSince {
+    /// Has the decided match been on screen for the whole lockout? `false`
+    /// outside a `MatchOver`, and on its first frame (before the clock has
+    /// been stamped).
+    pub fn settled(&self, now: f32) -> bool {
+        self.0
+            .is_some_and(|since| now - since >= REMATCH_LOCKOUT_SECS)
+    }
+}
+
+/// Stamp the moment a match is decided; clear it when the match leaves
+/// `MatchOver` (a rematch, or the screen closing).
+fn track_match_over(
+    time: Res<Time<Real>>,
+    state: Res<MatchState>,
+    mut since: ResMut<MatchOverSince>,
+) {
+    if matches!(*state, MatchState::MatchOver) {
+        since.0.get_or_insert(time.elapsed_secs());
+    } else {
+        since.0 = None;
+    }
+}
+
+/// May a THROW now restart the decided match? Only once the lockout has
+/// run AND the thumb has come up at least once since: a press held through
+/// the lockout would otherwise surface as a fresh edge the moment it ends.
+/// Once armed, it stays armed until the match leaves `MatchOver`. Pure.
+pub fn rematch_armed(was_armed: bool, settled: bool, throw_held: bool) -> bool {
+    was_armed || (settled && !throw_held)
+}
+
+/// `ReadInputs`, after every input source and before the UI injector and
+/// the online rematch gate: during a decided match's lockout, local THROW
+/// presses do not reach the wire. Pre-wire shaping of what this device
+/// sends, the legal kind (the rematch gate does the same); the sim, the
+/// peer and the tape only ever see the presses that remain.
+pub fn hold_rematch_until_settled(
+    time: Res<Time<Real>>,
+    state: Res<MatchState>,
+    since: Res<MatchOverSince>,
+    inputs: Option<ResMut<bevy_ggrs::LocalInputs<sim::GgrsCfg>>>,
+    mut armed: Local<bool>,
+) {
+    if !matches!(*state, MatchState::MatchOver) {
+        *armed = false;
+        return;
+    }
+    let Some(mut inputs) = inputs else {
+        return;
+    };
+    let throw_held = inputs
+        .0
+        .values()
+        .any(|input| input.buttons & sim::PlayerInput::THROW_DOWN != 0);
+    *armed = rematch_armed(*armed, since.settled(time.elapsed_secs()), throw_held);
+    if !*armed {
+        for input in inputs.0.values_mut() {
+            input.buttons &= !sim::PlayerInput::THROW_DOWN;
+        }
+    }
+}
+
 pub fn inject_ui_throw(
     mut pending: ResMut<PendingUiThrow>,
     local_players: Res<bevy_ggrs::LocalPlayers>,
@@ -1983,6 +2064,8 @@ type SummaryButtonQuery<'w, 's> = Query<
 fn update_summary_buttons(
     screen: Res<State<AppScreen>>,
     state: Res<MatchState>,
+    time: Res<Time<Real>>,
+    since: Res<MatchOverSince>,
     netplay: Res<NetplayConfig>,
     practice: Res<crate::bot::PracticeMode>,
     theater: Res<crate::theater::TheaterMode>,
@@ -2005,6 +2088,12 @@ fn update_summary_buttons(
     // the opponent has gone, where the slot now reads PLAY THE BOT and a
     // stale pre-flight consent must not render it pressed.
     let armed = online && !practice.0 && consent.local && !consent.peer && !opponent_gone;
+    // The primary reads as not-yet-pressable through the lockout.
+    let ink = if since.settled(time.elapsed_secs()) {
+        render::palette::HOT_BONE
+    } else {
+        render::palette::HOT_BONE.with_alpha(0.35)
+    };
 
     for (btn, mut vis, sprite, text, color) in &mut q {
         let shown = over
@@ -2021,10 +2110,15 @@ fn update_summary_buttons(
             continue;
         }
         let inverted = btn.action == SummaryAction::Primary && armed;
+        let ink = if btn.action == SummaryAction::Primary {
+            ink
+        } else {
+            render::palette::HOT_BONE
+        };
         match btn.role {
             BtnRole::Border => {
                 if let Some(mut s) = sprite {
-                    s.color = render::palette::HOT_BONE;
+                    s.color = ink;
                 }
             }
             BtnRole::Fill => {
@@ -2049,11 +2143,7 @@ fn update_summary_buttons(
                     };
                 }
                 if let Some(mut c) = color {
-                    c.0 = if inverted {
-                        render::palette::VOID
-                    } else {
-                        render::palette::HOT_BONE
-                    };
+                    c.0 = if inverted { render::palette::VOID } else { ink };
                 }
             }
         }
@@ -2068,6 +2158,8 @@ fn update_summary_buttons(
 fn summary_buttons_input(
     screen: Res<State<AppScreen>>,
     state: Res<MatchState>,
+    time: Res<Time<Real>>,
+    since: Res<MatchOverSince>,
     netplay: Res<NetplayConfig>,
     practice: Res<crate::bot::PracticeMode>,
     theater: Res<crate::theater::TheaterMode>,
@@ -2081,6 +2173,9 @@ fn summary_buttons_input(
     if *screen.get() != AppScreen::InMatch
         || !matches!(*state, MatchState::MatchOver)
         || theater.active()
+        // A thumb still on the stick or the dash corner when the match is
+        // decided sits right on this button: let the result land first.
+        || !since.settled(time.elapsed_secs())
     {
         return;
     }
@@ -2456,5 +2551,32 @@ mod unfinished_summary_tests {
         assert!(text.contains("nobody's win"), "{text}");
         assert!(!text.contains("WINS"), "{text}");
         assert!(text.contains("3RD MEETING"), "{text}");
+    }
+}
+
+#[cfg(test)]
+mod rematch_lockout_tests {
+    use super::*;
+
+    #[test]
+    fn the_decided_match_is_not_settled_until_the_lockout_has_run() {
+        assert!(!MatchOverSince(None).settled(100.0));
+        let since = MatchOverSince(Some(10.0));
+        assert!(!since.settled(10.0));
+        assert!(!since.settled(10.0 + REMATCH_LOCKOUT_SECS - 0.01));
+        assert!(since.settled(10.0 + REMATCH_LOCKOUT_SECS));
+    }
+
+    #[test]
+    fn a_thumb_held_through_the_lockout_must_lift_before_it_counts() {
+        // Mashing through the kill: nothing arms during the lockout.
+        assert!(!rematch_armed(false, false, true));
+        assert!(!rematch_armed(false, false, false));
+        // Lockout over, but THROW still down from the fight: not yet.
+        assert!(!rematch_armed(false, true, true));
+        // The thumb comes up: armed, and the next press is a real one.
+        assert!(rematch_armed(false, true, false));
+        // Armed stays armed while the press it was waiting for arrives.
+        assert!(rematch_armed(true, true, true));
     }
 }

@@ -26,13 +26,21 @@ use crate::anchor::ScreenAnchor;
 use crate::screen::AppScreen;
 
 /// Where the SHARE label sits on the summary (window-fraction, y-down),
-/// and the tap band around it. Low corner, clear of the summary card and
-/// the primary/quit strips.
-const SUMMARY_ANCHOR: (f32, f32) = (0.80, 0.16);
-const SUMMARY_BAND: ((f32, f32), (f32, f32)) = ((0.62, 0.98), (0.10, 0.22));
-/// Theater placement: top-right, under the marquee line.
-const THEATER_ANCHOR: (f32, f32) = (0.82, 0.12);
-const THEATER_BAND: ((f32, f32), (f32, f32)) = ((0.66, 0.98), (0.06, 0.18));
+/// and the tap band around it: the right-hand corner just BELOW the
+/// app-wide exit strip (`screen::TOP_EXIT_BAND`), clear of the summary
+/// card under it.
+///
+/// Both used to reach up into that strip, and every screen reads a tap
+/// there as BACK. In the theater the label's own centre was inside it, so
+/// SHARE started the upload and left the tape in the same frame (the QR
+/// came up over the replay list and was gone a frame later); on the
+/// summary the top half of the label was also LOBBY, or online LEAVE,
+/// which says goodbye to the opponent and ends any rematch.
+const SUMMARY_ANCHOR: (f32, f32) = (0.80, 0.215);
+const SUMMARY_BAND: ((f32, f32), (f32, f32)) = ((0.62, 0.98), (0.17, 0.26));
+/// Theater placement: the same corner, under the BACK box.
+const THEATER_ANCHOR: (f32, f32) = (0.82, 0.215);
+const THEATER_BAND: ((f32, f32), (f32, f32)) = ((0.66, 0.98), (0.17, 0.26));
 
 /// QR module scale (screen pixels per module) is left to the sprite
 /// transform; this is the quiet zone in modules, per the QR spec minimum.
@@ -473,6 +481,26 @@ impl Plugin for SharePlugin {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn no_share_target_reaches_into_the_exit_strip() {
+        let exit = crate::screen::TOP_EXIT_BAND;
+        for (anchor, band) in [
+            (SUMMARY_ANCHOR, SUMMARY_BAND),
+            (THEATER_ANCHOR, THEATER_BAND),
+        ] {
+            let (top, bottom) = band.1;
+            assert!(
+                top >= exit.1,
+                "band {band:?} overlaps the exit strip {exit:?}"
+            );
+            assert!(top < bottom);
+            assert!(
+                (top..bottom).contains(&anchor.1) && (band.0.0..band.0.1).contains(&anchor.0),
+                "the label at {anchor:?} sits inside its own band {band:?}",
+            );
+        }
+    }
 
     #[test]
     fn watch_urls_compose_with_and_without_trailing_slash() {
