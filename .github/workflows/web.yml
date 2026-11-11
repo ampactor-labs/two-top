@@ -86,6 +86,8 @@ jobs:
           cp web/manifest.webmanifest dist/
           cp web/icon-192.png web/icon-512.png web/apple-touch-icon.png dist/
           sed -i "s|__TWOTOP_DROP_URL__|${TWOTOP_DROP_URL}|" dist/index.html
+          # The boot line counts the module's download against this.
+          sed -i "s|__TWOTOP_WASM_BYTES__|$(stat -c%s dist/app_bg.wasm)|" dist/index.html
           cp -r assets dist/assets
           ls -la dist
       - uses: actions/upload-pages-artifact@v4

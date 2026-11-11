@@ -2,16 +2,28 @@
 <html lang="en">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <title>2-Top — join the table</title>
+  <link rel="icon" type="image/png" href="icon-192.png">
+  <link rel="apple-touch-icon" href="apple-touch-icon.png">
+  <meta name="theme-color" content="#100e22">
   <style>
     html, body { margin: 0; height: 100%; background: #100e22; color: #f2e5c9; }
     body {
       display: flex; flex-direction: column; align-items: center;
       justify-content: center; gap: 1.1em; font-family: monospace;
-      text-align: center; padding: 0 1em;
+      text-align: center; box-sizing: border-box;
+      padding: env(safe-area-inset-top) max(1em, env(safe-area-inset-right))
+               env(safe-area-inset-bottom) max(1em, env(safe-area-inset-left));
     }
-    #code { font-size: 64px; letter-spacing: 0.35em; color: #fff3ca; }
+    /* Sized to the screen and never wrapped: at a fixed 64px the four
+       glyphs were wider than a phone, and the code a friend had just been
+       sent read "C U R" over a lone "S". The negative margin takes back
+       the letter-spacing after the last glyph so the row sits centred. */
+    #code {
+      font-size: clamp(34px, 13vw, 64px); letter-spacing: 0.35em;
+      margin-right: -0.35em; white-space: nowrap; color: #fff3ca;
+    }
     #arena { font-size: 20px; color: #ffdc70; }
     a.btn {
       display: block; width: min(22em, 100%); box-sizing: border-box;
@@ -71,9 +83,13 @@
         });
       } else {
         // No Android app on this device (an iPhone, a laptop): the browser
-        // build is the way in, so it becomes the main button.
+        // build is the way in, so it becomes the main button, and the help
+        // line stops offering an APK this device cannot install.
         open.remove();
         web.classList.remove("alt");
+        document.getElementById("help").textContent =
+          "plays right here in the browser, nothing to install. "
+          + "the other phone shows the same code, and you both tap DUEL.";
       }
     } else {
       document.getElementById("code").textContent = "NO CODE";

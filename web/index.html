@@ -25,6 +25,18 @@
     html, body { margin: 0; height: 100%; background: #100e22; }
     body {
       display: flex; align-items: center; justify-content: center;
+      /* viewport-fit=cover hands the page the whole glass, including the
+         parts a phone draws over: the clock and Dynamic Island at the
+         top, the home-indicator bar at the bottom. Launched from the Home
+         Screen there is no browser chrome to keep the game out of them,
+         and the score pips sat under the island while the dash button sat
+         under the bar. Padding by the insets keeps the canvas (which Bevy
+         sizes to 100% of this box) on glass that is ours; the padding
+         itself is the same void the letterbox already shows. In a normal
+         browser tab every inset is 0 and nothing moves. */
+      box-sizing: border-box;
+      padding: env(safe-area-inset-top) env(safe-area-inset-right)
+               env(safe-area-inset-bottom) env(safe-area-inset-left);
       /* A finger on a game is aiming, never selecting or scrolling. */
       overscroll-behavior: none;
       touch-action: none;
@@ -47,45 +59,183 @@
       color: #f2e5c9; font-family: monospace; font-size: 14px;
       pointer-events: none; text-align: center; padding: 0 1em;
     }
+    /* The table is portrait. Android's installed app honours the
+       manifest's orientation lock; iOS ignores it, so a phone turned on
+       its side got the whole game as a postage stamp between two bars.
+       Phones only (a tablet on its side has the room to letterbox). */
+    #rotate {
+      display: none; position: fixed; inset: 0; z-index: 3;
+      align-items: center; justify-content: center;
+      background: #100e22; color: #fff3ca;
+      font-family: monospace; font-size: 18px; letter-spacing: 0.12em;
+    }
+    @media (orientation: landscape) and (pointer: coarse) and (max-height: 520px) {
+      #rotate { display: flex; }
+    }
+    /* iPhone, in a Safari tab: say how to get the full-screen game. */
+    #install {
+      display: none; position: fixed; left: 0; right: 0; z-index: 2;
+      top: env(safe-area-inset-top);
+      padding: 0.7em 2.4em 0.7em 1em; box-sizing: border-box;
+      background: #201c42; border-bottom: 2px solid #fff3ca;
+      color: #fff3ca; font-family: monospace; font-size: 13px;
+      line-height: 1.35; text-align: left;
+    }
+    #install b { color: #ffdc70; font-weight: normal; }
+    #install span {
+      position: absolute; right: 0.5em; top: 0.3em;
+      font-size: 22px; line-height: 1;
+    }
   </style>
 </head>
 <body>
   <canvas id="twotop-canvas"></canvas>
   <div id="boot">SUMMONING…</div>
+  <div id="rotate">TURN YOUR PHONE UPRIGHT</div>
+  <div id="install">
+    FULL SCREEN, AND YOUR RIVALS KEPT: tap <b>Share</b>, then
+    <b>Add to Home Screen</b>, and open 2&#8209;Top from there.<span>×</span>
+  </div>
   <script type="module">
     // Substituted by the Pages workflow from the repo's TWOTOP_DROP_URL
     // var; an empty value just disables #watch links.
     const DROP_URL = "__TWOTOP_DROP_URL__";
+
+    // Substituted by the Pages workflow with the wasm module's size in
+    // bytes, so the boot line can count toward something.
+    const WASM_BYTES = Number("__TWOTOP_WASM_BYTES__") || 0;
+
+    // iOS Safari has no Vibration API. The game looks `vibrate` up before
+    // calling it (crates/app/src/haptics.rs), but a build that did not
+    // froze for good on its first throw: calling `undefined` threw through
+    // the wasm frames and left the event loop borrowed. A harmless stand-in
+    // keeps any page that still carries such a module alive.
+    if (typeof navigator.vibrate !== "function") {
+      try { Navigator.prototype.vibrate = () => false; } catch (_) { /* frozen prototype */ }
+    }
 
     // Browser autoplay policy: an AudioContext constructed before the
     // viewer has interacted starts SUSPENDED, and the game's audio
     // backend (cpal, under bevy_audio) builds its context at startup —
     // long before the first tap. Nothing in the Rust can reach that
     // context to resume it, so the page keeps the handle: wrap the
-    // constructor to remember every context, and resume them on the
-    // first gesture. This must run BEFORE the wasm module initializes,
-    // which is why it sits above the import.
+    // constructor to remember every context, and resume them on a
+    // gesture. This must run BEFORE the wasm module initializes, which
+    // is why it sits above the import.
+    //
+    // Two iOS specifics. WebKit does not count `touchstart` as the gesture
+    // that may start audio — the finger LIFTING is (`touchend`, `click`) —
+    // so listening only on the way down left an iPhone silent. And a
+    // context that was running goes "interrupted", not "suspended", when
+    // the phone locks or a call comes in; anything that is not "running"
+    // gets resumed, on every gesture and whenever the page returns.
+    const liveAudio = [];
     (() => {
       const Native = window.AudioContext || window.webkitAudioContext;
       if (!Native) return;
-      const live = [];
       const Tracked = function (...args) {
         const ctx = new Native(...args);
-        live.push(ctx);
+        liveAudio.push(ctx);
         return ctx;
       };
       Tracked.prototype = Native.prototype;
       window.AudioContext = Tracked;
       if (window.webkitAudioContext) window.webkitAudioContext = Tracked;
-      const wake = () => {
-        for (const ctx of live) {
-          if (ctx.state === "suspended") ctx.resume().catch(() => {});
-        }
-      };
-      for (const ev of ["pointerdown", "touchstart", "keydown"]) {
-        window.addEventListener(ev, wake, { passive: true });
-      }
     })();
+    const wakeAudio = () => {
+      for (const ctx of liveAudio) {
+        if (ctx.state !== "running" && ctx.state !== "closed") {
+          try { ctx.resume().catch(() => {}); } catch (_) { /* not resumable yet */ }
+        }
+      }
+    };
+    // A hidden page stops drawing, so the game is frozen; its music should
+    // not keep playing over whatever the player switched to (a desktop
+    // browser keeps a background tab's audio running).
+    const hushAudio = () => {
+      for (const ctx of liveAudio) {
+        if (ctx.state === "running") {
+          try { ctx.suspend().catch(() => {}); } catch (_) { /* already gone */ }
+        }
+      }
+    };
+
+    // The screen. A phone dims and locks under a player who is watching
+    // rather than touching — waiting for a challenger, a replay, the
+    // summary — and a locked browser stops drawing, which the opponent
+    // meets as a walkout. The game says when it wants the screen held
+    // (crates/app/src/lifecycle.rs calls this); the lock is the page's to
+    // take, is dropped by the browser whenever the page is hidden, and is
+    // taken again when it comes back.
+    let wantAwake = false;
+    let wakeLock = null;
+    const syncWakeLock = async () => {
+      if (!("wakeLock" in navigator)) return;
+      try {
+        if (wantAwake && document.visibilityState === "visible") {
+          if (!wakeLock) {
+            const lock = await navigator.wakeLock.request("screen");
+            lock.addEventListener("release", () => {
+              if (wakeLock === lock) wakeLock = null;
+            });
+            wakeLock = lock;
+          }
+        } else if (wakeLock) {
+          const lock = wakeLock;
+          wakeLock = null;
+          await lock.release();
+        }
+      } catch (_) { /* refused (battery saver, no gesture yet): try again later */ }
+    };
+    window.twotopKeepAwake = (on) => { wantAwake = !!on; syncWakeLock(); };
+
+    // Ask the browser not to evict what the game keeps in localStorage:
+    // the install identity, the signing key and the rivalry ledger. Safari
+    // clears a site's storage after a week without a visit, and a wiped
+    // identity orphans the rivalry on BOTH phones.
+    let askedToPersist = false;
+    const keepStorage = () => {
+      if (askedToPersist) return;
+      askedToPersist = true;
+      try { navigator.storage?.persist?.().catch(() => {}); } catch (_) { /* no such API */ }
+    };
+
+    const onGesture = () => { wakeAudio(); syncWakeLock(); keepStorage(); };
+    for (const ev of ["pointerdown", "pointerup", "touchstart", "touchend", "click", "keydown"]) {
+      window.addEventListener(ev, onGesture, { passive: true });
+    }
+    document.addEventListener("visibilitychange", () => {
+      if (document.visibilityState === "visible") {
+        wakeAudio();
+        syncWakeLock();
+      } else {
+        hushAudio();
+      }
+    });
+
+    // An iPhone in a Safari tab has no way to go full screen except from
+    // the Home Screen, and an installed app keeps its storage where a tab
+    // loses it after a week. Say so, a few times, and get out of the way:
+    // never over a join or a shared tape (that visitor came to do
+    // something), never once it is installed.
+    (() => {
+      const ios = /iPad|iPhone|iPod/.test(navigator.userAgent)
+        || (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
+      const installed = navigator.standalone === true
+        || window.matchMedia?.("(display-mode: standalone)").matches
+        || window.matchMedia?.("(display-mode: fullscreen)").matches;
+      if (!ios || installed || location.hash) return;
+      let shown = 0;
+      try { shown = Number(localStorage.getItem("two-top/install-hint")) || 0; } catch (_) { return; }
+      if (shown >= 3) return;
+      const hint = document.getElementById("install");
+      const dismiss = () => hint.remove();
+      hint.style.display = "block";
+      hint.addEventListener("pointerdown", dismiss);
+      setTimeout(dismiss, 12000);
+      try { localStorage.setItem("two-top/install-hint", String(shown + 1)); } catch (_) { /* private mode */ }
+    })();
+
     const boot = document.getElementById("boot");
     const say = (t) => { boot.textContent = t; };
 
@@ -108,10 +258,44 @@
       return new Uint8Array(await res.arrayBuffer());
     }
 
+    // Fetch the module ourselves so the wait shows progress: it is several
+    // megabytes, and on a phone connection a motionless SUMMONING… read as
+    // a page that had died. The stream is split — one side is counted, the
+    // other goes to the streaming compiler exactly as before. Anything
+    // that goes wrong on this path falls back to the loader's own fetch.
+    async function loadGame(init) {
+      try {
+        const res = await fetch(new URL("./app_bg.wasm", import.meta.url));
+        if (!res.ok || !res.body) throw new Error(`module answered ${res.status}`);
+        const [counted, compiled] = res.body.tee();
+        (async () => {
+          const reader = counted.getReader();
+          let got = 0;
+          for (;;) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            got += value.byteLength;
+            say(WASM_BYTES > 0
+              ? `SUMMONING… ${Math.min(99, Math.floor(100 * got / WASM_BYTES))}%`
+              : `SUMMONING… ${(got / 1048576).toFixed(1)} MB`);
+          }
+        })().catch(() => {});
+        const streamed = new Response(compiled, {
+          headers: { "Content-Type": "application/wasm" },
+        });
+        return await init({ module_or_path: streamed });
+      } catch (e) {
+        // A failed attempt leaves the loader uninitialized, so it can
+        // simply be asked again.
+        console.warn("streamed load failed, loading the plain way:", e);
+        return init();
+      }
+    }
+
     try {
       const tape = await watchTape();
       const { default: init, web_start } = await import("./app.js");
-      await init();
+      await loadGame(init);
       if (notice) {
         // The tape failed but the game still boots: the notice stays up
         // long enough to be read instead of dying with the boot screen
