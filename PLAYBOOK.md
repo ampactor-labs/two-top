@@ -448,6 +448,20 @@ signaling server pairs you → you fight.
 This uses your local debug keystore to sign a release build for sideload
 playtesting. For store distribution, use a real upload/release key instead.
 
+**When it crashes on their phone** you do not need the phone. The next
+time they open 2-Top the title shows LAST RUN CRASHED / TAP HERE TO SEND
+THE REPORT; the tap opens their share sheet on a text report (phone, GPU,
+how Android says the run ended, the panic, the log tail) and they send it
+to you like any other message. `SIDELOAD.md` § After a crash has what is
+in it and where the same files sit for `adb`.
+
+**Friends on iPhone** play the web build: send them the Pages URL (or let
+them scan a private room's join QR, which offers PLAY IN THE BROWSER on an
+iPhone). Safari → Share → **Add to Home Screen** gives them the full-screen
+game and keeps their identity and rivalry ledger from being evicted; the
+page itself says so the first few times. Browser and APK meet in the same
+rooms, on the same sim version.
+
 For same-wifi: the signaling server runs on your machine (Rung 4 setup).
 For cross-network: deploy `matchbox_server` to a public host (see Rung 5).
 

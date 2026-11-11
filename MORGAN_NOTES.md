@@ -105,6 +105,40 @@ A silent desync would be worse. The crash names its frame in `crash.log`; the de
 
 The bill: if a nondeterminism bug ever ships again, a player gets a crash instead of a weird round. Acceptable while the fleet is two phones and every crash is a report I can read. The revisit gate is public release; at that point the humane version is to fence the observer to harness builds and have the app end the match as a forfeit with the tape flagged. Until then, fail loud.
 
+## Why a panic aborts on Android, and why the app owns `android_main` (0.15.4)
+
+Two phones "sometimes crash right after opening". Neither was in my hands, so this one was read out of the stack's source, and the reading is uncomfortable: the app could not survive *any* panic on a phone, and the damage showed up one launch later.
+
+`android-activity` wraps `android_main` in `catch_unwind`. A panic is logged, the activity is finished, and the process stays alive with nothing in it. Android keeps a cached process around for as long as it has the memory, which on a flagship is a long time. The next tap on the icon starts a second `android_main` in that same process; winit builds one event loop per process, bevy_winit `expect`s it, and the app closes the moment it opens. Every launch, until the OS reclaims the process. The first panic can be anything, and it can happen with nobody watching, because Bevy 0.18.1 panics on a swapchain acquire that times out, which is what happens when the screen goes dark under a live surface (see the next note). So: the game dies quietly in a pocket, and "crashes on launch" an hour later.
+
+`#[bevy_main]` cannot express the fix, so `lib.rs` exports `android_main` itself and hands it to `android::main`, whose one rule is that no way out leaves a process behind. A panic on the main thread aborts from the panic hook, after `crash.log` is written and the log file flushed. A clean return finishes the activity and exits. A watchdog thread polls `Activity.isDestroyed()` and exits when it turns true, because winit drops `MainEvent::Destroy` on the floor while `android-activity`'s `onDestroy` blocks the UI thread waiting for `android_main` to return; before this, a config change the manifest did not list was a frozen launch and an ANR.
+
+Abort rather than a quiet exit, on purpose: Android then shows its own crash dialog when the app was in front, writes an exit record, and the next launch is a cold start. A panic on any other thread is still only logged. I considered `panic = "abort"` for the release profile and left it alone: it would take the desktop tools with it and remove the choice per thread.
+
+The polling thread is the part I like least. It is four JNI calls a second for the life of the app, because the event the loop needs is the one winit does not forward. If winit ever does, delete the thread.
+
+## Why `bevy_render` is vendored (0.15.4)
+
+One arm of one `match`. 0.18.1's `prepare_windows` treats every swapchain-acquire failure except `Outdated` as fatal. wgpu gives the acquire a one second timeout and Android 11+ honours it, so a frame drawn after the compositor stops taking them and before the surface is torn down panics. Upstream changed that arm to log and skip the frame, after 0.18.1, and there is no 0.18.2.
+
+The options were: upgrade Bevy across two minor versions with `bevy_ggrs` and matchbox pinned behind it; replace Bevy's two window-surface systems with copies of my own (the surface lives in a private field, so it is both systems or neither, and then the screenshot plugin loses its surface); stop drawing whenever the window loses focus, which avoids the panic by guessing when it might happen; or carry the crate with the one-line change. The last is 1.3 MB of somebody else's code in the tree and exactly zero new logic. `vendor/README.md` has the diff and the removal steps. It goes when Bevy moves.
+
+## Why Bevy runs one thread here, and what that makes `IoTaskPool`
+
+`multi_threaded` is off in `crates/app/Cargo.toml`'s feature list. That was a deliberate choice for the phone (one thread runs every system, no render thread racing the activity lifecycle), and it has a consequence the code did not account for: without that feature `bevy_tasks` is the single-threaded pool, and `IoTaskPool::spawn` runs the task on the caller's thread until it first waits. A task that never waits runs to completion inside the frame that spawned it.
+
+The ICE credential fetch and the tape upload were both blocking `ureq` calls "on the IO pool". Tapping FIND OPPONENT froze the game for a DNS lookup, a TLS handshake and a request; ureq's timeout does not cover DNS, so on a network that swallows packets that is long enough for an ANR dialog. Both are on real threads now (`crate::off_main_thread`). The rule going forward: a task pool here is a way to interleave async work on the main thread, never a way to get off it. Asset decoding rides the same pool, so anything first loaded mid-match is a hitch on the frame that asks for it: load it at boot and hold the handle.
+
+Turning `multi_threaded` on would fix that class wholesale and change the executor, the render pipeline and every implicit system ordering in the presentation layer in one move. Not without a phone in hand.
+
+## Why Back is ignored during a live round, and why a decided match holds for 1.6 s
+
+Both are the same lesson: on a phone the thumbs never stop, and the game has to decide which touches mean something.
+
+Back first. winit swallows Android's Back key, so it did nothing anywhere; mapping it to Escape makes it mean "back" on every screen, as players expect. But on gesture navigation, the default on a Pixel, a thumb dragging the move stick off the left edge *is* the Back gesture, and in a round Escape arms QUIT. Two stray swipes inside 2.5 s would have quit a ranked match and filed the loss. So Back reaches the game everywhere except a live round, where the visible QUIT button is the only way out.
+
+The rematch hold. The sim restarts a decided match on any THROW press, and `MatchOver` begins on the tick of the deciding kill, which is exactly when every player presses THROW: to call the fang home. The winning kill ran straight into a fresh 0-0. The fix is pre-wire, like the online rematch gate: for the devouring's 1.6 s, and until the thumb has lifted once after it, local THROW never reaches the wire. The sim is untouched, the rule stays "a THROW restarts it", and the tape records only presses that were sent. I considered a sim-side hold (a frame count after `MatchOver`) and rejected it: a `SIM_VERSION` bump and a matrix run to fix what is a presentation problem.
+
 ## Why a configurable deadzone is determinism-safe
 
 `Settings.stick_deadzone` is player-local and persisted to disk, which normally screams desync risk — per-machine state feeding the sim is exactly how rollback games break. It's safe here because it acts strictly *pre-wire*: it shapes the analog stick magnitude *before* quantization into the 4-byte `PlayerInput`. Two peers with different deadzones still exchange byte-identical quantized wire inputs and resimulate identically; the deadzone only changes how each player's raw touch maps into those bytes, exactly like controller sensitivity. The rule it illustrates: anything *before* wire-quantization may be local and non-deterministic; anything *consuming* the wire input must be identical everywhere. `StickDeadzone` (in `input_touch`) is read by the touch sampler before it emits `PlayerInput`, and `Settings` just mirrors the persisted value into it. (The volume, music, and haptics settings are cosmetic — they never touch the sim at all.)

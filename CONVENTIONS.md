@@ -81,6 +81,31 @@ Hard rules. Violations cause subtle bugs that are expensive to find. The CI and 
   ```
 
   `scripts/check_platform_gates.py` enforces this in CI.
+- **No way out of `android_main` leaves the process alive.** `android-activity`
+  catches a panic and keeps the process; winit cannot build a second event
+  loop in it; every later launch then closes on sight. `crates/app/src/android.rs`
+  owns the entry point so that a main-thread panic aborts, a clean return
+  exits, and a destroyed activity exits. Do not reintroduce `#[bevy_main]`,
+  and do not add a path that returns from `android::main`.
+- **All JNI goes through `android::with_activity`.** It hands out the real
+  Activity (not `ndk_context`'s Application), scopes every call in a local
+  reference frame, and clears any pending Java exception. A bare
+  `attach_current_thread` + `call_method` leaks references on a thread that
+  never returns to Java.
+- **A Bevy task pool is not a background thread here.** `multi_threaded` is
+  off, so `IoTaskPool::spawn` runs the task on the caller's thread until it
+  first awaits. Anything that blocks (HTTP, DNS, large file I/O) goes through
+  `crate::off_main_thread`. See MORGAN_NOTES § "Why Bevy runs one thread here".
+- **Never call a browser API that may be missing through a plain web-sys
+  binding.** A binding without `catch` throws a JS exception through the wasm
+  frames when the method is `undefined`, and winit's web runner never recovers
+  from that: the game freezes with no panic and no log (`navigator.vibrate` on
+  iOS did exactly this). Look it up with `js_sys::Reflect::get` and call it as
+  a `js_sys::Function` (`haptics.rs`, `lifecycle.rs`).
+- **`vendor/` is third-party source under `[patch.crates-io]`,** excluded from
+  the workspace. Each entry is a verbatim crate plus a minimal, documented
+  diff (`vendor/README.md`); it is removed, not maintained, at the next
+  upgrade of the crate it shadows.
 - **No `unsafe` in `sim` or `fixed_math` crates** without an `// SAFETY:` comment block explaining why.
 - **All public types in `sim` and `fixed_math` derive `Debug`.**
 

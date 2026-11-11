@@ -783,3 +783,188 @@ verified by compiling, linting and the 1800-frame browser checksum
 probe. None of it is verified by a finger on a phone. The controls fix
 in particular deserves one real tap before it is believed — the last
 one shipped looking correct.
+
+---
+
+## Playtest round 2 — two phones that close on launch (2026-11-10)
+
+The report: on a Pixel 7 and on a heavy work phone of unknown make, the
+app "sometimes crashes right after opening". No phone was in reach for
+this pass, so every finding below was read out of source — ours and the
+stack's — and every fix is verified by compiling for the phone, by the
+unit tests around its decisions, and by nothing else. That limit is
+restated at the end, where it belongs.
+
+### 🔴 Any panic on a phone poisoned every launch after it
+
+Three facts, each from the dependency's own source:
+
+- `android-activity` 0.6.1 wraps `android_main` in `catch_unwind`. A
+  panic is logged, the activity is finished, and **the process stays
+  alive** (`native_activity/glue.rs`, `rust_glue_entry`).
+- winit builds one event loop per process
+  (`EventLoopError::RecreationAttempt`), bevy_winit `expect`s the build,
+  and `bevy::android::ANDROID_APP` is a `OnceLock` that keeps the first
+  activity's handle.
+- So the next tap on the icon, into the still-cached process, starts a
+  second `android_main`, panics on the event loop, is caught, and
+  finishes the activity. Again on the next tap. Until Android reclaims
+  the process — which on an 8 GB phone is not soon.
+
+"Sometimes" is the cached process: it only bites while the dead one is
+still around. (Why the dev phone showed it less is a guess — less RAM
+and a vendor that evicts cached processes sooner would do it.) P6 #3
+named this in its last sentence ("even if the subscriber survived, a
+second winit event loop in one process is its own abort") and the fix
+that landed stopped one line short of it.
+
+It also explains why no crash log ever matched: the second launch's
+panic **overwrote** `crash.log` with "Failed to build event loop",
+erasing the one that mattered.
+
+Fixed in `crates/app/src/android.rs`, which now owns `android_main`. A
+panic on the main thread aborts from the hook, after `crash.log`
+(append-only now, capped) is written; Android gets a crash it
+understands and the next launch is cold. A clean return exits. A second
+entry, which should no longer be reachable, exits instead of panicking.
+
+### 🔴 The first panic had a ready source: the screen going dark
+
+Bevy 0.18.1's `prepare_windows` panics on any swapchain-acquire failure
+but `Outdated`. wgpu gives the acquire one second and Android 11+
+honours it. Between the display going off (or the app sliding away) and
+the activity being stopped, the surface exists and the compositor is not
+taking frames. A frame drawn in that gap times out, and the app dies in
+the user's pocket — to be discovered at the next launch, by the finding
+above. P6 #6 (no keep-screen-on) is the common way into the gap: thirty
+untouched seconds in AWAITING A CHALLENGER.
+
+Upstream replaced the panic with a logged skip after 0.18.1; there is no
+0.18.2. Backported as a one-arm patch to a vendored `bevy_render`
+(`vendor/README.md`), and the screen is now held on through `InMatch`
+(with a three-minute cap on a forgotten waiting room).
+
+### 🔴 A destroyed activity hung the UI thread for good
+
+winit ignores `MainEvent::Destroy`. `android-activity`'s `onDestroy`
+blocks the Java UI thread until `android_main` returns. So an activity
+the system destroyed under a live process — any config change the
+manifest does not absorb, and the platform adds one most years — was a
+frozen relaunch and an ANR. A watchdog thread now polls
+`Activity.isDestroyed()` and exits the process; the system relaunches
+into a fresh one.
+
+### 🟠 The JNI was holding the wrong object, and leaking
+
+- `ndk_context`'s context is the **Application** since `android-activity`
+  0.6.1, not the Activity. `getIntent()` does not exist on it, so the
+  cold-start half of the sit-down ritual (`launch_uri`) has been failing
+  into a swallowed `NoSuchMethodError`; the clipboard half, which only
+  needs a `Context`, covered for it.
+- The main thread never returns to Java, so every local reference made
+  on it lived until the process died: two per haptic, a dozen per
+  clipboard check. Newer Android grows the table as needed; the oldest
+  release we install on (`min_sdk` 24) caps it at 512 and aborts past
+  that.
+
+One seam now (`android::with_activity`): the real Activity from
+`ANDROID_APP`, a local frame per call, and no pending exception left
+behind, whichever way the closure ends.
+
+### 🟠 Tapping FIND OPPONENT froze the game
+
+`multi_threaded` is off in the app's Bevy feature list, and without it
+`IoTaskPool::spawn` runs the task on the calling thread until it first
+waits. The ICE credential fetch and the tape upload are blocking `ureq`
+calls: they ran, whole, inside the frame that spawned them. ureq's
+timeout does not cover DNS. Both are on real threads now
+(`crate::off_main_thread`).
+
+### 🟠 A crash on a friend's phone could not be reported
+
+`crash.log` lands in `Android/data/<pkg>/files`, which no stock Files
+app on Android 11+ will open. The next launch after a crash now shows
+LAST RUN CRASHED / TAP HERE TO SEND THE REPORT on the title; the tap
+opens the share sheet on a text report. On Android 11+ it also reads
+`ApplicationExitInfo`, so a crash inside the GPU driver or an ANR — no
+Rust runs on the way out of either — is reported too
+(`crates/app/src/crash_report.rs`).
+
+### 🟠 Back did nothing; the music played on after Home
+
+winit reports Back as handled, so the system never acted on it. It is
+every screen's Escape now and leaves the app from the title — except in
+a live round, where a gesture-nav edge swipe off the move stick would
+otherwise arm QUIT (MORGAN_NOTES has the reasoning). And the four music
+beds loop on the audio thread, which did not stop with the app: Home,
+a call, or switching to a chat app to send a room code left the theme
+playing over it. Every sink pauses on suspend and resumes on return.
+
+### 🟠 Three ways the thumbs did something nobody meant
+
+- **A tap inside one frame stuck forever.** Bevy reports a finger that
+  landed and lifted between frames as pressed AND released; releases
+  were applied before presses, so it was added after its own release
+  and never removed. A quick THROW tap during a hitch left THROW held
+  (the duelist stood charging; the tap-throw never came). It now lives
+  one frame and is released on the next (`input_touch`, three tests).
+- **The winning kill rematched itself.** `MatchOver` starts on the tick
+  of the deciding kill and the sim restarts on the next THROW press,
+  which is the press everyone makes to call the fang home. The summary,
+  the devouring and the gauntlet tier were skipped; online, the press
+  consented to RUN IT BACK unseen. For 1.6 s, and until the thumb lifts
+  once, local THROW no longer reaches the wire, and the summary button
+  dims and ignores taps (`screen::hold_rematch_until_settled`).
+- **SHARE was also BACK.** Both SHARE targets reached up into the
+  top strip every screen reads as BACK. In the theater SHARE started the
+  upload and left the tape in one frame; on an online summary its top
+  half sent LEAVE. Both sit below the strip now, with a test that keeps
+  them there.
+
+### 🔴 The browser build froze on an iPhone's first throw
+
+D4 above wired `navigator.vibrate` and called iOS's lack of it "the same
+silent nothing it was". It is not. web-sys binds `vibrate` without
+`catch`; on an iPhone the property is `undefined`, the call throws a
+`TypeError` through the wasm frames with winit's runner still borrowed,
+and every event after that queues behind the borrow forever. No panic,
+no log line: the game stops on the first local throw or the first kill.
+Haptics default on. The function is now looked up before it is called
+(`haptics.rs`), and `web/index.html` installs a stand-in for any cached
+module that still does it the old way. CONVENTIONS now forbids the
+pattern.
+
+The same pass, all in `web/index.html` unless noted:
+
+- **Audio was probably silent on iOS.** WebKit does not treat
+  `touchstart` as the gesture that may start audio; the unlock listened
+  on the way down only. It now listens on the way up too, and resumes a
+  context in any state but `running` (a locked phone leaves it
+  `interrupted`, which the old `=== "suspended"` check never matched). A
+  hidden tab now suspends it.
+- **Safe areas.** `viewport-fit=cover` was set and the insets its own
+  comment promised were not. From the Home Screen the pips sat under the
+  Dynamic Island and the dash button under the home bar.
+- **Screen wake lock**, driven by the same `wants_screen_on` rule as the
+  APK (`lifecycle.rs` calls the page's hook).
+- **`storage.persist()`**, an install hint for Safari tabs, a "turn your
+  phone upright" card (iOS ignores the manifest's orientation), and a
+  boot line that counts the module's download instead of sitting still.
+- `join.html`: the room code no longer wraps on a phone, and the page
+  stops offering an APK to a device that cannot install one.
+
+### Unverified, and it is most of it
+
+Nothing in this section has run on a phone. Specifically:
+
+- That the zombie-process chain is *the* cause on those two phones, and
+  not merely *a* cause, is an inference from source. It fits the report;
+  the first crash report from the field is what will confirm it.
+- The JNI in `android.rs` compiles for `aarch64-linux-android` and has
+  been read line by line. It has not been called.
+- The APK was not packaged here (no SDK), so `aapt` has not seen the
+  manifest; it is unchanged except for comments.
+- No iPhone has opened the page. The freeze was reasoned from the
+  binding; the audio and safe-area fixes from WebKit's documented
+  behaviour. The pages were exercised in headless Chromium with a stub
+  module, across phone and tablet profiles.
