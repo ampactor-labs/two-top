@@ -219,10 +219,7 @@ fn load_room_code() -> RoomCode {
     let Some(path) = room_code_path() else {
         return RoomCode::default();
     };
-    let mut code: RoomCode = crate::paths::read_document(&path)
-        .ok()
-        .and_then(|text| serde_json::from_str(&text).ok())
-        .unwrap_or_default();
+    let mut code: RoomCode = crate::paths::read_json(&path, "room_code.json").unwrap_or_default();
     for slot in &mut code.slots {
         *slot %= CODE_ALPHABET.len() as u8;
     }
@@ -233,14 +230,7 @@ fn save_room_code(code: &RoomCode) {
     let Some(path) = room_code_path() else {
         return;
     };
-    if let Some(parent) = path.parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
-    if let Ok(json) = serde_json::to_string_pretty(code)
-        && let Err(e) = crate::paths::write_atomic(&path, json.as_bytes())
-    {
-        tracing::warn!(target: "two_top::room_code", error = %e, "failed to save room code");
-    }
+    crate::paths::write_json(&path, code, "room_code.json");
 }
 
 /// One glyph slot of the private dial (0..CODE_LEN).

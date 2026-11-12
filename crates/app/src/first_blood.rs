@@ -50,29 +50,14 @@ fn load_progress() -> Progress {
     let Some(path) = crate::paths::config_file(PROGRESS_FILE) else {
         return Progress::default();
     };
-    let Ok(text) = crate::paths::read_document(&path) else {
-        return Progress::default();
-    };
-    serde_json::from_str(&text).unwrap_or_else(|e| {
-        tracing::warn!(target: "two_top::first_blood", error = %e, "progress.json is corrupt; starting fresh");
-        crate::paths::quarantine_corrupt(&path);
-        Progress::default()
-    })
+    crate::paths::read_json(&path, PROGRESS_FILE).unwrap_or_default()
 }
 
 fn save_progress(progress: &Progress) {
     let Some(path) = crate::paths::config_file(PROGRESS_FILE) else {
         return;
     };
-    if let Some(dir) = path.parent() {
-        let _ = std::fs::create_dir_all(dir);
-    }
-    let Ok(text) = serde_json::to_string_pretty(progress) else {
-        return;
-    };
-    if let Err(e) = crate::paths::write_atomic(&path, text.as_bytes()) {
-        tracing::warn!(target: "two_top::first_blood", error = %e, "could not save progress");
-    }
+    crate::paths::write_json(&path, progress, PROGRESS_FILE);
 }
 
 /// The lesson, while a match is it.

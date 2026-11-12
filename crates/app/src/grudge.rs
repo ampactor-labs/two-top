@@ -245,35 +245,14 @@ fn load_career() -> CareerRecord {
 /// old path handed back a default that the next decided match then wrote
 /// over the only evidence of what happened.
 fn read_career(path: &std::path::Path) -> CareerRecord {
-    let Ok(text) = crate::paths::read_document(path) else {
-        return CareerRecord::default();
-    };
-    match serde_json::from_str(&text) {
-        Ok(record) => record,
-        Err(e) => {
-            tracing::error!(
-                target: "two_top::grudge",
-                error = %e,
-                "career.json is corrupt — quarantining it and starting a fresh ledger",
-            );
-            crate::paths::quarantine_corrupt(path);
-            CareerRecord::default()
-        }
-    }
+    crate::paths::read_json(path, "career.json").unwrap_or_default()
 }
 
 fn save_career(record: &CareerRecord) {
     let Some(path) = career_path() else {
         return;
     };
-    if let Some(parent) = path.parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
-    if let Ok(json) = serde_json::to_string_pretty(record)
-        && let Err(e) = crate::paths::write_atomic(&path, json.as_bytes())
-    {
-        tracing::warn!(target: "two_top::grudge", error = %e, "failed to save career record");
-    }
+    crate::paths::write_json(&path, record, "career.json");
 }
 
 /// How a forfeit reached us. Read off `LobbyState::Forfeited.conceded`.

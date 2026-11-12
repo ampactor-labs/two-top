@@ -296,35 +296,14 @@ fn load_profile() -> LocalProfile {
 /// happened — and with `paths::write_atomic` on every save, the only way
 /// to get here anymore is outside interference (a hand edit, a bad disk).
 fn read_profile(path: &std::path::Path) -> LocalProfile {
-    let Ok(text) = crate::paths::read_document(path) else {
-        return LocalProfile::default();
-    };
-    match serde_json::from_str(&text) {
-        Ok(profile) => profile,
-        Err(e) => {
-            tracing::error!(
-                target: "two_top::profile",
-                error = %e,
-                "profile.json is corrupt — quarantining it and reminting",
-            );
-            crate::paths::quarantine_corrupt(path);
-            LocalProfile::default()
-        }
-    }
+    crate::paths::read_json(path, "profile.json").unwrap_or_default()
 }
 
 fn save_profile(profile: &LocalProfile) {
     let Some(path) = profile_path() else {
         return;
     };
-    if let Some(parent) = path.parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
-    if let Ok(json) = serde_json::to_string_pretty(profile)
-        && let Err(e) = crate::paths::write_atomic(&path, json.as_bytes())
-    {
-        tracing::warn!(target: "two_top::profile", error = %e, "failed to save profile");
-    }
+    crate::paths::write_json(&path, profile, "profile.json");
 }
 
 /// Your name over your demon on the title.

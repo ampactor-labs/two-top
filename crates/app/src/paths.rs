@@ -280,6 +280,42 @@ fn write_atomic_fs(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
         })
 }
 
+/// Read one persisted JSON document. `None` when there is none (a first
+/// boot) or it cannot be read; a document that is there but will not
+/// parse as `T` is quarantined beside it ([`quarantine_corrupt`]) and read
+/// as `None`, never silently replaced. `what` names it in the log. Every
+/// persisted document goes through here, so every one gets that promise.
+pub fn read_json<T: serde::de::DeserializeOwned>(path: &Path, what: &str) -> Option<T> {
+    let text = read_document(path).ok()?;
+    match serde_json::from_str(&text) {
+        Ok(value) => Some(value),
+        Err(e) => {
+            tracing::error!(
+                target: "two_top::paths",
+                file = what,
+                error = %e,
+                "unreadable — kept beside it as .corrupt, starting fresh",
+            );
+            quarantine_corrupt(path);
+            None
+        }
+    }
+}
+
+/// Save one persisted JSON document, atomically ([`write_atomic`]). A
+/// failure is logged; the game carries on with what it holds in memory.
+pub fn write_json<T: serde::Serialize>(path: &Path, value: &T, what: &str) {
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let result = serde_json::to_string_pretty(value)
+        .map_err(std::io::Error::other)
+        .and_then(|json| write_atomic(path, json.as_bytes()));
+    if let Err(e) = result {
+        tracing::warn!(target: "two_top::paths", file = what, error = %e, "could not save");
+    }
+}
+
 /// Move a file that exists but will not parse aside as a `.corrupt`
 /// sibling: evidence a human can hand back, instead of bytes the next
 /// save silently replaces. With [`write_atomic`] on every save, the only
@@ -328,6 +364,38 @@ pub(crate) fn test_scratch(test: &str) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every persisted document (settings, room code, lesson progress,
+    /// career, profile) reads through `read_json`. Settings and the room
+    /// code used to fall back to defaults on a file that would not parse,
+    /// and the next save wrote over the only copy.
+    #[test]
+    fn a_document_that_will_not_parse_is_kept_aside_and_reads_as_none() {
+        #[derive(serde::Serialize, serde::Deserialize, Debug, PartialEq)]
+        struct Doc {
+            volume: u8,
+        }
+        let dir = test_scratch("json_doc");
+        let path = dir.join("settings.json");
+        assert_eq!(
+            read_json::<Doc>(&path, "settings.json"),
+            None,
+            "absent: none"
+        );
+
+        write_json(&path, &Doc { volume: 7 }, "settings.json");
+        assert_eq!(read_json(&path, "settings.json"), Some(Doc { volume: 7 }));
+
+        std::fs::write(&path, "{\"volume\": 7, \"mu").unwrap();
+        assert_eq!(read_json::<Doc>(&path, "settings.json"), None);
+        assert!(!path.exists(), "moved aside, not left to be overwritten");
+        assert_eq!(
+            std::fs::read_to_string(dir.join("settings.json.corrupt")).unwrap(),
+            "{\"volume\": 7, \"mu",
+            "the bytes survive for a human to hand back"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn write_atomic_replaces_the_target_and_cleans_the_sibling() {

@@ -98,26 +98,16 @@ fn load_settings() -> Settings {
     let Some(path) = settings_path() else {
         return Settings::default();
     };
-    match crate::paths::read_document(&path) {
-        Ok(text) => serde_json::from_str::<Settings>(&text)
-            .map(Settings::clamped)
-            .unwrap_or_default(),
-        Err(_) => Settings::default(),
-    }
+    crate::paths::read_json::<Settings>(&path, "settings.json")
+        .map(Settings::clamped)
+        .unwrap_or_default()
 }
 
 fn save_settings(settings: &Settings) {
     let Some(path) = settings_path() else {
         return;
     };
-    if let Some(parent) = path.parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
-    if let Ok(json) = serde_json::to_string_pretty(settings)
-        && let Err(e) = crate::paths::write_atomic(&path, json.as_bytes())
-    {
-        tracing::warn!(target: "two_top::settings", error = %e, "failed to save settings");
-    }
+    crate::paths::write_json(&path, settings, "settings.json");
 }
 
 pub struct SettingsPlugin;
