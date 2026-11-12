@@ -672,6 +672,14 @@ fn drive_netplay(world: &mut World) {
     }
 
     // --- Pre-swap: drive the lobby from socket peer-state ---
+    // No session yet, so no silence to measure: a peer that has not begun
+    // sending frames is matchbox's to report (`PeerState::Disconnected`
+    // below), not the grace timer's. The timer ages on real time
+    // (`net::SilenceClock`), so an unpinned stamp read every second spent
+    // waiting in the room as silence, and a pairing after a minute's wait
+    // went straight to a forfeit in the table handshake.
+    let now = world.resource::<net::SilenceClock>().0;
+    world.resource_mut::<LastPeerMessageFrame>().0 = now;
     // `try_`, not `update_peers`: once the signaling loop dies (server
     // unreachable after matchbox's built-in retries), the plain call
     // unwraps the closed channel and ABORTS the app — a phone with no
@@ -1375,6 +1383,44 @@ mod tests {
         assert_eq!(agreed_table(high, low, forest, pit), pit);
         // Same pick on both sides is simply that table.
         assert_eq!(agreed_table(high, low, pit, pit), pit);
+    }
+
+    /// Regression: the grace timer ages on real time, and nothing stamped
+    /// the peer's last message before the session existed, so a player who
+    /// had waited in the room was forfeited the frame a peer paired (seen
+    /// on a real local room: Connected → Disconnected → Forfeited in 15 ms
+    /// after a minute's wait).
+    #[test]
+    fn a_pairing_after_a_long_wait_is_not_read_as_silence() {
+        let mut world = World::new();
+        let (socket, message_loop) = WebRtcSocketBuilder::new("ws://127.0.0.1:1/room")
+            .add_channel(ChannelConfig::unreliable())
+            .add_channel(ChannelConfig::reliable())
+            .build();
+        world.insert_non_send_resource(MatchboxDriver {
+            socket,
+            channel_taken: false,
+            interrupted: false,
+            table: TableHandshake::default(),
+            backlog: Vec::new(),
+        });
+        let peer = PeerId(uuid_from(2));
+        world.insert_resource(LobbyState::Connected { peer_id: peer });
+        world.insert_resource(PendingP2PSwap::default());
+        world.insert_resource(net::SilenceClock(60 * 60)); // a minute in the room
+        world.insert_resource(LastPeerMessageFrame(0));
+        world.insert_resource(sim::MatchState::default());
+
+        drive_netplay(&mut world);
+        world
+            .run_system_cached(net::tick_disconnection_grace)
+            .unwrap();
+        assert_eq!(
+            *world.resource::<LobbyState>(),
+            LobbyState::Connected { peer_id: peer },
+            "a table handshake is not a silent peer",
+        );
+        drop(message_loop); // held so the socket reads as open
     }
 
     fn uuid_from(n: u128) -> uuid::Uuid {
