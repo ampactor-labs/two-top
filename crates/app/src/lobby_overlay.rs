@@ -64,6 +64,9 @@ fn spawn_summoning(mut commands: Commands) {
 /// instead of breathing dots forever.
 const STALL_DIAGNOSIS_SECS: f32 = 15.0;
 
+/// Seconds a paired session may spend synchronizing in silence.
+const SYNC_WORD_SECS: f32 = 2.0;
+
 /// While in-match but pre-peer, the wait is a *ceremony*, not a debug
 /// string: SUMMONING with a breathing ellipsis and the dialed room. The
 /// bad states (away / forfeit) speak plainly and large, and a stalled
@@ -77,6 +80,7 @@ fn update_summoning(
     room: Res<RoomCode>,
     peer_profile: Res<net::PeerProfile>,
     absence: Res<crate::netplay::RecentAbsence>,
+    sync: Res<crate::netplay::SyncWait>,
     mut stall: Local<Option<(std::mem::Discriminant<LobbyState>, f32)>>,
     mut q: Query<(&mut Text2d, &mut Visibility), With<SummoningText>>,
 ) {
@@ -157,6 +161,16 @@ fn update_summoning(
         }
         LobbyState::SummonFailed => Some(
             "COULDN'T REACH THE ROOM SERVER\n\ncheck this phone's connection,\nthen CANCEL and try again"
+                .to_string(),
+        ),
+        // Paired, and the first frame is taking its time: say so after a
+        // moment rather than show a frozen board (it normally lands in
+        // well under a second; `netplay::SYNC_BUDGET_SECS` bounds it).
+        LobbyState::Connected { .. } if sync.waiting() => {
+            (since > SYNC_WORD_SECS).then(|| format!("REACHING {challenger}{dots}"))
+        }
+        LobbyState::PeerUnreachable => Some(
+            "COULDN'T REACH YOUR CHALLENGER\n\ntry both on Wi-Fi,\nor both on data,\nthen CANCEL and try again"
                 .to_string(),
         ),
         // A desync ends at MatchOver, where the summary card owns the screen.
@@ -249,6 +263,7 @@ fn update_overlay(
             )
         }
         LobbyState::SummonFailed => "lobby: summons FAILED (signaling lost)".to_string(),
+        LobbyState::PeerUnreachable => "lobby: peer UNREACHABLE (sync never finished)".to_string(),
     };
     text.0 = label;
 }

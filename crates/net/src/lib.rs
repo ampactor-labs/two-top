@@ -828,6 +828,12 @@ pub enum LobbyState {
     /// player is told, and CANCEL / PLAY THE BOT are the exits. Replaces
     /// a fall-back to `Idle`, which rendered nothing at all.
     SummonFailed,
+    /// Paired, but the session never synchronized: the peer vanished
+    /// between pairing and the first frame, or packets never got through,
+    /// twice (the app re-dials once on its own first). Nothing was at
+    /// stake and nothing is recorded; the player is told, and CANCEL /
+    /// PLAY THE BOT are the exits, as for [`LobbyState::SummonFailed`].
+    PeerUnreachable,
 }
 
 impl LobbyState {
@@ -1400,6 +1406,7 @@ mod tests {
             .is_in_match()
         );
         assert!(!LobbyState::SummonFailed.is_in_match());
+        assert!(!LobbyState::PeerUnreachable.is_in_match());
     }
 
     #[test]
@@ -1423,6 +1430,7 @@ mod tests {
             LobbyState::Idle,
             LobbyState::Connecting,
             LobbyState::SummonFailed,
+            LobbyState::PeerUnreachable,
             LobbyState::WaitingForPeer { our_id: peer },
             LobbyState::Connected { peer_id: peer },
             LobbyState::Disconnected {

@@ -52,7 +52,8 @@ pub struct AwaitingPeer(pub bool);
 pub const BOT_OFFER_DELAY_SECS: f32 = 5.0;
 
 /// Whether the bot may be offered to a player still waiting for a peer.
-/// A summons that failed outright (`SummonFailed`) is offered at once —
+/// A summons that failed outright (`SummonFailed`, `PeerUnreachable`) is
+/// offered at once —
 /// there is nothing left to wait for.
 pub fn bot_offer_armed(waited_secs: f32, summons_failed: bool) -> bool {
     summons_failed || waited_secs >= BOT_OFFER_DELAY_SECS
@@ -1295,13 +1296,16 @@ fn update_awaiting_peer(
     practice: Res<crate::bot::PracticeMode>,
     theater: Res<crate::theater::TheaterMode>,
     lobby: Res<net::LobbyState>,
+    sync: Res<crate::netplay::SyncWait>,
     mut awaiting: ResMut<AwaitingPeer>,
 ) {
+    // Paired but not yet synchronized is still waiting: the challenger
+    // has not arrived until their first frame has.
     awaiting.0 = *screen.get() == AppScreen::InMatch
         && netplay.room_url.is_some()
         && !practice.0
         && !theater.active()
-        && !lobby.is_in_match();
+        && (!lobby.is_in_match() || sync.waiting());
 }
 
 /// Arm PLAY THE BOT only once the summons has actually hung (or failed).
@@ -1317,7 +1321,10 @@ fn update_bot_offer(
     }
     let now = time.elapsed_secs();
     let since = *offer.since.get_or_insert(now);
-    let failed = matches!(*lobby, net::LobbyState::SummonFailed);
+    let failed = matches!(
+        *lobby,
+        net::LobbyState::SummonFailed | net::LobbyState::PeerUnreachable
+    );
     offer.armed = bot_offer_armed(now - since, failed);
 }
 
@@ -1929,12 +1936,9 @@ fn quit_button_input(world: &mut World) {
         && !world.resource::<crate::bot::PracticeMode>().0;
     if online {
         // Abandoning a live duel is a loss, filed before the goodbye. A
-        // pre-swap wait (no session yet) or a peer who already fled stakes
-        // no result.
-        let established = world
-            .resource::<crate::netplay::LocalPlayerHandle>()
-            .0
-            .is_some();
+        // wait (no session yet, or one still synchronizing) or a peer who
+        // already fled stakes no result.
+        let established = crate::netplay::duel_underway(world);
         let peer_fled = world.resource::<net::LobbyState>().is_terminal();
         if established && !peer_fled {
             let peer = world.resource::<net::PeerProfile>().0;

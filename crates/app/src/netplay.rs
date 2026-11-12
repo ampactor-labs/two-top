@@ -78,6 +78,20 @@ const DESYNC_CHECK_INTERVAL: u32 = 30;
 /// just behind this.
 const DISCONNECT_TIMEOUT: Duration = Duration::from_secs(9);
 
+/// Seconds a fresh session may spend synchronizing before the peer counts
+/// as unreachable. ggrs retries its sync handshake forever (its
+/// `Synchronizing` state has no timeout of its own), so a peer that
+/// vanished between pairing and the first frame left the player at a
+/// frozen board with no word on screen, and QUIT filed a loss for a duel
+/// that never began. A healthy sync takes five round trips: well under a
+/// second even on a slow link.
+const SYNC_BUDGET_SECS: f32 = 12.0;
+
+/// Times a failed sync re-dials the room on its own before the player is
+/// told ([`LobbyState::PeerUnreachable`]). One: a peer who simply left is
+/// replaced by the next challenger, and a pair that fails twice is told.
+const MAX_REDIALS: u32 = 1;
+
 /// The matchbox channel ggrs owns (unreliable + unordered).
 const GGRS_CHANNEL: usize = 0;
 /// The reliable side-channel (identity, rematch consent, goodbye).
@@ -225,6 +239,34 @@ fn ice_server_config() -> RtcIceServerConfig {
     config
 }
 
+/// A fresh P2P session that has not synchronized yet. `since` is when it
+/// was built (real seconds), `None` once ggrs reports the peer
+/// synchronized and while there is no session at all. Until then no duel
+/// is underway: nothing is at stake, the far seat stays empty, and one
+/// QUIT tap cancels.
+#[derive(Resource, Default, Clone, Copy, Debug)]
+pub struct SyncWait {
+    pub since: Option<f32>,
+    /// The peer said goodbye, or its connection closed, before the sync.
+    peer_gone: bool,
+}
+
+impl SyncWait {
+    pub fn waiting(&self) -> bool {
+        self.since.is_some()
+    }
+}
+
+/// Re-dials made since the match screen was entered.
+#[derive(Resource, Default)]
+struct Redials(u32);
+
+/// Whether an online duel is underway: a session exists and has
+/// synchronized. Leaving one is a loss; leaving before is nothing.
+pub fn duel_underway(world: &World) -> bool {
+    world.resource::<LocalPlayerHandle>().0.is_some() && !world.resource::<SyncWait>().waiting()
+}
+
 /// Holds the live socket between lobby ticks. Kept as a **non-send**
 /// resource: the socket's async channels are `Send` on native but we never
 /// need it off the main schedule thread, and non-send sidesteps any `Sync`
@@ -300,8 +342,13 @@ impl Plugin for MatchboxPlugin {
                 },
             )
             .init_resource::<OwnTablePick>()
+            .init_resource::<SyncWait>()
+            .init_resource::<Redials>()
             .add_systems(OnExit(crate::screen::AppScreen::InMatch), restore_own_table)
-            .add_systems(OnEnter(crate::screen::AppScreen::InMatch), reset_absence)
+            .add_systems(
+                OnEnter(crate::screen::AppScreen::InMatch),
+                (reset_absence, |mut redials: ResMut<Redials>| redials.0 = 0),
+            )
             .add_systems(PostUpdate, freeze_terminal_session)
             .add_systems(
                 Update,
@@ -668,6 +715,7 @@ fn drive_netplay(world: &mut World) {
         }
         drain_session_events(world);
         pump_side_channel(world);
+        watch_sync(world);
         return;
     }
 
@@ -748,6 +796,65 @@ fn drive_netplay(world: &mut World) {
         && let Some(theirs) = exchange_table(world, peer_id)
     {
         perform_swap(world, peer_id, theirs);
+    }
+}
+
+/// A session still synchronizing: give up on it when the peer has gone
+/// (its goodbye, or its connection closing) or the budget runs out.
+fn watch_sync(world: &mut World) {
+    let wait = *world.resource::<SyncWait>();
+    let Some(since) = wait.since else {
+        return;
+    };
+    let peer = match *world.resource::<LobbyState>() {
+        LobbyState::Connected { peer_id } => Some(peer_id),
+        _ => None,
+    };
+    // Post-swap nothing else reads the socket's peer states; during the
+    // wait a closed connection is the fastest word that the peer left. A
+    // dead signaling socket is `end_match_on_link_loss`'s.
+    let closed = world
+        .non_send_resource_mut::<MatchboxDriver>()
+        .socket
+        .try_update_peers()
+        .is_ok_and(|updates| {
+            updates
+                .iter()
+                .any(|(id, state)| Some(*id) == peer && matches!(state, PeerState::Disconnected))
+        });
+    let waited = world.resource::<Time<Real>>().elapsed_secs() - since;
+    let gone = wait.peer_gone || closed;
+    if !gone && waited < SYNC_BUDGET_SECS {
+        return;
+    }
+    tracing::warn!(
+        target: "two_top::net",
+        gone,
+        waited_secs = waited,
+        "session never synchronized — giving up on this peer",
+    );
+    sync_failed(world);
+}
+
+/// Fold a session that never synchronized and go back to the room: once
+/// on its own, then [`LobbyState::PeerUnreachable`]. Nothing is recorded.
+fn sync_failed(world: &mut World) {
+    leave_online_match(world);
+    // Back at this player's own table, at the near edge, as before pairing.
+    if let Some(own) = world.resource_mut::<OwnTablePick>().0.take() {
+        world.resource_mut::<sim::SelectedArena>().0 = own;
+    }
+    if let Err(e) = world.run_system_cached(crate::screen::rebuild_match) {
+        tracing::error!(target: "two_top::net", error = %e, "could not relay the table");
+    }
+    let redials = world.resource::<Redials>().0;
+    if redials < MAX_REDIALS {
+        world.resource_mut::<Redials>().0 += 1;
+        tracing::info!(target: "two_top::net", attempt = redials + 1, "re-dialing the room");
+        start_matchbox(world);
+    } else {
+        tracing::warn!(target: "two_top::net", "challenger unreachable after a re-dial — telling the player");
+        *world.resource_mut::<LobbyState>() = LobbyState::PeerUnreachable;
     }
 }
 
@@ -888,6 +995,11 @@ fn perform_swap(world: &mut World, peer_id: PeerId, their_table: sim::ArenaId) {
 
     world.insert_resource(Session::P2P(session));
     world.resource_mut::<PendingP2PSwap>().0 = None;
+    let built_at = world.resource::<Time<Real>>().elapsed_secs();
+    *world.resource_mut::<SyncWait>() = SyncWait {
+        since: Some(built_at),
+        peer_gone: false,
+    };
     // Record which player is us, so "your-action" feedback (haptics, summary
     // banner) can distinguish local from remote.
     world.resource_mut::<LocalPlayerHandle>().0 = Some(local_handle);
@@ -929,6 +1041,7 @@ fn drain_session_events(world: &mut World) {
     let mut forfeited_peer = None;
     let mut desynced_at: Option<(sim::NetAddr, u32)> = None;
     let mut interruption_edge: Option<bool> = None;
+    let mut synchronized = false;
     {
         // Absent once a terminal lobby state froze it (`freeze_terminal_session`).
         let Some(mut session) = world.get_resource_mut::<Session<GgrsCfg>>() else {
@@ -942,6 +1055,7 @@ fn drain_session_events(world: &mut World) {
                     }
                     GgrsEvent::Synchronized { addr } => {
                         tracing::info!(target: "two_top::net", ?addr, "peer synchronized");
+                        synchronized = true;
                     }
                     GgrsEvent::NetworkInterrupted {
                         addr,
@@ -985,6 +1099,9 @@ fn drain_session_events(world: &mut World) {
         }
     }
 
+    if synchronized {
+        *world.resource_mut::<SyncWait>() = SyncWait::default();
+    }
     if let Some(interrupted) = interruption_edge {
         world.non_send_resource_mut::<MatchboxDriver>().interrupted = interrupted;
     }
@@ -1130,6 +1247,12 @@ fn pump_side_channel(world: &mut World) {
             }
             // Handshake leftovers (a duplicate) — the table is settled.
             NetMsg::Table { .. } => {}
+            // Gone before the first frame: no duel, nobody's concession.
+            // `watch_sync` looks for the next challenger.
+            NetMsg::Bye if world.resource::<SyncWait>().waiting() => {
+                tracing::info!(target: "two_top::net", ?from, "peer left before the session synchronized");
+                world.resource_mut::<SyncWait>().peer_gone = true;
+            }
             NetMsg::Bye => {
                 tracing::info!(target: "two_top::net", ?from, "peer said goodbye — forfeit without the grace wait");
                 *world.resource_mut::<LobbyState>() = LobbyState::Forfeited {
@@ -1311,11 +1434,15 @@ pub fn reset_rematch_consent(state: Res<sim::MatchState>, mut consent: ResMut<Re
 pub fn leave_online_match(world: &mut World) {
     // Best-effort goodbye straight into the channel — the send queue won't
     // get another pump after the driver is removed.
+    // Before the sync no duel began, and a goodbye would read as a
+    // concession to a peer whose own sync finished first: leave silently,
+    // and the peer sees the connection close (no result either way).
     let peer = match world.resource::<LobbyState>() {
         LobbyState::Connected { peer_id } => Some(*peer_id),
         LobbyState::Disconnected { peer_id, .. } => Some(*peer_id),
         _ => None,
-    };
+    }
+    .filter(|_| !world.resource::<SyncWait>().waiting());
     // The removal is unconditional (dropping the socket ends the message
     // loop); the goodbye rides out only when a peer is still addressable.
     let mut driver = world.remove_non_send_resource::<MatchboxDriver>();
@@ -1334,6 +1461,7 @@ pub fn leave_online_match(world: &mut World) {
     world.remove_resource::<Session<GgrsCfg>>();
     *world.resource_mut::<LobbyState>() = LobbyState::Idle;
     world.resource_mut::<PendingP2PSwap>().0 = None;
+    *world.resource_mut::<SyncWait>() = SyncWait::default();
     world.resource_mut::<PeerProfile>().0 = None;
     world.resource_mut::<PeerKeys>().0 = None;
     world.resource_mut::<PeerSig>().0 = None;

@@ -18,6 +18,11 @@
 # VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/lvp_icd.json), and built
 # binaries (`cargo build -p app -p replay_sync`).
 # Usage: scripts/two_peer_smoke.sh [app-binary]
+#
+# For a peer that pairs and never syncs (the sync budget and re-dial),
+# start one app the same way and point `cargo run -p app --example
+# silent_peer -- ws://127.0.0.1:$PORT/two-top-v<SIM_VERSION>?next=2 silent`
+# at the room the app logs.
 set -u
 APP=${1:-target/debug/app}
 # Work (homes, logs, tapes) lives under target/, removed on a pass.
@@ -82,8 +87,10 @@ strip() { sed 's/\x1b\[[0-9;]*m//g' "$1"; }
 # A THROW pressed in the last input-delay frames of a round lands after
 # MatchOver, where the sim reads it as an instant rematch: no summary, no
 # tape, no signed result (a known sim-level issue; see docs).
-if strip "$WORK/a.log" | grep -A1 "next=MatchOver" | grep -q "prev=MatchOver next=Countdown"; then
+# Nobody taps RUN IT BACK here, so any MatchOver -> Countdown is that.
+if strip "$WORK/a.log" | grep -q "prev=MatchOver next=Countdown"; then
   echo "WARN: the match restarted from MatchOver at once (a late THROW became a rematch) — no tape to compare"
+  warned=1
 else
   tape() { strip "$1" | grep "match replay saved" | tail -1 | sed -E 's/.*path=([^ ]+).*/\1/'; }
   TA=$(tape "$WORK/a.log"); TB=$(tape "$WORK/b.log")
@@ -104,10 +111,13 @@ else
         echo "OK: $(basename "$att") verifies against its tape"
       else
         echo "WARN: no verifiable attestation beside $(basename "$t")"
+        warned=1
       fi
     done
   else
     echo "WARN: a peer saved no tape"
+    warned=1
   fi
 fi
-rm -rf "$WORK"
+# A warning keeps the logs for a look; a clean pass leaves nothing behind.
+if [ -n "${warned:-}" ]; then echo "(logs kept in $WORK)"; else rm -rf "$WORK"; fi

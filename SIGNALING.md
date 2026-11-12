@@ -241,7 +241,7 @@ locally — no negotiation round-trip. Player *entities* are spawned
 identically on both sides (same `setup`), so only "which handle reads
 local input" differs; the deterministic sim guarantees the rest.
 
-The ggrs session is built with `input_delay = 2`, desync detection on
+The ggrs session is built with `input_delay = 3`, desync detection on
 (`interval = 30`, ~2 checks/sec), and a **9 s disconnect timeout** —
 the away grace that lets a phone survive a notification-shade peek or
 a short call banner and rejoin the live match (ggrs replays the missed
@@ -252,6 +252,26 @@ peer gone and the match forfeits (net's own silence FSM backstops at
 `target: two_top::net`; a `Disconnected` event (or a `Bye` on the
 side-channel — the clean-leave path) forfeits the match (sets
 `sim::MatchState::MatchOver`).
+
+Silence is only measured once the session exists. Before the swap (the
+wait, and the table handshake) the app pins the last-message stamp every
+frame: a peer that leaves then is matchbox's to report
+(`PeerState::Disconnected`), and the grace timer, which ages on real time,
+never reads a minute spent waiting in the room as a silent peer.
+
+ggrs's sync handshake has no timeout of its own, so the app gives a fresh
+session **12 s to synchronize** (`netplay::SYNC_BUDGET_SECS`; a healthy
+sync is five round trips, well under a second). A peer that says goodbye,
+or whose connection closes, before the first frame ends the wait at once.
+Either way nothing is recorded and no goodbye is sent (it would read as a
+concession to a peer whose own sync finished first); the app re-dials the
+room once on its own, and if that pairing fails the same way the overlay
+says `COULDN'T REACH YOUR CHALLENGER`, with PLAY THE BOT offered at once.
+Until the sync lands, no duel is underway: the far seat stays empty, QUIT
+reads CANCEL and costs nothing, and after 2 s the overlay says
+`REACHING <NAME>…`. `cargo run -p app --example silent_peer -- <room>
+silent|leave` is a peer that pairs and then never syncs (or leaves), for
+checking all of this against a real room.
 
 ### Loopback verification (Gate 0 — done, automatable)
 
