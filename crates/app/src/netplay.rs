@@ -383,6 +383,8 @@ impl Plugin for MatchboxPlugin {
                 },
             )
             .init_resource::<OwnTablePick>()
+            .init_resource::<IceCache>()
+            .add_systems(OnEnter(crate::screen::AppScreen::Title), prefetch_ice)
             .init_resource::<SyncWait>()
             .init_resource::<Redials>()
             .init_non_send_resource::<DepartingSockets>()
@@ -395,6 +397,7 @@ impl Plugin for MatchboxPlugin {
             .add_systems(
                 Update,
                 (
+                    finish_prefetch,
                     finish_ice_fetch,
                     announce_going_away.before(drive_netplay),
                     drive_netplay,
@@ -513,9 +516,58 @@ const ICE_FETCH_TIMEOUT_SECS: f32 = 2.5;
 /// `Sync` and resources must be both.
 #[derive(Resource)]
 struct PendingIce {
-    rx: std::sync::Mutex<std::sync::mpsc::Receiver<Option<RtcIceServerConfig>>>,
+    rx: std::sync::Mutex<IceReceiver>,
     started_at: f32,
 }
+
+type IceReceiver = std::sync::mpsc::Receiver<Option<IceAnswer>>;
+
+/// A vendor answer: the ICE config and how long its credential lives.
+#[derive(Clone, Debug)]
+struct IceAnswer {
+    config: RtcIceServerConfig,
+    ttl_secs: u64,
+}
+
+/// A relay answer fetched ahead of a match, kept until half its credential
+/// is spent: `(config, good until, real seconds)`. With it a match opens
+/// its socket at once instead of spending up to [`ICE_FETCH_TIMEOUT_SECS`]
+/// on the fetch first, and a slow vendor or a cold mobile connection no
+/// longer decides whether this duel gets a relay.
+#[derive(Resource, Default)]
+struct IceCache(Option<(RtcIceServerConfig, f32)>);
+
+impl IceCache {
+    fn fresh(&self, now: f32) -> Option<RtcIceServerConfig> {
+        self.0
+            .as_ref()
+            .filter(|(_, until)| now < *until)
+            .map(|(config, _)| config.clone())
+    }
+
+    /// Keep `answer` if it carries a relay. A STUN-only answer (a vendor
+    /// with no relay, or one still minting its first credential) is used
+    /// for the match at hand and never kept: kept, it would stand between
+    /// this phone and the relay for hours.
+    fn store(&mut self, answer: &IceAnswer, now: f32) {
+        let relays = answer.config.urls.iter().any(|u| u.starts_with("turn"));
+        if relays && answer.ttl_secs > 0 {
+            self.0 = Some((answer.config.clone(), now + answer.ttl_secs as f32 / 2.0));
+        }
+    }
+}
+
+/// A fetch started ahead of the match (when the title comes up), not yet
+/// landed. A match entered meanwhile adopts it instead of starting another.
+#[derive(Resource)]
+struct PrefetchIce {
+    rx: std::sync::Mutex<IceReceiver>,
+    started_at: f32,
+}
+
+/// A prefetch that has not answered in this long is abandoned; the match
+/// fetches for itself.
+const PREFETCH_GIVE_UP_SECS: f32 = 15.0;
 
 /// The vendor's `GET /ice` contract — field names in lockstep with
 /// `ice_vendor::IceResponse`.
@@ -524,6 +576,8 @@ struct IceResponse {
     urls: Vec<String>,
     username: Option<String>,
     credential: Option<String>,
+    #[serde(default)]
+    ttl_secs: u64,
 }
 
 /// Parse a vendor response body into matchbox's ICE config. `None` for
@@ -541,13 +595,37 @@ pub(crate) fn parse_ice_response(body: &str) -> Option<RtcIceServerConfig> {
     })
 }
 
+/// [`parse_ice_response`], with the credential's lifetime.
+fn parse_ice_answer(body: &str) -> Option<IceAnswer> {
+    let ttl_secs = serde_json::from_str::<IceResponse>(body).ok()?.ttl_secs;
+    Some(IceAnswer {
+        config: parse_ice_response(body)?,
+        ttl_secs,
+    })
+}
+
+/// Start a vendor fetch off the main thread: a thread of its own natively,
+/// the page's `fetch` in a browser. The answer lands in the receiver.
+fn spawn_ice_fetch(ice_url: String, ice_key: Option<String>) -> IceReceiver {
+    let (tx, rx) = std::sync::mpsc::channel();
+    #[cfg(not(target_family = "wasm"))]
+    crate::platform::off_main_thread("twotop-ice", move || {
+        let _ = tx.send(fetch_ice(&ice_url, ice_key.as_deref()));
+    });
+    #[cfg(target_family = "wasm")]
+    wasm_bindgen_futures::spawn_local(async move {
+        let _ = tx.send(fetch_ice_web(ice_url, ice_key).await);
+    });
+    rx
+}
+
 /// Blocking fetch of the vendor's ICE config (runs on its own thread via
 /// `crate::platform::off_main_thread` — never the main one). Tight timeout: the
 /// fallback exists. The
 /// browser's twin is [`fetch_ice_web`]; both feed the same channel that
 /// [`finish_ice_fetch`] polls, so the socket-open path is identical.
 #[cfg(not(target_family = "wasm"))]
-fn fetch_ice(url: &str, app_key: Option<&str>) -> Option<RtcIceServerConfig> {
+fn fetch_ice(url: &str, app_key: Option<&str>) -> Option<IceAnswer> {
     let mut request = ureq::get(url).timeout(Duration::from_secs(2));
     if let Some(key) = app_key {
         request = request.set("X-App-Key", key);
@@ -560,7 +638,7 @@ fn fetch_ice(url: &str, app_key: Option<&str>) -> Option<RtcIceServerConfig> {
         })
         .ok()?;
     let body = response.into_string().ok()?;
-    let config = parse_ice_response(&body);
+    let config = parse_ice_answer(&body);
     if config.is_none() {
         tracing::warn!(target: "two_top::net", "ice vendor response unusable — falling back");
     }
@@ -576,7 +654,7 @@ fn fetch_ice(url: &str, app_key: Option<&str>) -> Option<RtcIceServerConfig> {
 /// [`ICE_FETCH_TIMEOUT_SECS`] budget is what bounds this request (a
 /// `fetch` has no timeout of its own — the deadline lives in the poller).
 #[cfg(target_family = "wasm")]
-async fn fetch_ice_web(url: String, app_key: Option<String>) -> Option<RtcIceServerConfig> {
+async fn fetch_ice_web(url: String, app_key: Option<String>) -> Option<IceAnswer> {
     use wasm_bindgen::JsCast;
 
     let init = web_sys::RequestInit::new();
@@ -606,11 +684,59 @@ async fn fetch_ice_web(url: String, app_key: Option<String>) -> Option<RtcIceSer
         .await
         .ok()?
         .as_string()?;
-    let config = parse_ice_response(&body);
+    let config = parse_ice_answer(&body);
     if config.is_none() {
         tracing::warn!(target: "two_top::net", "ice vendor response unusable — falling back");
     }
     config
+}
+
+/// `OnEnter(Title)`: fetch ICE ahead of the next match when there is no
+/// fresh relay answer kept and no fetch already out.
+fn prefetch_ice(world: &mut World) {
+    let config = world.resource::<NetplayConfig>();
+    let (Some(_), Some(ice_url)) = (config.room_url.as_ref(), config.ice_url.clone()) else {
+        return;
+    };
+    let ice_key = config.ice_key.clone();
+    let now = world.resource::<Time<Real>>().elapsed_secs();
+    if world.resource::<IceCache>().fresh(now).is_some()
+        || world.contains_resource::<PrefetchIce>()
+        || world.contains_resource::<PendingIce>()
+    {
+        return;
+    }
+    tracing::info!(target: "two_top::net", "fetching ice ahead of the match");
+    world.insert_resource(PrefetchIce {
+        rx: std::sync::Mutex::new(spawn_ice_fetch(ice_url, ice_key)),
+        started_at: now,
+    });
+}
+
+/// Land a prefetch in the [`IceCache`], or give it up.
+fn finish_prefetch(world: &mut World) {
+    let Some(prefetch) = world.get_resource::<PrefetchIce>() else {
+        return;
+    };
+    let now = world.resource::<Time<Real>>().elapsed_secs();
+    let polled = prefetch
+        .rx
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .try_recv();
+    let landed = match polled {
+        Ok(answer) => answer,
+        Err(std::sync::mpsc::TryRecvError::Empty)
+            if now - prefetch.started_at < PREFETCH_GIVE_UP_SECS =>
+        {
+            return;
+        }
+        Err(_) => None,
+    };
+    world.remove_resource::<PrefetchIce>();
+    if let Some(answer) = landed {
+        world.resource_mut::<IceCache>().store(&answer, now);
+    }
 }
 
 /// Startup: build the socket + spawn its message loop. Runs after Bevy's
@@ -634,23 +760,21 @@ fn start_matchbox(world: &mut World) {
     };
 
     if let Some(ice_url) = config.ice_url {
-        let ice_key = config.ice_key;
-        let (tx, rx) = std::sync::mpsc::channel();
-        // Native: a blocking request on a thread of its own. Browser: the
-        // page's own `fetch`, driven by the JS event loop. Both hand the
-        // same `Option<RtcIceServerConfig>` to the same receiver below.
-        #[cfg(not(target_family = "wasm"))]
-        crate::platform::off_main_thread("twotop-ice", move || {
-            let _ = tx.send(fetch_ice(&ice_url, ice_key.as_deref()));
-        });
-        #[cfg(target_family = "wasm")]
-        wasm_bindgen_futures::spawn_local(async move {
-            let _ = tx.send(fetch_ice_web(ice_url, ice_key).await);
-        });
-        let started_at = world.resource::<Time<Real>>().elapsed_secs();
+        let now = world.resource::<Time<Real>>().elapsed_secs();
+        if let Some(cached) = world.resource::<IceCache>().fresh(now) {
+            tracing::info!(target: "two_top::net", "ice config fetched ahead — no wait");
+            open_socket(world, url, cached);
+            return;
+        }
+        // A prefetch still in flight becomes this match's fetch, its
+        // budget counted from now; otherwise fetch afresh.
+        let rx = match world.remove_resource::<PrefetchIce>() {
+            Some(prefetch) => prefetch.rx.into_inner().unwrap_or_else(|e| e.into_inner()),
+            None => spawn_ice_fetch(ice_url, config.ice_key),
+        };
         world.insert_resource(PendingIce {
             rx: std::sync::Mutex::new(rx),
-            started_at,
+            started_at: now,
         });
         // SUMMONING goes up now; the socket follows within the timeout.
         *world.resource_mut::<LobbyState>() = LobbyState::Connecting;
@@ -696,7 +820,10 @@ fn finish_ice_fetch(world: &mut World) {
         return;
     };
     let fetched = result.is_some();
-    let ice = result.unwrap_or_else(ice_server_config);
+    if let Some(answer) = &result {
+        world.resource_mut::<IceCache>().store(answer, now);
+    }
+    let ice = result.map_or_else(ice_server_config, |answer| answer.config);
     tracing::info!(target: "two_top::net", fetched, "ice config resolved");
     open_socket(world, url, ice);
 }
@@ -1718,6 +1845,32 @@ mod tests {
         assert!(freeze_is_absence(QUIET_GRACE_SECS));
         assert!((QUIET_GRACE_SECS - 9.0).abs() < 1e-3);
         assert!(freeze_is_absence(30.0));
+    }
+
+    #[test]
+    fn only_a_relay_answer_is_kept_and_only_for_half_its_life() {
+        let relay = parse_ice_answer(
+            r#"{"urls":["stun:s:19302","turn:t:3478"],"username":"u","credential":"c","ttl_secs":3600}"#,
+        )
+        .expect("a relay answer parses");
+        assert_eq!(relay.ttl_secs, 3600);
+        let mut cache = IceCache::default();
+        cache.store(&relay, 100.0);
+        assert!(cache.fresh(100.0 + 1799.0).is_some());
+        assert!(
+            cache.fresh(100.0 + 1800.0).is_none(),
+            "half spent: fetch again"
+        );
+
+        // A STUN-only answer is used, never kept: kept, it would hide the
+        // relay for hours.
+        let stun_only = parse_ice_answer(
+            r#"{"urls":["stun:s:19302"],"username":null,"credential":null,"ttl_secs":3600}"#,
+        )
+        .unwrap();
+        let mut cache = IceCache::default();
+        cache.store(&stun_only, 0.0);
+        assert!(cache.fresh(1.0).is_none());
     }
 
     #[test]

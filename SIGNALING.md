@@ -79,11 +79,16 @@ ephemeral vendor below instead; the APK CI workflow refuses to carry
 `crates/ice_vendor` is a tiny HTTP service that holds the relay secret
 server-side and answers `GET /ice` with a THROWAWAY credential pair the
 TURN server refuses once its embedded timestamp expires (the TURN REST
-API convention, draft-uberti-behave-turn-rest). The app fetches it at
-match entry when `TWOTOP_ICE_URL` is set — a URL, not a secret, so it
-is safe to bake into public builds — with a 2.5 s timeout falling back
-to the baked/STUN-only config. The fetch rides the SUMMONING wait, so
-it costs nothing visible.
+API convention, draft-uberti-behave-turn-rest). When `TWOTOP_ICE_URL`
+is set (a URL, not a secret, so it is safe to bake into public builds)
+the app fetches it ahead of the match, as the title comes up, and keeps
+a relay answer in memory until half its credential's life is spent: a
+match, a rematch or a re-dial opens its socket at once on it. Without a
+kept answer (the first match after a cold start that went straight in,
+or a vendor that has not answered) the match fetches for itself, adopting
+a fetch already out, with a 2.5 s budget falling back to the
+baked/STUN-only config. A STUN-only answer is used and never kept, so it
+can never stand between a phone and the relay.
 
 Two backends, picked by env:
 
@@ -102,7 +107,15 @@ Two backends, picked by env:
   verifies offline.
 
 Neither set ⇒ the vendor answers STUN-only, which still exercises the
-whole fetch path. `ICE_TTL_SECS` tunes the credential lifetime
+whole fetch path.
+
+The vendor never makes a caller wait on anything upstream. HMAC
+credentials are computed on the spot; in Cloudflare mode a background
+thread mints a credential every quarter of its lifetime and every caller
+is handed the current one, with its remaining lifetime as `ttl_secs` (it
+is served until half spent). One Cloudflare call per hour at the default
+TTL, however many duels start, and a slow Cloudflare no longer holds the
+phones in line behind it past their 2.5 s budget. `ICE_TTL_SECS` tunes the credential lifetime
 (default 4 h). Deploy the vendor anywhere HTTPS lives — a second
 Railway service off this repo with start command
 `cargo run -p ice_vendor --release` works — then bake its URL:
@@ -118,7 +131,10 @@ bake the same value from `TWOTOP_ICE_KEY` (the repo secret for CI,
 the env for `scripts/phone.sh`); a build without it gets the 403 and
 falls back to STUN-only. The key ships inside every APK, so it filters
 drive-by scrapers rather than authenticating anyone; the per-IP bucket
-and the credential TTL are what bound abuse. Bake the key into the
+and the credential TTL are what bound abuse. The bucket (a burst of 30,
+then one per 2 s) is sized for phones on mobile data, many of which share
+one carrier address: with credentials minted on a timer a flood mints
+nothing, so it only has to bound request volume. Bake the key into the
 builds before setting it on the vendor.
 
 ---
