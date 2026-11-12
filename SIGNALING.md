@@ -253,6 +253,15 @@ peer gone and the match forfeits (net's own silence FSM backstops at
 side-channel — the clean-leave path) forfeits the match (sets
 `sim::MatchState::MatchOver`).
 
+Leaving a live match sends that `Bye` and then keeps the socket **and**
+the ggrs session alive for one more second (`netplay::GOODBYE_LINGER_SECS`)
+before dropping them. matchbox's message loop exits the moment any one
+channel's queue closes, and the session owns channel 0, so dropping it in
+the same frame tore the connection down before the goodbye left: on two
+real peers the quitter booked its loss while the one who stayed heard
+nothing and booked the match unfinished 9 s later. With the linger the
+stayer hears the goodbye within milliseconds and books the concession.
+
 Silence is only measured once the session exists. Before the swap (the
 wait, and the table handshake) the app pins the last-message stamp every
 frame: a peer that leaves then is matchbox's to report

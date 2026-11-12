@@ -257,6 +257,38 @@ impl SyncWait {
     }
 }
 
+/// Seconds a socket stays open after its goodbye is queued. Sending only
+/// queues the message for matchbox's own task; dropping the match in the
+/// same frame closed the connection under it, and the goodbye was lost:
+/// seen on two real peers, the quitter filed the abandoned loss while the
+/// one who stayed heard nothing, waited out ggrs's 9 s and filed the match
+/// as unfinished. A second covers the reliable channel's round trip on any
+/// link a match could have been played over.
+const GOODBYE_LINGER_SECS: f32 = 1.0;
+
+/// A match already left, kept whole until its deadline so the goodbye
+/// queued on its socket is delivered. Nothing reads it. The session rides
+/// along because it owns the ggrs channel: matchbox's message loop exits
+/// as soon as any one channel's queue closes ("Outgoing message queue
+/// closed, message not sent"), so dropping the session alone tore the
+/// connection down under the goodbye.
+struct Departing {
+    _socket: WebRtcSocket,
+    _session: Option<Session<GgrsCfg>>,
+    until: f32,
+}
+
+#[derive(Default)]
+struct DepartingSockets(Vec<Departing>);
+
+fn close_departed_sockets(world: &mut World) {
+    let now = world.resource::<Time<Real>>().elapsed_secs();
+    let mut departing = world.non_send_resource_mut::<DepartingSockets>();
+    if !departing.0.is_empty() {
+        departing.0.retain(|d| now < d.until);
+    }
+}
+
 /// Re-dials made since the match screen was entered.
 #[derive(Resource, Default)]
 struct Redials(u32);
@@ -344,6 +376,7 @@ impl Plugin for MatchboxPlugin {
             .init_resource::<OwnTablePick>()
             .init_resource::<SyncWait>()
             .init_resource::<Redials>()
+            .init_non_send_resource::<DepartingSockets>()
             .add_systems(OnExit(crate::screen::AppScreen::InMatch), restore_own_table)
             .add_systems(
                 OnEnter(crate::screen::AppScreen::InMatch),
@@ -355,6 +388,7 @@ impl Plugin for MatchboxPlugin {
                 (
                     finish_ice_fetch,
                     drive_netplay,
+                    close_departed_sockets,
                     track_absence,
                     reset_rematch_consent,
                     log_link,
@@ -1443,22 +1477,32 @@ pub fn leave_online_match(world: &mut World) {
         _ => None,
     }
     .filter(|_| !world.resource::<SyncWait>().waiting());
-    // The removal is unconditional (dropping the socket ends the message
-    // loop); the goodbye rides out only when a peer is still addressable.
-    let mut driver = world.remove_non_send_resource::<MatchboxDriver>();
-    if let Some(driver) = driver.as_mut()
+    // The driver and the session go now; the goodbye rides out only when a
+    // peer is still addressable, and both stay alive a moment to carry it:
+    // the session owns the ggrs channel, and matchbox ends the whole
+    // connection the moment any one channel of the socket is dropped.
+    let session = world.remove_resource::<Session<GgrsCfg>>();
+    if let Some(mut driver) = world.remove_non_send_resource::<MatchboxDriver>()
         && let Some(peer) = peer
         && driver.channel_taken
-    {
         // Best effort: leaving over a link that already died must not
         // crash on the way out.
-        let _ = driver
+        && driver
             .socket
             .channel_mut(SIDE_CHANNEL)
-            .try_send(encode_net_msg(&NetMsg::Bye), peer);
+            .try_send(encode_net_msg(&NetMsg::Bye), peer)
+            .is_ok()
+    {
+        let until = world.resource::<Time<Real>>().elapsed_secs() + GOODBYE_LINGER_SECS;
+        world
+            .non_send_resource_mut::<DepartingSockets>()
+            .0
+            .push(Departing {
+                _socket: driver.socket,
+                _session: session,
+                until,
+            });
     }
-    drop(driver);
-    world.remove_resource::<Session<GgrsCfg>>();
     *world.resource_mut::<LobbyState>() = LobbyState::Idle;
     world.resource_mut::<PendingP2PSwap>().0 = None;
     *world.resource_mut::<SyncWait>() = SyncWait::default();
