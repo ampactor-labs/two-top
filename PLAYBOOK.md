@@ -534,6 +534,12 @@ capture and autostart runs keep it away unless forced), and
 `TWOTOP_LESSON_STAGE=dodge` (any stage) starts it partway, for checking one
 stage. Progress is `progress.json` beside `settings.json`.
 
+In real matches (online and practice, not couch) the same line speaks up at
+three moments: GET BACK ON THE FLOOR whenever you are out past the edge,
+HOLD A DIRECTION after two dashes pressed with the stick at rest, and PICK
+IT UP, OR RECALL when your fang has lain loose for three seconds. The last
+two stop after three showings ever (`crates/app/src/nudges.rs`).
+
 **Trading tapes.** A match tape is a ~14 KB `.bmrg` file, and the sim is
 deterministic, so a friend's tape plays on your device exactly as it played
 on theirs — HUD, kill-cam, audio, the devouring, all of it. The REPLAYS

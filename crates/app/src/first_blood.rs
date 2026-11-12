@@ -20,7 +20,6 @@ use sim::{
     Player, PositionF,
 };
 
-use crate::anchor::ScreenAnchor;
 use crate::lesson::{BotMode, Device, Events, Lesson, Stage};
 use crate::screen::AppScreen;
 
@@ -35,6 +34,10 @@ pub struct Progress {
     /// First Blood finished or skipped: it never starts on its own again.
     #[serde(default)]
     pub first_blood_done: bool,
+    /// How many times each in-match nudge has been shown
+    /// (`crate::nudges`), by key.
+    #[serde(default)]
+    pub nudges: std::collections::BTreeMap<String, u32>,
 }
 
 /// The persisted progress, as a resource.
@@ -170,6 +173,11 @@ pub fn skip(world: &mut World) {
     }
     mark_done(&mut world.resource_mut::<LessonProgress>());
     tracing::info!(target: "two_top::first_blood", stage = ?world.resource::<FirstBlood>().lesson.stage, "first blood skipped");
+}
+
+/// Write the progress out (the nudges' counts change mid-match).
+pub fn save(progress: &LessonProgress) {
+    save_progress(&progress.0);
 }
 
 fn mark_done(progress: &mut LessonProgress) {
@@ -327,90 +335,29 @@ fn track_device(
     }
 }
 
-/// The lesson's one line.
-#[derive(Component)]
-struct LessonLine;
-
-/// The dark plate behind it: the line is read over a live, busy floor.
-#[derive(Component)]
-struct LessonPlate;
-
-/// The plate's height per line of text, and its padding (world units).
-const PLATE_LINE_H: f32 = 52.0;
-const PLATE_PAD: f32 = 28.0;
-
-/// Where the line sits: between the intro card's stakes (0.325) and the
-/// countdown glyph at the centre, over the far half of the floor.
-const LINE_FY: f32 = 0.395;
-
-fn spawn_line(mut commands: Commands) {
-    commands.spawn((
-        LessonPlate,
-        Sprite {
-            color: render::palette::DEEP_ASH.with_alpha(0.72),
-            custom_size: Some(Vec2::new(4000.0, PLATE_LINE_H + PLATE_PAD)),
-            ..default()
-        },
-        ScreenAnchor::new(0.0, crate::ui::anchor_y(LINE_FY), 0.0, 0.0),
-        Transform::from_xyz(0.0, 0.0, 205.5),
-        Visibility::Hidden,
-    ));
-    commands.spawn((
-        LessonLine,
-        Text2d::new(String::new()),
-        TextFont {
-            font_size: 40.0,
-            ..default()
-        },
-        TextColor(render::palette::HOT_BONE),
-        // Lines break where `lesson::line` breaks them, never mid-phrase.
-        TextLayout {
-            justify: Justify::Center,
-            linebreak: bevy::text::LineBreak::NoWrap,
-        },
-        ScreenAnchor::new(0.0, crate::ui::anchor_y(LINE_FY), 0.0, 0.0),
-        Transform::from_xyz(0.0, 0.0, 206.0),
-        Visibility::Hidden,
-    ));
-}
-
-/// Show the stage's line while the lesson runs, breathing gently so it
-/// reads as alive rather than as a caption.
-#[allow(clippy::type_complexity)]
-fn update_line(
+/// Say the stage's line through the shared callout while the lesson runs,
+/// breathing gently so it reads as alive rather than as a caption.
+fn speak_line(
     screen: Res<State<AppScreen>>,
     state: Res<MatchState>,
     fb: Res<FirstBlood>,
     device: Res<InputDevice>,
     time: Res<Time<Real>>,
-    mut q: Query<(&mut Text2d, &mut TextColor, &mut Visibility), With<LessonLine>>,
-    mut plate: Query<(&mut Sprite, &mut Visibility), (With<LessonPlate>, Without<LessonLine>)>,
+    mut callout: ResMut<crate::callout::Callout>,
 ) {
-    let Ok((mut text, mut color, mut vis)) = q.single_mut() else {
-        return;
-    };
-    let Ok((mut plate, mut plate_vis)) = plate.single_mut() else {
-        return;
-    };
-    let line = (fb.active
+    let showing = fb.active
         && *screen.get() == AppScreen::InMatch
-        && !matches!(*state, MatchState::MatchOver))
-    .then(|| crate::lesson::line(fb.lesson.stage, device.0))
-    .flatten();
-    let Some(line) = line else {
-        *vis = Visibility::Hidden;
-        *plate_vis = Visibility::Hidden;
-        return;
-    };
-    *vis = Visibility::Visible;
-    *plate_vis = Visibility::Visible;
-    if text.0 != line {
-        text.0 = line.to_string();
-        let lines = line.lines().count() as f32;
-        plate.custom_size = Some(Vec2::new(4000.0, PLATE_LINE_H * lines + PLATE_PAD));
-    }
-    let breath = 0.82 + 0.18 * (time.elapsed_secs() * 3.0).sin();
-    color.0 = render::palette::HOT_BONE.with_alpha(breath);
+        && !matches!(*state, MatchState::MatchOver);
+    callout.lesson = showing
+        .then(|| crate::lesson::line(fb.lesson.stage, device.0))
+        .flatten()
+        .map(|text| {
+            let breath = 0.82 + 0.18 * (time.elapsed_secs() * 3.0).sin();
+            crate::callout::Line {
+                text,
+                color: render::palette::HOT_BONE.with_alpha(breath),
+            }
+        });
 }
 
 pub struct FirstBloodPlugin;
@@ -428,7 +375,6 @@ impl Plugin for FirstBloodPlugin {
                 Device::Keys
             }))
             .init_resource::<FirstBlood>()
-            .add_systems(Startup, spawn_line)
             .add_systems(OnExit(AppScreen::InMatch), end_on_exit)
             .add_systems(
                 Update,
@@ -436,7 +382,7 @@ impl Plugin for FirstBloodPlugin {
                     auto_begin.run_if(in_state(AppScreen::Title)),
                     track_device,
                     read_lesson.run_if(in_state(AppScreen::InMatch)),
-                    update_line,
+                    speak_line.in_set(crate::callout::CalloutSpeak),
                 ),
             );
     }
@@ -455,6 +401,7 @@ mod tests {
         // Done (finished or skipped): never again by itself.
         let done = Progress {
             first_blood_done: true,
+            ..Progress::default()
         };
         assert!(!should_auto_run(&done, &career, false, None, false));
         // An existing player who updated: not a first launch.
@@ -480,6 +427,7 @@ mod tests {
     fn progress_reads_back_and_tolerates_a_missing_field() {
         let p = Progress {
             first_blood_done: true,
+            nudges: [("loose_fang".to_string(), 2)].into(),
         };
         let text = serde_json::to_string(&p).unwrap();
         assert_eq!(serde_json::from_str::<Progress>(&text).unwrap(), p);
@@ -487,11 +435,5 @@ mod tests {
             serde_json::from_str::<Progress>("{}").unwrap(),
             Progress::default()
         );
-    }
-
-    #[test]
-    fn the_line_sits_clear_of_the_intro_card_and_the_exit_strip() {
-        const { assert!(LINE_FY > 0.325 + 0.04) };
-        assert!(!crate::ui::in_band(LINE_FY, crate::ui::TOP_EXIT));
     }
 }

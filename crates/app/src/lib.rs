@@ -27,6 +27,7 @@ mod arena_select;
 mod attest;
 mod audio;
 mod bot;
+mod callout;
 mod camera;
 mod crash_report;
 mod dark_beyond;
@@ -42,6 +43,7 @@ mod lifecycle;
 mod lobby_overlay;
 mod logging;
 mod netplay;
+mod nudges;
 mod paths;
 mod platform;
 mod pointer;
@@ -229,7 +231,9 @@ pub fn run() {
         .add_plugins(runes::RunesPlugin)
         .add_plugins(TouchControlsPlugin)
         .add_plugins(BotPlugin)
+        .add_plugins(callout::CalloutPlugin)
         .add_plugins(first_blood::FirstBloodPlugin)
+        .add_plugins(nudges::NudgesPlugin)
         .add_plugins(HudPlugin)
         .add_plugins(DebugInputOverlayPlugin)
         .add_plugins(net::NetPlugin)
@@ -306,6 +310,12 @@ pub fn run() {
     app.add_systems(
         Update,
         toggle_fullscreen.run_if(|profile: Res<platform::DeviceProfile>| profile.fullscreen_key),
+    );
+    // The nudges watch the local player's DASH presses where inputs are
+    // made (a directionless press does nothing the sim could show).
+    app.add_systems(
+        bevy_ggrs::prelude::ReadInputs,
+        nudges::watch_dash_presses.after(bot::drive_bot),
     );
     app.add_systems(
         bevy_ggrs::prelude::ReadInputs,
