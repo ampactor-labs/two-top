@@ -122,11 +122,11 @@ pub fn build_report(
 /// Which token, if any, deserves a notice: the newest sign of a bad exit,
 /// when it is newer than the last one acknowledged. Pure for tests.
 fn pending_token(
-    crash_log_ms: Option<u64>,
+    fatal_panic_ms: Option<u64>,
     abnormal_exit_ms: Option<u64>,
     acked: u64,
 ) -> Option<u64> {
-    let newest = crash_log_ms.max(abnormal_exit_ms)?;
+    let newest = fatal_panic_ms.max(abnormal_exit_ms)?;
     (newest > acked).then_some(newest)
 }
 
@@ -136,35 +136,27 @@ fn modified_ms(path: &Path) -> Option<u64> {
     Some(since_epoch.as_millis() as u64)
 }
 
-/// The end of a file, without reading the rest of it: a day's log runs to
-/// megabytes and this happens at boot.
-fn read_tail(path: &Path, max_bytes: u64) -> Option<String> {
+/// Up to `max_bytes` of a file ending at byte `end`, without reading the
+/// rest of it: a day's log runs to megabytes and this happens at boot.
+fn read_tail(path: &Path, end: u64, max_bytes: u64) -> Option<String> {
     use std::io::{Read, Seek, SeekFrom};
     let mut file = std::fs::File::open(path).ok()?;
-    let len = file.metadata().ok()?.len();
-    file.seek(SeekFrom::Start(len.saturating_sub(max_bytes)))
-        .ok()?;
+    let end = end.min(file.metadata().ok()?.len());
+    let start = end.saturating_sub(max_bytes);
+    file.seek(SeekFrom::Start(start)).ok()?;
     let mut bytes = Vec::new();
-    file.read_to_end(&mut bytes).ok()?;
+    file.take(end - start).read_to_end(&mut bytes).ok()?;
     Some(String::from_utf8_lossy(&bytes).into_owned())
 }
 
-/// The newest log file's tail. The appender stamps the date into the file
-/// name, so the newest file is the last one by name.
-fn newest_log_tail(logs: &Path) -> String {
-    let newest = std::fs::read_dir(logs)
-        .ok()
-        .into_iter()
-        .flatten()
-        .filter_map(|entry| Some(entry.ok()?.path()))
-        .filter(|path| {
-            path.file_name()
-                .and_then(|name| name.to_str())
-                .is_some_and(|name| name.starts_with(crate::logging::LOG_FILE_PREFIX))
-        })
-        .max();
-    newest
-        .and_then(|path| read_tail(&path, 4 * REPORT_LOG_CHARS as u64))
+/// The last thing the previous run wrote to its log: the file it was
+/// writing, up to where it stopped (`logging::previous_run_log`). The
+/// newest file on disk is the wrong one to read here — this run has
+/// already appended its boot lines to it, or started a new one on a new
+/// day — and a report for yesterday's crash carried this morning's boot.
+fn previous_run_log_tail() -> String {
+    crate::logging::previous_run_log()
+        .and_then(|(path, end)| read_tail(&path, end, 4 * REPORT_LOG_CHARS as u64))
         .unwrap_or_default()
 }
 
@@ -207,12 +199,18 @@ fn collect(mut notice: ResMut<CrashNotice>) {
     }
     let dir = crate::paths::diagnostics_dir();
     let crash_path = dir.as_ref().map(|dir| dir.join(CRASH_LOG));
-    let crash_log_ms = crash_path.as_deref().and_then(modified_ms);
+    // The notice keys on the run-ending mark, not on `crash.log`'s date:
+    // the log also takes panics the run survived and entries an older
+    // build left, and each of those used to raise LAST RUN CRASHED over a
+    // run that ended fine.
+    let fatal_panic_ms = dir
+        .as_ref()
+        .and_then(|dir| modified_ms(&dir.join(crate::logging::FATAL_MARK)));
     let abnormal_exit_ms = last_exit
         .as_ref()
         .filter(|exit| exit.is_abnormal())
         .map(|exit| exit.timestamp_ms.max(0) as u64);
-    let Some(token) = pending_token(crash_log_ms, abnormal_exit_ms, acknowledged()) else {
+    let Some(token) = pending_token(fatal_panic_ms, abnormal_exit_ms, acknowledged()) else {
         return;
     };
     tracing::warn!(target: "two_top::crash", "the previous run crashed; offering the report");
@@ -220,9 +218,7 @@ fn collect(mut notice: ResMut<CrashNotice>) {
         token,
         last_exit,
         crash_log: crash_path.and_then(|path| std::fs::read_to_string(path).ok()),
-        log_tail: dir
-            .map(|dir| newest_log_tail(&dir.join("logs")))
-            .unwrap_or_default(),
+        log_tail: previous_run_log_tail(),
     });
 }
 
@@ -359,6 +355,29 @@ mod tests {
         assert_eq!(pending_token(Some(10), Some(12), 12), None);
         // A new crash after that one.
         assert_eq!(pending_token(Some(30), Some(12), 12), Some(30));
+    }
+
+    #[test]
+    fn the_tail_stops_where_the_previous_run_stopped() {
+        let dir = std::env::temp_dir().join(format!("twotop-tail-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("two_top.log.2026-11-12");
+        // The previous run's last words, then this run's boot appended.
+        let previous = "boot\nduel\nthe last thing it said\n";
+        std::fs::write(&path, format!("{previous}two-top starting\n")).unwrap();
+        let tail = read_tail(&path, previous.len() as u64, 1024).unwrap();
+        assert_eq!(tail, previous);
+        // Bounded from the end it stops at.
+        let short = read_tail(&path, previous.len() as u64, 8).unwrap();
+        assert_eq!(short, "it said\n");
+        // A recorded end past the file (it was rotated and rewritten) reads
+        // what is there instead of failing.
+        assert!(
+            read_tail(&path, 1 << 20, 1024)
+                .unwrap()
+                .ends_with("starting\n")
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

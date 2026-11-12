@@ -27,9 +27,11 @@
 //! So this module owns the entry point, and no way out of [`main`] leaves a
 //! process behind:
 //!
-//! * a panic on the main thread aborts (`logging`'s hook, after it has
-//!   written `crash.log`): Android sees an honest crash and the next launch
-//!   is a cold start;
+//! * a panic that unwinds out of the game aborts, here, after the hook has
+//!   written `crash.log` and `run` has marked the run as ended by it:
+//!   Android sees an honest crash and the next launch is a cold start. A
+//!   panic something below catches (a detached task's, which the executor
+//!   swallows — those run on this thread too) is logged and survived;
 //! * a clean return finishes the activity and exits;
 //! * a destroyed activity is noticed by a watchdog and the process exits,
 //!   so the system relaunches into a fresh one;
@@ -46,7 +48,6 @@
 //! we install on caps the table at 512), and never leaves a Java exception
 //! pending.
 
-use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
@@ -61,17 +62,8 @@ use jni::objects::{JObject, JString, JValue};
 use crate::lifecycle::LastExit;
 use crate::screen::{AppScreen, AwaitingPeer};
 
-/// The thread `android_main` runs on: the one whose panic ends the app.
-static MAIN_THREAD: OnceLock<std::thread::ThreadId> = OnceLock::new();
-
 /// Set on the first entry, for the life of the process.
 static ENTERED: AtomicBool = AtomicBool::new(false);
-
-/// True on the thread that owns the event loop. A panic there is the end
-/// of the app; a panic on any other thread is not.
-pub fn is_main_thread() -> bool {
-    MAIN_THREAD.get() == Some(&std::thread::current().id())
-}
 
 /// The native entry (`lib.rs` exports `android_main` and calls this).
 pub fn main(android_app: AndroidApp) {
@@ -83,11 +75,17 @@ pub fn main(android_app: AndroidApp) {
         eprintln!("two-top: android_main entered twice in one process; restarting clean");
         exit_process(0);
     }
-    let _ = MAIN_THREAD.set(std::thread::current().id());
     let _ = ANDROID_APP.set(android_app);
     spawn_destroy_watchdog();
 
-    crate::run();
+    if std::panic::catch_unwind(crate::run).is_err() {
+        // Unwinding on out of `android_main` would land in
+        // `android-activity`'s own catch, which finishes the activity and
+        // leaves a process that can never start the game again. Abort
+        // instead: the crash Android understands.
+        crate::logging::shutdown();
+        std::process::abort();
+    }
 
     // The event loop ended without a panic (an `AppExit`). Close the
     // activity so the system does not bring it straight back, then go.

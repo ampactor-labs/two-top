@@ -40,8 +40,8 @@
 //! whatever it has not written when the process ends is lost. The worker's
 //! guard lives in a static so that every way out can flush it: `run()`
 //! holds a [`LogGuard`] for a clean return, and the paths that end the
-//! process without returning (a panic on Android's main thread, a destroyed
-//! activity) call [`shutdown`] themselves.
+//! process without returning (a panic that ends the run on Android, a
+//! destroyed activity) call [`shutdown`] themselves.
 
 use tracing_subscriber::EnvFilter;
 use tracing_subscriber::prelude::*;
@@ -55,6 +55,7 @@ const DEFAULT_FILTER: &str = "info,\
     bevy_app=warn,bevy_winit=warn,bevy_render=warn,bevy_ecs=warn";
 
 /// File-name prefix of the rotated log (`two_top.log.<date>`).
+#[cfg(any(test, all(not(debug_assertions), not(target_family = "wasm"))))]
 pub const LOG_FILE_PREFIX: &str = "two_top.log";
 
 /// Days of log kept on disk. The appender made a file per day and never
@@ -110,6 +111,7 @@ fn file_writer(
     tracing_appender::non_blocking::WorkerGuard,
 )> {
     std::fs::create_dir_all(dir).ok()?;
+    note_previous_run_log(dir);
     let appender = tracing_appender::rolling::Builder::new()
         .rotation(tracing_appender::rolling::Rotation::DAILY)
         .filename_prefix(LOG_FILE_PREFIX)
@@ -145,14 +147,16 @@ fn android_log_dir() -> Option<std::path::PathBuf> {
 /// `crash.log` (newest last, capped) with the build, the thread and the
 /// device, and `crate::crash_report` offers that file on the next launch.
 ///
-/// On Android a panic on the main thread then **aborts**. Unwinding out of
-/// `android_main` does not end the process there: `android-activity`
-/// catches it, finishes the activity, and leaves a live process that can
-/// never start the game again (`crate::android` has the whole chain), so
-/// every later launch closed on sight. An abort is a crash Android
-/// understands — its dialog, its exit record — and the next launch is a
-/// cold start. A panic on any other thread is logged and left alone, as
-/// before.
+/// The hook only records. It runs at the panic site, before anything has
+/// had the chance to catch the unwind, so it cannot know whether this
+/// panic ends the run: a panic inside a detached task (matchbox's message
+/// loop, an asset load) is caught and dropped by the executor, and on
+/// Android those tasks run on the main thread. It used to abort on any
+/// main-thread panic, which turned every one of those survivable task
+/// panics — a peer's socket dying mid-match among them — into a crash.
+/// Whether a panic ENDED the run is decided where the unwind escapes:
+/// [`crate::run`] marks it ([`mark_fatal_panic`]) and the Android adapter
+/// turns it into an abort (`crate::platform::android::main`).
 #[cfg(not(target_family = "wasm"))]
 fn install_panic_hook() {
     // A second call keeps the hook it already has: chaining another copy
@@ -183,11 +187,6 @@ fn install_panic_hook() {
                 crate::paths::write_atomic(&path, appended_crash_log(&existing, &entry).as_bytes());
         }
         previous(info);
-        #[cfg(target_os = "android")]
-        if crate::platform::android::is_main_thread() {
-            shutdown();
-            std::process::abort();
-        }
     }));
 }
 
@@ -196,6 +195,74 @@ fn install_panic_hook() {
 /// erase the first cause.
 #[cfg(not(target_family = "wasm"))]
 const CRASH_LOG_CAP: usize = 16 * 1024;
+
+/// Written beside `crash.log` when a panic ends the run, and only then:
+/// the next launch offers a crash report when this mark is newer than the
+/// last report handed over (`crate::crash_report`). `crash.log` itself is
+/// a history — it also holds panics the run survived (a task's, a helper
+/// thread's) and panics an older build wrote — so its date says nothing
+/// about how the last run ended.
+pub const FATAL_MARK: &str = "crash_fatal";
+
+/// Record that a panic is ending the run (see [`FATAL_MARK`]). Called on
+/// the way out by the one place that knows: the unwind has escaped the
+/// whole app.
+#[cfg(not(target_family = "wasm"))]
+pub fn mark_fatal_panic() {
+    let Some(dir) = crate::paths::diagnostics_dir() else {
+        return;
+    };
+    let _ = std::fs::create_dir_all(&dir);
+    let unix = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    let _ = crate::paths::write_atomic(&dir.join(FATAL_MARK), unix.to_string().as_bytes());
+}
+
+/// Where the previous run's log ended: the file it was writing and that
+/// file's length before this run wrote anything. Captured before the
+/// appender opens the directory, because this run appends to the same
+/// day's file (and starts a new one on a new day) — a tail read after
+/// that is this run's boot lines, not the last thing the previous run
+/// said.
+static PREVIOUS_RUN_LOG: std::sync::OnceLock<(std::path::PathBuf, u64)> =
+    std::sync::OnceLock::new();
+
+/// The previous run's log file and the byte length it ended at, when this
+/// run logs to a file.
+pub fn previous_run_log() -> Option<(std::path::PathBuf, u64)> {
+    PREVIOUS_RUN_LOG.get().cloned()
+}
+
+/// The newest rotated log among `paths`. The appender stamps the date into
+/// the name, so the newest is the last by name.
+#[cfg(any(test, all(not(debug_assertions), not(target_family = "wasm"))))]
+fn newest_log(paths: impl IntoIterator<Item = std::path::PathBuf>) -> Option<std::path::PathBuf> {
+    paths
+        .into_iter()
+        .filter(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with(LOG_FILE_PREFIX))
+        })
+        .max()
+}
+
+/// Note where the previous run's log ended, before this run's appender
+/// touches `dir`.
+#[cfg(all(not(debug_assertions), not(target_family = "wasm")))]
+fn note_previous_run_log(dir: &std::path::Path) {
+    let entries = std::fs::read_dir(dir)
+        .into_iter()
+        .flatten()
+        .filter_map(|entry| Some(entry.ok()?.path()));
+    if let Some(path) = newest_log(entries)
+        && let Ok(meta) = std::fs::metadata(&path)
+    {
+        let _ = PREVIOUS_RUN_LOG.set((path, meta.len()));
+    }
+}
 
 /// Append one entry to a crash log's text and keep the newest
 /// [`CRASH_LOG_CAP`] bytes. Pure, so the panic hook's bookkeeping is
@@ -437,6 +504,19 @@ fn log_dir() -> std::path::PathBuf {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_newest_log_is_the_last_dated_one_with_the_prefix() {
+        use std::path::PathBuf;
+        let found = super::newest_log([
+            PathBuf::from("logs/two_top.log.2026-11-10"),
+            PathBuf::from("logs/two_top.log.2026-11-12"),
+            PathBuf::from("logs/zz-not-a-log"),
+            PathBuf::from("logs/two_top.log.2026-11-11"),
+        ]);
+        assert_eq!(found, Some(PathBuf::from("logs/two_top.log.2026-11-12")));
+        assert_eq!(super::newest_log([PathBuf::from("logs/other")]), None);
+    }
+
     /// The activity-recreation shape: `run()` twice in one process. The
     /// old `.init()` panicked here on the second registration.
     #[test]

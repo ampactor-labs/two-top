@@ -317,6 +317,16 @@ pub fn run() {
         app.insert_resource(cap).add_systems(Last, capture_frame);
     }
 
+    // A panic that unwinds out of the whole app ended the run; mark it for
+    // the next launch's crash notice and hand it on (on Android the
+    // platform adapter turns it into an abort). Panics something below
+    // caught — a detached task's — never get here and leave no mark.
+    #[cfg(not(target_family = "wasm"))]
+    if let Err(panic) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| app.run())) {
+        logging::mark_fatal_panic();
+        std::panic::resume_unwind(panic);
+    }
+    #[cfg(target_family = "wasm")]
     app.run();
 
     tracing::info!(target: "two_top::app", "two-top exiting cleanly");
