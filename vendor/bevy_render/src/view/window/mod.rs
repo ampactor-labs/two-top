@@ -276,18 +276,30 @@ pub fn prepare_windows(
         };
 
         let surface = &surface_data.surface;
+        // 2-TOP BACKPORT: acquires skipped in a row (see the last arm).
+        static SKIPPED: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
         match surface.get_current_texture() {
             Ok(frame) => {
+                SKIPPED.store(0, std::sync::atomic::Ordering::Relaxed);
                 window.set_swapchain_texture(frame);
             }
-            Err(wgpu::SurfaceError::Outdated) => {
+            // 2-TOP BACKPORT (see vendor/README.md): `Lost` is rebuilt the
+            // same way. Upstream 0.18.1 panicked on it; skipping it alone
+            // would never rebuild the swapchain (a frozen screen and an
+            // error every frame).
+            Err(wgpu::SurfaceError::Outdated | wgpu::SurfaceError::Lost) => {
                 render_device.configure_surface(surface, &surface_data.configuration);
                 let frame = match surface.get_current_texture() {
                     Ok(frame) => frame,
                     Err(err) => {
                         // This is a common occurrence on X11 and Xwayland with NVIDIA drivers
                         // when opening and resizing the window.
-                        warn!("Couldn't get swap chain texture after configuring. Cause: '{err}'");
+                        // 2-TOP BACKPORT: sparse, like the last arm — a surface
+                        // that stays lost retries here every frame.
+                        let n = SKIPPED.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+                        if n.is_power_of_two() {
+                            warn!("Couldn't get swap chain texture after configuring ({n} frames skipped). Cause: '{err}'");
+                        }
                         continue;
                     }
                 };
@@ -301,13 +313,17 @@ pub fn prepare_windows(
                 );
             }
             // 2-TOP BACKPORT (see vendor/README.md). Upstream 0.18.1 panics
-            // here. A phone returns `Timeout` or `Lost` whenever the
-            // compositor stops taking frames while the surface still exists
-            // (screen off, the app sliding into the background), and the
-            // next lifecycle event tears the surface down properly. Skipping
-            // the frame is what upstream does after 0.18.1.
+            // here. A phone returns `Timeout` whenever the compositor stops
+            // taking frames while the surface still exists (screen off, the
+            // app sliding into the background), and the next lifecycle
+            // event tears the surface down properly. Skipping the frame is
+            // what upstream does after 0.18.1. Logged on the 1st, 2nd, 4th,
+            // 8th... in a row, so a stuck surface cannot bury the log.
             Err(err) => {
-                tracing::error!("Couldn't get swap chain texture: {err}");
+                let n = SKIPPED.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+                if n.is_power_of_two() {
+                    tracing::error!("Couldn't get swap chain texture ({n} frames skipped): {err}");
+                }
                 continue;
             }
         }

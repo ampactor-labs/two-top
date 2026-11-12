@@ -10,20 +10,27 @@ touch it.
 
 An unmodified copy of the crates.io release (commit `chore(vendor):
 bevy_render 0.18.1, verbatim from crates.io`) plus **one** change, in
-`src/view/window/mod.rs::prepare_windows`:
+`src/view/window/mod.rs::prepare_windows`, the swapchain acquire:
 
 ```diff
+-            Err(wgpu::SurfaceError::Outdated) => {
++            Err(wgpu::SurfaceError::Outdated | wgpu::SurfaceError::Lost) => {
+                 render_device.configure_surface(surface, &surface_data.configuration);
+ ...
 -            Err(err) => {
 -                panic!("Couldn't get swap chain texture, operation unrecoverable: {err}");
 -            }
 +            Err(err) => {
-+                tracing::error!("Couldn't get swap chain texture: {err}");
++                // logged on the 1st, 2nd, 4th, 8th... skip in a row
 +                continue;
 +            }
 ```
 
-`git diff <verbatim commit> -- vendor/bevy_render` shows exactly that,
-plus the comment above it.
+A lost swapchain is rebuilt the way an outdated one is (wgpu's own
+examples do the same); any other failure skips the frame. Skipping a
+`Lost` without rebuilding would leave a frozen screen that logs an error
+every frame. `git diff <verbatim commit> -- vendor/bevy_render` shows
+exactly that, plus the comments.
 
 ### Why
 
