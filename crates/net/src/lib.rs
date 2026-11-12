@@ -74,6 +74,8 @@ pub fn addr_to_peer(addr: NetAddr) -> PeerId {
 /// reference impl; we mirror the warning for parity).
 pub struct MatchboxBridge {
     channel: WebRtcChannel,
+    /// The socket under the channel has ended; logged once, then quiet.
+    link_lost_logged: bool,
 }
 
 impl MatchboxBridge {
@@ -92,7 +94,10 @@ impl MatchboxBridge {
                  channel config.",
             );
         }
-        Self { channel }
+        Self {
+            channel,
+            link_lost_logged: false,
+        }
     }
 
     /// Surrender the wrapped channel — useful for tests or for
@@ -381,8 +386,24 @@ pub fn decode_packet(message: (PeerId, Packet)) -> Option<(NetAddr, Message)> {
 }
 
 impl NonBlockingSocket<NetAddr> for MatchboxBridge {
+    /// Never panics. matchbox's `WebRtcChannel::send` does (`"Send
+    /// failed"`) once the socket's future has ended — and it ends for the
+    /// whole socket, data channels included, the moment the signaling
+    /// websocket closes after pairing: the room server redeploying, or a
+    /// phone moving from Wi-Fi to cellular. ggrs sends every frame, so
+    /// every match in progress used to crash on the next frame. A failed
+    /// send is a packet lost on a dead link; the app sees the closed
+    /// socket and ends the match (`netplay`'s link-lost check).
     fn send_to(&mut self, msg: &Message, addr: &NetAddr) {
-        self.channel.send(encode_message(msg), addr_to_peer(*addr));
+        if self
+            .channel
+            .try_send(encode_message(msg), addr_to_peer(*addr))
+            .is_err()
+            && !self.link_lost_logged
+        {
+            self.link_lost_logged = true;
+            tracing::warn!(target: "two_top::net", "ggrs channel closed under the session — link lost");
+        }
     }
 
     fn receive_all_messages(&mut self) -> Vec<(NetAddr, Message)> {
@@ -1066,6 +1087,38 @@ mod tests {
     fn matchbox_bridge_impls_non_blocking_socket() {
         fn assert_impl<T: NonBlockingSocket<NetAddr>>() {}
         assert_impl::<MatchboxBridge>();
+    }
+
+    /// The link-lost crash: once the socket's future is gone (the room
+    /// server restarted, the phone changed networks), matchbox's `send`
+    /// panics. The bridge must keep accepting sends as lost packets, and
+    /// the closure must be visible to the app through `any_channel_closed`
+    /// on what remains of the socket.
+    #[test]
+    fn a_bridge_over_a_dead_socket_drops_packets_instead_of_panicking() {
+        let (mut socket, message_loop) =
+            matchbox_socket::WebRtcSocketBuilder::new("ws://127.0.0.1:1/room")
+                .add_channel(ChannelConfig::unreliable())
+                .add_channel(ChannelConfig::reliable())
+                .build();
+        let mut channel = socket.take_channel(0).expect("channel 0");
+        assert!(!socket.any_channel_closed(), "a fresh socket is open");
+        // The socket's future ending is what drops its receivers.
+        drop(message_loop);
+        assert!(
+            socket.any_channel_closed(),
+            "the side channel reports the loss"
+        );
+        // A ggrs `Message` cannot be built outside ggrs, so the bridge's
+        // send path is exercised through the call it now makes: `try_send`
+        // answers Err where matchbox's `send` panicked with "Send failed".
+        assert!(
+            channel
+                .try_send(vec![1u8, 2, 3].into_boxed_slice(), addr_to_peer(NetAddr(7)))
+                .is_err()
+        );
+        let mut bridge = MatchboxBridge::new(channel);
+        assert!(bridge.receive_all_messages().is_empty());
     }
 
     /// The `PeerId` ↔ `NetAddr` bijection must round-trip losslessly

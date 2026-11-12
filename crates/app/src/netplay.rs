@@ -570,6 +570,9 @@ fn drive_netplay(world: &mut World) {
         // reliable side-channel, and keep the silence timer fresh only
         // while ggrs reports a healthy link — during an interruption the
         // timer ages honestly and net's silence FSM raises OPPONENT AWAY.
+        if end_match_on_link_loss(world) {
+            return;
+        }
         drain_session_events(world);
         pump_side_channel(world);
         return;
@@ -647,6 +650,40 @@ fn drive_netplay(world: &mut World) {
     }
 }
 
+/// The socket under a live match has ended. matchbox runs signaling and
+/// the data channels as one future, and it has no reconnect: the room
+/// server restarting, or this phone moving from Wi-Fi to cellular, ends
+/// all of it, and the match with it. That used to be a crash (every send
+/// on the dead channel panicked); it is a dropped connection now, said at
+/// once instead of after ggrs's 9 s timeout, and scored the way any
+/// silent drop is — unfinished, nobody's win (`grudge::match_outcome`).
+/// `true` when the match was just ended here.
+fn end_match_on_link_loss(world: &mut World) -> bool {
+    let closed = world
+        .get_non_send_resource::<MatchboxDriver>()
+        .is_some_and(|driver| driver.socket.any_channel_closed());
+    if !closed {
+        return false;
+    }
+    let peer_id = match *world.resource::<LobbyState>() {
+        LobbyState::Connected { peer_id } | LobbyState::Disconnected { peer_id, .. } => peer_id,
+        // Already over (a forfeit, a desync, a goodbye): the socket ending
+        // after that is the teardown, not news.
+        _ => return false,
+    };
+    tracing::error!(
+        target: "two_top::net",
+        peer = %peer_id,
+        "connection lost: the socket ended under a live match",
+    );
+    *world.resource_mut::<LobbyState>() = LobbyState::Forfeited {
+        peer_id,
+        conceded: false,
+    };
+    *world.resource_mut::<sim::MatchState>() = sim::MatchState::MatchOver;
+    true
+}
+
 /// One tick of the table handshake: send our pick once, read the peer's.
 /// `Some(their pick)` once it has arrived. Anything else the peer sent on
 /// the side channel meanwhile is kept for the session, never dropped.
@@ -662,7 +699,9 @@ fn exchange_table(world: &mut World, peer_id: PeerId) -> Option<sim::ArenaId> {
         driver.backlog.clear();
     }
     if !driver.table.sent {
-        driver.socket.channel_mut(SIDE_CHANNEL).send(
+        // `try_send`: a dead socket is caught by the next `try_update_peers`
+        // (`SummonFailed`), never by a panic here.
+        let _ = driver.socket.channel_mut(SIDE_CHANNEL).try_send(
             encode_net_msg(&NetMsg::Table {
                 arena: ours.as_u8(),
             }),
@@ -922,10 +961,11 @@ fn pump_side_channel(world: &mut World) {
         let mut driver = world.non_send_resource_mut::<MatchboxDriver>();
         if let Some(peer) = peer {
             for msg in &outbound {
-                driver
+                // A closed socket is `end_match_on_link_loss`'s to report.
+                let _ = driver
                     .socket
                     .channel_mut(SIDE_CHANNEL)
-                    .send(encode_net_msg(msg), peer);
+                    .try_send(encode_net_msg(msg), peer);
             }
         } else if !outbound.is_empty() {
             tracing::debug!(
@@ -1182,10 +1222,12 @@ pub fn leave_online_match(world: &mut World) {
         && let Some(peer) = peer
         && driver.channel_taken
     {
-        driver
+        // Best effort: leaving over a link that already died must not
+        // crash on the way out.
+        let _ = driver
             .socket
             .channel_mut(SIDE_CHANNEL)
-            .send(encode_net_msg(&NetMsg::Bye), peer);
+            .try_send(encode_net_msg(&NetMsg::Bye), peer);
     }
     drop(driver);
     world.remove_resource::<Session<GgrsCfg>>();
