@@ -30,6 +30,12 @@ pub enum Seat {
     Idle,
     /// The bot at a fixed tier (no rubber band: the bench measures tiers).
     Bot { tier: u32 },
+    /// Never throws, never stops walking: a fresh heading every half to
+    /// one and a half seconds, steered off the edge, cover and the chasm.
+    /// A stand-in for the part of a human the bot has to beat — a target
+    /// that keeps moving — so "how long does tier n take to land five" is
+    /// measured on something a tight aim at the wrong spot misses.
+    Strafer,
 }
 
 /// How one match went.
@@ -64,10 +70,44 @@ impl MatchReport {
     }
 }
 
+/// What drives one seat during a match.
+enum Driver {
+    Idle,
+    Bot(Brain, u32),
+    Strafer,
+}
+
 #[derive(Resource)]
 struct Seats {
-    brains: [Option<(Brain, u32)>; 2],
+    drivers: [Driver; 2],
     seed: u32,
+}
+
+/// The strafer's input this tick: a heading hashed from the seed and the
+/// current leg (legs of 30-90 ticks), through the brain's own steering.
+fn strafe(view: &crate::BotView, seed: u32) -> PlayerInput {
+    let hash = |x: u32| {
+        let mut h = x.wrapping_mul(0x9E37_79B9) ^ seed;
+        h ^= h >> 16;
+        h = h.wrapping_mul(0x7FEB_352D);
+        h ^ (h >> 15)
+    };
+    // Walk the legs forward to the one this frame falls in.
+    let (mut start, mut leg) = (0u32, 0u32);
+    loop {
+        let len = 30 + hash(leg) % 61;
+        if view.frame < start + len {
+            break;
+        }
+        start += len;
+        leg += 1;
+        if leg > 100_000 {
+            break;
+        }
+    }
+    let angle = (hash(leg ^ 0xA5A5_5A5A) % 360) as f32 * std::f32::consts::PI / 180.0;
+    let dir = crate::steer(view, Vec2::from_angle(angle));
+    crate::input_from(dir, 0)
 }
 
 /// `ReadInputs`: both seats' inputs for this tick.
@@ -75,18 +115,20 @@ fn seat_inputs(world: &mut World) {
     world.resource_scope::<Seats, _>(|world, mut seats| {
         let seed = seats.seed;
         let mut map = bevy::platform::collections::HashMap::default();
-        for (handle, seat) in seats.brains.iter_mut().enumerate() {
+        for (handle, seat) in seats.drivers.iter_mut().enumerate() {
+            let seat_seed = seed.wrapping_add(handle as u32);
             let input = match seat {
-                Some((brain, tier)) => {
-                    match view_for(world, handle, *tier, None, seed.wrapping_add(handle as u32)) {
-                        Some(view) => brain.decide(view),
-                        None => {
-                            brain.forget();
-                            PlayerInput::default()
-                        }
+                Driver::Bot(brain, tier) => match view_for(world, handle, *tier, None, seat_seed) {
+                    Some(view) => brain.decide(view),
+                    None => {
+                        brain.forget();
+                        PlayerInput::default()
                     }
-                }
-                None => PlayerInput::default(),
+                },
+                Driver::Strafer => view_for(world, handle, 0, None, seat_seed)
+                    .map(|view| strafe(&view, seat_seed))
+                    .unwrap_or_default(),
+                Driver::Idle => PlayerInput::default(),
             };
             map.insert(handle, input);
         }
@@ -120,9 +162,10 @@ fn build(arena: ArenaId, seats: [Seat; 2], seed: u32) -> App {
     app.insert_resource(Session::SyncTest(session));
     app.insert_resource(sim::SelectedArena(arena));
     app.insert_resource(Seats {
-        brains: seats.map(|seat| match seat {
-            Seat::Idle => None,
-            Seat::Bot { tier } => Some((Brain::default(), tier)),
+        drivers: seats.map(|seat| match seat {
+            Seat::Idle => Driver::Idle,
+            Seat::Bot { tier } => Driver::Bot(Brain::default(), tier),
+            Seat::Strafer => Driver::Strafer,
         }),
         seed,
     });

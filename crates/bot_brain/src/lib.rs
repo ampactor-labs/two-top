@@ -33,6 +33,8 @@ pub struct BotView {
     pub frame: u32,
     pub me: Vec2,
     pub foe: Vec2,
+    /// The foe's velocity (cm/tick), for leading a throw ([`lead_frac`]).
+    pub foe_vel: Vec2,
     pub foe_alive: bool,
     pub my_charge: u32,
     /// Primary fangs the bot has out (0 = free to throw).
@@ -231,13 +233,17 @@ pub fn bot_decide(v: &BotView) -> PlayerInput {
     //    player's throws, and above it the reflex fires on some throws, not
     //    all (`dodge_chance`). A shade dodges from the first tick and every
     //    time — its reflex is the rival's, not the ladder's.
-    let reacts = v.style.is_some() || dodge_roll(v.frame, v.seed) < dodge_chance(lvl);
-    if reacts && let Some((tpos, tvel)) = v.threat {
+    if reacts(v)
+        && let Some((tpos, tvel)) = v.threat
+    {
         let to_me = v.me - tpos;
         let radius = v
             .style
             .map_or_else(|| threat_radius(lvl), |s| s.dodge_radius);
-        if tvel.dot(to_me) > 0.0 && to_me.length() < radius {
+        // Only a fang whose lane the bot is in: one that will pass wide is
+        // left to the lane rule below, and the dash kept for one that won't.
+        let off = lane_offset(v, (tpos, tvel)).unwrap_or(Vec2::ZERO);
+        if tvel.dot(to_me) > 0.0 && to_me.length() < radius && off.length() < LANE_CLEAR {
             // Mid-charge there is no dashing (a charge commits you in
             // place), and letting go of THROW fires the fang along the
             // stick. The dodge used to do exactly that with the stick
@@ -253,14 +259,7 @@ pub fn bot_decide(v: &BotView) -> PlayerInput {
                     PlayerInput::AIM_ACTIVE | PlayerInput::DASH_DOWN,
                 );
             }
-            // Perpendicular to the fang's path, biased toward the center so
-            // the dodge never carries the bot off the island.
-            let perp = Vec2::new(-tvel.y, tvel.x).normalize_or_zero();
-            let dir = if (v.me + perp * 100.0).length() < (v.me - perp * 100.0).length() {
-                perp
-            } else {
-                -perp
-            };
+            let dir = dodge_side(v, tvel, off);
             let buttons = if v.can_dash {
                 PlayerInput::DASH_DOWN
             } else {
@@ -268,6 +267,33 @@ pub fn bot_decide(v: &BotView) -> PlayerInput {
             };
             return input_from(steer(v, dir), buttons);
         }
+    }
+
+    // 1b) Out of the lane. The dodge is a reflex at close range; once it
+    //     had carried the bot clear, the footwork walked it straight back
+    //     into the same fang's line — a slow, far fang is still coming, and
+    //     big — and most deaths of a dodging tier came a few ticks after a
+    //     dash that had worked. A bot that is reading the fang walks out of
+    //     its lane (rooted while charging, so not then), and its footwork
+    //     will not step back in (`keep_out_of_lane`).
+    if v.my_charge == 0
+        && reacts(v)
+        && let Some(threat) = v.threat
+        && let Some(off) = lane_offset(v, threat)
+        && off.length() < LANE_CLEAR
+    {
+        let out = if off.length() > 5.0 {
+            off.normalize()
+        } else {
+            // Dead on the line: out toward the centre.
+            let perp = Vec2::new(-threat.1.y, threat.1.x).normalize_or_zero();
+            if (v.me + perp).length() < (v.me - perp).length() {
+                perp
+            } else {
+                -perp
+            }
+        };
+        return input_from(steer(v, out), 0);
     }
 
     // 2) Housekeeping: a dropped fang is a liability (the human can steal
@@ -383,10 +409,59 @@ fn orbit_dir(v: &BotView) -> Vec2 {
     (radial + tangent).clamp_length_max(1.0)
 }
 
-/// Aim at the foe with a slow wobble — the imperfection that makes the bot
-/// beatable at the dash-dodge game.
+/// How much of the foe's motion the throw leads, by level: none up to
+/// level 1, then a seventh more each level, all of it from level 8.
+///
+/// A fang crosses the dueling range in about a quarter second, and a
+/// walking foe covers well over a body width in that time, so a throw at
+/// where the foe IS misses anyone who keeps moving. Without a lead, the
+/// sharper aim of a high tier was aim at the wrong spot, and the bench
+/// had tier 1 beating tier 10: the wide spray of a green bot hit a mover
+/// as often as the tight aim of a sharp one, and threw sooner. Leading is
+/// the skill; the wobble ([`wobble_amp`]) stays the imperfection on top.
+fn lead_frac(lvl: u32) -> f32 {
+    (lvl.saturating_sub(1) as f32 / 7.0).min(1.0)
+}
+
+/// A shade leads like a sharp human: most of the way, not all of it.
+const SHADE_LEAD: f32 = 0.7;
+
+/// The fastest a lead believes the foe moves (cm/tick): walking pace. A
+/// dash is a five-tick burst, not a heading worth leading.
+const LEAD_MAX_SPEED: f32 = sim::WALK_SPEED_CM_PER_TICK as f32;
+
+/// Launch speed (cm/tick) of a throw released at `charge` frames — the
+/// sim's own formula, unempowered.
+fn release_speed(charge: u32) -> f32 {
+    sim::aimed_throw_speed(sim::throw_speed_for(false), sim::charge_power(charge)).to_num::<f32>()
+}
+
+/// Where to throw at: the foe as last seen, carried `lead` of the way along
+/// its motion through the perception lag and the fang's flight (four
+/// passes of the intercept: each closes it by the speed ratio, ~0.45).
+fn led_target(v: &BotView, lead: f32) -> Vec2 {
+    if lead <= 0.0 {
+        return v.foe;
+    }
+    let vel = v.foe_vel.clamp_length_max(LEAD_MAX_SPEED);
+    let lag = perception_lag(v.difficulty, v.style.is_some()) as f32;
+    let speed = release_speed(v.my_charge.max(1)).max(1.0);
+    let mut target = v.foe;
+    for _ in 0..4 {
+        let flight = target.distance(v.me) / speed;
+        target = v.foe + vel * (lag + flight) * lead;
+    }
+    target
+}
+
+/// Aim at the foe — led by the level's share of its motion — with a slow
+/// wobble: the imperfection that makes the bot beatable at the dash-dodge
+/// game.
 fn aim_at_foe(v: &BotView) -> Vec2 {
-    let base = (v.foe - v.me).normalize_or_zero();
+    let lead = v
+        .style
+        .map_or_else(|| lead_frac(v.difficulty), |_| SHADE_LEAD);
+    let base = (led_target(v, lead) - v.me).normalize_or_zero();
     // Wobble amplitude shrinks as the bot levels up: a wide early spray, a
     // tighter (still imperfect) aim once the player has been winning. A
     // shade sprays exactly as wide as its rival planted tight.
@@ -636,6 +711,91 @@ fn slide_around_cover_within(v: &BotView, dir: Vec2, lookahead: f32) -> Vec2 {
     d
 }
 
+/// Does the bot read the incoming fang this window? A shade always does;
+/// the ladder from level 3, on some windows ([`dodge_chance`]).
+fn reacts(v: &BotView) -> bool {
+    v.style.is_some() || dodge_roll(v.frame, v.seed) < dodge_chance(v.difficulty)
+}
+
+/// Clearance (cm) kept from an incoming fang's line: a far fang's kill box
+/// (13 cm grown 1.6x) plus the body's, with room to spare.
+const LANE_CLEAR: f32 = 90.0;
+/// How far down an incoming fang's line the bot keeps out of it.
+const LANE_WATCH: f32 = 520.0;
+
+/// The bot's offset from the line a fang is flying along, when the bot is
+/// ahead of it on that line and close enough to care. `None` once the fang
+/// has passed, or for one that is not moving.
+fn lane_offset(v: &BotView, (tpos, tvel): (Vec2, Vec2)) -> Option<Vec2> {
+    let dir = tvel.normalize_or_zero();
+    if dir == Vec2::ZERO {
+        return None;
+    }
+    let rel = v.me - tpos;
+    let along = rel.dot(dir);
+    (along > 0.0 && along < LANE_WATCH).then(|| rel - dir * along)
+}
+
+/// How far a dash carries (cm): its ticks at dash speed.
+const DASH_REACH: f32 = (sim::DASH_DURATION_FRAMES as i32 * sim::DASH_SPEED_CM_PER_TICK) as f32;
+
+/// Which way to dodge a fang flying along `tvel`, the bot `off` its line:
+/// across the lane on the side the bot is already on, so a second press
+/// (or the walk during the dash's cooldown) carries it further out, not
+/// back over the line. It used to pick the side nearer the centre every
+/// tick, and once a dodge had carried the bot off-centre that was back
+/// across the lane: the bench caught tier 10 walking back into the fang
+/// it had just dodged, at walking pace, in most of its deaths. Dead on the
+/// line, or when its own side would land off the floor or in the chasm,
+/// it takes the other.
+fn dodge_side(v: &BotView, tvel: Vec2, off: Vec2) -> Vec2 {
+    let perp = Vec2::new(-tvel.y, tvel.x).normalize_or_zero();
+    let centre_ward = if (v.me + perp).length() < (v.me - perp).length() {
+        perp
+    } else {
+        -perp
+    };
+    let own = if off.length() > 5.0 {
+        if off.dot(perp) >= 0.0 { perp } else { -perp }
+    } else {
+        centre_ward
+    };
+    let lands = |dir: Vec2| {
+        let land = v.me + dir * DASH_REACH;
+        land.x.abs() < v.bounds.x * EDGE_MARGIN
+            && land.y.abs() < v.bounds.y * EDGE_MARGIN
+            && !v.hazards.iter().any(|(center, half)| {
+                segment_hits_box(v.me, land, *center, *half + Vec2::splat(ROUTE_PAD))
+            })
+    };
+    if lands(own) || !lands(-own) {
+        own
+    } else {
+        -own
+    }
+}
+
+/// Drop the part of a movement intent that would carry the bot back into
+/// an incoming fang's lane, while it is reading the fang.
+fn keep_out_of_lane(v: &BotView, dir: Vec2) -> Vec2 {
+    let Some(threat) = v.threat.filter(|_| reacts(v)) else {
+        return dir;
+    };
+    let Some(off) = lane_offset(v, threat) else {
+        return dir;
+    };
+    if off.length() >= LANE_CLEAR * 2.0 || off.length() < 1.0 {
+        return dir;
+    }
+    let away = off.normalize();
+    let toward = dir.dot(-away);
+    if toward > 0.0 {
+        dir + away * toward
+    } else {
+        dir
+    }
+}
+
 /// The duel's footwork. With a clear line to the foe it is the
 /// range-keeping orbit; with cover in the way it is the walk to the
 /// nearest spot the foe can be seen from ([`route_to_line`]). The orbit
@@ -649,9 +809,9 @@ fn duel_move(v: &BotView) -> Vec2 {
     {
         // Straight at it: the route already keeps the body off every face,
         // and the slide's wider ring would close the very gaps it threads.
-        return (waypoint - v.me).normalize_or_zero();
+        return keep_out_of_lane(v, (waypoint - v.me).normalize_or_zero());
     }
-    steer(v, orbit_dir(v))
+    keep_out_of_lane(v, steer(v, orbit_dir(v)))
 }
 
 /// Grid pitch (cm) of the route search: half a body width, so every gap
@@ -792,6 +952,7 @@ pub fn perception_lag(lvl: u32, shade: bool) -> usize {
 #[derive(Clone, Copy, Debug)]
 struct Perceived {
     foe: Vec2,
+    foe_vel: Vec2,
     foe_alive: bool,
     threat: Option<(Vec2, Vec2)>,
 }
@@ -802,7 +963,9 @@ struct Perceived {
 /// velocity, as a human tracks a moving thing — so the lag costs the bot
 /// fangs that appeared within the window (a reaction time) without turning
 /// every dodge into a dodge at where the fang used to be. The opponent's
-/// position is not extrapolated: a low tier aims where you WERE.
+/// position is not extrapolated here: what the bot does with the late
+/// picture is its aim's business ([`lead_frac`]) — a low tier aims where
+/// you WERE, a sharp one where you will be.
 #[derive(Default, Debug)]
 pub struct Brain {
     seen: std::collections::VecDeque<Perceived>,
@@ -814,6 +977,7 @@ impl Brain {
         let lag = perception_lag(view.difficulty, view.style.is_some());
         self.seen.push_back(Perceived {
             foe: view.foe,
+            foe_vel: view.foe_vel,
             foe_alive: view.foe_alive,
             threat: view.threat,
         });
@@ -823,6 +987,7 @@ impl Brain {
         if let Some(old) = self.seen.front() {
             let late = (self.seen.len() - 1) as f32;
             view.foe = old.foe;
+            view.foe_vel = old.foe_vel;
             view.foe_alive = old.foe_alive;
             view.threat = old.threat.map(|threat| ahead(threat, late));
         }
@@ -896,8 +1061,15 @@ pub fn view_for(
     }
     let mut me_alive = true;
     {
-        let mut players = world.query::<(&Player, &PositionF, &Dead, &DashState, &ThrowCharge)>();
-        for (p, pos, dead, dash, charge) in players.iter(world) {
+        let mut players = world.query::<(
+            &Player,
+            &PositionF,
+            &VelocityF,
+            &Dead,
+            &DashState,
+            &ThrowCharge,
+        )>();
+        for (p, pos, vel, dead, dash, charge) in players.iter(world) {
             let (x, y) = pos.0.to_f32();
             if p.handle == me {
                 view.me = Vec2::new(x, y);
@@ -906,6 +1078,8 @@ pub fn view_for(
                 me_alive = !dead.is_dying();
             } else {
                 view.foe = Vec2::new(x, y);
+                let (vx, vy) = vel.0.to_f32();
+                view.foe_vel = Vec2::new(vx, vy);
                 view.foe_alive = !dead.is_dying();
             }
         }
@@ -1203,6 +1377,108 @@ mod tests {
         let stick = Vec2::new(f32::from(input.stick_x), f32::from(input.stick_y));
         let to_foe = (v.foe - v.me).normalize();
         assert!(stick.normalize().dot(to_foe) > 0.99, "{stick:?}");
+    }
+
+    #[test]
+    fn a_sharp_bot_throws_where_a_walker_will_be() {
+        let mut v = base_view();
+        v.me = Vec2::new(0.0, 300.0);
+        v.foe = Vec2::new(0.0, -140.0);
+        v.foe_vel = Vec2::new(11.0, 0.0); // walking right
+        v.my_charge = 20;
+        let angle_x = |v: &BotView| led_target(v, lead_frac(v.difficulty)).x;
+        // A green bot throws at where the foe is.
+        v.difficulty = 1;
+        assert_eq!(angle_x(&v), 0.0);
+        // A sharp one leads, and leads more the sharper it is.
+        v.difficulty = 5;
+        let mid = angle_x(&v);
+        v.difficulty = 10;
+        let sharp = angle_x(&v);
+        assert!(mid > 30.0 && sharp > mid, "{mid} then {sharp}");
+        // The lead lands where the walker is when the fang arrives.
+        let speed = release_speed(20);
+        let lag = perception_lag(10, false) as f32;
+        let arrival = v.foe + v.foe_vel * (lag + v.me.distance(Vec2::new(sharp, -140.0)) / speed);
+        assert!((arrival.x - sharp).abs() < 4.0, "{arrival:?} vs {sharp}");
+    }
+
+    #[test]
+    fn a_dash_is_not_a_heading_worth_leading() {
+        let mut v = base_view();
+        v.difficulty = 10;
+        v.foe_vel = Vec2::new(42.0, 0.0); // mid-dash
+        let dashing = led_target(&v, 1.0);
+        v.foe_vel = Vec2::new(LEAD_MAX_SPEED, 0.0);
+        assert_eq!(dashing, led_target(&v, 1.0));
+    }
+
+    /// A view whose dodge roll fires on this frame (a shade always reads).
+    fn reading(mut v: BotView) -> BotView {
+        v.style = Some(BotStyle {
+            commit_frac: 0.5,
+            dodge_radius: 100.0,
+            wobble: 0.2,
+            range: 440.0,
+        });
+        v
+    }
+
+    #[test]
+    fn a_bot_in_a_fang_lane_walks_out_of_it() {
+        let mut v = reading(base_view());
+        v.me = Vec2::new(30.0, 0.0);
+        // A fang 400 cm off, flying straight at the bot's stretch of line.
+        v.threat = Some((Vec2::new(0.0, -400.0), Vec2::new(0.0, 15.0)));
+        let input = bot_decide(&v);
+        assert!(
+            input.stick_x > 60,
+            "should step out to its own side: {input:?}"
+        );
+        assert_eq!(
+            input.buttons & PlayerInput::DASH_DOWN,
+            0,
+            "a walk, not a dash, out there"
+        );
+    }
+
+    #[test]
+    fn the_footwork_does_not_step_back_into_the_lane() {
+        let mut v = reading(base_view());
+        v.me = Vec2::new(120.0, 0.0);
+        v.threat = Some((Vec2::new(0.0, -400.0), Vec2::new(0.0, 15.0)));
+        let into = keep_out_of_lane(&v, Vec2::new(-1.0, 0.3));
+        assert!(into.x >= -1e-4, "{into:?}");
+        // Once the fang has passed, the lane is just floor.
+        v.threat = Some((Vec2::new(0.0, 100.0), Vec2::new(0.0, 15.0)));
+        assert_eq!(
+            keep_out_of_lane(&v, Vec2::new(-1.0, 0.3)),
+            Vec2::new(-1.0, 0.3)
+        );
+    }
+
+    #[test]
+    fn a_dodge_goes_out_on_its_own_side_not_back_across_the_lane() {
+        let mut v = reading(base_view());
+        // Already right of a fang flying up the x = -60 line, and right of
+        // centre: the centre is back across the lane.
+        v.me = Vec2::new(-20.0, 0.0);
+        v.threat = Some((Vec2::new(-60.0, -80.0), Vec2::new(0.0, 15.0)));
+        let input = bot_decide(&v);
+        assert!(input.stick_x > 60, "{input:?}");
+        assert_ne!(input.buttons & PlayerInput::DASH_DOWN, 0);
+        // Its own side would land off the floor: the other one.
+        v.me = Vec2::new(v.bounds.x * 0.78, 0.0);
+        v.threat = Some((Vec2::new(v.me.x - 40.0, -80.0), Vec2::new(0.0, 15.0)));
+        assert!(bot_decide(&v).stick_x < -60);
+    }
+
+    #[test]
+    fn a_fang_that_will_pass_wide_is_not_dodged() {
+        let mut v = reading(base_view());
+        v.me = Vec2::new(150.0, 0.0);
+        v.threat = Some((Vec2::new(0.0, -60.0), Vec2::new(0.0, 15.0)));
+        assert_eq!(bot_decide(&v).buttons & PlayerInput::DASH_DOWN, 0);
     }
 
     #[test]
