@@ -1099,6 +1099,7 @@ mod tests {
     // determinism lane links Android test binaries against API 21. The
     // app itself ships at a level that has it; the bridge logic is the same
     // on every target and runs here on the others.
+    // platform-gate-ok: a native test; the browser never runs net's tests.
     #[cfg(not(target_os = "android"))]
     #[test]
     fn a_bridge_over_a_dead_socket_drops_packets_instead_of_panicking() {

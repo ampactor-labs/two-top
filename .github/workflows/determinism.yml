@@ -19,6 +19,11 @@ jobs:
   determinism:
     name: ${{ matrix.target }}
     runs-on: ${{ matrix.runs-on }}
+    # One shell everywhere: the Windows lane's default is PowerShell, and
+    # the steps below are written for bash (Git Bash ships on the runner).
+    defaults:
+      run:
+        shell: bash
     strategy:
       fail-fast: false
       matrix:
@@ -39,6 +44,13 @@ jobs:
             replay-sync: true
           - target: aarch64-apple-darwin
             runs-on: macos-14
+            pkg-args: --workspace --exclude app --exclude ice_vendor
+            replay-sync: true
+          # Windows: the desktop app ships here (desktop.yml), and a Windows
+          # player online against a phone is only safe if the two sims
+          # agree. Sim crates only, like the other non-Linux lanes.
+          - target: x86_64-pc-windows-msvc
+            runs-on: windows-latest
             pkg-args: --workspace --exclude app --exclude ice_vendor
             replay-sync: true
           # aarch64-linux-android: Phase 7.5 expanded scope from

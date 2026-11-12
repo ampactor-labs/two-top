@@ -10,7 +10,7 @@
 //! - **Dev (`debug_assertions`)**: `fmt` layer → `stderr`. Matches the
 //!   prior bevy-default behavior so existing dev workflow is preserved.
 //! - **Release desktop**: `fmt` layer (no ANSI) → daily-rotated file under
-//!   `<exe-dir>/logs/two_top.log`. Writes go through `tracing-appender`'s
+//!   the user's local data directory (`two-top/logs/two_top.log`). Writes go through `tracing-appender`'s
 //!   non-blocking writer so disk I/O never stalls the game thread.
 //! - **Release Android**: stderr/logcat AND a daily-rotated file beside the
 //!   replays (`crate::paths::diagnostics_dir()/logs/`). The file half is
@@ -484,9 +484,16 @@ pub fn init_logging() -> LogGuard {
 }
 
 /// Resolve the release log directory. Order:
-/// 1. `<exe-dir>/logs/` if the current exe path is resolvable.
-/// 2. `./logs/` as a last-resort cwd fallback.
+/// 1. the user's local data directory (`%LOCALAPPDATA%\two-top\logs`,
+///    `~/Library/Application Support/two-top/logs`,
+///    `~/.local/share/two-top/logs`);
+/// 2. `<exe-dir>/logs/` if the current exe path is resolvable;
+/// 3. `./logs/` as a last-resort cwd fallback.
 ///
+/// The executable's folder used to come first. A shipped desktop build
+/// lives where a user cannot write — Program Files, inside a signed
+/// `.app`, inside an AppImage's read-only mount — and the log simply went
+/// unwritten there.
 #[cfg(all(
     not(debug_assertions),
     not(target_os = "android"),
@@ -494,6 +501,9 @@ pub fn init_logging() -> LogGuard {
 ))]
 fn log_dir() -> std::path::PathBuf {
     use std::path::PathBuf;
+    if let Some(data) = dirs::data_local_dir() {
+        return data.join("two-top").join("logs");
+    }
     if let Ok(exe) = std::env::current_exe()
         && let Some(parent) = exe.parent()
     {

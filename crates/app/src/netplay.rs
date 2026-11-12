@@ -310,9 +310,102 @@ impl Plugin for MatchboxPlugin {
                     drive_netplay,
                     track_absence,
                     reset_rematch_consent,
+                    log_link,
                 ),
             );
     }
+}
+
+/// How often a live session's link goes into the log.
+const LINK_LOG_EVERY_SECS: f32 = 5.0;
+
+/// One match's link, as ggrs measured it, summed for its closing line.
+#[derive(Default, Debug, Clone, PartialEq)]
+struct LinkSummary {
+    samples: u32,
+    ping_sum_ms: u128,
+    ping_max_ms: u128,
+    behind_max: i32,
+    kbps_max: usize,
+}
+
+impl LinkSummary {
+    fn add(&mut self, ping_ms: u128, local_frames_behind: i32, kbps_sent: usize) {
+        self.samples += 1;
+        self.ping_sum_ms += ping_ms;
+        self.ping_max_ms = self.ping_max_ms.max(ping_ms);
+        self.behind_max = self.behind_max.max(local_frames_behind.abs());
+        self.kbps_max = self.kbps_max.max(kbps_sent);
+    }
+
+    fn mean_ping_ms(&self) -> u128 {
+        self.ping_sum_ms / u128::from(self.samples.max(1))
+    }
+}
+
+/// The link, in the log: every few seconds of a live online session, the
+/// round trip, frames behind and bandwidth ggrs measures, and once at the
+/// end of the match a one-line summary of all of it. The log carried none
+/// of it — `network_stats()` was never called, the prediction stalls
+/// logged at debug (compiled out of release) — so a report of "it felt
+/// laggy" or a dropped match came with nothing to read. The summary rides
+/// in the crash report's log tail like everything else.
+fn log_link(
+    time: Res<Time<Real>>,
+    local: Res<LocalPlayerHandle>,
+    state: Res<sim::MatchState>,
+    session: Option<Res<Session<GgrsCfg>>>,
+    mut summary: Local<LinkSummary>,
+    mut next_sample: Local<f32>,
+    mut summarized: Local<bool>,
+) {
+    let now = time.elapsed_secs();
+    let (Some(session), Some(local)) = (session, local.0) else {
+        *summary = LinkSummary::default();
+        *summarized = false;
+        return;
+    };
+    let Session::P2P(session) = &*session else {
+        return;
+    };
+    if matches!(*state, sim::MatchState::MatchOver) {
+        if !*summarized && summary.samples > 0 {
+            tracing::info!(
+                target: "two_top::net::link",
+                samples = summary.samples,
+                mean_ping_ms = summary.mean_ping_ms(),
+                max_ping_ms = summary.ping_max_ms,
+                max_frames_behind = summary.behind_max,
+                max_kbps = summary.kbps_max,
+                "match link summary",
+            );
+        }
+        *summarized = true;
+        return;
+    }
+    if *summarized {
+        // A rematch: a new match, a new summary.
+        *summary = LinkSummary::default();
+        *summarized = false;
+    }
+    if now < *next_sample {
+        return;
+    }
+    *next_sample = now + LINK_LOG_EVERY_SECS;
+    // Not synchronized yet (or the peer is gone): nothing measured.
+    let Ok(stats) = session.network_stats(1 - local) else {
+        return;
+    };
+    summary.add(stats.ping, stats.local_frames_behind, stats.kbps_sent);
+    tracing::info!(
+        target: "two_top::net::link",
+        ping_ms = stats.ping,
+        local_frames_behind = stats.local_frames_behind,
+        remote_frames_behind = stats.remote_frames_behind,
+        kbps_sent = stats.kbps_sent,
+        send_queue = stats.send_queue_len,
+        "link",
+    );
 }
 
 /// Seconds the credential fetch may hold up the connection before we fall
@@ -1256,6 +1349,20 @@ pub fn leave_online_match(world: &mut World) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_link_summary_keeps_the_worst_and_the_mean() {
+        let mut sum = LinkSummary::default();
+        assert_eq!(sum.mean_ping_ms(), 0, "no samples, no division by zero");
+        sum.add(40, 1, 12);
+        sum.add(80, -3, 9);
+        sum.add(60, 2, 15);
+        assert_eq!(sum.samples, 3);
+        assert_eq!(sum.mean_ping_ms(), 60);
+        assert_eq!(sum.ping_max_ms, 80);
+        assert_eq!(sum.behind_max, 3, "behind either way counts");
+        assert_eq!(sum.kbps_max, 15);
+    }
 
     #[test]
     fn both_peers_agree_on_the_lower_ids_table() {

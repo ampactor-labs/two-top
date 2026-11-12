@@ -265,6 +265,31 @@ as `NetworkInterrupted` and cleanly `NetworkResumed` with no desync.
 The three gates below additionally require **real devices / real
 networks** and remain operator-executed.
 
+That loopback run had nobody playing, and an idle match never threw two
+fangs on one frame. `scripts/two_peer_smoke.sh` is the same setup with
+the bot brain at each keyboard (`TWOTOP_AUTOPILOT`): its first runs
+desynced at frame 210 every time both sides threw together, a
+spawn-order fault no single-process check could see (MORGAN_NOTES, "Why
+same-frame spawns go in handle order"). Run it after any change to the
+sim, the netplay driver or matchbox:
+
+```sh
+cargo install matchbox_server --version 0.14.0 --locked
+cargo build -p app -p replay_sync
+VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/lvp_icd.json scripts/two_peer_smoke.sh
+```
+
+It passes when both peers decide a match with no desync, both tapes
+replay to the same per-frame checksums, and each attestation verifies.
+`STATE_LOG_DIR=<dir>` makes each peer write every frame's state there
+(`TWOTOP_STATE_LOG`) for diffing when it does not. The server is pinned
+at 0.14.0 (`deploy/matchbox/Dockerfile`), the client's matchbox line;
+bump the two together.
+
+A live session also logs its link every 5 s (`two_top::net::link`: ping,
+frames behind, kbps) and a one-line `match link summary` at the end of
+each match.
+
 ---
 
 ## Exit-criteria test plan
