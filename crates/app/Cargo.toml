@@ -73,6 +73,8 @@ input_touch = { path = "../input_touch" }
 # touch source. Pulls the `keyboard` bevy feature in transitively.
 input_desktop = { path = "../input_desktop" }
 net = { path = "../net" }
+# The practice bot's brain (shared with its headless tuning bench).
+bot_brain = { path = "../bot_brain" }
 render = { path = "../render" }
 # Match recorder: every decided match is written out as a shareable .bmrg
 # replay (the deterministic sim makes the input tape a perfect recording).

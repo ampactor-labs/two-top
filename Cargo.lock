@@ -184,6 +184,7 @@ dependencies = [
  "base64 0.22.1",
  "bevy",
  "bevy_ggrs",
+ "bot_brain",
  "console_error_panic_hook",
  "dirs",
  "fixed_math",
@@ -1915,6 +1916,16 @@ dependencies = [
  "futures-io",
  "futures-lite",
  "piper",
+]
+
+[[package]]
+name = "bot_brain"
+version = "0.15.4"
+dependencies = [
+ "bevy",
+ "bevy_ggrs",
+ "fixed_math",
+ "sim",
 ]
 
 [[package]]

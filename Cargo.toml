@@ -14,6 +14,7 @@ members = [
     "crates/replay_viewer",
     "crates/ice_vendor",
     "crates/tape_drop",
+    "crates/bot_brain",
 ]
 # Third-party source carried for a backport (vendor/README.md). Not ours to
 # lint or format: keep it out of `--workspace`.
