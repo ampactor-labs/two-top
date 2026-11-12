@@ -86,6 +86,14 @@ jobs:
             -storepass android -keypass android -alias androiddebugkey \
             -dname "CN=Android Debug,O=Android,C=US" \
             -keyalg RSA -keysize 2048 -validity 10000
+      - name: Room server (deploy/endpoints.env unless the repo variable says otherwise)
+        shell: bash
+        env:
+          ROOM_VAR: ${{ vars.TWOTOP_ROOM }}
+        run: |
+          . deploy/endpoints.env
+          echo "TWOTOP_ROOM=${ROOM_VAR:-$TWOTOP_ROOM_DEFAULT}" >> "$GITHUB_ENV"
+          echo "baking room server ${ROOM_VAR:-$TWOTOP_ROOM_DEFAULT}"
       - name: Say whether this build can relay
         shell: bash
         env:
@@ -98,7 +106,6 @@ jobs:
         env:
           CARGO_APK_RELEASE_KEYSTORE: ${{ github.workspace }}/debug.keystore
           CARGO_APK_RELEASE_KEYSTORE_PASSWORD: android
-          TWOTOP_ROOM: ${{ vars.TWOTOP_ROOM || 'wss://two-top-matchbox-production.up.railway.app/two-top?next=2' }}
           # The ephemeral-ICE vendor URL (crates/ice_vendor). A URL, not a
           # credential — safe in a public binary. Unset ⇒ STUN-only, as now.
           TWOTOP_ICE_URL: ${{ vars.TWOTOP_ICE_URL }}

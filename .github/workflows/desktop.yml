@@ -37,7 +37,6 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
-  TWOTOP_ROOM: ${{ vars.TWOTOP_ROOM || 'wss://two-top-matchbox-production.up.railway.app/two-top?next=2' }}
   TWOTOP_ICE_URL: ${{ vars.TWOTOP_ICE_URL }}
   TWOTOP_ICE_KEY: ${{ secrets.TWOTOP_ICE_KEY }}
   TWOTOP_DROP_URL: ${{ vars.TWOTOP_DROP_URL }}
@@ -68,6 +67,14 @@ jobs:
           if [ -z "$TWOTOP_ICE_URL" ]; then
             echo "::warning title=No TURN relay::TWOTOP_ICE_URL is unset, so this build is STUN-only: two phones on mobile data (carrier NAT) will not connect. Deploy crates/ice_vendor and set the TWOTOP_ICE_URL repo variable (SIGNALING.md)."
           fi
+      - name: Room server (deploy/endpoints.env unless the repo variable says otherwise)
+        shell: bash
+        env:
+          ROOM_VAR: ${{ vars.TWOTOP_ROOM }}
+        run: |
+          . deploy/endpoints.env
+          echo "TWOTOP_ROOM=${ROOM_VAR:-$TWOTOP_ROOM_DEFAULT}" >> "$GITHUB_ENV"
+          echo "baking room server ${ROOM_VAR:-$TWOTOP_ROOM_DEFAULT}"
       - name: Build
         run: cargo build -p app --bin app --release --locked --features gamepad
       - name: Package
@@ -110,6 +117,14 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: desktop-windows
+      - name: Room server (deploy/endpoints.env unless the repo variable says otherwise)
+        shell: bash
+        env:
+          ROOM_VAR: ${{ vars.TWOTOP_ROOM }}
+        run: |
+          . deploy/endpoints.env
+          echo "TWOTOP_ROOM=${ROOM_VAR:-$TWOTOP_ROOM_DEFAULT}" >> "$GITHUB_ENV"
+          echo "baking room server ${ROOM_VAR:-$TWOTOP_ROOM_DEFAULT}"
       - name: Build
         run: cargo build -p app --bin app --release --locked --features gamepad
       - name: Package
@@ -137,6 +152,14 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: desktop-macos
+      - name: Room server (deploy/endpoints.env unless the repo variable says otherwise)
+        shell: bash
+        env:
+          ROOM_VAR: ${{ vars.TWOTOP_ROOM }}
+        run: |
+          . deploy/endpoints.env
+          echo "TWOTOP_ROOM=${ROOM_VAR:-$TWOTOP_ROOM_DEFAULT}" >> "$GITHUB_ENV"
+          echo "baking room server ${ROOM_VAR:-$TWOTOP_ROOM_DEFAULT}"
       - name: Build
         run: |
           for t in aarch64-apple-darwin x86_64-apple-darwin; do
