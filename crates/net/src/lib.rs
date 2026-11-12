@@ -946,6 +946,31 @@ pub fn detect_peer_connection_edge(
 #[derive(Resource, Default, Clone, Copy, Debug)]
 pub struct LastPeerMessageFrame(pub u32);
 
+/// The clock the silence FSM ages on: real time since boot, counted in
+/// 60 Hz ticks, so every `*_AFTER_FRAMES` threshold keeps its meaning.
+/// [`LastPeerMessageFrame`] is stamped from it.
+///
+/// It was the sim's `FrameCount`, and that clock stops exactly when it is
+/// needed: a P2P session stops advancing frames once the peer's inputs stop
+/// arriving (ggrs holds at its prediction window), so silence never aged
+/// past the 16 frames of that window, the lobby never reached
+/// `Disconnected`, OPPONENT AWAY could never show, and the healthy side
+/// stared at a frozen board until ggrs's own timeout. Disconnection is
+/// observed locally on each phone either way; nothing here is simulated.
+/// Monotonic: it only ever moves forward (a test can set it ahead).
+#[derive(Resource, Default, Clone, Copy, Debug)]
+pub struct SilenceClock(pub u32);
+
+/// `Update`, before the grace timer: advance [`SilenceClock`] to now.
+/// No time plugin (a bare test app): the clock holds still.
+pub fn advance_silence_clock(time: Option<Res<Time<Real>>>, mut clock: ResMut<SilenceClock>) {
+    let Some(time) = time else {
+        return;
+    };
+    let now = (time.elapsed_secs_f64() * f64::from(sim::TICK_HZ as u32)) as u32;
+    clock.0 = clock.0.max(now);
+}
+
 /// Frames of peer silence that trigger `Connected -> Disconnected`.
 /// 60 = 1 s @ 60 Hz. Short enough that the UI can surface a
 /// reconnect spinner immediately on a real disconnect; long enough
@@ -1001,13 +1026,12 @@ pub fn next_lobby_state_for_silence(
 }
 
 /// `Update`-schedule system: drives the disconnection-grace timer.
-/// Reads `FrameCount` (post-tick value, since Update runs after
-/// `GgrsSchedule`) + `LastPeerMessageFrame`. Writes the next
+/// Reads [`SilenceClock`] + `LastPeerMessageFrame`. Writes the next
 /// `LobbyState` if a threshold was crossed, and pulses
 /// `sim::MatchState::MatchOver` on a `Forfeited` transition so the
 /// in-sim round flow ends.
 pub fn tick_disconnection_grace(
-    frame: Res<sim::FrameCount>,
+    frame: Res<SilenceClock>,
     last_msg: Res<LastPeerMessageFrame>,
     mut lobby: ResMut<LobbyState>,
     mut match_state: ResMut<sim::MatchState>,
@@ -1057,6 +1081,7 @@ impl Plugin for NetPlugin {
             .init_resource::<LobbyState>()
             .init_resource::<PendingP2PSwap>()
             .init_resource::<LastPeerMessageFrame>()
+            .init_resource::<SilenceClock>()
             .init_resource::<PeerProfile>()
             .init_resource::<PeerKeys>()
             .init_resource::<PeerSig>()
@@ -1064,7 +1089,10 @@ impl Plugin for NetPlugin {
             .init_resource::<NetSendQueue>()
             .add_systems(
                 Update,
-                (detect_peer_connection_edge, tick_disconnection_grace),
+                (
+                    detect_peer_connection_edge,
+                    (advance_silence_clock, tick_disconnection_grace).chain(),
+                ),
             );
     }
 }
@@ -1527,6 +1555,31 @@ mod tests {
         );
     }
 
+    /// The AWAY overlay could never show: the grace timer aged on the sim's
+    /// frame clock, which a P2P session stops advancing once the peer's
+    /// inputs stop arriving. On the silence clock, a peer silent for a
+    /// second of real time reads as away, whatever the frame count does.
+    #[test]
+    fn silence_ages_while_the_sim_frame_stands_still() {
+        let mut app = App::new();
+        app.add_plugins(NetPlugin);
+        let peer = dummy_peer();
+        *app.world_mut().resource_mut::<LobbyState>() = LobbyState::Connected { peer_id: peer };
+        // The sim froze a few frames past the last message (its prediction
+        // window), so a frame clock reads no silence; real time moves on.
+        app.world_mut().resource_mut::<sim::FrameCount>().0 = 10;
+        app.world_mut().resource_mut::<LastPeerMessageFrame>().0 = 0;
+        app.world_mut().resource_mut::<SilenceClock>().0 = DISCONNECT_AFTER_FRAMES + 1;
+        app.update();
+        assert!(
+            matches!(
+                *app.world().resource::<LobbyState>(),
+                LobbyState::Disconnected { .. }
+            ),
+            "a second of real silence is away"
+        );
+    }
+
     #[test]
     fn disconnected_to_forfeited_at_threshold() {
         let peer = dummy_peer();
@@ -1595,7 +1648,7 @@ mod tests {
             peer_id: peer,
             since_frame: 0,
         };
-        app.world_mut().resource_mut::<sim::FrameCount>().0 = FORFEIT_AFTER_FRAMES + 10;
+        app.world_mut().resource_mut::<SilenceClock>().0 = FORFEIT_AFTER_FRAMES + 10;
         app.world_mut().resource_mut::<LastPeerMessageFrame>().0 = 0;
 
         app.update();

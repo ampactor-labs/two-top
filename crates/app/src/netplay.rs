@@ -885,8 +885,8 @@ fn perform_swap(world: &mut World, peer_id: PeerId, their_table: sim::ArenaId) {
     world.resource_mut::<LocalPlayerHandle>().0 = Some(local_handle);
     // Pin the silence timer to "now" so net's grace timer never spuriously
     // forfeits a healthy session — real disconnects come via ggrs events.
-    let frame = world.resource::<sim::FrameCount>().0;
-    world.resource_mut::<LastPeerMessageFrame>().0 = frame;
+    let now = world.resource::<net::SilenceClock>().0;
+    world.resource_mut::<LastPeerMessageFrame>().0 = now;
 
     // Open the duel with the identity handshake: install-id + name on the
     // reliable channel. The peer's grudge ledger files this match under it.
@@ -986,8 +986,8 @@ fn drain_session_events(world: &mut World) {
     // flips the lobby to `Disconnected` (the OPPONENT AWAY overlay) after
     // ~1 s and recovers it the moment pinning resumes.
     if !world.non_send_resource::<MatchboxDriver>().interrupted {
-        let frame = world.resource::<sim::FrameCount>().0;
-        world.resource_mut::<LastPeerMessageFrame>().0 = frame;
+        let now = world.resource::<net::SilenceClock>().0;
+        world.resource_mut::<LastPeerMessageFrame>().0 = now;
     }
 
     if let Some(addr) = forfeited_peer {
