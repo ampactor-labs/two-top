@@ -1,10 +1,10 @@
 # vendor/
 
 Third-party source carried in-tree because a fix we need has no release
-we can move to. Everything here is wired in through `[patch.crates-io]`
-in the workspace `Cargo.toml` and is excluded from the workspace, so
-`cargo fmt --all`, `cargo clippy --workspace` and the test run never
-touch it.
+we can move to: `bevy_render` and `ggrs`, each with one change.
+Everything here is wired in through `[patch.crates-io]` in the workspace
+`Cargo.toml` and is excluded from the workspace, so `cargo fmt --all`,
+`cargo clippy --workspace` and the test run never touch it.
 
 ## bevy_render 0.18.1
 
@@ -61,8 +61,51 @@ pick it up from.
 
 ### Removing it
 
-On the next Bevy upgrade: delete `vendor/bevy_render`, delete the
-`[patch.crates-io]` table and the `exclude` line from the workspace
-`Cargo.toml`, and let `cargo update -p bevy_render` put the registry
-source back in `Cargo.lock`. Check that the release you land on still
-skips the frame in `prepare_windows`.
+On the next Bevy upgrade: delete `vendor/bevy_render`, delete its line
+from the `[patch.crates-io]` table in the workspace `Cargo.toml` (and the
+table and the `exclude` line once nothing else is vendored), and let
+`cargo update -p bevy_render` put the registry source back in
+`Cargo.lock`. Check that the release you land on still skips the frame in
+`prepare_windows`.
+
+## ggrs 0.12.0
+
+An unmodified copy of the crates.io release (commit `chore(vendor): ggrs
+0.12.0, verbatim from crates.io`; the logo, docs folder, CI config and
+lockfile left out, the examples and tests kept because the manifest names
+them) plus **one** change, in `src/network/protocol.rs::on_input`:
+
+```diff
+-        assert!(
+-            self.last_recv_frame() == NULL_FRAME || self.last_recv_frame() + 1 >= body.start_frame
+-        );
++        if !(self.last_recv_frame() == NULL_FRAME || self.last_recv_frame() + 1 >= body.start_frame)
++        {
++            warn!("Input packet starts past the last received frame, discarding");
++            return;
++        }
+```
+
+### Why
+
+That `assert!` runs on a field of a packet the remote peer wrote. An
+honest peer never trips it: it resends from the last frame we
+acknowledged. Anyone else can, with one packet, and the public room pairs
+strangers. The app already refuses every other remote packet that would
+panic ggrs before ggrs sees it (`net::refuse_reason`: input streams of the
+wrong width, a malformed RLE stream, a connection-status list shorter
+than the player count), but this check needs ggrs's private record of
+what it has received, so it is fixed where it lives.
+`net::input_stream_tests::an_input_that_skips_ahead_is_dropped_not_fatal`
+drives a real `P2PSession` into it: red on 0.12.0, green here.
+
+Nothing honest changes: the check passes for every packet a real peer
+sends, and the code after it is untouched.
+
+### Removing it
+
+When ggrs is upgraded (with bevy_ggrs, with Bevy): check whether the new
+release still asserts in `on_input`. If it drops the packet instead,
+delete `vendor/ggrs` and its `[patch.crates-io]` line and let `cargo
+update -p ggrs` restore the registry source; if not, re-vendor it with
+the same change.

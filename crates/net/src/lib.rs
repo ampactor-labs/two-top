@@ -141,11 +141,11 @@ pub fn encode_message(msg: &Message) -> Packet {
 // decoder runs, so the guard is the first — and only — caller that ever
 // hands it something it cannot survive.
 //
-// Still open upstream, and not closable at this boundary: protocol.rs also
-// `assert!(last_recv_frame + 1 >= body.start_frame)` on the wire's own
-// `start_frame`. Checking that needs ggrs's private receive bookkeeping,
-// so a hostile peer can still trip it mid-match. The honest fix is a
-// warn-and-drop in ggrs itself.
+// Not closable at this boundary: protocol.rs also `assert!`ed
+// `last_recv_frame + 1 >= body.start_frame` on the wire's own `start_frame`,
+// which needs ggrs's private receive bookkeeping to check. That one is
+// fixed in ggrs itself: the vendored copy (vendor/README.md) drops such a
+// packet with a warning (`an_input_that_skips_ahead_is_dropped_not_fatal`).
 
 /// One player's input on the wire, as ggrs sizes it: the bincode-1 fixint
 /// encoding of `sim::PlayerInput`, four one-byte fields. `size_of` is
@@ -157,6 +157,10 @@ const INPUT_BYTES_PER_PLAYER: usize = std::mem::size_of::<sim::PlayerInput>();
 /// phone, and ggrs sizes a frame as `bytes_per_player × handles.len()` on
 /// both ends, so this is the one number the guard must agree with it on.
 const PLAYERS_PER_PEER: usize = 1;
+
+/// Players in a session: what ggrs sizes its connection-status table by,
+/// and the length it indexes a remote Input's list up to. 2-Top is a duel.
+const SESSION_PLAYERS: usize = 2;
 
 /// The exact frame width an honest peer sends, every frame.
 const INPUT_FRAME_BYTES: usize = INPUT_BYTES_PER_PLAYER * PLAYERS_PER_PEER;
@@ -341,6 +345,14 @@ fn refuse_reason(bytes: &[u8]) -> Option<&'static str> {
         return None;
     };
     match wire.body {
+        // ggrs reads one connection status per player out of the body
+        // (`body.peer_connect_status[i]`, unchecked) unless the peer is
+        // asking to disconnect: a shorter list was an index panic.
+        WireBody::Input(input)
+            if !input.disconnect_requested && input.peer_connect_status.len() < SESSION_PLAYERS =>
+        {
+            Some("connection status list shorter than the player count")
+        }
         WireBody::Input(input) => input_stream_frames(&input).err(),
         _ => None,
     }
@@ -1830,6 +1842,60 @@ mod input_stream_tests {
                 bytes: bitfield_rle::encode(delta),
             }),
         }
+    }
+
+    /// A real `P2PSession` fed one honest Input and then one whose start
+    /// frame skips past what it has received. ggrs 0.12 `assert!`ed on
+    /// that (`protocol.rs`, `on_input`) — one packet from a stranger in the
+    /// public room took the whole app down. The vendored ggrs drops it.
+    #[test]
+    fn an_input_that_skips_ahead_is_dropped_not_fatal() {
+        use ggrs::{NonBlockingSocket, PlayerType, SessionBuilder};
+        struct Inject(Vec<(sim::NetAddr, Message)>);
+        impl NonBlockingSocket<sim::NetAddr> for Inject {
+            fn send_to(&mut self, _: &Message, _: &sim::NetAddr) {}
+            fn receive_all_messages(&mut self) -> Vec<(sim::NetAddr, Message)> {
+                std::mem::take(&mut self.0)
+            }
+        }
+        let peer = PeerId(Uuid::from_u128(1));
+        let honest = input_message(&[vec![0; 4]]);
+        let mut skips_ahead = input_message(&[vec![0; 4]]);
+        if let WireBody::Input(input) = &mut skips_ahead.body {
+            input.start_frame = 100;
+        }
+        let inbound = [honest, skips_ahead]
+            .iter()
+            .map(|m| decode_packet((peer, packet(m))).expect("well-formed, so the guard passes it"))
+            .collect();
+        let mut session = SessionBuilder::<sim::GgrsCfg>::new()
+            .with_num_players(2)
+            .unwrap()
+            .add_player(PlayerType::Local, 0)
+            .unwrap()
+            .add_player(PlayerType::Remote(peer_to_addr(peer)), 1)
+            .unwrap()
+            .start_p2p_session(Inject(inbound))
+            .unwrap();
+        session.poll_remote_clients();
+    }
+
+    /// ggrs indexes the remote's connection-status list once per player,
+    /// unchecked: a short one was an index panic, so the guard refuses it.
+    #[test]
+    fn a_short_connection_status_list_is_refused() {
+        let peer = PeerId(Uuid::from_u128(1));
+        let mut short = input_message(&[vec![0; 4]]);
+        if let WireBody::Input(input) = &mut short.body {
+            input.peer_connect_status.truncate(1);
+        }
+        assert!(decode_packet((peer, packet(&short))).is_none());
+        // Asking to disconnect, ggrs reads no list: nothing to refuse.
+        if let WireBody::Input(input) = &mut short.body {
+            input.disconnect_requested = true;
+        }
+        assert!(decode_packet((peer, packet(&short))).is_some());
+        assert!(decode_packet((peer, packet(&input_message(&[vec![0; 4]])))).is_some());
     }
 
     #[test]

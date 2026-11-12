@@ -57,5 +57,12 @@ strip = "symbols"
 # surface lost skips the frame instead of panicking. On a phone that panic
 # was a launch crash one step removed (vendor/README.md has the chain).
 # Drop this table and `vendor/bevy_render` with the next Bevy upgrade.
+#
+# And one to ggrs 0.12.0 (vendor/README.md): a remote Input packet whose
+# start frame skips past what we have received tripped an `assert!` and
+# took the app down; it is dropped with a warning instead. The public room
+# pairs strangers, and no stranger's packet gets to crash the table.
+# Drop it with the next ggrs upgrade that carries the same fix.
 [patch.crates-io]
 bevy_render = { path = "vendor/bevy_render" }
+ggrs = { path = "vendor/ggrs" }

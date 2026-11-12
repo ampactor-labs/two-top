@@ -691,9 +691,14 @@ impl<T: Config> UdpProtocol<T> {
         }
 
         // if the encoded packet is decoded with an input we did not receive yet, we cannot recover
-        assert!(
-            self.last_recv_frame() == NULL_FRAME || self.last_recv_frame() + 1 >= body.start_frame
-        );
+        // 2-Top: drop the packet instead of asserting. An honest peer never sends one (it resends
+        // from the last frame we acknowledged), so only a broken or hostile peer can, and a remote
+        // packet must not be able to take the process down. See vendor/README.md.
+        if !(self.last_recv_frame() == NULL_FRAME || self.last_recv_frame() + 1 >= body.start_frame)
+        {
+            warn!("Input packet starts past the last received frame, discarding");
+            return;
+        }
 
         // if we did not receive any input yet, we decode with the blank input,
         // otherwise we use the input previous to the start of the encoded inputs
