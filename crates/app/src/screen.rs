@@ -31,6 +31,7 @@ use sim::{
 
 use crate::anchor::ScreenAnchor;
 use crate::netplay::NetplayConfig;
+use crate::ui;
 use input_touch::WindowSize;
 
 /// True while the player is sitting in an online room with no opponent yet
@@ -793,33 +794,27 @@ const TITLE_BODY_WIDTH: f32 = 1080.0;
 // mode toggle 0.68–0.74 · private dial 0.75–0.81 · primary 0.82–0.93,
 // which stops clear of the phone's nav-bar / gesture strip (~last 6%).
 
-/// The line under the diorama: the arena name (couch, tappable to cycle)
-/// or the career record (online).
-const SUBLINE_RECT: (f32, f32) = (0.52, 0.58);
-const SUBLINE_ANCHOR_Y: f32 = 1.0 - 2.0 * 0.55;
-/// PRACTICE · REPLAYS · SETTINGS share one row, split on window-x.
-const SECONDARY_ROW_RECT: (f32, f32) = (0.59, 0.66);
-const SECONDARY_ANCHOR_Y: f32 = 1.0 - 2.0 * 0.625;
+// The bands themselves live in `ui::title` (one table, overlap-tested);
+// these names keep the call sites short.
+const SUBLINE_RECT: ui::Band = ui::title::SUBLINE;
+const SUBLINE_ANCHOR_Y: f32 = ui::band_anchor_y(SUBLINE_RECT);
+const SECONDARY_ROW_RECT: ui::Band = ui::title::SECONDARY_ROW;
+const SECONDARY_ANCHOR_Y: f32 = ui::band_anchor_y(SECONDARY_ROW_RECT);
+/// PRACTICE · RIVALS · REPLAYS · SETTINGS split the secondary row on
+/// window-x at these fractions.
 const SECONDARY_PRACTICE_X: f32 = 0.26;
 const SECONDARY_RIVALS_X: f32 = 0.50;
 const SECONDARY_REPLAYS_X: f32 = 0.74;
-/// QUICK MATCH | PRIVATE, sitting directly on top of the button it
-/// relabels (room_code.rs draws it; the adjacency is the explanation).
-pub const MODE_TOGGLE_RECT: (f32, f32) = (0.68, 0.74);
-pub const MODE_TOGGLE_ANCHOR_Y: f32 = 1.0 - 2.0 * 0.71;
-/// The private dial's row — empty while QUICK MATCH is selected.
-pub const DIAL_RECT: (f32, f32) = (0.75, 0.81);
-pub const DIAL_ANCHOR_Y: f32 = 1.0 - 2.0 * 0.78;
-const PLAY_BTN_RECT: (f32, f32) = (0.82, 0.93);
-const PLAY_ANCHOR_Y: f32 = 1.0 - 2.0 * 0.875;
-
-/// One top strip, one meaning, every screen: tapping it goes BACK — leave
-/// the online match, back to the couch lobby, exit the tape. Starts below
-/// any camera cutout/status bar (the v9 device pass moved every target off
-/// the notch; keep it that way).
-pub const TOP_EXIT_BAND: (f32, f32) = (0.05, 0.16);
+pub const MODE_TOGGLE_RECT: ui::Band = ui::title::MODE_TOGGLE;
+pub const MODE_TOGGLE_ANCHOR_Y: f32 = ui::band_anchor_y(MODE_TOGGLE_RECT);
+pub const DIAL_RECT: ui::Band = ui::title::DIAL;
+pub const DIAL_ANCHOR_Y: f32 = ui::band_anchor_y(DIAL_RECT);
+const PLAY_BTN_RECT: ui::Band = ui::title::PLAY;
+const PLAY_ANCHOR_Y: f32 = ui::band_anchor_y(PLAY_BTN_RECT);
+/// The app-wide BACK strip (`ui::TOP_EXIT`).
+pub const TOP_EXIT_BAND: ui::Band = ui::TOP_EXIT;
 /// Screen-anchor Y for whatever labels the top-exit strip.
-pub const TOP_EXIT_ANCHOR_Y: f32 = 1.0 - (TOP_EXIT_BAND.0 + TOP_EXIT_BAND.1);
+pub const TOP_EXIT_ANCHOR_Y: f32 = ui::band_anchor_y(TOP_EXIT_BAND);
 
 /// Which title action a button fires.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -846,10 +841,7 @@ pub enum BtnRole {
     Label,
 }
 
-/// True if a touch at window-fraction `y_down` fell in a button band.
-fn in_band(y_down: f32, band: (f32, f32)) -> bool {
-    y_down >= band.0 && y_down < band.1
-}
+use crate::ui::in_band;
 
 /// Spawn one piece of a bordered box button. `insert_marker` stamps the
 /// screen-specific marker (title vs summary vs the room pad) so each
@@ -1057,12 +1049,11 @@ fn pick_arena(
         next.set(AppScreen::ArenaSelect);
         return;
     }
-    let win = window.0;
-    if win.y > 0.0
-        && touches
-            .iter_just_pressed()
-            .any(|t| in_band(t.position().y / win.y, SUBLINE_RECT))
-    {
+    if ui::tapped(
+        touches.iter_just_pressed().map(|t| t.position()),
+        SUBLINE_RECT,
+        window.0,
+    ) {
         next.set(AppScreen::ArenaSelect);
     }
 }
@@ -1276,11 +1267,11 @@ fn back_to_lobby(
     }
     // Escape (desktop) or the labeled LOBBY strip — the one universal
     // top-exit band every screen shares.
-    let win = window.0;
-    let tapped = win.y > 0.0
-        && touches
-            .iter_just_pressed()
-            .any(|t| in_band(t.position().y / win.y, TOP_EXIT_BAND));
+    let tapped = ui::tapped(
+        touches.iter_just_pressed().map(|t| t.position()),
+        TOP_EXIT_BAND,
+        window.0,
+    );
     if keys.just_pressed(KeyCode::Escape) || tapped {
         next.set(AppScreen::Title);
     }
@@ -2032,11 +2023,14 @@ fn bot_fallback_input(world: &mut World) {
         .resource::<ButtonInput<KeyCode>>()
         .just_pressed(KeyCode::KeyP);
     let win = world.resource::<WindowSize>().0;
-    let tapped = win.y > 0.0
-        && world
+    let tapped = ui::tapped(
+        world
             .resource::<Touches>()
             .iter_just_pressed()
-            .any(|t| in_band(t.position().y / win.y, PLAY_BTN_RECT));
+            .map(|t| t.position()),
+        PLAY_BTN_RECT,
+        win,
+    );
     if !(key || tapped) {
         return;
     }
@@ -2179,14 +2173,11 @@ fn summary_buttons_input(
     {
         return;
     }
-    let win = window.0;
-    if win.y <= 0.0 {
-        return;
-    }
-    let tapped_primary = touches
-        .iter_just_pressed()
-        .any(|t| in_band(t.position().y / win.y, PLAY_BTN_RECT));
-    if !tapped_primary {
+    if !ui::tapped(
+        touches.iter_just_pressed().map(|t| t.position()),
+        PLAY_BTN_RECT,
+        window.0,
+    ) {
         return;
     }
     let online = netplay.room_url.is_some() && !practice.0;
@@ -2220,11 +2211,14 @@ fn online_leave_input(world: &mut World) {
         .resource::<ButtonInput<KeyCode>>()
         .just_pressed(KeyCode::Escape);
     let win = world.resource::<WindowSize>().0;
-    let tapped = win.y > 0.0
-        && world
+    let tapped = ui::tapped(
+        world
             .resource::<Touches>()
             .iter_just_pressed()
-            .any(|t| in_band(t.position().y / win.y, TOP_EXIT_BAND));
+            .map(|t| t.position()),
+        TOP_EXIT_BAND,
+        win,
+    );
     if !(esc || tapped) {
         return;
     }

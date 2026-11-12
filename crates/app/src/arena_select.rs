@@ -19,7 +19,7 @@ use crate::screen::AppScreen;
 const LIST_TOP: f32 = 0.14;
 const LIST_PITCH: f32 = 0.085;
 /// The BACK band at the bottom — same gesture as every menu.
-const BACK_BAND: (f32, f32) = (0.86, 0.96);
+const BACK_BAND: crate::ui::Band = crate::ui::BACK;
 
 pub fn arena_title(id: ArenaId) -> &'static str {
     match id {
@@ -69,7 +69,7 @@ struct RosterRowName(ArenaId);
 
 fn row_anchor_y(i: usize) -> f32 {
     let fy = LIST_TOP + (i as f32 + 0.5) * LIST_PITCH;
-    1.0 - 2.0 * fy
+    crate::ui::anchor_y(fy)
 }
 
 fn enter_roster(mut commands: Commands, asset_server: Res<AssetServer>) {
@@ -82,7 +82,7 @@ fn enter_roster(mut commands: Commands, asset_server: Res<AssetServer>) {
         },
         TextColor(render::palette::HOT_BONE),
         TextLayout::new_with_justify(Justify::Center),
-        ScreenAnchor::new(0.0, 1.0 - 2.0 * 0.07, 0.0, 0.0),
+        ScreenAnchor::new(0.0, crate::ui::anchor_y(0.07), 0.0, 0.0),
         Transform::from_xyz(0.0, 0.0, 210.0),
     ));
     for (i, &arena) in ALL_ARENAS.iter().enumerate() {
@@ -126,7 +126,7 @@ fn enter_roster(mut commands: Commands, asset_server: Res<AssetServer>) {
         ));
     }
     // BACK, in the shared bordered-box language.
-    let back_y = 1.0 - (BACK_BAND.0 + BACK_BAND.1);
+    let back_y = crate::ui::band_anchor_y(BACK_BAND);
     for (role, size, z) in [
         (0, Vec2::new(362.0, 98.0), 209.0),
         (1, Vec2::new(340.0, 76.0), 209.5),
@@ -212,7 +212,7 @@ fn roster_input(
     if win.y > 0.0 {
         for t in touches.iter_just_pressed() {
             let fy = t.position().y / win.y;
-            if in_band(fy, BACK_BAND) {
+            if crate::ui::in_band(fy, BACK_BAND) {
                 next.set(AppScreen::Title);
                 return;
             }
@@ -234,10 +234,6 @@ fn roster_input(
         crate::settings::persist(&settings);
         next.set(AppScreen::Title);
     }
-}
-
-fn in_band(y_down: f32, band: (f32, f32)) -> bool {
-    y_down >= band.0 && y_down < band.1
 }
 
 /// Startup: restore the persisted pick (TWOTOP_ARENA overrides for capture

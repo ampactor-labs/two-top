@@ -27,7 +27,7 @@ const LIST_PITCH: f32 = 0.088;
 /// thumb's worth (the REPLAYS ceiling, same reasoning).
 const LIST_MAX: usize = 8;
 /// The BACK band at the bottom — same gesture as every menu.
-const BACK_BAND: (f32, f32) = (0.86, 0.96);
+const BACK_BAND: crate::ui::Band = crate::ui::BACK;
 /// Detail view: the tape rows start here.
 const DETAIL_TAPES_TOP: f32 = 0.52;
 const DETAIL_TAPES_PITCH: f32 = 0.075;
@@ -126,7 +126,7 @@ fn spawn_text(
 }
 
 fn row_anchor_y(i: usize, top: f32, pitch: f32) -> f32 {
-    1.0 - 2.0 * (top + (i as f32 + 0.5) * pitch)
+    crate::ui::anchor_y(top + (i as f32 + 0.5) * pitch)
 }
 
 /// (Re)build the screen for the current view. Runs on enter and on any
@@ -150,7 +150,7 @@ fn build_rivals_ui(world: &mut World) {
                 "THE RIVALS".to_string(),
                 72.0,
                 render::palette::HOT_BONE,
-                (0.0, 1.0 - 2.0 * 0.08),
+                (0.0, crate::ui::anchor_y(0.08)),
                 210.0,
             );
             let rows = ranked(&record);
@@ -213,7 +213,7 @@ fn build_rivals_ui(world: &mut World) {
                 row_name(&record, &key, r),
                 64.0,
                 render::palette::HOT_BONE,
-                (0.0, 1.0 - 2.0 * 0.10),
+                (0.0, crate::ui::anchor_y(0.10)),
                 210.0,
             );
             spawn_text(
@@ -221,7 +221,7 @@ fn build_rivals_ui(world: &mut World) {
                 format!("{} MEETINGS - {}", r.meetings(), standing_line(&r.name, r)),
                 36.0,
                 render::palette::BONE,
-                (0.0, 1.0 - 2.0 * 0.20),
+                (0.0, crate::ui::anchor_y(0.20)),
                 210.0,
             );
             let mut facts: Vec<String> = Vec::new();
@@ -250,7 +250,7 @@ fn build_rivals_ui(world: &mut World) {
                     fact.clone(),
                     28.0,
                     render::palette::BONE.with_alpha(0.75),
-                    (0.0, 1.0 - 2.0 * (0.27 + i as f32 * 0.050)),
+                    (0.0, crate::ui::anchor_y(0.27 + i as f32 * 0.050)),
                     210.0,
                 );
             }
@@ -260,7 +260,7 @@ fn build_rivals_ui(world: &mut World) {
                     "SPAR THEIR SHADE".to_string(),
                     32.0,
                     render::palette::EMBER,
-                    (0.0, 1.0 - (SHADE_BAND.0 + SHADE_BAND.1)),
+                    (0.0, crate::ui::band_anchor_y(SHADE_BAND)),
                     210.0,
                 );
             }
@@ -288,7 +288,7 @@ fn build_rivals_ui(world: &mut World) {
     }
 
     // BACK, in the shared language.
-    let back_y = 1.0 - (BACK_BAND.0 + BACK_BAND.1);
+    let back_y = crate::ui::band_anchor_y(BACK_BAND);
     spawn_text(
         &mut commands,
         "BACK".to_string(),

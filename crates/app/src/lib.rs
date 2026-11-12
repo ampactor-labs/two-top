@@ -54,6 +54,7 @@ mod shade;
 mod share;
 mod theater;
 mod touch_controls;
+mod ui;
 use anchor::{FullScreenSprite, ScreenAnchorPlugin};
 use attest::AttestPlugin;
 use audio::GameAudioPlugin;
@@ -730,13 +731,13 @@ fn spawn_title_diorama(
         (
             DioramaPart::NearDemon,
             "sprites/players/duelist_a_sheet.png",
-            1.0 - 2.0 * 0.42,
+            crate::ui::anchor_y(0.42),
             render::PLAYER_RENDER_SIZE * 3.1,
         ),
         (
             DioramaPart::FarDemon,
             "sprites/players/duelist_b_sheet.png",
-            1.0 - 2.0 * 0.26,
+            crate::ui::anchor_y(0.26),
             render::PLAYER_RENDER_SIZE * 2.1,
         ),
     ] {
@@ -768,7 +769,7 @@ fn spawn_title_diorama(
             custom_size: Some(Vec2::splat(render::PLAYER_RENDER_SIZE * 1.9)),
             ..default()
         },
-        anchor::ScreenAnchor::new(0.0, 1.0 - 2.0 * 0.26, 0.0, 0.0),
+        anchor::ScreenAnchor::new(0.0, crate::ui::anchor_y(0.26), 0.0, 0.0),
         Transform::from_xyz(0.0, 0.0, 101.0),
         Visibility::Hidden,
     ));

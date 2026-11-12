@@ -44,7 +44,7 @@ const REPORT_LOG_CHARS: usize = 6000;
 /// The title strip the notice sits in (window fractions, y-down): under
 /// the banner, above the far seat. No other title target reaches it.
 const NOTICE_BAND: (f32, f32) = (0.16, 0.215);
-const NOTICE_ANCHOR_Y: f32 = 1.0 - (NOTICE_BAND.0 + NOTICE_BAND.1);
+const NOTICE_ANCHOR_Y: f32 = crate::ui::band_anchor_y(NOTICE_BAND);
 
 /// Evidence that the last run ended badly, held until the player hands it
 /// over. `None` everywhere a crash did not just happen.
@@ -270,15 +270,13 @@ fn update_notice(
 /// back, and a notice that reappears after being dealt with would be worse
 /// than one report lost to a cancelled share (`crash.log` stays on disk).
 fn notice_input(touches: Res<Touches>, window: Res<WindowSize>, mut notice: ResMut<CrashNotice>) {
-    let win = window.0;
-    if notice.0.is_none() || win.y <= 0.0 {
-        return;
-    }
-    let tapped = touches.iter_just_pressed().any(|touch| {
-        let y = touch.position().y / win.y;
-        y >= NOTICE_BAND.0 && y < NOTICE_BAND.1
-    });
-    if !tapped {
+    if notice.0.is_none()
+        || !crate::ui::tapped(
+            touches.iter_just_pressed().map(|t| t.position()),
+            NOTICE_BAND,
+            window.0,
+        )
+    {
         return;
     }
     let Some(evidence) = notice.0.take() else {

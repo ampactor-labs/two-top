@@ -303,7 +303,7 @@ fn spawn_pad(mut commands: Commands, netplay: Res<NetplayConfig>) {
                 ..default()
             },
             TextColor(render::palette::P1_CYAN),
-            ScreenAnchor::new(fx * 2.0 - 1.0, DIAL_ANCHOR_Y, 0.0, 0.0),
+            ScreenAnchor::new(crate::ui::anchor_x(fx), DIAL_ANCHOR_Y, 0.0, 0.0),
             Transform::from_xyz(0.0, 0.0, 200.0),
             Visibility::Hidden,
         ));

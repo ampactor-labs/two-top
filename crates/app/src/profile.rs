@@ -56,11 +56,11 @@ const KEY_ROWS: [&str; 4] = ["1234567890", "QWERTYUIOP", "ASDFGHJKL", "ZXCVBNM"]
 // ---- Title: your name over your demon's head ----
 /// Tap anywhere on your demon (or its name) to re-enter the keyboard.
 const NAME_TAP_RECT: (f32, f32) = (0.30, 0.50);
-const NAME_ANCHOR_Y: f32 = 1.0 - 2.0 * 0.335;
+const NAME_ANCHOR_Y: f32 = crate::ui::anchor_y(0.335);
 
 // ---- NameEntry screen (window-fraction, y-down) ----
 /// The name you're typing, with its blinking cursor.
-const ENTRY_ANCHOR_Y: f32 = 1.0 - 2.0 * 0.28;
+const ENTRY_ANCHOR_Y: f32 = crate::ui::anchor_y(0.28);
 /// The keyboard: four ragged rows low on the screen where a phone keyboard
 /// lives, plus a DEL/DONE row under it.
 const KEY_TOP: f32 = 0.44;
@@ -388,7 +388,7 @@ fn spawn_name_ui(mut commands: Commands, netplay: Res<NetplayConfig>) {
             },
             TextColor(color),
             TextLayout::new_with_justify(Justify::Center),
-            ScreenAnchor::new(fx * 2.0 - 1.0, 1.0 - 2.0 * fy, 0.0, 0.0),
+            ScreenAnchor::new(crate::ui::anchor_x(fx), crate::ui::anchor_y(fy), 0.0, 0.0),
             Transform::from_xyz(0.0, 0.0, 201.0),
             Visibility::Hidden,
         ));

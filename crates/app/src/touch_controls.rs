@@ -244,7 +244,7 @@ fn taunt_anchor() -> ScreenAnchor {
     // a notch/status bar never covers the mark.
     ScreenAnchor::new(
         0.0,
-        1.0 - 2.0 * (input_touch::TAUNT_ZONE_Y_FRAC * 0.72),
+        crate::ui::anchor_y(input_touch::TAUNT_ZONE_Y_FRAC * 0.72),
         0.0,
         0.0,
     )
@@ -283,7 +283,7 @@ fn dash_active() -> Color {
 /// Screen px (top-left origin, y-down) to world, through the same visible
 /// rect the anchor pass computed this frame.
 fn screen_to_world(p: Vec2, win: Vec2, rect: &ViewRect) -> Vec2 {
-    let frac = Vec2::new(p.x / win.x * 2.0 - 1.0, 1.0 - p.y / win.y * 2.0);
+    let frac = Vec2::new(p.x / crate::ui::anchor_x(win.x), 1.0 - p.y / win.y * 2.0);
     rect.center + rect.half * frac
 }
 

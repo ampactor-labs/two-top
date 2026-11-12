@@ -144,11 +144,11 @@ fn settings_back(
     window: Res<WindowSize>,
     mut next: ResMut<NextState<AppScreen>>,
 ) {
-    let win = window.0;
-    let tapped = win.y > 0.0
-        && touches
-            .iter_just_pressed()
-            .any(|t| (BACK_BAND.0..BACK_BAND.1).contains(&(t.position().y / win.y)));
+    let tapped = crate::ui::tapped(
+        touches.iter_just_pressed().map(|t| t.position()),
+        BACK_BAND,
+        window.0,
+    );
     if tapped || keys.just_pressed(KeyCode::Escape) {
         next.set(AppScreen::Title);
     }
@@ -201,7 +201,7 @@ const ROW_ARROW_X: f32 = 300.0;
 /// 2 music, 3 deadzone, 4 southpaw, 5 shake — `adjust_settings`' keys).
 const GROUPS: [(&str, [usize; 2]); 3] = [("FEEL", [0, 5]), ("AUDIO", [1, 2]), ("CONTROL", [3, 4])];
 /// BACK, matching the replays screen's band exactly.
-const BACK_BAND: (f32, f32) = (0.86, 0.96);
+const BACK_BAND: crate::ui::Band = crate::ui::BACK;
 
 /// The computed screen layout: a y-down band per setting row (indexed by
 /// the row's settled id) and a center fy per group header.
@@ -276,7 +276,7 @@ fn spawn_setting_rows(mut commands: Commands) {
         },
         TextColor(render::palette::HOT_BONE),
         TextLayout::new_with_justify(Justify::Center),
-        crate::anchor::ScreenAnchor::new(0.0, 1.0 - 2.0 * HEADING_FY, 0.0, 0.0),
+        crate::anchor::ScreenAnchor::new(0.0, crate::ui::anchor_y(HEADING_FY), 0.0, 0.0),
         Transform::from_xyz(0.0, 0.0, 210.0),
         Visibility::Hidden,
     ));
@@ -290,7 +290,12 @@ fn spawn_setting_rows(mut commands: Commands) {
             },
             TextColor(render::palette::COLD_STONE),
             TextLayout::new_with_justify(Justify::Center),
-            crate::anchor::ScreenAnchor::new(0.0, 1.0 - 2.0 * l.header_centers[g], 0.0, 0.0),
+            crate::anchor::ScreenAnchor::new(
+                0.0,
+                crate::ui::anchor_y(l.header_centers[g]),
+                0.0,
+                0.0,
+            ),
             Transform::from_xyz(0.0, 0.0, 210.0),
             Visibility::Hidden,
         ));
@@ -355,7 +360,7 @@ fn spawn_setting_rows(mut commands: Commands) {
         }
     }
     // BACK in the shared bordered-box language, at the shared band.
-    let back_anchor_y = 1.0 - (BACK_BAND.0 + BACK_BAND.1);
+    let back_anchor_y = crate::ui::band_anchor_y(BACK_BAND);
     for role in [
         crate::screen::BtnRole::Border,
         crate::screen::BtnRole::Fill,
