@@ -19,6 +19,8 @@
 
 use bevy::prelude::*;
 use bevy_ggrs::LocalInputs;
+
+use crate::lesson::BotMode;
 pub use bot_brain::BotStyle;
 use sim::{GgrsCfg, PlayerInput};
 
@@ -58,14 +60,38 @@ pub fn drive_bot(world: &mut World) {
     if !world.resource::<PracticeMode>().0 {
         return;
     }
-    let tier = world
-        .resource::<crate::grudge::CareerRecord>()
-        .gauntlet_tier;
+    let lesson = world
+        .get_resource::<crate::first_blood::FirstBlood>()
+        .and_then(|fb| fb.bot_mode());
+    let tier = match lesson {
+        // First Blood decides how hard the bot plays while it teaches.
+        Some(BotMode::Duel(tier)) => tier,
+        Some(_) => 0,
+        None => {
+            world
+                .resource::<crate::grudge::CareerRecord>()
+                .gauntlet_tier
+        }
+    };
     let score = *world.resource::<sim::MatchScore>();
     let difficulty = bot_brain::rubber_band(tier, score.p0, score.p1);
     let style = world.resource::<ShadeStyle>().0.as_ref().map(|s| s.style);
     let input = match bot_brain::view_for(world, BOT_HANDLE, difficulty, style, 0) {
-        Some(view) => world.resource_mut::<BotBrain>().0.decide(view),
+        Some(view) => match lesson {
+            // A target, then a moving target, while the lesson teaches the
+            // verbs; the sparring partner's lobs for the dodge; a real
+            // duel to finish.
+            Some(BotMode::Stand) => PlayerInput::default(),
+            Some(BotMode::Amble) => bot_brain::amble(&view),
+            Some(BotMode::Spar) => {
+                let view = bot_brain::BotView {
+                    difficulty: 0,
+                    ..view
+                };
+                world.resource_mut::<BotBrain>().0.decide(view)
+            }
+            Some(BotMode::Duel(_)) | None => world.resource_mut::<BotBrain>().0.decide(view),
+        },
         None => {
             // Out of the round or dead: whatever it saw is stale by the
             // time it is back.

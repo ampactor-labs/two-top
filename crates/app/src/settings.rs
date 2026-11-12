@@ -131,6 +131,7 @@ impl Plugin for SettingsPlugin {
                 (
                     adjust_settings.run_if(in_state(AppScreen::Settings)),
                     settings_back.run_if(in_state(AppScreen::Settings)),
+                    settings_how_to_play.run_if(in_state(AppScreen::Settings)),
                     update_setting_rows,
                 ),
             );
@@ -151,6 +152,24 @@ fn settings_back(
     );
     if tapped || keys.just_pressed(KeyCode::Escape) {
         next.set(AppScreen::Title);
+    }
+}
+
+/// HOW TO PLAY: First Blood again, from the top.
+fn settings_how_to_play(
+    touches: Res<Touches>,
+    window: Res<WindowSize>,
+    mut fb: ResMut<crate::first_blood::FirstBlood>,
+    mut practice: ResMut<crate::bot::PracticeMode>,
+    mut selected: ResMut<sim::SelectedArena>,
+    mut next: ResMut<NextState<AppScreen>>,
+) {
+    if crate::ui::tapped(
+        touches.iter_just_pressed().map(|t| t.position()),
+        HOW_TO_PLAY_BAND,
+        window.0,
+    ) {
+        crate::first_blood::begin(&mut fb, &mut practice, &mut selected, &mut next);
     }
 }
 
@@ -183,7 +202,7 @@ fn push_deadzone(
 // whichever group your eye reached first. The gap BEFORE a header is now
 // most of twice the gap after it, and the rows inside a group are tight —
 // which is the whole job of a group header.
-const GROUPS_TOP: f32 = 0.205;
+const GROUPS_TOP: f32 = 0.215;
 const GROUP_HEADER_H: f32 = 0.028;
 const ROW_PITCH: f32 = 0.070;
 const GROUP_GAP: f32 = 0.060;
@@ -202,6 +221,9 @@ const ROW_ARROW_X: f32 = 300.0;
 const GROUPS: [(&str, [usize; 2]); 3] = [("FEEL", [0, 5]), ("AUDIO", [1, 2]), ("CONTROL", [3, 4])];
 /// BACK, matching the replays screen's band exactly.
 const BACK_BAND: crate::ui::Band = crate::ui::BACK;
+/// HOW TO PLAY: under the heading, clear of the top strip (BACK's, on
+/// every screen) and above the first group.
+const HOW_TO_PLAY_BAND: crate::ui::Band = (0.162, 0.210);
 
 /// The computed screen layout: a y-down band per setting row (indexed by
 /// the row's settled id) and a center fy per group header.
@@ -260,10 +282,17 @@ enum RowPart {
     ArrowRight,
 }
 
-/// The bordered BACK button's parts (the same button chrome every other
-/// screen's BACK wears — this one was a bare floating word).
+/// The screen's two buttons, in the bordered chrome every other screen's
+/// buttons wear: BACK, and HOW TO PLAY (First Blood again, any time).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SettingsAction {
+    Back,
+    HowToPlay,
+}
+
+/// One part of one of the screen's buttons.
 #[derive(Component)]
-struct SettingsBack(crate::screen::BtnRole);
+struct SettingsBack(SettingsAction, crate::screen::BtnRole);
 
 fn spawn_setting_rows(mut commands: Commands) {
     let l = layout();
@@ -359,23 +388,38 @@ fn spawn_setting_rows(mut commands: Commands) {
             ));
         }
     }
-    // BACK in the shared bordered-box language, at the shared band.
-    let back_anchor_y = crate::ui::band_anchor_y(BACK_BAND);
-    for role in [
-        crate::screen::BtnRole::Border,
-        crate::screen::BtnRole::Fill,
-        crate::screen::BtnRole::Label,
-    ] {
-        crate::screen::spawn_button_part(
-            &mut commands,
-            role,
-            Vec2::new(0.0, back_anchor_y),
+    // BACK in the shared bordered-box language, at the shared band; HOW
+    // TO PLAY, smaller, under the heading.
+    for (action, band, size, font) in [
+        (
+            SettingsAction::Back,
+            BACK_BAND,
             Vec2::new(340.0, 76.0),
             40.0,
-            &mut |ec, role| {
-                ec.insert(SettingsBack(role));
-            },
-        );
+        ),
+        (
+            SettingsAction::HowToPlay,
+            HOW_TO_PLAY_BAND,
+            Vec2::new(420.0, 64.0),
+            30.0,
+        ),
+    ] {
+        for role in [
+            crate::screen::BtnRole::Border,
+            crate::screen::BtnRole::Fill,
+            crate::screen::BtnRole::Label,
+        ] {
+            crate::screen::spawn_button_part(
+                &mut commands,
+                role,
+                Vec2::new(0.0, crate::ui::band_anchor_y(band)),
+                size,
+                font,
+                &mut |ec, role| {
+                    ec.insert(SettingsBack(action, role));
+                },
+            );
+        }
     }
 }
 
@@ -428,10 +472,14 @@ fn update_setting_rows(
             Visibility::Hidden
         };
         if open
-            && part.0 == crate::screen::BtnRole::Label
+            && part.1 == crate::screen::BtnRole::Label
             && let Some(mut t) = text
         {
-            t.0 = "BACK".to_string();
+            t.0 = match part.0 {
+                SettingsAction::Back => "BACK",
+                SettingsAction::HowToPlay => "HOW TO PLAY",
+            }
+            .to_string();
         }
     }
 }
@@ -572,8 +620,22 @@ mod tests {
         }
         // A header tap adjusts nothing.
         assert_eq!(row_at(l.header_centers[0]), None);
-        // Neither does the BACK band (settings_back owns it).
+        // Neither does the BACK band (settings_back owns it), nor HOW TO
+        // PLAY's.
         assert_eq!(row_at((BACK_BAND.0 + BACK_BAND.1) * 0.5), None);
+        assert_eq!(
+            row_at((HOW_TO_PLAY_BAND.0 + HOW_TO_PLAY_BAND.1) * 0.5),
+            None
+        );
+    }
+
+    #[test]
+    fn how_to_play_sits_between_the_exit_strip_and_the_first_row() {
+        let l = layout();
+        assert!(!crate::ui::overlaps(HOW_TO_PLAY_BAND, crate::ui::TOP_EXIT));
+        for band in l.row_bands {
+            assert!(!crate::ui::overlaps(HOW_TO_PLAY_BAND, band), "{band:?}");
+        }
     }
 
     #[test]

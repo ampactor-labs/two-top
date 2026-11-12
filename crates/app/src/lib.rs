@@ -32,10 +32,12 @@ mod crash_report;
 mod dark_beyond;
 mod debug_overlay;
 mod devour;
+mod first_blood;
 mod grudge;
 mod haptics;
 mod hud;
 mod intro_card;
+mod lesson;
 mod lifecycle;
 mod lobby_overlay;
 mod logging;
@@ -227,6 +229,7 @@ pub fn run() {
         .add_plugins(runes::RunesPlugin)
         .add_plugins(TouchControlsPlugin)
         .add_plugins(BotPlugin)
+        .add_plugins(first_blood::FirstBloodPlugin)
         .add_plugins(HudPlugin)
         .add_plugins(DebugInputOverlayPlugin)
         .add_plugins(net::NetPlugin)

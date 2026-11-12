@@ -77,6 +77,12 @@ pub struct BotOffer {
 #[derive(Resource, Default)]
 pub struct PendingBotMatch(pub bool);
 
+/// Set by FIND OPPONENT on the summary after First Blood: the Title passes
+/// it straight on into an online match, the way [`PendingBotMatch`] passes
+/// a bot match (practice has been disarmed on the way out).
+#[derive(Resource, Default)]
+pub struct PendingFindOpponent(pub bool);
+
 /// Which screen the app is showing. Both local and online builds boot into
 /// [`Title`](Self::Title); online starts the netplay lifecycle only after the
 /// player enters [`InMatch`](Self::InMatch). [`Replays`](Self::Replays) is
@@ -149,6 +155,7 @@ impl Plugin for ScreenPlugin {
             .init_resource::<VictoryPose>()
             .init_resource::<PendingUiThrow>()
             .init_resource::<PendingBotMatch>()
+            .init_resource::<PendingFindOpponent>()
             .init_resource::<QuitArm>()
             .init_resource::<MatchOverSince>()
             .add_systems(Startup, spawn_overlays)
@@ -1061,6 +1068,7 @@ fn pick_arena(
 /// The single title input handler: keyboard shortcuts plus taps dispatched to
 /// the visible button bands. No more invisible screen-half zones — a touch
 /// only does something when it lands on the PLAY or PRACTICE button.
+#[allow(clippy::too_many_arguments)]
 fn title_buttons_input(
     keys: Res<ButtonInput<KeyCode>>,
     touches: Res<Touches>,
@@ -1068,12 +1076,15 @@ fn title_buttons_input(
     mut next: ResMut<NextState<AppScreen>>,
     mut practice: ResMut<crate::bot::PracticeMode>,
     mut pending_bot: ResMut<PendingBotMatch>,
+    mut pending_find: ResMut<PendingFindOpponent>,
     mut autostart: Local<Option<Option<AppScreen>>>,
 ) {
     // A bot fallback tapped mid-wait lands on the Title for one frame:
-    // go straight back in with practice armed.
-    if pending_bot.0 {
+    // go straight back in with practice armed. FIND OPPONENT after the
+    // lesson lands here the same way, practice off.
+    if pending_bot.0 || pending_find.0 {
         pending_bot.0 = false;
+        pending_find.0 = false;
         next.set(AppScreen::InMatch);
         return;
     }
@@ -1501,6 +1512,26 @@ fn practice_summary(
     )
 }
 
+/// The card at the end of First Blood: the lesson is over whoever took
+/// the match, so it says so — and what the ladder made of it. Pure.
+fn first_blood_summary(score: MatchScore, step: Option<(u32, u32)>, saved: bool) -> String {
+    let won = score.p0 >= MATCH_WIN_THRESHOLD;
+    let verdict = if won {
+        "FIRST BLOOD"
+    } else {
+        "THE BOT TOOK THIS ONE"
+    };
+    let tier = step
+        .and_then(|(from, to)| crate::grudge::gauntlet_line(from, to, won))
+        .map(|line| format!("\n{line}"))
+        .unwrap_or_default();
+    let replay_line = if saved { "\n\nreplay saved" } else { "" };
+    format!(
+        "YOU'RE READY\n\n{}  -  {}\n{verdict}{tier}{replay_line}",
+        score.p0, score.p1
+    )
+}
+
 /// The primary summary button's label — the RUN IT BACK handshake as a
 /// state machine the thumb can read. A gone opponent flips the slot to the
 /// bot offer (`bot_fallback_input` owns that tap); `None` is kept for any
@@ -1544,9 +1575,10 @@ fn update_summary_overlay(
     saved: Res<crate::recorder::LastSavedReplay>,
     absence: Res<crate::netplay::RecentAbsence>,
     time: Res<Time<Real>>,
-    (shade, step): (
+    (shade, step, first_blood): (
         Res<crate::bot::ShadeStyle>,
         Res<crate::grudge::GauntletStep>,
+        Res<crate::first_blood::FirstBlood>,
     ),
     mut q: Query<(&mut Text2d, &mut Visibility), With<SummaryOverlay>>,
 ) {
@@ -1577,6 +1609,10 @@ fn update_summary_overlay(
                 ..
             }
         ) && !we_fled;
+        if first_blood.finished() {
+            text.0 = first_blood_summary(*score, step.0, saved.0.is_some());
+            return;
+        }
         if practice.0 && !theater.active() {
             text.0 = practice_summary(
                 *score,
@@ -1817,9 +1853,12 @@ fn spawn_quit_button(commands: &mut Commands) {
 }
 
 /// The quit label states, pure for tests: the summoning wait needs no
-/// confirmation (nothing at stake yet), a live match asks twice.
-pub fn quit_label(awaiting: bool, armed: bool) -> &'static str {
-    if awaiting {
+/// confirmation (nothing at stake yet), nor does the lesson (SKIP), and a
+/// live match asks twice.
+pub fn quit_label(awaiting: bool, lesson: bool, armed: bool) -> &'static str {
+    if lesson {
+        "SKIP"
+    } else if awaiting {
         "CANCEL"
     } else if armed {
         "SURE?"
@@ -1870,12 +1909,21 @@ fn quit_button_input(world: &mut World) {
     }
 
     // Waiting alone in an online room stakes nothing — one tap cancels.
+    // The lesson stakes nothing either: one tap skips it, for good.
     let awaiting = world.resource::<AwaitingPeer>().0;
-    if !awaiting && world.resource::<QuitArm>().0.is_none() {
+    let lesson = world.resource::<crate::first_blood::FirstBlood>().active;
+    if !awaiting && !lesson && world.resource::<QuitArm>().0.is_none() {
         world.resource_mut::<QuitArm>().0 = Some(now);
         return;
     }
     world.resource_mut::<QuitArm>().0 = None;
+    if lesson {
+        crate::first_blood::skip(world);
+        world
+            .resource_mut::<NextState<AppScreen>>()
+            .set(AppScreen::Title);
+        return;
+    }
 
     let online = world.resource::<NetplayConfig>().room_url.is_some()
         && !world.resource::<crate::bot::PracticeMode>().0;
@@ -1925,6 +1973,7 @@ type QuitButtonQuery<'w, 's> = Query<
     ),
 >;
 
+#[allow(clippy::too_many_arguments)]
 fn update_quit_button(
     screen: Res<State<AppScreen>>,
     state: Res<MatchState>,
@@ -1932,6 +1981,7 @@ fn update_quit_button(
     awaiting: Res<AwaitingPeer>,
     arm: Res<QuitArm>,
     southpaw: Res<input_touch::Southpaw>,
+    first_blood: Res<crate::first_blood::FirstBlood>,
     mut q: QuitButtonQuery,
 ) {
     let shown = *screen.get() == AppScreen::InMatch
@@ -1971,7 +2021,7 @@ fn update_quit_button(
             }
             BtnRole::Label => {
                 if let Some(mut t) = text {
-                    t.0 = quit_label(awaiting.0, armed).to_string();
+                    t.0 = quit_label(awaiting.0, first_blood.active, armed).to_string();
                 }
                 if let Some(mut c) = color {
                     c.0 = if armed {
@@ -2106,6 +2156,7 @@ fn update_summary_buttons(
     peer: Res<net::PeerProfile>,
     consent: Res<net::RematchConsent>,
     lobby: Res<net::LobbyState>,
+    first_blood: Res<crate::first_blood::FirstBlood>,
     mut q: SummaryButtonQuery,
 ) {
     let over = *screen.get() == AppScreen::InMatch
@@ -2117,7 +2168,12 @@ fn update_summary_buttons(
     // Fled or desynced: either way the slot reads PLAY THE BOT.
     let opponent_gone = lobby.is_terminal();
     let peer_name = crate::profile::peer_name(peer.0);
-    let primary = primary_label(online, practice.0, *consent, &peer_name, opponent_gone);
+    // After the lesson, the next step on an online build is a real duel.
+    let primary = if first_blood.finished() && online {
+        Some("FIND OPPONENT".to_string())
+    } else {
+        primary_label(online, practice.0, *consent, &peer_name, opponent_gone)
+    };
     // Local consent shows as a pressed/armed button: inverted fill — unless
     // the opponent has gone, where the slot now reads PLAY THE BOT and a
     // stale pre-flight consent must not render it pressed.
@@ -2203,6 +2259,11 @@ fn summary_buttons_input(
     mut consent: ResMut<net::RematchConsent>,
     mut queue: ResMut<net::NetSendQueue>,
     mut pending: ResMut<PendingUiThrow>,
+    (first_blood, mut find, mut next): (
+        Res<crate::first_blood::FirstBlood>,
+        ResMut<PendingFindOpponent>,
+        ResMut<NextState<AppScreen>>,
+    ),
 ) {
     if *screen.get() != AppScreen::InMatch
         || !matches!(*state, MatchState::MatchOver)
@@ -2218,6 +2279,13 @@ fn summary_buttons_input(
         PLAY_BTN_RECT,
         window.0,
     ) {
+        return;
+    }
+    // FIND OPPONENT after the lesson: out through the Title (which tears
+    // the practice match down and disarms practice) and straight on in.
+    if first_blood.finished() && netplay.room_url.is_some() {
+        find.0 = true;
+        next.set(AppScreen::Title);
         return;
     }
     let online = netplay.room_url.is_some() && !practice.0;
@@ -2443,11 +2511,12 @@ mod tests {
 
     #[test]
     fn quit_label_walks_its_states() {
-        assert_eq!(quit_label(false, false), "QUIT");
-        assert_eq!(quit_label(false, true), "SURE?");
+        assert_eq!(quit_label(false, false, false), "QUIT");
+        assert_eq!(quit_label(false, false, true), "SURE?");
+        assert_eq!(quit_label(false, true, false), "SKIP");
         // The summoning wait cancels in one tap — no arming, no SURE?.
-        assert_eq!(quit_label(true, false), "CANCEL");
-        assert_eq!(quit_label(true, true), "CANCEL");
+        assert_eq!(quit_label(true, false, false), "CANCEL");
+        assert_eq!(quit_label(true, false, true), "CANCEL");
     }
 
     #[test]
@@ -2503,6 +2572,25 @@ mod tests {
 #[cfg(test)]
 mod practice_summary_tests {
     use super::*;
+
+    #[test]
+    fn the_lesson_ends_ready_either_way() {
+        let won = MatchScore {
+            p0: MATCH_WIN_THRESHOLD,
+            p1: 1,
+        };
+        let text = first_blood_summary(won, Some((0, 1)), false);
+        assert!(text.starts_with("YOU'RE READY"), "{text}");
+        assert!(text.contains("FIRST BLOOD"), "{text}");
+        assert!(text.contains("UP TO GAUNTLET 1"), "{text}");
+        let lost = MatchScore {
+            p0: 3,
+            p1: MATCH_WIN_THRESHOLD,
+        };
+        let text = first_blood_summary(lost, Some((0, 0)), false);
+        assert!(text.starts_with("YOU'RE READY"), "{text}");
+        assert!(!text.contains("GAUNTLET"), "{text}");
+    }
 
     #[test]
     fn the_practice_card_speaks_to_the_player_and_names_the_rung() {

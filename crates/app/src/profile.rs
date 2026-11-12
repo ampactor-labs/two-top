@@ -335,13 +335,29 @@ struct TitleName;
 #[derive(Component)]
 struct EntryLine;
 
-/// One key of the keyboard: a letter at (row, col), or an action.
+/// One key of the keyboard: a letter at (row, col), or an action — plus
+/// the screen's two words, the prompt above the line and SKIP in the
+/// shared top strip, which share the keys' show/hide.
 #[derive(Component, Clone, Copy, PartialEq)]
 enum GridKey {
     Letter { row: usize, col: usize },
     Del,
     Done,
+    Prompt,
+    Skip,
 }
+
+/// The name as it stood when the keyboard opened (the dealt placeholder
+/// for a fresh install): what SKIP keeps.
+#[derive(Resource, Default)]
+struct NameBeforeEntry(String);
+
+/// The question over the line: the keyboard used to open with no word on
+/// it, and a newcomer met a blinking cursor before any idea of what it
+/// wanted.
+const PROMPT: &str = "WHAT DO THEY CALL YOU?";
+/// Where the prompt sits: above the entry line, below the top strip.
+const PROMPT_FY: f32 = 0.20;
 
 fn spawn_name_ui(mut commands: Commands, netplay: Res<NetplayConfig>) {
     // Couch builds carry no identity to exchange; the name is online-only.
@@ -405,6 +421,14 @@ fn spawn_name_ui(mut commands: Commands, netplay: Res<NetplayConfig>) {
             );
         }
     }
+    key(GridKey::Prompt, 0.5, PROMPT_FY, 34.0, render::palette::BONE);
+    key(
+        GridKey::Skip,
+        0.5,
+        (crate::ui::TOP_EXIT.0 + crate::ui::TOP_EXIT.1) * 0.5,
+        30.0,
+        render::palette::COLD_STONE,
+    );
     key(
         GridKey::Del,
         0.28,
@@ -425,7 +449,11 @@ fn spawn_name_ui(mut commands: Commands, netplay: Res<NetplayConfig>) {
 /// type — the dealt placeholder exists so the wire is never empty, not so
 /// you have to backspace it before your own name. Editing a name you
 /// already chose keeps it, so a one-letter fix stays a one-letter fix.
-fn clear_placeholder_on_entry(mut profile: ResMut<LocalProfile>) {
+fn clear_placeholder_on_entry(
+    mut profile: ResMut<LocalProfile>,
+    mut before: ResMut<NameBeforeEntry>,
+) {
+    before.0 = profile.name.clone();
     if !profile.named {
         profile.name.clear();
     }
@@ -478,6 +506,7 @@ fn name_entry_input(
     keys: Res<ButtonInput<KeyCode>>,
     touches: Res<Touches>,
     window: Res<WindowSize>,
+    before: Res<NameBeforeEntry>,
     mut profile: ResMut<LocalProfile>,
     mut next: ResMut<NextState<AppScreen>>,
 ) {
@@ -488,7 +517,9 @@ fn name_entry_input(
         for t in touches.iter_just_pressed() {
             let p = t.position();
             let (fx, fy) = (p.x / win.x, p.y / win.y);
-            if (ACTION_BAND.0..ACTION_BAND.1).contains(&fy) {
+            if crate::ui::in_band(fy, crate::ui::TOP_EXIT) {
+                hit = Some(GridKey::Skip);
+            } else if (ACTION_BAND.0..ACTION_BAND.1).contains(&fy) {
                 hit = Some(if fx < 0.5 {
                     GridKey::Del
                 } else {
@@ -561,6 +592,18 @@ fn name_entry_input(
         Some(GridKey::Del) => {
             profile.name.pop();
         }
+        Some(GridKey::Skip) => {
+            // Leave with the name you came in with: the dealt one on a
+            // fresh install (claimed, so the keyboard does not reopen).
+            profile.name = if before.0.is_empty() {
+                default_name(profile.install_id)
+            } else {
+                before.0.clone()
+            };
+            profile.named = true;
+            save_profile(&profile);
+            next.set(AppScreen::Title);
+        }
         _ => {}
     }
 }
@@ -632,6 +675,14 @@ fn update_name_ui(
                 text.0 = "DONE".to_string();
                 color.0 = render::palette::SPARK;
             }
+            GridKey::Prompt => {
+                text.0 = PROMPT.to_string();
+                color.0 = render::palette::BONE;
+            }
+            GridKey::Skip => {
+                text.0 = "SKIP".to_string();
+                color.0 = render::palette::COLD_STONE;
+            }
             GridKey::Letter { row, col } => {
                 text.0 = KEY_ROWS[row]
                     .chars()
@@ -649,6 +700,7 @@ pub struct ProfilePlugin;
 impl Plugin for ProfilePlugin {
     fn build(&self, app: &mut App) {
         app.insert_resource(load_profile())
+            .init_resource::<NameBeforeEntry>()
             .add_systems(Startup, spawn_name_ui)
             .add_systems(OnEnter(AppScreen::NameEntry), clear_placeholder_on_entry)
             .add_systems(

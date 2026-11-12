@@ -521,6 +521,19 @@ headless bench (`docs/BOT_LADDER.md`). Practice results never touch the
 online career W-L.
 `TWOTOP_PRACTICE=1` env arms it for desktop automation.
 
+**First Blood.** A fresh install (no match ever played) goes from naming
+itself straight into a guided practice match on the Vigil that teaches one
+verb at a time — move, throw, recall and catch, a charged kill, dodging a
+throw, the perfect catch, the edge — then a match to five against tier 1,
+and a summary that offers FIND OPPONENT. One line on screen at a time, worded
+for touch or keys by what the player last used; each stage moves on when the
+player actually does the thing. SKIP (the quit chip) ends it for good; a
+player who arrived by a join link never gets it unasked; SETTINGS → HOW TO
+PLAY runs it again. `TWOTOP_FIRST_BLOOD=1` forces it (`0` keeps it away;
+capture and autostart runs keep it away unless forced), and
+`TWOTOP_LESSON_STAGE=dodge` (any stage) starts it partway, for checking one
+stage. Progress is `progress.json` beside `settings.json`.
+
 **Trading tapes.** A match tape is a ~14 KB `.bmrg` file, and the sim is
 deterministic, so a friend's tape plays on your device exactly as it played
 on theirs — HUD, kill-cam, audio, the devouring, all of it. The REPLAYS

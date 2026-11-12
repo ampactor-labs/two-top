@@ -85,6 +85,7 @@ fn update_intro_card(
     career: Res<crate::grudge::CareerRecord>,
     profile: Res<crate::profile::LocalProfile>,
     peer: Res<net::PeerProfile>,
+    first_blood: Res<crate::first_blood::FirstBlood>,
     mut q: Query<(&IntroCardLine, &mut Text2d, &mut Visibility)>,
 ) {
     let show = *screen.get() == AppScreen::InMatch
@@ -109,6 +110,9 @@ fn update_intro_card(
         career.gauntlet_tier,
         career.rivalry_line(peer.0),
     );
+    if first_blood.active {
+        stakes = "FIRST BLOOD".to_string();
+    }
     // Online the table was agreed at pairing and may not be the one this
     // player picked — say where they are sitting.
     if online {

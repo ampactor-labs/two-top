@@ -216,7 +216,7 @@ fn spawn_controls(
             HintZone::Taunt,
             0.0,
             0.44,
-            "tap the ring above to flex\nfinish it: tier up",
+            "tap the ring above to flex\nfinish it: +1 streak",
         ),
     ] {
         commands.spawn((
@@ -315,6 +315,7 @@ fn update_controls(
     )>,
     booms: Query<(&sim::Boomerang, &sim::BoomerangMods)>,
     mut hints_used: ResMut<HintsUsed>,
+    first_blood: Res<crate::first_blood::FirstBlood>,
     mut parts: Query<(
         &Part,
         &mut Sprite,
@@ -577,7 +578,9 @@ fn update_controls(
             HintZone::Throw => anchor.frac.x = 0.5 * mirror,
             HintZone::Taunt => {}
         }
-        *vis = if live && !used {
+        // The lesson says one thing at a time in its own line; the
+        // standing captions would talk over it.
+        *vis = if live && !used && !first_blood.active {
             Visibility::Visible
         } else {
             Visibility::Hidden

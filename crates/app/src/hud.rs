@@ -39,7 +39,7 @@ struct ScorePip {
 }
 
 #[derive(Component)]
-struct CountdownGlyph;
+struct CountdownGlyph(usize);
 
 #[derive(Component)]
 struct TimerBar;
@@ -118,21 +118,24 @@ fn spawn_hud(
         None,
         None,
     ));
-    commands.spawn((
-        CountdownGlyph,
-        Sprite {
-            image: asset_server.load("hud/countdown_digits.png"),
-            texture_atlas: Some(TextureAtlas {
-                layout: cd_layout,
-                index: 0,
-            }),
-            custom_size: Some(Vec2::splat(COUNTDOWN_SIZE)),
-            ..default()
-        },
-        ScreenAnchor::new(0.0, 0.0, 0.0, 40.0),
-        Transform::from_xyz(0.0, 40.0, 150.0),
-        Visibility::Hidden,
-    ));
+    // Two glyph slots: the digit (or the G), and the O beside it for GO.
+    for slot in 0..2 {
+        commands.spawn((
+            CountdownGlyph(slot),
+            Sprite {
+                image: asset_server.load("hud/countdown_digits.png"),
+                texture_atlas: Some(TextureAtlas {
+                    layout: cd_layout.clone(),
+                    index: 0,
+                }),
+                custom_size: Some(Vec2::splat(COUNTDOWN_SIZE)),
+                ..default()
+            },
+            ScreenAnchor::new(0.0, 0.0, 0.0, 40.0),
+            Transform::from_xyz(0.0, 40.0, 150.0),
+            Visibility::Hidden,
+        ));
+    }
 }
 
 /// Seconds a freshly-earned pip spends slamming in (oversized + overdriven,
@@ -219,43 +222,61 @@ fn update_score_pips(
     }
 }
 
+/// What the countdown shows: the atlas cells, left to right. Pure for
+/// tests. `None` hides it.
+fn countdown_cells(
+    screen: AppScreen,
+    awaiting: bool,
+    state: MatchState,
+    frame: u32,
+) -> Option<&'static [usize]> {
+    // The idle session parks MatchState at Countdown{3}; don't freeze a "3"
+    // over the empty room while waiting for the challenger to arrive.
+    if awaiting || screen != AppScreen::InMatch {
+        return None;
+    }
+    match state {
+        // digit 3/2/1 → cells 0/1/2.
+        MatchState::Countdown { digit, .. } => Some(match digit {
+            3 => &[0],
+            2 => &[1],
+            _ => &[2],
+        }),
+        // A brief GO on the first frames of the round: cells 3 and 4. It
+        // drew cell 3 alone, so the round opened on a lone "G".
+        MatchState::InRound { expires_at_frame } => {
+            let started = expires_at_frame.saturating_sub(ROUND_DURATION_FRAMES);
+            (frame < started + GO_FLASH_FRAMES).then_some(&[3, 4][..])
+        }
+        _ => None,
+    }
+}
+
 fn update_countdown(
     screen: Res<State<AppScreen>>,
     awaiting: Res<AwaitingPeer>,
     state: Res<MatchState>,
     frame: Res<FrameCount>,
-    mut q: Query<(&mut Sprite, &mut Visibility), With<CountdownGlyph>>,
+    mut q: Query<(
+        &CountdownGlyph,
+        &mut Sprite,
+        &mut ScreenAnchor,
+        &mut Visibility,
+    )>,
 ) {
-    let Ok((mut sprite, mut vis)) = q.single_mut() else {
-        return;
-    };
-    // The idle session parks MatchState at Countdown{3}; don't freeze a "3"
-    // over the empty room while waiting for the challenger to arrive.
-    if awaiting.0 {
-        *vis = Visibility::Hidden;
-        return;
-    }
-    let show = |index: usize, sprite: &mut Sprite, vis: &mut Visibility| {
+    let cells = countdown_cells(*screen.get(), awaiting.0, *state, frame.0).unwrap_or(&[]);
+    for (glyph, mut sprite, mut anchor, mut vis) in &mut q {
+        let Some(&cell) = cells.get(glyph.0) else {
+            *vis = Visibility::Hidden;
+            continue;
+        };
         if let Some(atlas) = sprite.texture_atlas.as_mut() {
-            atlas.index = index;
+            atlas.index = cell;
         }
+        // Centred as a word: one glyph on the middle, two either side of it.
+        let slot = glyph.0 as f32 - (cells.len() as f32 - 1.0) * 0.5;
+        anchor.offset.x = slot * COUNTDOWN_SIZE * 0.9;
         *vis = Visibility::Visible;
-    };
-    match (*screen.get(), *state) {
-        (AppScreen::InMatch, MatchState::Countdown { digit, .. }) => {
-            // digit 3/2/1 → cells 0/1/2.
-            show(3usize.saturating_sub(digit as usize), &mut sprite, &mut vis);
-        }
-        (AppScreen::InMatch, MatchState::InRound { expires_at_frame }) => {
-            // Brief "GO" (cell 3) on the first frames of the round.
-            let started = expires_at_frame.saturating_sub(ROUND_DURATION_FRAMES);
-            if frame.0 < started + GO_FLASH_FRAMES {
-                show(3, &mut sprite, &mut vis);
-            } else {
-                *vis = Visibility::Hidden;
-            }
-        }
-        _ => *vis = Visibility::Hidden,
     }
 }
 
@@ -276,13 +297,51 @@ fn update_timer_bar(
             .min(ROUND_DURATION_FRAMES);
         let frac = remaining as f32 / ROUND_DURATION_FRAMES as f32;
         sprite.custom_size = Some(Vec2::new((TIMER_WIDTH * frac).max(1.0), TIMER_HEIGHT));
-        // Drain to Ember in the final 5 s — the only animation it ever does.
-        sprite.color = if remaining <= 5 * 60 {
+        // Drain to Ember as the floor starts to crumble (the final 8 s,
+        // `SUDDEN_DEATH_FRAMES`) — the only animation it ever does. It
+        // turned at 5 s, three seconds after the edges began to fall.
+        // Arenas with no storm turn at the same point; the clock reads alike.
+        sprite.color = if remaining <= sim::SUDDEN_DEATH_FRAMES {
             render::palette::EMBER
         } else {
             render::palette::COLD_STONE
         };
     } else {
         *vis = Visibility::Hidden;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_round_opens_on_go_not_g() {
+        let round = MatchState::InRound {
+            expires_at_frame: 1000 + ROUND_DURATION_FRAMES,
+        };
+        assert_eq!(
+            countdown_cells(AppScreen::InMatch, false, round, 1000),
+            Some(&[3, 4][..])
+        );
+        // Gone once the flash is over.
+        assert_eq!(
+            countdown_cells(AppScreen::InMatch, false, round, 1000 + GO_FLASH_FRAMES),
+            None
+        );
+    }
+
+    #[test]
+    fn digits_count_down_and_hide_while_alone_at_the_table() {
+        let three = MatchState::Countdown {
+            digit: 3,
+            expires_at_frame: 60,
+        };
+        assert_eq!(
+            countdown_cells(AppScreen::InMatch, false, three, 0),
+            Some(&[0][..])
+        );
+        assert_eq!(countdown_cells(AppScreen::InMatch, true, three, 0), None);
+        assert_eq!(countdown_cells(AppScreen::Title, false, three, 0), None);
     }
 }
