@@ -167,25 +167,46 @@
     // (crates/app/src/lifecycle.rs calls this); the lock is the page's to
     // take, is dropped by the browser whenever the page is hidden, and is
     // taken again when it comes back.
+    //
+    // One request at a time: a single tap fires several gesture events,
+    // and each used to start its own request while the first was still
+    // pending — every lock but the last was overwritten and never
+    // released. And the game can stop wanting the screen while a request
+    // is in flight, so the answer is checked against what is wanted NOW
+    // and let go if it is no longer wanted.
     let wantAwake = false;
     let wakeLock = null;
+    let requesting = false;
+    const wantsLock = () => wantAwake && document.visibilityState === "visible";
     const syncWakeLock = async () => {
       if (!("wakeLock" in navigator)) return;
-      try {
-        if (wantAwake && document.visibilityState === "visible") {
-          if (!wakeLock) {
-            const lock = await navigator.wakeLock.request("screen");
-            lock.addEventListener("release", () => {
-              if (wakeLock === lock) wakeLock = null;
-            });
-            wakeLock = lock;
-          }
-        } else if (wakeLock) {
+      if (!wantsLock()) {
+        if (wakeLock) {
           const lock = wakeLock;
           wakeLock = null;
-          await lock.release();
+          lock.release().catch(() => {});
         }
-      } catch (_) { /* refused (battery saver, no gesture yet): try again later */ }
+        return;
+      }
+      if (wakeLock || requesting) return;
+      requesting = true;
+      let lock = null;
+      try {
+        lock = await navigator.wakeLock.request("screen");
+      } catch (_) {
+        /* refused (battery saver, no gesture yet): the next gesture tries again */
+      } finally {
+        requesting = false;
+      }
+      if (!lock) return;
+      if (!wantsLock()) {
+        lock.release().catch(() => {});
+        return;
+      }
+      lock.addEventListener("release", () => {
+        if (wakeLock === lock) wakeLock = null;
+      });
+      wakeLock = lock;
     };
     window.twotopKeepAwake = (on) => { wantAwake = !!on; syncWakeLock(); };
 
