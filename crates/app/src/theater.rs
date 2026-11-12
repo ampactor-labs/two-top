@@ -762,6 +762,7 @@ fn despawn_theater_ui(mut commands: Commands, q: Query<Entity, With<TheaterMarqu
 
 /// Theater input: top strip exits, scrub band seeks, speed pips switch,
 /// anywhere else toggles pause. Desktop: Space / arrows / Home / End / Esc.
+#[allow(clippy::too_many_arguments)]
 fn theater_input(
     theater: Res<TheaterMode>,
     keys: Res<ButtonInput<KeyCode>>,
@@ -769,6 +770,7 @@ fn theater_input(
     window: Res<WindowSize>,
     frame: Res<sim::FrameCount>,
     controls: Option<ResMut<TheaterControls>>,
+    share: Res<crate::share::ShareTapBand>,
     mut next: ResMut<NextState<AppScreen>>,
 ) {
     // The transport only exists while a tape rolls — a live match reaches
@@ -827,6 +829,10 @@ fn theater_input(
                 controls.speed_idx = idx.min(SPEED_PRESETS.len() - 1);
             }
             continue; // scrub presses are handled with drags below
+        }
+        // The SHARE label's own tap is SHARE's, not a pause.
+        if share.hit(p, win) {
+            continue;
         }
         // Anywhere else: transport toggle.
         controls.paused = !controls.paused;
