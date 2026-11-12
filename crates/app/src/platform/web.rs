@@ -96,8 +96,8 @@ pub(crate) fn join_link() -> Option<String> {
 #[cfg(feature = "wasm-probe")]
 #[wasm_bindgen]
 pub fn checksum_golden_probe() -> String {
-    const GOLDEN: &str = include_str!("../../../tests/demos/canonical/match_v1.checksums.tsv");
-    const TAPE: &[u8] = include_bytes!("../../../tests/demos/canonical/match_v1.bmrg");
+    const GOLDEN: &str = include_str!("../../../../tests/demos/canonical/match_v1.checksums.tsv");
+    const TAPE: &[u8] = include_bytes!("../../../../tests/demos/canonical/match_v1.bmrg");
     let replay = match replay::decode_for_sim_version(TAPE, sim::SIM_VERSION) {
         Ok(r) => r,
         Err(e) => return format!("CHECKSUMS-FAIL decode: {e}"),

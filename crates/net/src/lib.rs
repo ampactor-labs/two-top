@@ -1094,6 +1094,12 @@ mod tests {
     /// panics. The bridge must keep accepting sends as lost packets, and
     /// the closure must be visible to the app through `any_channel_closed`
     /// on what remains of the socket.
+    // Not on Android: it builds a real matchbox socket, which links
+    // webrtc's interface enumeration (`getifaddrs`, API 24+), and the
+    // determinism lane links Android test binaries against API 21. The
+    // app itself ships at a level that has it; the bridge logic is the same
+    // on every target and runs here on the others.
+    #[cfg(not(target_os = "android"))]
     #[test]
     fn a_bridge_over_a_dead_socket_drops_packets_instead_of_panicking() {
         let (mut socket, message_loop) =
