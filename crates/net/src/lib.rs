@@ -494,6 +494,14 @@ pub enum NetMsg {
     /// the session. Reliable + ordered, so it always lands ahead of the
     /// peer's `Profile`.
     Table { arena: u8 },
+    /// "This phone is going away for a moment" — the app is being
+    /// backgrounded (a notification-shade peek, a call, a switch to the
+    /// chat app) or its tab hidden. Sent on the last update before it
+    /// sleeps. The receiver gives it [`PAUSED_FORFEIT_AFTER_FRAMES`] of
+    /// silence instead of [`FORFEIT_AFTER_FRAMES`] before forfeiting, and
+    /// says so on screen. An old build cannot decode it and ignores it,
+    /// which is the old behaviour.
+    Pausing,
 }
 
 /// Encode a side-channel message. Infallible for these types (postcard on
@@ -983,15 +991,35 @@ pub fn advance_silence_clock(time: Option<Res<Time<Real>>>, mut clock: ResMut<Si
 /// that ordinary packet jitter doesn't cause spurious flickers.
 pub const DISCONNECT_AFTER_FRAMES: u32 = 60;
 
-/// Frames of peer silence that trigger `Disconnected -> Forfeited`.
-/// 600 = 10 s @ 60 Hz — the grace window that lets a phone survive a
-/// notification-shade peek or a short call screen without losing the
-/// match. ggrs's own disconnect (9 s, `app::netplay::DISCONNECT_TIMEOUT`)
-/// is the authoritative trigger and fires just before this; the silence
-/// FSM here is the fallback for the pre-swap window and for anything
-/// ggrs misses. The `Forfeited` transition also sets
-/// `sim::MatchState::MatchOver`, ending the round in the sim layer.
-pub const FORFEIT_AFTER_FRAMES: u32 = 600;
+/// Frames of peer silence that trigger `Disconnected -> Forfeited`, for a
+/// peer that went quiet without a word. 540 = 9 s @ 60 Hz. This FSM is
+/// the authority: ggrs's own disconnect timeout
+/// (`app::netplay::GGRS_DISCONNECT_TIMEOUT`) is set at the paused grace
+/// below, a ceiling it only reaches if this one somehow does not fire.
+/// The `Forfeited` transition also sets `sim::MatchState::MatchOver`,
+/// ending the round in the sim layer.
+pub const FORFEIT_AFTER_FRAMES: u32 = 540;
+
+/// The same for a peer that said it was going away ([`NetMsg::Pausing`]):
+/// 1200 = 20 s, long enough for a notification-shade peek, a short call
+/// or a trip to the chat app to send the room code, without losing the
+/// match.
+pub const PAUSED_FORFEIT_AFTER_FRAMES: u32 = 1200;
+
+/// Silence the FSM forfeits a peer at.
+pub fn forfeit_after(peer_paused: bool) -> u32 {
+    if peer_paused {
+        PAUSED_FORFEIT_AFTER_FRAMES
+    } else {
+        FORFEIT_AFTER_FRAMES
+    }
+}
+
+/// The peer said it was going away ([`NetMsg::Pausing`]) and has not been
+/// heard from since. Cleared when its traffic resumes and when a session
+/// starts or ends.
+#[derive(Resource, Default, Clone, Copy, Debug)]
+pub struct PeerPaused(pub bool);
 
 /// Pure helper: given the current lobby state, the current frame,
 /// and the last-message frame, return the next lobby state if a
@@ -1000,7 +1028,7 @@ pub const FORFEIT_AFTER_FRAMES: u32 = 600;
 /// Transitions:
 ///   - `Connected` after `DISCONNECT_AFTER_FRAMES` of silence ->
 ///     `Disconnected`.
-///   - `Disconnected` after `FORFEIT_AFTER_FRAMES` of silence ->
+///   - `Disconnected` after `forfeit_after` of silence ->
 ///     `Forfeited` (terminal).
 ///   - `Disconnected` whose elapsed silence dropped below the
 ///     disconnect threshold -> `Connected` (reconnect happened).
@@ -1009,6 +1037,7 @@ pub fn next_lobby_state_for_silence(
     curr: &LobbyState,
     frame: u32,
     last_msg: u32,
+    forfeit_after: u32,
 ) -> Option<LobbyState> {
     let elapsed = frame.saturating_sub(last_msg);
     match curr {
@@ -1018,7 +1047,7 @@ pub fn next_lobby_state_for_silence(
                 since_frame: last_msg,
             })
         }
-        LobbyState::Disconnected { peer_id, .. } if elapsed >= FORFEIT_AFTER_FRAMES => {
+        LobbyState::Disconnected { peer_id, .. } if elapsed >= forfeit_after => {
             Some(LobbyState::Forfeited {
                 peer_id: *peer_id,
                 conceded: false,
@@ -1039,10 +1068,12 @@ pub fn next_lobby_state_for_silence(
 pub fn tick_disconnection_grace(
     frame: Res<SilenceClock>,
     last_msg: Res<LastPeerMessageFrame>,
+    paused: Res<PeerPaused>,
     mut lobby: ResMut<LobbyState>,
     mut match_state: ResMut<sim::MatchState>,
 ) {
-    if let Some(next) = next_lobby_state_for_silence(&lobby, frame.0, last_msg.0) {
+    let forfeit_after = forfeit_after(paused.0);
+    if let Some(next) = next_lobby_state_for_silence(&lobby, frame.0, last_msg.0, forfeit_after) {
         let became_forfeit = matches!(next, LobbyState::Forfeited { .. });
         tracing::warn!(
             target: "two_top::net::peer",
@@ -1088,6 +1119,7 @@ impl Plugin for NetPlugin {
             .init_resource::<PendingP2PSwap>()
             .init_resource::<LastPeerMessageFrame>()
             .init_resource::<SilenceClock>()
+            .init_resource::<PeerPaused>()
             .init_resource::<PeerProfile>()
             .init_resource::<PeerKeys>()
             .init_resource::<PeerSig>()
@@ -1544,7 +1576,12 @@ mod tests {
         let peer = dummy_peer();
         // Frame 50, last msg at 49 — only 1 frame of silence.
         assert_eq!(
-            next_lobby_state_for_silence(&LobbyState::Connected { peer_id: peer }, 50, 49),
+            next_lobby_state_for_silence(
+                &LobbyState::Connected { peer_id: peer },
+                50,
+                49,
+                FORFEIT_AFTER_FRAMES
+            ),
             None,
         );
     }
@@ -1555,7 +1592,12 @@ mod tests {
         let last_msg = 100;
         let now = last_msg + DISCONNECT_AFTER_FRAMES;
         assert_eq!(
-            next_lobby_state_for_silence(&LobbyState::Connected { peer_id: peer }, now, last_msg),
+            next_lobby_state_for_silence(
+                &LobbyState::Connected { peer_id: peer },
+                now,
+                last_msg,
+                FORFEIT_AFTER_FRAMES
+            ),
             Some(LobbyState::Disconnected {
                 peer_id: peer,
                 since_frame: last_msg,
@@ -1600,13 +1642,50 @@ mod tests {
                     since_frame: last_msg
                 },
                 now,
-                last_msg
+                last_msg,
+                FORFEIT_AFTER_FRAMES,
             ),
             Some(LobbyState::Forfeited {
                 peer_id: peer,
                 conceded: false,
             }),
         );
+    }
+
+    /// A peer that said it was going away is not forfeited at the quiet
+    /// threshold; it is at the paused one.
+    #[test]
+    fn a_paused_peer_gets_the_longer_grace() {
+        let peer = dummy_peer();
+        let away = LobbyState::Disconnected {
+            peer_id: peer,
+            since_frame: 0,
+        };
+        let quiet = forfeit_after(false);
+        let paused = forfeit_after(true);
+        assert!(paused > quiet);
+        assert_eq!(next_lobby_state_for_silence(&away, quiet, 0, paused), None);
+        assert_eq!(
+            next_lobby_state_for_silence(&away, paused, 0, paused),
+            Some(LobbyState::Forfeited {
+                peer_id: peer,
+                conceded: false,
+            }),
+        );
+
+        let mut app = App::new();
+        app.add_plugins(NetPlugin);
+        *app.world_mut().resource_mut::<LobbyState>() = away.clone();
+        app.world_mut().resource_mut::<PeerPaused>().0 = true;
+        app.world_mut().resource_mut::<SilenceClock>().0 = FORFEIT_AFTER_FRAMES + 10;
+        app.update();
+        assert_eq!(*app.world().resource::<LobbyState>(), away, "still waiting");
+        app.world_mut().resource_mut::<SilenceClock>().0 = PAUSED_FORFEIT_AFTER_FRAMES;
+        app.update();
+        assert!(matches!(
+            *app.world().resource::<LobbyState>(),
+            LobbyState::Forfeited { .. }
+        ));
     }
 
     #[test]
@@ -1622,7 +1701,8 @@ mod tests {
                     since_frame: 800
                 },
                 now,
-                last_msg
+                last_msg,
+                FORFEIT_AFTER_FRAMES,
             ),
             Some(LobbyState::Connected { peer_id: peer }),
         );
@@ -1639,7 +1719,8 @@ mod tests {
                     conceded: false,
                 },
                 10_000,
-                0
+                0,
+                FORFEIT_AFTER_FRAMES,
             ),
             None,
         );

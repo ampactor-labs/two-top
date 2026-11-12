@@ -242,13 +242,20 @@ identically on both sides (same `setup`), so only "which handle reads
 local input" differs; the deterministic sim guarantees the rest.
 
 The ggrs session is built with `input_delay = 3`, desync detection on
-(`interval = 30`, ~2 checks/sec), and a **9 s disconnect timeout** —
-the away grace that lets a phone survive a notification-shade peek or
-a short call banner and rejoin the live match (ggrs replays the missed
-ticks on resume). During an interruption the healthy side's overlay
-shows `<NAME> AWAY` after ~1 s of silence; at 9 s ggrs declares the
-peer gone and the match forfeits (net's own silence FSM backstops at
-10 s). A `DesyncDetected` event logs a loud `ERROR` on
+(`interval = 30`, ~2 checks/sec), and ggrs's disconnect timeout at
+20 s, a ceiling: the away grace is net's silence FSM. A peer silent
+without a word is forfeited at **9 s** (`net::FORFEIT_AFTER_FRAMES`); a
+phone going to the background (or a hidden tab) first sends
+`NetMsg::Pausing` on its last update, and that peer is held for **20 s**
+(`net::PAUSED_FORFEIT_AFTER_FRAMES`), long enough for a notification-shade
+peek, a short call, or a trip to the chat app, and it rejoins the live
+match on return (ggrs replays the missed ticks). During either wait the
+healthy side shows `<NAME> AWAY` (or `STEPPED AWAY`) after ~1 s of
+silence, with the seconds left. The phone that was away does not hold
+its own sleep against the peer: a frame gap restarts the peer's silence
+on its side. `scripts/pause_smoke.sh` runs both cases on two real peers
+(an announced 14 s pause carries on; `SILENT=1`, the same freeze
+unannounced, is forfeited 9.5 s in). A `DesyncDetected` event logs a loud `ERROR` on
 `target: two_top::net`; a `Disconnected` event (or a `Bye` on the
 side-channel — the clean-leave path) forfeits the match (sets
 `sim::MatchState::MatchOver`).
@@ -374,10 +381,12 @@ If either side desyncs visibly, take both `.bmrg.log` files and run
 ### Gate 3: forfeit on long disconnection
 
 * Same setup, but kill connectivity on one device for 12+ seconds.
-* The surviving device transitions `<NAME> AWAY → <NAME> FLED - the
-  field is yours` at ~9 s of silence (ggrs `Disconnected`;
-  `FORFEIT_AFTER_FRAMES = 600` is the 10 s fallback), records a career
-  WIN, and offers the top-band LEAVE.
+* The surviving device counts `<NAME> AWAY` down and transitions to
+  `<NAME> FLED - the field is yours` at ~9 s of silence (net's silence
+  FSM, `FORFEIT_AFTER_FRAMES = 540`; 20 s if the phone announced it was
+  going to the background), records the match **unfinished** (a dropped
+  link proves nothing about who left: nobody's win, nobody's loss), and
+  offers the top-band LEAVE.
 * `sim::MatchState::MatchOver` fires (the round flow ends; HUD shows
   match-over state).
 * The forfeiting peer, on coming back, sees `MATCH ABANDONED — you

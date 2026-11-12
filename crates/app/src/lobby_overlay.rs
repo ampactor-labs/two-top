@@ -81,6 +81,11 @@ fn update_summoning(
     peer_profile: Res<net::PeerProfile>,
     absence: Res<crate::netplay::RecentAbsence>,
     sync: Res<crate::netplay::SyncWait>,
+    silence: (
+        Res<net::SilenceClock>,
+        Res<net::LastPeerMessageFrame>,
+        Res<net::PeerPaused>,
+    ),
     mut stall: Local<Option<(std::mem::Discriminant<LobbyState>, f32)>>,
     mut q: Query<(&mut Text2d, &mut Visibility), With<SummoningText>>,
 ) {
@@ -147,9 +152,14 @@ fn update_summoning(
             }
             Some(m)
         }
-        LobbyState::Disconnected { .. } => Some(format!(
-            "{challenger} AWAY{dots}\nhold the field - forfeit soon"
-        )),
+        LobbyState::Disconnected { .. } => {
+            let (clock, heard, paused) = silence;
+            let left = away_secs_left(clock.0, heard.0, paused.0);
+            // A peer that said it was stepping out is waited for longer,
+            // and the wait says so.
+            let what = if paused.0 { "STEPPED AWAY" } else { "AWAY" };
+            Some(format!("{challenger} {what}\n\n{left}\n\nhold the field"))
+        }
         LobbyState::Forfeited { .. } => {
             // If OUR phone went away just before the forfeit, we are the
             // one who fled — say so instead of gaslighting the player.
@@ -183,6 +193,14 @@ fn update_summoning(
         }
         None => *vis = Visibility::Hidden,
     }
+}
+
+/// Whole seconds until an away peer is forfeited (net's silence FSM), never
+/// below 1 while the overlay still shows. Pure for tests.
+fn away_secs_left(clock: u32, last_heard: u32, paused: bool) -> u32 {
+    let silent = clock.saturating_sub(last_heard);
+    let left = net::forfeit_after(paused).saturating_sub(silent);
+    left.div_ceil(sim::TICK_HZ as u32).max(1)
 }
 
 /// "CURS" → "C U R S" (the glyphs read as a dialed code, not a word).
@@ -266,4 +284,20 @@ fn update_overlay(
         LobbyState::PeerUnreachable => "lobby: peer UNREACHABLE (sync never finished)".to_string(),
     };
     text.0 = label;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_away_countdown_reaches_the_forfeit_and_waits_longer_for_a_pause() {
+        let hz = sim::TICK_HZ as u32;
+        // A second of silence: the AWAY overlay has just come up.
+        assert_eq!(away_secs_left(hz, 0, false), 8);
+        assert_eq!(away_secs_left(hz, 0, true), 19);
+        // The last moment before the forfeit still shows a 1, never a 0.
+        assert_eq!(away_secs_left(net::FORFEIT_AFTER_FRAMES - 1, 0, false), 1);
+        assert_eq!(away_secs_left(net::FORFEIT_AFTER_FRAMES + 50, 0, false), 1);
+    }
 }

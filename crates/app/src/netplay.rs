@@ -68,15 +68,24 @@ const MAX_PREDICTION_FRAMES: usize = 16;
 /// within a few hundred ms, cheap enough to be free on the wire.
 const DESYNC_CHECK_INTERVAL: u32 = 30;
 
-/// Drop the peer (and forfeit) after this much silence. 9 s — long enough
-/// that a phone surviving a notification-shade peek or a short call banner
-/// comes back into a live match (ggrs replays the missed ticks), short
-/// enough that a genuinely gone opponent doesn't hold the field hostage.
-/// The OPPONENT AWAY overlay covers the wait (net's silence FSM flips the
-/// lobby to `Disconnected` after ~1 s once the driver stops pinning the
-/// silence timer). net::FORFEIT_AFTER_FRAMES (10 s) is the fallback gate
-/// just behind this.
-const DISCONNECT_TIMEOUT: Duration = Duration::from_secs(9);
+/// ggrs's own disconnect timeout: a ceiling, not the rule. The rule is net's
+/// silence FSM: a peer silent for 9 s without a word is forfeited
+/// (`net::FORFEIT_AFTER_FRAMES`), one that said it was going away gets 20 s
+/// (`net::PAUSED_FORFEIT_AFTER_FRAMES`, [`NetMsg::Pausing`]), and the OPPONENT
+/// AWAY overlay counts down the wait. ggrs knows nothing of a pause, so its
+/// timeout sits at the longer grace: at 9 s it would end a match the FSM is
+/// still holding open. A phone that comes back in time rejoins the live
+/// match (ggrs replays the missed ticks).
+const GGRS_DISCONNECT_TIMEOUT: Duration = Duration::from_secs(20);
+
+/// The grace a peer gets without a word, in seconds: how long our own
+/// freeze must last before the other phone could have forfeited us.
+const QUIET_GRACE_SECS: f32 = net::FORFEIT_AFTER_FRAMES as f32 / sim::TICK_HZ as f32;
+
+/// A frame gap at least this long means this phone itself was away (asleep
+/// in the background, a hidden tab): the silence in it is ours, not the
+/// peer's, and is not held against them.
+const OWN_GAP_SECS: f32 = 0.5;
 
 /// Seconds a fresh session may spend synchronizing before the peer counts
 /// as unreachable. ggrs retries its sync handshake forever (its
@@ -387,9 +396,12 @@ impl Plugin for MatchboxPlugin {
                 Update,
                 (
                     finish_ice_fetch,
+                    announce_going_away.before(drive_netplay),
                     drive_netplay,
                     close_departed_sockets,
-                    track_absence,
+                    track_absence
+                        .after(net::advance_silence_clock)
+                        .before(net::tick_disconnection_grace),
                     reset_rematch_consent,
                     log_link,
                 ),
@@ -995,7 +1007,7 @@ fn perform_swap(world: &mut World, peer_id: PeerId, their_table: sim::ArenaId) {
         .expect("2 players")
         .with_input_delay(ONLINE_INPUT_DELAY)
         .with_max_prediction_window(MAX_PREDICTION_FRAMES)
-        .with_disconnect_timeout(DISCONNECT_TIMEOUT)
+        .with_disconnect_timeout(GGRS_DISCONNECT_TIMEOUT)
         .with_desync_detection_mode(DesyncDetection::On {
             interval: DESYNC_CHECK_INTERVAL,
         });
@@ -1034,6 +1046,7 @@ fn perform_swap(world: &mut World, peer_id: PeerId, their_table: sim::ArenaId) {
         since: Some(built_at),
         peer_gone: false,
     };
+    world.resource_mut::<net::PeerPaused>().0 = false;
     // Record which player is us, so "your-action" feedback (haptics, summary
     // banner) can distinguish local from remote.
     world.resource_mut::<LocalPlayerHandle>().0 = Some(local_handle);
@@ -1138,6 +1151,9 @@ fn drain_session_events(world: &mut World) {
     }
     if let Some(interrupted) = interruption_edge {
         world.non_send_resource_mut::<MatchboxDriver>().interrupted = interrupted;
+        if !interrupted {
+            world.resource_mut::<net::PeerPaused>().0 = false;
+        }
     }
 
     // Healthy session: keep silence ~0 so net's grace timer stays quiet.
@@ -1281,6 +1297,10 @@ fn pump_side_channel(world: &mut World) {
             }
             // Handshake leftovers (a duplicate) — the table is settled.
             NetMsg::Table { .. } => {}
+            NetMsg::Pausing => {
+                tracing::info!(target: "two_top::net", "peer is going away for a moment — holding the match longer");
+                world.resource_mut::<net::PeerPaused>().0 = true;
+            }
             // Gone before the first frame: no duel, nobody's concession.
             // `watch_sync` looks for the next challenger.
             NetMsg::Bye if world.resource::<SyncWait>().waiting() => {
@@ -1381,16 +1401,69 @@ impl RecentAbsence {
 /// notification shade fires; either could convict this phone of walking
 /// out of a match the OPPONENT then abandoned.
 pub fn freeze_is_absence(delta_secs: f32) -> bool {
-    delta_secs >= DISCONNECT_TIMEOUT.as_secs_f32()
+    delta_secs >= QUIET_GRACE_SECS
 }
 
 /// Track absences: main-loop freezes long enough to have forfeited us on
 /// the other phone. `Time<Real>`, not `Virtual` — the virtual clock clamps
 /// a resume-after-suspend to 250 ms and would never see one.
-pub fn track_absence(time: Res<Time<Real>>, mut absence: ResMut<RecentAbsence>) {
-    if freeze_is_absence(time.delta_secs()) {
+///
+/// Any gap at all ([`OWN_GAP_SECS`]) also restarts the peer's silence:
+/// while this phone slept nothing was read, so the silence in that gap is
+/// ours. Unstamped, the FSM forfeited the opponent on the first frame back
+/// from a long pause, while that opponent was still holding the match
+/// open for us. Runs between net's clock advance and its grace tick.
+pub fn track_absence(
+    time: Res<Time<Real>>,
+    clock: Res<net::SilenceClock>,
+    mut absence: ResMut<RecentAbsence>,
+    mut last_heard: ResMut<LastPeerMessageFrame>,
+) {
+    let gap = time.delta_secs();
+    if gap >= OWN_GAP_SECS {
+        last_heard.0 = clock.0;
+    }
+    if freeze_is_absence(gap) {
         absence.0 = Some(time.elapsed_secs());
     }
+}
+
+/// `Update`, before the driver pumps the side channel: when this phone is
+/// about to go away (backgrounded, or its tab hidden) in the middle of a
+/// duel, tell the peer, so it holds the match open for the longer grace.
+/// The app gets one last update before it sleeps (`WillSuspend`), and the
+/// driver's pump in that update sends the message.
+#[allow(clippy::too_many_arguments)]
+fn announce_going_away(
+    mut lifecycle: MessageReader<bevy::window::AppLifecycle>,
+    mut occluded: MessageReader<bevy::window::WindowOccluded>,
+    lobby: Res<LobbyState>,
+    local: Res<LocalPlayerHandle>,
+    sync: Res<SyncWait>,
+    mut queue: ResMut<NetSendQueue>,
+    mut away: Local<bool>,
+) {
+    use bevy::window::AppLifecycle;
+    let mut going = None;
+    for state in lifecycle.read() {
+        match state {
+            AppLifecycle::WillSuspend | AppLifecycle::Suspended => going = Some(true),
+            AppLifecycle::WillResume | AppLifecycle::Running => going = Some(false),
+            AppLifecycle::Idle => {}
+        }
+    }
+    for e in occluded.read() {
+        going = Some(e.occluded);
+    }
+    let Some(going) = going else {
+        return;
+    };
+    let duel = local.0.is_some() && !sync.waiting() && lobby.is_in_match();
+    if going && !*away && duel {
+        tracing::info!(target: "two_top::net", "going away mid-duel — telling the peer");
+        queue.0.push(NetMsg::Pausing);
+    }
+    *away = going;
 }
 
 /// A fresh match starts with a clean slate: an absence taken on the Title
@@ -1506,6 +1579,7 @@ pub fn leave_online_match(world: &mut World) {
     *world.resource_mut::<LobbyState>() = LobbyState::Idle;
     world.resource_mut::<PendingP2PSwap>().0 = None;
     *world.resource_mut::<SyncWait>() = SyncWait::default();
+    world.resource_mut::<net::PeerPaused>().0 = false;
     world.resource_mut::<PeerProfile>().0 = None;
     world.resource_mut::<PeerKeys>().0 = None;
     world.resource_mut::<PeerSig>().0 = None;
@@ -1581,6 +1655,7 @@ mod tests {
         world.insert_resource(PendingP2PSwap::default());
         world.insert_resource(net::SilenceClock(60 * 60)); // a minute in the room
         world.insert_resource(LastPeerMessageFrame(0));
+        world.insert_resource(net::PeerPaused::default());
         world.insert_resource(sim::MatchState::default());
 
         drive_netplay(&mut world);
@@ -1640,7 +1715,8 @@ mod tests {
     fn only_a_freeze_the_peer_would_time_out_counts_as_absence() {
         assert!(!freeze_is_absence(0.016));
         assert!(!freeze_is_absence(2.1), "a thermal hitch is not a walk-out");
-        assert!(freeze_is_absence(DISCONNECT_TIMEOUT.as_secs_f32()));
+        assert!(freeze_is_absence(QUIET_GRACE_SECS));
+        assert!((QUIET_GRACE_SECS - 9.0).abs() < 1e-3);
         assert!(freeze_is_absence(30.0));
     }
 
