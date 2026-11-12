@@ -52,8 +52,11 @@ jobs:
       - uses: actions/checkout@v5
       - name: Free disk space
         run: sudo rm -rf /usr/local/lib/android /usr/share/dotnet /usr/local/.ghcup /opt/hostedtoolcache/CodeQL
-      - name: System libraries (audio, controllers; Xvfb + lavapipe for the smoke run)
-        run: sudo apt-get update && sudo apt-get install -y libasound2-dev libudev-dev pkg-config xvfb mesa-vulkan-drivers
+      # libxkbcommon-x11 is a RUNTIME dependency of the window layer (winit
+      # loads it on X11): the bare runner lacks it and the first smoke run
+      # panicked on it, which is how README came to list it.
+      - name: System libraries (audio, controllers; Xvfb + lavapipe + xkbcommon for the smoke run)
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev libudev-dev pkg-config xvfb mesa-vulkan-drivers libxkbcommon-x11-0
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: desktop-linux

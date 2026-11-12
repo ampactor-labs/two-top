@@ -24,9 +24,11 @@ Windows, macOS and Linux builds are published on every push to main as the rolli
 
 - **Windows:** unzip `2-Top-windows-x86_64.zip` anywhere and run `2-Top.exe`. The build is not signed, so SmartScreen says "Windows protected your PC" the first time: choose **More info**, then **Run anyway**.
 - **macOS** (Apple silicon and Intel): unzip `2-Top-macos-universal.zip` and move `2-Top.app` to Applications. It is not notarized, so the first open says it cannot be checked: open **System Settings → Privacy & Security** and choose **Open Anyway** (or Control-click the app, **Open**). After that it opens normally.
-- **Linux** (x86_64, glibc 2.35+): `tar -xzf 2-Top-linux-x86_64.tar.gz` and run `2-Top/two-top`. It needs a Vulkan driver (Mesa's is fine) and ALSA's runtime (`libasound2`); `two-top.desktop` and `two-top.png` are in the folder for a menu entry.
+- **Linux** (x86_64, glibc 2.35+): `tar -xzf 2-Top-linux-x86_64.tar.gz` and run `2-Top/two-top`. It needs a Vulkan driver (Mesa's is fine), ALSA's runtime (`libasound2`) and `libxkbcommon-x11` (present on desktop installs; a minimal system may need `libxkbcommon-x11-0`); `two-top.desktop` and `two-top.png` are in the folder for a menu entry.
 
 ### A desktop build, for development
+
+The game-feel numbers (screen shake, kill flash, kill-cam, camera lean, fang trails, phone buzzes) live in one place, `render::tuning::Tuning`, which every build reads. To tune by eye without rebuilding, `TWOTOP_TUNING_DUMP=tune.json` writes the current values out, and `TWOTOP_TUNING=tune.json` runs the game watching that file: an edit lands within half a second. Copy the values that win back into `Tuning::default()`.
 
 Two players share one keyboard:
 

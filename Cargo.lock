@@ -5509,6 +5509,8 @@ dependencies = [
  "bevy",
  "fixed_math",
  "rand 0.8.6",
+ "serde",
+ "serde_json",
  "sim",
 ]
 

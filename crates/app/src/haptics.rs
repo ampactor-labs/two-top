@@ -31,13 +31,6 @@ use sim::{Boomerang, BoomerangMods, Dead, Empowered, Player};
 use crate::netplay::LocalPlayerHandle;
 use crate::settings::Settings;
 
-/// Throw buzz — a light tick as the fang leaves your hand.
-pub const HAPTIC_THROW_MS: i64 = 10;
-/// Kill buzz — the heaviest, the one-hit-kill impact.
-pub const HAPTIC_KILL_MS: i64 = 60;
-/// Perfect-catch buzz — a crisp confirm of the skill beat.
-pub const HAPTIC_PERFECT_CATCH_MS: i64 = 15;
-
 /// Is `handle` a player holding this phone? Online, the one local handle.
 /// Practice runs a local session too (`None`), but only one of its two
 /// seats has a thumb on the screen: the bot's throws and catches used to
@@ -65,6 +58,7 @@ fn haptic_on_throw(
     local: Res<LocalPlayerHandle>,
     practice: Res<crate::bot::PracticeMode>,
     settings: Res<Settings>,
+    tuning: Res<render::tuning::Tuning>,
     mut had_primary: Local<HashMap<usize, bool>>,
 ) {
     let mut present: HashMap<usize, bool> = HashMap::default();
@@ -78,7 +72,7 @@ fn haptic_on_throw(
         let now = present.get(&handle).copied().unwrap_or(false);
         let was = had_primary.get(&handle).copied().unwrap_or(false);
         if now && !was && settings.haptics && is_local(&local, practice.0, handle) {
-            vibrate(HAPTIC_THROW_MS);
+            vibrate(tuning.haptics.throw_ms);
         }
         had_primary.insert(handle, now);
     }
@@ -88,13 +82,14 @@ fn haptic_on_throw(
 fn haptic_on_kill(
     players: Query<(&Player, &Dead)>,
     settings: Res<Settings>,
+    tuning: Res<render::tuning::Tuning>,
     mut prev: Local<HashMap<usize, bool>>,
 ) {
     for (player, dead) in &players {
         let now = dead.is_dying();
         let was = prev.get(&player.handle).copied().unwrap_or(false);
         if now && !was && settings.haptics {
-            vibrate(HAPTIC_KILL_MS);
+            vibrate(tuning.haptics.kill_ms);
         }
         prev.insert(player.handle, now);
     }
@@ -107,13 +102,14 @@ fn haptic_on_perfect_catch(
     local: Res<LocalPlayerHandle>,
     practice: Res<crate::bot::PracticeMode>,
     settings: Res<Settings>,
+    tuning: Res<render::tuning::Tuning>,
     mut prev: Local<HashMap<usize, bool>>,
 ) {
     for (player, emp) in &players {
         let now = emp.0;
         let was = prev.get(&player.handle).copied().unwrap_or(false);
         if now && !was && settings.haptics && is_local(&local, practice.0, player.handle) {
-            vibrate(HAPTIC_PERFECT_CATCH_MS);
+            vibrate(tuning.haptics.perfect_catch_ms);
         }
         prev.insert(player.handle, now);
     }

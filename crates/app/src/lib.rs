@@ -59,6 +59,7 @@ mod share;
 mod state_log;
 mod theater;
 mod touch_controls;
+mod tuning_reload;
 mod ui;
 use anchor::{FullScreenSprite, ScreenAnchorPlugin};
 use attest::AttestPlugin;
@@ -236,6 +237,7 @@ pub fn run() {
         .add_plugins(first_blood::FirstBloodPlugin)
         .add_plugins(nudges::NudgesPlugin)
         .add_plugins(state_log::StateLogPlugin)
+        .add_plugins(tuning_reload::TuningReloadPlugin)
         .add_plugins(HudPlugin)
         .add_plugins(DebugInputOverlayPlugin)
         .add_plugins(net::NetPlugin)

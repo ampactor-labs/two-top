@@ -189,6 +189,8 @@ impl Default for PerspectiveFlip {
 // raw RGB triples that drift from the canonical palette.
 // ===========================================================================
 
+pub mod tuning;
+
 pub mod palette {
     use bevy::prelude::Color;
 
@@ -1495,9 +1497,6 @@ pub fn spawn_dash_dust(
     }
 }
 
-/// Trauma kicked by a mid-air fang clash — a felt "clang" well under a kill.
-pub const TRAUMA_CLASH: f32 = 0.22;
-
 /// Tracks each fang entity's last-observed `LastClashFrame` so
 /// [`spawn_clash_sparks`] fires exactly once per clash.
 #[derive(Default)]
@@ -1509,6 +1508,7 @@ pub struct PrevClash(pub bevy::platform::collections::HashMap<Entity, u32>);
 pub fn spawn_clash_sparks(
     mut commands: Commands,
     assets: Res<EffectAssets>,
+    tuning: Res<tuning::Tuning>,
     mut shake: ResMut<ScreenShake>,
     fangs: Query<(Entity, &sim::LastClashFrame, &Transform), With<Boomerang>>,
     mut prev: Local<PrevClash>,
@@ -1526,7 +1526,7 @@ pub fn spawn_clash_sparks(
                 48.0,
                 0.55, // above the fangs — the clang reads on top
             );
-            shake.add_trauma(TRAUMA_CLASH);
+            shake.add_trauma(tuning.shake.clash);
         }
         prev.0.insert(entity, clash.0);
     }
@@ -1551,6 +1551,7 @@ pub struct PrevDying(pub bevy::platform::collections::HashMap<usize, bool>);
 pub fn spawn_hit_and_death_bursts(
     mut commands: Commands,
     assets: Res<EffectAssets>,
+    tuning: Res<tuning::Tuning>,
     mut shake: ResMut<ScreenShake>,
     mut last_kill: ResMut<LastKillPos>,
     players: Query<(&Player, &Dead, &Transform)>,
@@ -1564,9 +1565,9 @@ pub fn spawn_hit_and_death_bursts(
             // Kill feedback: camera kick + a hard 2-frame white flash, and
             // record where it happened so the kill-cam can punch in on the
             // round/match-ending blow.
-            shake.add_trauma(TRAUMA_KILL);
+            shake.add_trauma(tuning.shake.kill);
             last_kill.0 = pos;
-            spawn_kill_flash(&mut commands);
+            spawn_kill_flash(&mut commands, tuning.flash.kill_alpha);
             // Hit burst — quick 4-frame flash, ~70 ms total. Above
             // gameplay z so it pops over the player sprite that just
             // got hit.
@@ -1746,24 +1747,17 @@ pub struct TrailGhost {
 #[derive(Default)]
 pub struct TrailStampPos(pub bevy::platform::collections::HashMap<Entity, (Vec2, u32)>);
 
-/// World-units of travel between ghost-stamps (~half a fang).
-pub const TRAIL_STAMP_SPACING: f32 = 22.0;
-/// Real seconds a ghost-stamp lives — short so the trail never walls off
-/// the arena.
-pub const TRAIL_GHOST_TTL: f32 = 0.18;
-/// Starting opacity of a fresh stamp (the wake stays quieter than the fang).
-pub const TRAIL_GHOST_ALPHA: f32 = 0.55;
-
 /// The three-band palette ramp for a stamp: bright state color at the head,
 /// then the violet darks the whole stage is built from. Stepped, not lerped.
 pub fn trail_ramp(
     returning: bool,
     owner_handle: usize,
     modifier: Option<sim::PickupKind>,
+    ghost_alpha: f32,
 ) -> [Color; 3] {
     let head = trail_tint(returning, owner_handle, modifier);
     [
-        head.with_alpha(TRAIL_GHOST_ALPHA),
+        head.with_alpha(ghost_alpha),
         palette::CHARCOAL_LINE.with_alpha(0.35),
         palette::BRUISE_SHADOW.with_alpha(0.18),
     ]
@@ -1789,10 +1783,11 @@ pub fn trail_tint(
 }
 
 /// Render-side: stamp a faded fang ghost each time a live boomerang has
-/// travelled `TRAIL_STAMP_SPACING` since its last stamp.
+/// travelled `tuning.trail.stamp_spacing` since its last stamp.
 pub fn spawn_boomerang_trail(
     mut commands: Commands,
     asset_server: Res<AssetServer>,
+    tuning: Res<tuning::Tuning>,
     mut image: Local<Option<Handle<Image>>>,
     mut last: Local<TrailStampPos>,
     boomerangs: Query<(Entity, &Boomerang, &Transform, &sim::BoomerangMods)>,
@@ -1804,11 +1799,16 @@ pub fn spawn_boomerang_trail(
     for (entity, boom, xform, mods) in &boomerangs {
         let pos = xform.translation.truncate();
         let prev = last.0.get(&entity).copied();
-        let stamp = prev.is_none_or(|(p, _)| pos.distance(p) >= TRAIL_STAMP_SPACING);
+        let stamp = prev.is_none_or(|(p, _)| pos.distance(p) >= tuning.trail.stamp_spacing);
         if stamp {
             let count = prev.map(|(_, c)| c + 1).unwrap_or(0);
             let returning = matches!(boom.state, BoomerangState::Returning { .. });
-            let ramp = trail_ramp(returning, boom.owner_handle, mods.modifier);
+            let ramp = trail_ramp(
+                returning,
+                boom.owner_handle,
+                mods.modifier,
+                tuning.trail.ghost_alpha,
+            );
             commands.spawn((
                 Sprite {
                     image: img.clone(),
@@ -1821,7 +1821,7 @@ pub fn spawn_boomerang_trail(
                 Transform::from_xyz(pos.x, pos.y, 0.45),
                 TrailGhost {
                     age: 0.0,
-                    ttl: TRAIL_GHOST_TTL,
+                    ttl: tuning.trail.ghost_ttl,
                     ramp,
                     small: count % 2 == 1,
                 },
@@ -1965,20 +1965,6 @@ impl ScreenShake {
     }
 }
 
-/// Trauma lost per real-time second (linear decay).
-pub const SHAKE_DECAY_PER_SEC: f32 = 1.8;
-/// Camera offset in world units at `trauma == 1.0` (the source sprites are
-/// 32 px at 2× world scale, so 6 world units ≈ 3 source texels of kick).
-pub const SHAKE_MAX_OFFSET: f32 = 6.0;
-/// Kill shake. This is a one-hit-kill game — every landed contact is a
-/// death (`award_kill`), so the plan's separate "hit" and "death" events
-/// coincide; the kill edge gets the stronger death-magnitude kick.
-pub const TRAUMA_KILL: f32 = 0.7;
-/// Pyre-shatter shake (arena geometry breaking).
-pub const TRAUMA_SHATTER: f32 = 0.3;
-/// Perfect-catch shake (the signature skill beat).
-pub const TRAUMA_PERFECT_CATCH: f32 = 0.25;
-
 /// Pure offset sampler: magnitude `trauma² × max`, direction `angle`
 /// radians. Split out so the curve is unit-testable; the camera system
 /// supplies a random angle from the cosmetic RNG each frame.
@@ -1997,15 +1983,13 @@ pub struct KillFlash {
 
 /// How many render frames the kill flash holds before despawning.
 pub const KILL_FLASH_FRAMES: u8 = 2;
-/// Flash alpha (contact-mode accent — feedback, not information).
-pub const KILL_FLASH_ALPHA: f32 = 0.6;
 /// Spawn a kill flash covering the whole view. A single large quad at the
 /// arena origin (z above gameplay + effects, below the HUD legend) covers
 /// both the static desktop camera and the zoomed mobile follow cam, which
 /// always centres well inside the arena — no per-frame reposition needed.
-fn spawn_kill_flash(commands: &mut Commands) {
+fn spawn_kill_flash(commands: &mut Commands, alpha: f32) {
     let mut color = palette::HIT_WHITE;
-    color.set_alpha(KILL_FLASH_ALPHA);
+    color.set_alpha(alpha);
     commands.spawn((
         Sprite {
             color,
@@ -2042,6 +2026,7 @@ pub struct PrevEmpowered(pub bevy::platform::collections::HashMap<usize, bool>);
 /// flag rises (a catch inside the perfect window). Falling edges (the
 /// empowered throw consuming the flag) don't shake.
 pub fn shake_on_perfect_catch(
+    tuning: Res<tuning::Tuning>,
     mut shake: ResMut<ScreenShake>,
     players: Query<(&Player, &sim::Empowered)>,
     mut prev: Local<PrevEmpowered>,
@@ -2050,7 +2035,7 @@ pub fn shake_on_perfect_catch(
         let now = emp.0;
         let was = prev.0.get(&player.handle).copied().unwrap_or(false);
         if now && !was {
-            shake.add_trauma(TRAUMA_PERFECT_CATCH);
+            shake.add_trauma(tuning.shake.perfect_catch);
         }
         prev.0.insert(player.handle, now);
     }
@@ -2064,6 +2049,7 @@ pub struct PrevShattered(pub bevy::platform::collections::HashMap<Entity, bool>)
 
 /// Render-side: add shatter trauma the tick a `BonePyre` breaks.
 pub fn shake_on_pyre_shatter(
+    tuning: Res<tuning::Tuning>,
     mut shake: ResMut<ScreenShake>,
     pyres: Query<(Entity, &sim::BonePyre)>,
     mut prev: Local<PrevShattered>,
@@ -2071,7 +2057,7 @@ pub fn shake_on_pyre_shatter(
     for (entity, pyre) in &pyres {
         let was = prev.0.get(&entity).copied().unwrap_or(false);
         if pyre.shattered && !was {
-            shake.add_trauma(TRAUMA_SHATTER);
+            shake.add_trauma(tuning.shake.shatter);
         }
         prev.0.insert(entity, pyre.shattered);
     }
@@ -2088,6 +2074,7 @@ impl Plugin for EffectsPlugin {
         app.insert_resource(CosmeticRng(SmallRng::seed_from_u64(COSMETIC_BOOT_SEED)))
             .insert_resource(EmberAccumulator { elapsed: 0.0 })
             .init_resource::<ScreenShake>()
+            .init_resource::<tuning::Tuning>()
             .init_resource::<LastKillPos>()
             .init_resource::<MatchPointRitual>()
             .add_systems(Startup, load_effect_assets)
@@ -2185,7 +2172,7 @@ mod tests {
 
     #[test]
     fn shake_offset_zero_trauma_is_zero() {
-        let v = shake_offset(0.0, SHAKE_MAX_OFFSET, 1.234);
+        let v = shake_offset(0.0, tuning::Tuning::default().shake.max_offset, 1.234);
         assert!(v.length() < 1e-6);
     }
 
@@ -2193,24 +2180,24 @@ mod tests {
     fn shake_offset_full_trauma_hits_max_magnitude() {
         // trauma == 1.0 → magnitude == max, regardless of angle.
         for &angle in &[0.0, 0.7, 1.6, 3.1, 5.5] {
-            let v = shake_offset(1.0, SHAKE_MAX_OFFSET, angle);
-            assert!((v.length() - SHAKE_MAX_OFFSET).abs() < 1e-4);
+            let v = shake_offset(1.0, tuning::Tuning::default().shake.max_offset, angle);
+            assert!((v.length() - tuning::Tuning::default().shake.max_offset).abs() < 1e-4);
         }
     }
 
     #[test]
     fn shake_offset_scales_quadratically() {
         // Half trauma → quarter magnitude (the trauma² curve).
-        let half = shake_offset(0.5, SHAKE_MAX_OFFSET, 0.0).length();
-        let full = shake_offset(1.0, SHAKE_MAX_OFFSET, 0.0).length();
+        let half = shake_offset(0.5, tuning::Tuning::default().shake.max_offset, 0.0).length();
+        let full = shake_offset(1.0, tuning::Tuning::default().shake.max_offset, 0.0).length();
         assert!((half - full * 0.25).abs() < 1e-4);
     }
 
     #[test]
     fn add_trauma_accumulates_and_clamps() {
         let mut s = ScreenShake::default();
-        s.add_trauma(TRAUMA_PERFECT_CATCH);
-        assert!((s.trauma - TRAUMA_PERFECT_CATCH).abs() < 1e-6);
+        s.add_trauma(tuning::Tuning::default().shake.perfect_catch);
+        assert!((s.trauma - tuning::Tuning::default().shake.perfect_catch).abs() < 1e-6);
         // Stacking past 1.0 saturates rather than overflowing the curve.
         s.add_trauma(1.0);
         assert!((s.trauma - 1.0).abs() < 1e-6);
