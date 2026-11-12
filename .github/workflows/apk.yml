@@ -86,6 +86,14 @@ jobs:
             -storepass android -keypass android -alias androiddebugkey \
             -dname "CN=Android Debug,O=Android,C=US" \
             -keyalg RSA -keysize 2048 -validity 10000
+      - name: Say whether this build can relay
+        shell: bash
+        env:
+          TWOTOP_ICE_URL: ${{ vars.TWOTOP_ICE_URL }}
+        run: |
+          if [ -z "$TWOTOP_ICE_URL" ]; then
+            echo "::warning title=No TURN relay::TWOTOP_ICE_URL is unset, so this build is STUN-only: two phones on mobile data (carrier NAT) will not connect. Deploy crates/ice_vendor and set the TWOTOP_ICE_URL repo variable (SIGNALING.md)."
+          fi
       - name: Build release APK
         env:
           CARGO_APK_RELEASE_KEYSTORE: ${{ github.workspace }}/debug.keystore
