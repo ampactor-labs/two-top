@@ -102,7 +102,8 @@ jobs:
       # Non-android targets: build + run the test suite under nextest.
       - name: Run tests
         if: matrix.target != 'aarch64-linux-android'
-        run: cargo nextest run ${{ matrix.pkg-args }} --target ${{ matrix.target }} --locked
+        # --no-fail-fast: a new lane reports every failure in one run.
+        run: cargo nextest run ${{ matrix.pkg-args }} --target ${{ matrix.target }} --locked --no-fail-fast
       # Android: build-only via cargo build --tests. nextest can't *run*
       # tests under aarch64-linux-android without an android runtime, but
       # `cargo build --tests` exercises every test target's compilation
