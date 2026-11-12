@@ -1474,6 +1474,33 @@ fn summary_text(
     )
 }
 
+/// The practice summary card: who won, said to the player ("YOU WIN", not
+/// the Cur's name — the human is always the Cur in practice and nobody
+/// reads themselves as an animal), the score, where the gauntlet went,
+/// and the saved-tape note. A shade is named as one. Pure for tests.
+fn practice_summary(
+    score: MatchScore,
+    shade_name: Option<&str>,
+    step: Option<(u32, u32)>,
+    saved: bool,
+) -> String {
+    let won = score.p0 >= MATCH_WIN_THRESHOLD;
+    let headline = match (won, shade_name) {
+        (true, _) => "YOU WIN".to_string(),
+        (false, Some(name)) => format!("{name} SHADE WINS"),
+        (false, None) => "THE BOT WINS".to_string(),
+    };
+    let tier = step
+        .and_then(|(from, to)| crate::grudge::gauntlet_line(from, to, won))
+        .map(|line| format!("\n\n{line}"))
+        .unwrap_or_default();
+    let replay_line = if saved { "\n\nreplay saved" } else { "" };
+    format!(
+        "{headline}\n\n{}  -  {}{tier}{replay_line}",
+        score.p0, score.p1
+    )
+}
+
 /// The primary summary button's label — the RUN IT BACK handshake as a
 /// state machine the thumb can read. A gone opponent flips the slot to the
 /// bot offer (`bot_fallback_input` owns that tap); `None` is kept for any
@@ -1517,6 +1544,10 @@ fn update_summary_overlay(
     saved: Res<crate::recorder::LastSavedReplay>,
     absence: Res<crate::netplay::RecentAbsence>,
     time: Res<Time<Real>>,
+    (shade, step): (
+        Res<crate::bot::ShadeStyle>,
+        Res<crate::grudge::GauntletStep>,
+    ),
     mut q: Query<(&mut Text2d, &mut Visibility), With<SummaryOverlay>>,
 ) {
     let Ok((mut text, mut vis)) = q.single_mut() else {
@@ -1546,6 +1577,15 @@ fn update_summary_overlay(
                 ..
             }
         ) && !we_fled;
+        if practice.0 && !theater.active() {
+            text.0 = practice_summary(
+                *score,
+                shade.0.as_ref().map(|s| s.name.as_str()),
+                step.0,
+                saved.0.is_some(),
+            );
+            return;
+        }
         text.0 = summary_text(
             *score,
             netplay.room_url.is_some(),
@@ -2457,6 +2497,35 @@ mod tests {
         );
         assert!(text.contains("CUR WINS"), "{text}");
         assert!(text.contains("replay saved"), "{text}");
+    }
+}
+
+#[cfg(test)]
+mod practice_summary_tests {
+    use super::*;
+
+    #[test]
+    fn the_practice_card_speaks_to_the_player_and_names_the_rung() {
+        let won = MatchScore {
+            p0: MATCH_WIN_THRESHOLD,
+            p1: 2,
+        };
+        let lost = MatchScore {
+            p0: 1,
+            p1: MATCH_WIN_THRESHOLD,
+        };
+        let text = practice_summary(won, None, Some((3, 4)), true);
+        assert!(text.starts_with("YOU WIN"), "{text}");
+        assert!(text.contains("UP TO GAUNTLET 4"), "{text}");
+        assert!(text.contains("replay saved"), "{text}");
+        assert!(!text.contains("CUR"), "{text}");
+        let text = practice_summary(lost, None, Some((5, 4)), false);
+        assert!(text.starts_with("THE BOT WINS"), "{text}");
+        assert!(text.contains("DOWN TO GAUNTLET 4"), "{text}");
+        // A shade moves no rung and is named as what it is.
+        let text = practice_summary(lost, Some("CURS"), None, false);
+        assert!(text.starts_with("CURS SHADE WINS"), "{text}");
+        assert!(!text.contains("GAUNTLET"), "{text}");
     }
 }
 

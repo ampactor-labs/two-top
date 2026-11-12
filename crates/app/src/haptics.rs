@@ -38,9 +38,15 @@ pub const HAPTIC_KILL_MS: i64 = 60;
 /// Perfect-catch buzz — a crisp confirm of the skill beat.
 pub const HAPTIC_PERFECT_CATCH_MS: i64 = 15;
 
-/// Is `handle` a local player? `None` (couch/SyncTest — both players on one
-/// device) treats every handle as local.
-fn is_local(local: &LocalPlayerHandle, handle: usize) -> bool {
+/// Is `handle` a player holding this phone? Online, the one local handle.
+/// Practice runs a local session too (`None`), but only one of its two
+/// seats has a thumb on the screen: the bot's throws and catches used to
+/// buzz the player's hand as if they were the player's own. Couch (`None`,
+/// not practice): both players share the device, both buzz.
+fn is_local(local: &LocalPlayerHandle, practice: bool, handle: usize) -> bool {
+    if practice {
+        return handle != crate::bot::BOT_HANDLE;
+    }
     local.0.is_none_or(|lh| lh == handle)
 }
 
@@ -57,6 +63,7 @@ fn haptic_on_throw(
     booms: Query<(&Boomerang, &BoomerangMods)>,
     players: Query<&Player>,
     local: Res<LocalPlayerHandle>,
+    practice: Res<crate::bot::PracticeMode>,
     settings: Res<Settings>,
     mut had_primary: Local<HashMap<usize, bool>>,
 ) {
@@ -70,7 +77,7 @@ fn haptic_on_throw(
         let handle = player.handle;
         let now = present.get(&handle).copied().unwrap_or(false);
         let was = had_primary.get(&handle).copied().unwrap_or(false);
-        if now && !was && settings.haptics && is_local(&local, handle) {
+        if now && !was && settings.haptics && is_local(&local, practice.0, handle) {
             vibrate(HAPTIC_THROW_MS);
         }
         had_primary.insert(handle, now);
@@ -98,13 +105,14 @@ fn haptic_on_kill(
 fn haptic_on_perfect_catch(
     players: Query<(&Player, &Empowered)>,
     local: Res<LocalPlayerHandle>,
+    practice: Res<crate::bot::PracticeMode>,
     settings: Res<Settings>,
     mut prev: Local<HashMap<usize, bool>>,
 ) {
     for (player, emp) in &players {
         let now = emp.0;
         let was = prev.get(&player.handle).copied().unwrap_or(false);
-        if now && !was && settings.haptics && is_local(&local, player.handle) {
+        if now && !was && settings.haptics && is_local(&local, practice.0, player.handle) {
             vibrate(HAPTIC_PERFECT_CATCH_MS);
         }
         prev.insert(player.handle, now);
@@ -132,15 +140,23 @@ mod tests {
     #[test]
     fn local_filter_matches_only_the_local_handle() {
         let local = LocalPlayerHandle(Some(1));
-        assert!(!is_local(&local, 0));
-        assert!(is_local(&local, 1));
+        assert!(!is_local(&local, false, 0));
+        assert!(is_local(&local, false, 1));
+    }
+
+    #[test]
+    fn in_practice_only_the_player_buzzes() {
+        let local = LocalPlayerHandle(None);
+        let bot = crate::bot::BOT_HANDLE;
+        assert!(!is_local(&local, true, bot));
+        assert!(is_local(&local, true, 1 - bot));
     }
 
     #[test]
     fn local_filter_none_treats_every_handle_as_local() {
         // Couch/SyncTest: both players share the device.
         let local = LocalPlayerHandle(None);
-        assert!(is_local(&local, 0));
-        assert!(is_local(&local, 1));
+        assert!(is_local(&local, false, 0));
+        assert!(is_local(&local, false, 1));
     }
 }

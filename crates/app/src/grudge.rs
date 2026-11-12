@@ -418,11 +418,11 @@ pub fn note_rival_tape(record: &mut CareerRecord, peer: net::ProfileData, filena
     save_career(record);
 }
 
-/// The last rung that changes the opponent. `bot.rs`'s knobs saturate at
-/// difficulty 11 (`difficulty = tier + in_match_ramp`, the ramp being one
-/// late notch), so a tier-10 bot ends its match fully sharpened and every
-/// tier past it would be the same duelist under a bigger number. The
-/// counter stops here and says so.
+/// The last rung that changes the opponent. `bot_brain`'s knobs saturate
+/// at difficulty 11 (the tier plus the in-match rubber band's one notch,
+/// `bot_brain::rubber_band`), so a tier-10 bot that falls behind is fully
+/// sharpened and every tier past it would be the same duelist under a
+/// bigger number. The counter stops here and says so.
 pub const GAUNTLET_MAX_TIER: u32 = 10;
 
 /// The tier a win climbs to.
@@ -431,8 +431,8 @@ pub fn next_tier_after_win(tier: u32) -> u32 {
 }
 
 /// The tier a loss (or a quit from a live match) falls to: one rung under
-/// the tier just lost at, never back to the passive dummy once it has been
-/// cleared (the dummy is worth exactly one visit).
+/// the tier just lost at, never back to the sparring partner once it has
+/// been cleared (it is worth exactly one visit).
 ///
 /// This used to be "two rungs under the BEST ever reached", which made the
 /// floor permanent: a player who once climbed to tier 8 could lose forever
@@ -465,9 +465,34 @@ pub fn record_gauntlet_quit(record: &mut CareerRecord) {
     save_career(record);
 }
 
+/// How the last decided gauntlet match moved the ladder: `(from, to)`.
+/// `None` for anything that does not move it (a shade, the theater, a
+/// couch or online match) — the summary card reads it for its tier line.
+#[derive(Resource, Default, Clone, Copy, Debug, PartialEq, Eq)]
+pub struct GauntletStep(pub Option<(u32, u32)>);
+
+/// The summary's line for a gauntlet step: where the ladder went. Pure for
+/// tests. The default font has no arrow, so the words carry it.
+pub fn gauntlet_line(from: u32, to: u32, won: bool) -> Option<String> {
+    if won && gauntlet_mastered(to) {
+        return Some(if from < to {
+            "GAUNTLET MASTERED".to_string()
+        } else {
+            "GAUNTLET MASTERED - HELD".to_string()
+        });
+    }
+    match to.cmp(&from) {
+        std::cmp::Ordering::Greater => Some(format!("UP TO GAUNTLET {to}")),
+        std::cmp::Ordering::Less => Some(format!("DOWN TO GAUNTLET {to}")),
+        std::cmp::Ordering::Equal if to > 0 => Some(format!("GAUNTLET {to} HOLDS")),
+        std::cmp::Ordering::Equal => None,
+    }
+}
+
 /// The practice ladder: a decided bot match moves the gauntlet. Win → the
 /// tier climbs to the cap (and the best-ever remembers); lose → one rung
-/// down, never back to the dummy.
+/// down, never back to the sparring partner.
+#[allow(clippy::too_many_arguments)]
 fn record_gauntlet_result(
     state: Res<MatchState>,
     score: Res<MatchScore>,
@@ -475,12 +500,18 @@ fn record_gauntlet_result(
     shade: Res<crate::bot::ShadeStyle>,
     theater: Res<crate::theater::TheaterMode>,
     mut record: ResMut<CareerRecord>,
+    mut step: ResMut<GauntletStep>,
     mut prev_over: Local<bool>,
 ) {
     let over = matches!(*state, MatchState::MatchOver);
     let entered = over && !*prev_over;
     *prev_over = over;
-    if !entered || !practice.0 || theater.active() {
+    if !entered {
+        return;
+    }
+    // A fresh verdict: whatever the last match said no longer applies.
+    step.0 = None;
+    if !practice.0 || theater.active() {
         return;
     }
     if shade.0.is_some() {
@@ -490,6 +521,7 @@ fn record_gauntlet_result(
         return;
     }
     // The human is always handle 0 in practice.
+    let from = record.gauntlet_tier;
     if score.p0 >= MATCH_WIN_THRESHOLD {
         record.gauntlet_tier = next_tier_after_win(record.gauntlet_tier);
         record.gauntlet_best = record.gauntlet_best.max(record.gauntlet_tier);
@@ -502,6 +534,7 @@ fn record_gauntlet_result(
     } else {
         record.gauntlet_tier = loss_tier(record.gauntlet_tier);
     }
+    step.0 = Some((from, record.gauntlet_tier));
     save_career(&record);
 }
 
@@ -511,6 +544,7 @@ impl Plugin for GrudgePlugin {
     fn build(&self, app: &mut App) {
         app.insert_resource(load_career())
             .init_resource::<MilestoneFlareArmed>()
+            .init_resource::<GauntletStep>()
             .add_systems(
                 Update,
                 (
@@ -525,6 +559,36 @@ impl Plugin for GrudgePlugin {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_gauntlet_line_says_where_the_ladder_went() {
+        assert_eq!(
+            gauntlet_line(3, 4, true).as_deref(),
+            Some("UP TO GAUNTLET 4")
+        );
+        assert_eq!(
+            gauntlet_line(5, 4, false).as_deref(),
+            Some("DOWN TO GAUNTLET 4")
+        );
+        assert_eq!(
+            gauntlet_line(1, 1, false).as_deref(),
+            Some("GAUNTLET 1 HOLDS")
+        );
+        assert_eq!(gauntlet_line(0, 0, false), None);
+        assert_eq!(
+            gauntlet_line(GAUNTLET_MAX_TIER - 1, GAUNTLET_MAX_TIER, true).as_deref(),
+            Some("GAUNTLET MASTERED")
+        );
+        assert_eq!(
+            gauntlet_line(GAUNTLET_MAX_TIER, GAUNTLET_MAX_TIER, true).as_deref(),
+            Some("GAUNTLET MASTERED - HELD")
+        );
+        // A loss at the cap is a step down, said as one.
+        assert_eq!(
+            gauntlet_line(GAUNTLET_MAX_TIER, GAUNTLET_MAX_TIER - 1, false).as_deref(),
+            Some("DOWN TO GAUNTLET 9")
+        );
+    }
 
     #[test]
     fn ordinals_speak_english() {
@@ -653,8 +717,12 @@ mod tests {
     }
 
     #[test]
-    fn a_loss_falls_one_rung_and_never_back_to_the_dummy() {
-        assert_eq!(loss_tier(0), 0, "never cleared the dummy: it waits");
+    fn a_loss_falls_one_rung_and_never_back_to_the_sparring_partner() {
+        assert_eq!(
+            loss_tier(0),
+            0,
+            "never cleared the sparring partner: it waits"
+        );
         assert_eq!(loss_tier(1), 1);
         assert_eq!(loss_tier(2), 1);
         assert_eq!(loss_tier(3), 2);

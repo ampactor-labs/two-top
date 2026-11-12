@@ -502,16 +502,23 @@ the share; `replay_sync --attest` verifies them wherever the files are.
 
 **The gauntlet (practice vs the bot).** Tap PRACTICE VS BOT on the Title
 (P on desktop), then PLAY. The match runs the normal local session with the
-bot supplying player 2's inputs — it keeps range, plants visibly before it
-throws, dashes through your fangs, and steers its recalls. Beat it and your
-GAUNTLET TIER climbs (the button label carries the number); every tier the
-bot opens a little sharper — harder throws, then (from tier 3) a dodge
-reflex that fires on some of your throws and more of them as it climbs,
-tighter aim — up to a beatable ceiling at tier 10. Lose and the tier drops
-one rung (never back to the dummy; best tier is remembered in
-`career.json`), so a losing streak keeps easing the bot off. A fresh
-install's bot starts as a passive dummy that only starts lobbing back once
-you have landed three kills, so the first match is the tutorial. Practice results never touch the online career W-L.
+bot supplying player 2's inputs — it keeps range, routes around cover to a
+clear line, plants visibly before it throws, dashes out of your fangs'
+lanes, and steers its recalls. Beat it and your GAUNTLET TIER climbs (the
+button label carries the number); every tier the bot opens a little
+sharper — harder throws, a quicker read of you, throws that lead where
+you are walking, then (from tier 3) a dodge reflex that fires on some of
+your throws and more of them as it climbs — up to a beatable ceiling at
+tier 10. Lose and the tier drops one rung (never back to tier 0; best tier
+is remembered in `career.json`), so a losing streak keeps easing the bot
+off. Within a match it eases a notch while it leads by two kills and
+sharpens a notch while you do. A fresh install starts at tier 0, a
+sparring partner: slow, telegraphed lobs every few seconds and no
+dodging, so even a player who has not found the controls meets a fang in
+flight and a finished match. The summary says where the ladder went
+(UP TO GAUNTLET 4, GAUNTLET MASTERED). The ladder is tuned against a
+headless bench (`docs/BOT_LADDER.md`). Practice results never touch the
+online career W-L.
 `TWOTOP_PRACTICE=1` env arms it for desktop automation.
 
 **Trading tapes.** A match tape is a ~14 KB `.bmrg` file, and the sim is
