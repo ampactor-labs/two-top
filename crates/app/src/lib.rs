@@ -14,7 +14,7 @@
 use bevy::prelude::*;
 use bevy_ggrs::GgrsPlugin;
 use fixed_math::Fix;
-use input_touch::{CursorPosition, InputTouchPlugin, WindowSize, update_touch_state};
+use input_touch::{InputTouchPlugin, WindowSize, update_touch_state};
 use render::{EffectsPlugin, RenderSyncPlugin};
 use sim::{
     AnimState, BOOMERANG_HALF_EXTENT_CM, Boomerang, GgrsCfg, Player, PositionF, SelectedArena,
@@ -44,6 +44,7 @@ mod lobby_overlay;
 mod logging;
 mod netplay;
 mod paths;
+mod pointer;
 mod profile;
 mod recorder;
 mod rivals;
@@ -222,6 +223,8 @@ pub fn run() {
         // per-platform below; the two must never both be installed or
         // they'd race over `LocalInputs<GgrsCfg>`.
         .add_plugins(InputTouchPlugin)
+        // The mouse as a finger, ahead of every touch reader (`pointer`).
+        .add_plugins(pointer::PointerPlugin)
         .add_plugins(RenderSyncPlugin)
         .add_plugins(EffectsPlugin)
         .add_plugins(GameAudioPlugin)
@@ -295,60 +298,30 @@ pub fn run() {
     #[cfg(target_os = "android")]
     app.add_plugins(android::AndroidPlugin);
 
-    // Platform input source (level signals only; exactly one source).
-    // Android: touch. Everything else (PC): keyboard — WASD for P0, arrows
-    // for P1, so two friends play couch versus on one keyboard. After the
-    // source (and the bot's patch): the online rematch gate converts a
-    // MatchOver THROW press into handshake consent, and — when a tape is
-    // loaded — the theater's playback source replaces the whole map.
-    #[cfg(target_os = "android")]
+    // One input chain, the same on every platform (level signals only).
+    // The keyboard/gamepad source writes every local handle (WASD for P0,
+    // arrows for P1, so two friends play couch versus on one keyboard);
+    // the flip mirror reflects it for a P1 seat; then the touch source
+    // overwrites the local handle, but only while a finger (or the mouse,
+    // `pointer`) is actually down, so a keyboard is never stamped over;
+    // then the bot patches handle 1 in practice. After that: the rematch
+    // hold, the UI's injected THROW, the online rematch gate, and — when a
+    // tape is loaded — the theater's playback source, which replaces the
+    // whole map.
+    //
+    // This used to be three chains. Android took touch as its only source
+    // (and wrote one finger to BOTH handles), native desktop never read
+    // touch at all, and the browser layered the two. A touch layer fixed
+    // on one platform stayed broken on another until someone noticed.
+    app.add_plugins(input_desktop::DesktopInputsPlugin);
     app.add_systems(
         bevy_ggrs::prelude::ReadInputs,
-        // The bot patches handle 1 after the touch source's insert applies.
-        (read_android_touch_inputs, bot::drive_bot).chain(),
+        (mirror_keyboard_for_flip, read_touch_inputs, bot::drive_bot)
+            .chain()
+            .after(input_desktop::read_local_desktop_inputs),
     );
-    // platform-gate-ok: the browser takes the keyboard source too, and
-    // layers the touch source below over it.
-    #[cfg(not(target_os = "android"))]
-    {
-        app.add_plugins(input_desktop::DesktopInputsPlugin);
-        // Mirror-for-flip runs between the keyboard source and the bot: the
-        // P1 window of a desktop loopback session needs the same world-Y
-        // reflection as the P1 phone, and the bot's world-space inputs must
-        // never be mirrored (it patches handle 1 afterwards).
-        //
-        // The browser gets a SECOND source layered on after the mirror.
-        // One wasm binary serves a phone and a laptop, and it was taking
-        // the keyboard-only branch on both: `read_android_touch_inputs`
-        // is the only thing anywhere that turns `TouchState` into
-        // `LocalInputs`, and it is Android-gated. So a phone browser drew
-        // controls (once they were un-gated) that fed nothing — the stick
-        // moved under the thumb and the duelist never did. `TouchState`
-        // is maintained on every platform; only the wire into ggrs was
-        // missing. The touch source runs last and overwrites only while a
-        // finger is actually down, so a laptop browser keeps WASD and
-        // couch versus.
-        #[cfg(not(target_family = "wasm"))]
-        app.add_systems(
-            bevy_ggrs::prelude::ReadInputs,
-            (mirror_desktop_inputs_for_flip, bot::drive_bot)
-                .chain()
-                .after(input_desktop::read_local_desktop_inputs),
-        );
-        #[cfg(target_family = "wasm")]
-        app.add_systems(
-            bevy_ggrs::prelude::ReadInputs,
-            (
-                mirror_desktop_inputs_for_flip,
-                read_web_touch_inputs,
-                bot::drive_bot,
-            )
-                .chain()
-                .after(input_desktop::read_local_desktop_inputs),
-        );
-        #[cfg(not(target_family = "wasm"))]
-        app.add_systems(Update, toggle_fullscreen);
-    }
+    #[cfg(not(any(target_os = "android", target_family = "wasm")))]
+    app.add_systems(Update, toggle_fullscreen);
     app.add_systems(
         bevy_ggrs::prelude::ReadInputs,
         (
@@ -376,47 +349,24 @@ pub fn run() {
     tracing::info!(target: "two_top::app", "two-top exiting cleanly");
 }
 
-#[cfg(target_os = "android")]
-fn read_android_touch_inputs(
-    mut commands: Commands,
-    touch_state: Res<input_touch::TouchState>,
-    local_players: Res<bevy_ggrs::LocalPlayers>,
-    local_handle: Res<netplay::LocalPlayerHandle>,
-    flip: Res<render::PerspectiveFlip>,
-) {
-    let mut input = input_touch::quantize_inputs(&touch_state);
-    // The flipped client (P1's phone) renders the world mirrored top-for-
-    // bottom so its player sits at the near edge; its screen drags must be
-    // reflected into world space PRE-wire or "down" walks the character up
-    // (and aim inverts with it). Both peers still exchange plain world-space
-    // inputs, so determinism is untouched.
-    if flip.0 < 0.0 {
-        input = input_touch::mirror_input_y(input);
-    }
-    let mut map = bevy::platform::collections::HashMap::default();
-    if let Some(handle) = local_handle.0 {
-        map.insert(handle, input);
-    } else {
-        for handle in &local_players.0 {
-            map.insert(*handle, input);
-        }
-    }
-    commands.insert_resource(bevy_ggrs::LocalInputs::<GgrsCfg>(map));
-}
-
-/// The browser's touch source: the same `TouchState` -> `LocalInputs`
-/// step [`read_android_touch_inputs`] does, layered over the keyboard
-/// source instead of replacing it.
+/// The touch source, on every platform: `TouchState` (fingers, and the
+/// mouse as a finger) into `LocalInputs`, layered over the keyboard.
 ///
-/// Overwrites the local handle's input ONLY while a finger is engaged
-/// ([`input_touch::is_engaged`]), because the same wasm binary serves a
-/// laptop browser where the keyboard is the only input device — an
-/// unconditional write would stamp neutral over every keystroke. Mirrors
-/// for the flipped (P1) client itself, exactly as the Android reader
-/// does, and therefore runs AFTER `mirror_desktop_inputs_for_flip` so the
-/// reflection is applied once, not twice.
-#[cfg(target_family = "wasm")]
-fn read_web_touch_inputs(
+/// Overwrites ONLY while engaged ([`input_touch::is_engaged`], which
+/// includes the one-frame sticky release of an aimed throw), so a keyboard
+/// player is never stamped over with neutral. Online it drives this
+/// device's handle; with no handle assigned (couch, practice, First Blood)
+/// it drives the near seat, P0 — the bot takes P1 in practice, and in
+/// couch versus P1 stays on the keyboard. It used to drive every local
+/// handle at once, so one finger moved both couch players.
+///
+/// The flipped (P1) online client renders the world mirrored top-for-
+/// bottom so its player sits at the near edge; its screen drags are
+/// reflected into world space here, PRE-wire, or "down" walks the
+/// character up. Runs after [`mirror_keyboard_for_flip`] so the keyboard's
+/// reflection and this one are each applied exactly once. Both peers still
+/// exchange plain world-space inputs, so determinism is untouched.
+fn read_touch_inputs(
     touch_state: Res<input_touch::TouchState>,
     local_players: Res<bevy_ggrs::LocalPlayers>,
     local_handle: Res<netplay::LocalPlayerHandle>,
@@ -433,24 +383,23 @@ fn read_web_touch_inputs(
     if flip.0 < 0.0 {
         input = input_touch::mirror_input_y(input);
     }
-    if let Some(handle) = local_handle.0 {
+    if let Some(handle) = touch_handle(local_handle.0, &local_players.0) {
         inputs.0.insert(handle, input);
-    } else {
-        for handle in &local_players.0 {
-            inputs.0.insert(*handle, input);
-        }
     }
 }
 
-/// Desktop twin of the flip mirror inside `read_android_touch_inputs`: when
-/// this window is the flipped (P1) client of an online session, reflect the
-/// keyboard's world-Y before the wire so "up" on this screen moves the
+/// Which handle a finger drives: this device's online handle, else the
+/// lowest local one (P0). Pure for tests.
+fn touch_handle(online: Option<usize>, local: &[usize]) -> Option<usize> {
+    online.or_else(|| local.iter().copied().min())
+}
+
+/// The keyboard/gamepad's twin of the flip in [`read_touch_inputs`]: when
+/// this window is the flipped (P1) client of an online session, reflect
+/// the keyboard's world-Y before the wire so "up" on this screen moves the
 /// character up on this screen. Couch and practice run with flip = 1.0, so
-/// this is a no-op everywhere but a desktop loopback P1 window.
-// platform-gate-ok: the browser runs the keyboard source, so it needs
-// this mirror as much as a native desktop client does.
-#[cfg(not(target_os = "android"))]
-fn mirror_desktop_inputs_for_flip(
+/// this is a no-op everywhere but an online P1 seat.
+fn mirror_keyboard_for_flip(
     flip: Res<render::PerspectiveFlip>,
     inputs: Option<ResMut<bevy_ggrs::LocalInputs<GgrsCfg>>>,
 ) {
@@ -1398,27 +1347,31 @@ fn sync_sprite_atlas_from_anim(
     }
 }
 
-/// Mirrors the primary `Window`'s logical size and cursor position into
-/// the resources `input_touch` reads. Lives in the app crate (not
-/// `input_touch`) because only the app pulls in `bevy_window` —
-/// `input_touch` stays headless-friendly for tests and CI.
-/// Ordered before `input_touch::update_touch_state` so the same-frame
-/// touch sync sees fresh metrics.
-fn update_window_metrics(
-    window: Query<&Window>,
-    mut window_size: ResMut<WindowSize>,
-    mut cursor_pos: ResMut<CursorPosition>,
-) {
+/// Mirrors the primary `Window`'s logical size into the resource
+/// `input_touch` reads. Lives in the app crate (not `input_touch`) because
+/// only the app pulls in `bevy_window` — `input_touch` stays
+/// headless-friendly for tests and CI. Ordered before
+/// `input_touch::update_touch_state` so the same-frame touch sync sees
+/// fresh metrics. (The mouse reaches `input_touch` as a finger, through
+/// `pointer`, so no cursor position is mirrored any more.)
+fn update_window_metrics(window: Query<&Window>, mut window_size: ResMut<WindowSize>) {
     let Ok(w) = window.single() else { return };
     window_size.0 = Vec2::new(w.width(), w.height());
-    if let Some(pos) = w.cursor_position() {
-        cursor_pos.0 = pos;
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_finger_drives_the_online_seat_or_else_p0_alone() {
+        assert_eq!(touch_handle(Some(1), &[1]), Some(1));
+        // Couch / practice / First Blood: both handles are local, and a
+        // finger is the near seat's — never both players at once.
+        assert_eq!(touch_handle(None, &[0, 1]), Some(0));
+        assert_eq!(touch_handle(None, &[1, 0]), Some(0));
+        assert_eq!(touch_handle(None, &[]), None);
+    }
 
     #[test]
     fn actor_pose_idle_is_neutral() {

@@ -17,17 +17,17 @@
 //!     `aim_angle_rad` its heading, mirroring the desktop throw-key +
 //!     d-pad model. Tap-vs-hold detection itself is left to sim's
 //!     `released_within(THROW_DOWN, …)` edge derivation (cycle 6).
-//!   * cycle 4: mouse-drag desktop fallback. Left mouse button is
-//!     synthesized into a single virtual touch with sentinel id
-//!     `MOUSE_TOUCH_ID`, merged into the touch event stream so the
-//!     same stick/throw logic drives it. Lets developers and CI
-//!     exercise the input layer without a touchscreen.
+//!   * cycle 4: the mouse as a finger. The app turns the left mouse
+//!     button into a touch with sentinel id `MOUSE_TOUCH_ID` before
+//!     Bevy's touch system runs (`app::pointer`), so this crate sees it
+//!     as one more finger and needs no mouse path of its own. (It used
+//!     to synthesize the touch here, which reached only the gameplay
+//!     layer: every menu, reading Bevy's `Touches`, stayed unclickable.)
 //!   * cycle 5: quantization to wire-format `PlayerInput` and the
 //!     `TouchInputsPlugin` that wires `read_local_touch_inputs` into
 //!     GGRS's `ReadInputs` schedule. This is the moment touch state
 //!     becomes a 4-byte deterministic input that flows into sim.
 
-use bevy::input::mouse::MouseButton;
 use bevy::input::touch::Touches;
 use bevy::prelude::*;
 use bevy_ggrs::prelude::ReadInputs;
@@ -65,12 +65,6 @@ pub const STICK_FOLLOW_RADIUS_PX: f32 = STICK_MAX_RADIUS_PX * STICK_DEADZONE_SAT
 #[derive(Resource, Debug, Clone, Copy, Default)]
 pub struct WindowSize(pub Vec2);
 
-/// Cursor position in logical pixels, for the desktop mouse-drag
-/// fallback. Same population pattern as `WindowSize`. ZERO when the
-/// cursor is outside the window or the app hasn't populated it yet.
-#[derive(Resource, Debug, Clone, Copy, Default)]
-pub struct CursorPosition(pub Vec2);
-
 /// Runtime-adjustable inner deadzone for the virtual stick (Phase 18 Task
 /// 5.5c). Defaults to [`STICK_DEADZONE_INNER`]; the app overwrites it from the
 /// persisted `Settings` (the deadzone feeds the stick *before* quantization to
@@ -99,9 +93,10 @@ pub fn mirror_x(pos: Vec2, window: Vec2) -> Vec2 {
     Vec2::new(window.x - pos.x, pos.y)
 }
 
-/// Sentinel id for the synthesized left-mouse-button touch. `u64::MAX`
-/// is well outside any real touchscreen id space (Bevy/Android emit
-/// small monotonic ids), so it cannot collide with a real touch.
+/// Finger id of the mouse, synthesized into Bevy's touch stream by the
+/// app (`app::pointer`). `u64::MAX` is well outside any real touchscreen
+/// id space (Bevy/Android emit small monotonic ids), so it cannot collide
+/// with a real touch.
 pub const MOUSE_TOUCH_ID: u64 = u64::MAX;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -445,49 +440,21 @@ pub fn apply_touch_events(
 }
 
 /// PreUpdate system: syncs `TouchState` against Bevy's `Touches` each
-/// frame, plus a synthesized virtual touch driven by the left mouse
-/// button (cycle 4 desktop fallback). Frame counter advances even when
-/// no touches are active so future cycles can measure
+/// frame (the mouse included: the app writes it into the touch stream as
+/// finger [`MOUSE_TOUCH_ID`]). Frame counter advances even when no
+/// touches are active so future cycles can measure
 /// elapsed-frames-since-touch-start without interleaved gaps.
-pub fn update_touch_state(
-    mut state: ResMut<TouchState>,
-    bevy_touches: Res<Touches>,
-    mouse_btn: Res<ButtonInput<MouseButton>>,
-    cursor: Res<CursorPosition>,
-) {
+pub fn update_touch_state(mut state: ResMut<TouchState>, bevy_touches: Res<Touches>) {
     let frame = state.frame.wrapping_add(1);
-
-    let cursor_pos = cursor.0;
-    let mouse_just_pressed = mouse_btn.just_pressed(MouseButton::Left);
-    let mouse_just_released = mouse_btn.just_released(MouseButton::Left);
-    let mouse_held = mouse_btn.pressed(MouseButton::Left);
-
-    let mouse_pressed_iter = mouse_just_pressed
-        .then_some((MOUSE_TOUCH_ID, cursor_pos))
-        .into_iter();
-    let mouse_released_iter = mouse_just_released.then_some(MOUSE_TOUCH_ID).into_iter();
-    // `pressed()` is false on the just_released frame, so this naturally
-    // excludes the release frame from active updates.
-    let mouse_active_iter = mouse_held
-        .then_some((MOUSE_TOUCH_ID, cursor_pos))
-        .into_iter();
-
     apply_touch_events(
         &mut state,
         frame,
         bevy_touches
             .iter_just_pressed()
-            .map(|t| (t.id(), t.position()))
-            .chain(mouse_pressed_iter),
-        bevy_touches
-            .iter_just_released()
-            .map(|t| t.id())
-            .chain(mouse_released_iter),
+            .map(|t| (t.id(), t.position())),
+        bevy_touches.iter_just_released().map(|t| t.id()),
         bevy_touches.iter_just_canceled().map(|t| t.id()),
-        bevy_touches
-            .iter()
-            .map(|t| (t.id(), t.position()))
-            .chain(mouse_active_iter),
+        bevy_touches.iter().map(|t| (t.id(), t.position())),
     );
 }
 
@@ -705,7 +672,6 @@ impl Plugin for InputTouchPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<TouchState>()
             .init_resource::<WindowSize>()
-            .init_resource::<CursorPosition>()
             .init_resource::<StickDeadzone>()
             .init_resource::<Southpaw>()
             .add_systems(
