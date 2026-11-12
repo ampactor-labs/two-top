@@ -189,6 +189,7 @@ impl Default for PerspectiveFlip {
 // raw RGB triples that drift from the canonical palette.
 // ===========================================================================
 
+pub mod arena;
 pub mod tuning;
 
 pub mod palette {
@@ -1403,7 +1404,7 @@ fn load_effect_assets(
         None,
     ));
     // 3 rows: ember mote / cold dust / grove spore — one register per arena
-    // family, picked by `ambient_profile`.
+    // family, picked by the arena's `air` (`arena::info`).
     let ember_layout = atlases.add(TextureAtlasLayout::from_grid(
         UVec2::splat(8),
         4,
@@ -1881,22 +1882,6 @@ pub struct EmberAccumulator {
 const EMBER_ARENA_HALF_W: f32 = 650.0;
 const EMBER_ARENA_HALF_H: f32 = 400.0;
 
-/// The arena's ambient air: (spawn rate Hz, sheet row). Row 0 = ember mote,
-/// row 1 = cold dust, row 2 = grove spore. The Pit smolders, the Vigil is
-/// nearly still, the Forest drifts thick with spores — the air says where
-/// you are before the floor does.
-fn ambient_profile(arena: sim::ArenaId) -> (f32, u16) {
-    match arena {
-        sim::ArenaId::Anchor => (4.0, 0),
-        sim::ArenaId::Crossing => (2.5, 1),
-        sim::ArenaId::Reliquary => (3.0, 2),
-        sim::ArenaId::Pit => (8.0, 0),
-        sim::ArenaId::Vigil => (1.2, 1),
-        sim::ArenaId::Gallery => (1.8, 1),
-        sim::ArenaId::Forest => (5.0, 2),
-    }
-}
-
 pub fn spawn_ambient_embers(
     time: Res<Time<Real>>,
     mut commands: Commands,
@@ -1906,7 +1891,7 @@ pub fn spawn_ambient_embers(
     mut rng: ResMut<CosmeticRng>,
     mut acc: ResMut<EmberAccumulator>,
 ) {
-    let (rate_hz, row) = ambient_profile(selected.0);
+    let (rate_hz, row) = arena::info(selected.0).air;
     acc.elapsed += time.delta_secs();
     let interval = 1.0 / rate_hz;
     while acc.elapsed >= interval {

@@ -89,20 +89,6 @@ impl RoomCode {
     }
 }
 
-/// The arena's join-link token (`join.html#CURS-pit`). Lowercase so it
-/// reads as one clean path segment.
-pub fn arena_room_tag(arena: sim::ArenaId) -> &'static str {
-    match arena {
-        sim::ArenaId::Anchor => "anchor",
-        sim::ArenaId::Crossing => "crossing",
-        sim::ArenaId::Reliquary => "reliquary",
-        sim::ArenaId::Pit => "pit",
-        sim::ArenaId::Vigil => "vigil",
-        sim::ArenaId::Gallery => "gallery",
-        sim::ArenaId::Forest => "forest",
-    }
-}
-
 /// Append the (optional) code and the sim version to the room *name*,
 /// preserving any query string: `ws://host/two-top?next=2` + `CURS` +
 /// `15` → `ws://host/two-top-CURS-v15?next=2`. Pure for testing. The
@@ -141,7 +127,7 @@ pub fn parse_join(uri: &str) -> Option<([u8; CODE_LEN], sim::ArenaId)> {
     let arena = sim::ALL_ARENAS
         .iter()
         .copied()
-        .find(|a| arena_room_tag(*a) == tag)?;
+        .find(|a| render::arena::info(*a).room_tag == tag)?;
     Some((slots, arena))
 }
 
@@ -152,7 +138,7 @@ pub fn join_link(watch_base: &str, code: &str, arena: sim::ArenaId) -> String {
         "{}/join.html#{}-{}",
         watch_base.trim_end_matches('/'),
         code,
-        arena_room_tag(arena),
+        render::arena::info(arena).room_tag,
     )
 }
 
@@ -177,7 +163,7 @@ fn apply_join(
     tracing::info!(
         target: "two_top::room_code",
         code = %code.code_string(),
-        arena = arena_room_tag(arena),
+        arena = render::arena::info(arena).room_tag,
         "join link accepted — the table is set",
     );
     true
@@ -698,7 +684,7 @@ mod tests {
     #[test]
     fn every_arena_tag_is_a_clean_path_token() {
         for &a in sim::ALL_ARENAS.iter() {
-            let tag = arena_room_tag(a);
+            let tag = render::arena::info(a).room_tag;
             assert!(!tag.is_empty());
             assert!(
                 tag.chars().all(|c| c.is_ascii_lowercase()),

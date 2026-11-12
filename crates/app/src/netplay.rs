@@ -1157,9 +1157,9 @@ fn perform_swap(world: &mut World, peer_id: PeerId, their_table: sim::ArenaId) {
     }
     tracing::info!(
         target: "two_top::net",
-        table = crate::room_code::arena_room_tag(table),
-        ours = crate::room_code::arena_room_tag(ours),
-        theirs = crate::room_code::arena_room_tag(their_table),
+        table = render::arena::info(table).room_tag,
+        ours = render::arena::info(ours).room_tag,
+        theirs = render::arena::info(their_table).room_tag,
         "table agreed",
     );
     if let Err(e) = world.run_system_cached(crate::screen::rebuild_match) {

@@ -116,7 +116,7 @@ fn update_intro_card(
     // Online the table was agreed at pairing and may not be the one this
     // player picked — say where they are sitting.
     if online {
-        let table = format!("AT {}", crate::arena_select::arena_title(selected.0));
+        let table = format!("AT {}", render::arena::info(selected.0).title);
         stakes = if stakes.is_empty() {
             table
         } else {

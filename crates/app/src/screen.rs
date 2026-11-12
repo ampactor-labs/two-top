@@ -445,70 +445,9 @@ pub(crate) fn rebuild_match(
     );
 }
 
-/// Per-arena cover skin: the front-face and lid colors plus which motif the
-/// lid carries. Flat quads still sell the 2.5D read (dither at this scale is
-/// noise — the validated depth mock); *identity* comes from the register and
-/// one quiet motif per arena, so a crate, a pillar, a reliquary bar, a pit
-/// stone, and a museum plinth stop being the same gray box everywhere.
-struct CoverSkin {
-    front: Color,
-    top: Color,
-    motif: CoverMotif,
-}
-
-enum CoverMotif {
-    /// Anchor: rope lashing across the crate lid (an X of thin straps).
-    Lashing,
-    /// Crossing: two vertical flutes carved into the pillar's front face.
-    Flutes,
-    /// Reliquary: the sealed teal seam along the bar's long axis.
-    Seam,
-    /// The Pit: an ember crack — the stone remembers the strikes.
-    Crack,
-    /// The Gallery: the lit bone rim on the plinth's near lid edge.
-    PlinthRim,
-}
-
-fn cover_skin(arena: sim::ArenaId) -> CoverSkin {
-    use render::palette as pal;
-    match arena {
-        sim::ArenaId::Anchor => CoverSkin {
-            front: pal::BRUISE_SHADOW,
-            top: pal::WARM_BONE_SHADE,
-            motif: CoverMotif::Lashing,
-        },
-        sim::ArenaId::Crossing => CoverSkin {
-            front: pal::DEEP_ASH,
-            top: pal::COLD_STONE,
-            motif: CoverMotif::Flutes,
-        },
-        sim::ArenaId::Reliquary => CoverSkin {
-            front: pal::BRUISE_SHADOW,
-            top: pal::WARM_BONE_SHADE,
-            motif: CoverMotif::Seam,
-        },
-        sim::ArenaId::Pit => CoverSkin {
-            front: pal::CHARCOAL_LINE,
-            top: pal::BRUISE_SHADOW,
-            motif: CoverMotif::Crack,
-        },
-        sim::ArenaId::Gallery => CoverSkin {
-            front: pal::DEEP_ASH,
-            top: pal::COLD_STONE,
-            motif: CoverMotif::PlinthRim,
-        },
-        // No obstacles on these rosters today; a sane default if one lands.
-        sim::ArenaId::Vigil | sim::ArenaId::Forest => CoverSkin {
-            front: pal::CHARCOAL_LINE,
-            top: pal::COLD_STONE,
-            motif: CoverMotif::PlinthRim,
-        },
-    }
-}
-
 /// Spawn the raised-cover composite for one obstacle footprint: a cast shadow,
 /// a void silhouette, a shaded front face, a contact/AO band, and the lit top
-/// face — colored and marked per arena via [`cover_skin`]. Flat-color quads;
+/// face — colored and marked per arena by its `render::arena` cover skin. Flat-color quads;
 /// the *height* + outline + shadow are what sell the 2.5D read. Sorted by the
 /// front (nearest) base via [`render::ground_z`] so a duelist behind the block
 /// is occluded and one in front draws over it. All quads are tagged
@@ -529,7 +468,7 @@ fn spawn_obstacle_block(
     let cx = (min_x + max_x) * 0.5;
     let total_h = rise + d;
     let z = render::ground_z(min_y);
-    let skin = cover_skin(arena);
+    let skin = render::arena::info(arena).cover;
 
     let mut quad = |color: Color, size: Vec2, center: Vec2, zz: f32, angle: f32| {
         commands.spawn((
@@ -569,7 +508,7 @@ fn spawn_obstacle_block(
     // The motif rides just above the lid (and the flutes above the front).
     let mz = z + 0.0015;
     match skin.motif {
-        CoverMotif::Lashing => {
+        render::arena::CoverMotif::Lashing => {
             let len = (w * w + d * d).sqrt() - 6.0;
             let angle = (d / w).atan();
             quad(
@@ -587,7 +526,7 @@ fn spawn_obstacle_block(
                 -angle,
             );
         }
-        CoverMotif::Flutes => {
+        render::arena::CoverMotif::Flutes => {
             for side in [-1.0f32, 1.0] {
                 quad(
                     render::palette::BRUISE_SHADOW,
@@ -598,7 +537,7 @@ fn spawn_obstacle_block(
                 );
             }
         }
-        CoverMotif::Seam => {
+        render::arena::CoverMotif::Seam => {
             let along_x = w >= d;
             let size = if along_x {
                 Vec2::new(w - 6.0, 2.0)
@@ -607,7 +546,7 @@ fn spawn_obstacle_block(
             };
             quad(render::palette::DEEP_TEAL, size, lid_c, mz, 0.0);
         }
-        CoverMotif::Crack => {
+        render::arena::CoverMotif::Crack => {
             quad(
                 render::palette::EMBER,
                 Vec2::new(w.min(d) * 0.9, 2.0),
@@ -616,7 +555,7 @@ fn spawn_obstacle_block(
                 0.6,
             );
         }
-        CoverMotif::PlinthRim => {
+        render::arena::CoverMotif::PlinthRim => {
             quad(
                 render::palette::BONE,
                 Vec2::new(w, 2.0),
@@ -1389,7 +1328,7 @@ fn update_title_overlay(
         // this side's offer in the table handshake. The career
         // record joins it once there is one.
         let online = netplay.room_url.is_some();
-        let arena_line = format!("< {} >", arena_name(selected.0));
+        let arena_line = format!("< {} >", render::arena::info(selected.0).name);
         text.0 = if online && career.total() > 0 {
             format!("{arena_line}\ncareer {}W-{}L", career.wins, career.losses)
         } else {
@@ -2340,18 +2279,6 @@ fn online_leave_input(world: &mut World) {
         .set(AppScreen::Title);
 }
 
-fn arena_name(id: sim::ArenaId) -> &'static str {
-    match id {
-        sim::ArenaId::Anchor => "Anchor",
-        sim::ArenaId::Crossing => "Crossing",
-        sim::ArenaId::Reliquary => "Reliquary",
-        sim::ArenaId::Pit => "The Pit",
-        sim::ArenaId::Vigil => "The Vigil",
-        sim::ArenaId::Gallery => "The Gallery",
-        sim::ArenaId::Forest => "The Forest",
-    }
-}
-
 /// The match decided when a player's kills reached `MATCH_WIN_THRESHOLD`. P0 is
 /// the Cur, P1 the Stag (ART_DIRECTION v2). Pure for testing; the deciding
 /// kill always belongs to exactly one side (it's a one-hit-kill game).
@@ -2388,15 +2315,6 @@ mod tests {
             }),
             "STAG WINS"
         );
-    }
-
-    #[test]
-    fn arena_names_cover_every_variant() {
-        for arena in sim::ALL_ARENAS {
-            assert!(!arena_name(arena).is_empty());
-        }
-        assert_eq!(arena_name(sim::ArenaId::Anchor), "Anchor");
-        assert_eq!(arena_name(sim::ArenaId::Pit), "The Pit");
     }
 
     fn online_summary(gone: bool) -> String {

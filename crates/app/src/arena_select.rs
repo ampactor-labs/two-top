@@ -21,44 +21,6 @@ const LIST_PITCH: f32 = 0.085;
 /// The BACK band at the bottom — same gesture as every menu.
 const BACK_BAND: crate::ui::Band = crate::ui::BACK;
 
-pub fn arena_title(id: ArenaId) -> &'static str {
-    match id {
-        ArenaId::Anchor => "ANCHOR",
-        ArenaId::Crossing => "CROSSING",
-        ArenaId::Reliquary => "RELIQUARY",
-        ArenaId::Pit => "THE PIT",
-        ArenaId::Vigil => "THE VIGIL",
-        ArenaId::Gallery => "THE GALLERY",
-        ArenaId::Forest => "THE FOREST",
-    }
-}
-
-/// One line of the rules that make the arena itself — the roster is where
-/// a player learns the roster's verbs, so the tags say mechanics, not mood.
-pub fn arena_rule(id: ArenaId) -> &'static str {
-    match id {
-        ArenaId::Anchor => "four crates - one pyre",
-        ArenaId::Crossing => "a moat between you - ring a sigil to bridge it",
-        ArenaId::Reliquary => "doors teleport - pyres chain",
-        ArenaId::Pit => "walls ricochet - nothing falls",
-        ArenaId::Vigil => "no storm - open ground",
-        ArenaId::Gallery => "corridors of angles",
-        ArenaId::Forest => "the grove burns",
-    }
-}
-
-fn floor_asset(id: ArenaId) -> &'static str {
-    match id {
-        ArenaId::Anchor => "arenas/anchor_floor.png",
-        ArenaId::Crossing => "arenas/crossing_floor.png",
-        ArenaId::Reliquary => "arenas/reliquary_floor.png",
-        ArenaId::Pit => "arenas/pit_floor.png",
-        ArenaId::Vigil => "arenas/vigil_floor.png",
-        ArenaId::Gallery => "arenas/gallery_floor.png",
-        ArenaId::Forest => "arenas/forest_floor.png",
-    }
-}
-
 /// Everything this screen spawns, for one-query teardown.
 #[derive(Component)]
 struct RosterUi;
@@ -92,7 +54,7 @@ fn enter_roster(mut commands: Commands, asset_server: Res<AssetServer>) {
         commands.spawn((
             RosterUi,
             Sprite {
-                image: asset_server.load(floor_asset(arena)),
+                image: asset_server.load(render::arena::info(arena).floor),
                 custom_size: Some(Vec2::new(58.0, 87.0)),
                 ..default()
             },
@@ -102,7 +64,7 @@ fn enter_roster(mut commands: Commands, asset_server: Res<AssetServer>) {
         commands.spawn((
             RosterUi,
             RosterRowName(arena),
-            Text2d::new(arena_title(arena)),
+            Text2d::new(render::arena::info(arena).title),
             TextFont {
                 font_size: 44.0,
                 ..default()
@@ -114,7 +76,7 @@ fn enter_roster(mut commands: Commands, asset_server: Res<AssetServer>) {
         ));
         commands.spawn((
             RosterUi,
-            Text2d::new(arena_rule(arena)),
+            Text2d::new(render::arena::info(arena).rule),
             TextFont {
                 font_size: 26.0,
                 ..default()
@@ -247,10 +209,12 @@ fn restore_arena_pick(
         if let Ok(n) = v.parse::<u8>() {
             return Some(ArenaId::from_u8(n));
         }
-        ALL_ARENAS
-            .iter()
-            .copied()
-            .find(|a| arena_title(*a).to_ascii_lowercase().contains(&v))
+        ALL_ARENAS.iter().copied().find(|a| {
+            render::arena::info(*a)
+                .title
+                .to_ascii_lowercase()
+                .contains(&v)
+        })
     });
     selected.0 = from_env.unwrap_or_else(|| ArenaId::from_u8(settings.arena));
 }
@@ -272,24 +236,6 @@ impl Plugin for ArenaSelectPlugin {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn every_arena_has_a_row_worth_of_copy() {
-        for &a in sim::ALL_ARENAS.iter() {
-            assert!(!arena_title(a).is_empty());
-            assert!(
-                arena_rule(a).len() < 48,
-                "rule tag for {:?} must fit one phone row",
-                a
-            );
-            assert!(
-                arena_rule(a)
-                    .chars()
-                    .all(|c| c.is_ascii() && c != '\u{2014}'),
-                "ASCII only — the bundled font renders tofu otherwise"
-            );
-        }
-    }
 
     #[test]
     fn rows_map_taps_back_to_arenas() {

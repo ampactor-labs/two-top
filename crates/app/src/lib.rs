@@ -519,20 +519,6 @@ fn android_main(android_app: bevy::android::android_activity::AndroidApp) {
 #[derive(Component)]
 struct ArenaFloor;
 
-/// Composed floor backdrop per arena (DESIGN_DIRECTION § 4 — one quiet shared
-/// composition retinted per arena; props carry the rest of the identity).
-fn arena_floor_asset(id: sim::ArenaId) -> &'static str {
-    match id {
-        sim::ArenaId::Anchor => "arenas/anchor_floor.png",
-        sim::ArenaId::Crossing => "arenas/crossing_floor.png",
-        sim::ArenaId::Reliquary => "arenas/reliquary_floor.png",
-        sim::ArenaId::Pit => "arenas/pit_floor.png",
-        sim::ArenaId::Vigil => "arenas/vigil_floor.png",
-        sim::ArenaId::Gallery => "arenas/gallery_floor.png",
-        sim::ArenaId::Forest => "arenas/forest_floor.png",
-    }
-}
-
 /// Swap the backdrop texture when the lobby arena picker changes the selection,
 /// so the Title screen previews the chosen arena's floor and the match starts on
 /// the right one. Render-only; never touches sim.
@@ -544,7 +530,7 @@ fn update_arena_floor(
     if !selected.is_changed() {
         return;
     }
-    let path = arena_floor_asset(selected.0);
+    let path = render::arena::info(selected.0).floor;
     for mut sprite in &mut q {
         sprite.image = asset_server.load(path);
     }
@@ -1157,7 +1143,7 @@ fn setup(
     // The title's table (shown only on the title; see `update_title_diorama`).
     spawn_title_diorama(&mut commands, &asset_server, &mut atlases);
 
-    let floor_img = asset_server.load(arena_floor_asset(selected.0));
+    let floor_img = asset_server.load(render::arena::info(selected.0).floor);
     for i in 0..FLOOR_STRIPS {
         let v0 = FLOOR_SRC_H * i as f32 / FLOOR_STRIPS as f32;
         let v1 = FLOOR_SRC_H * (i + 1) as f32 / FLOOR_STRIPS as f32;

@@ -270,16 +270,10 @@ fn scan_tapes() -> Vec<TapeEntry> {
     tapes.into_iter().map(|(_, t)| t).collect()
 }
 
+/// A tape header's arena byte, as the replay list prints it. An id this
+/// build does not know reads as the first arena (`ArenaId::from_u8`).
 fn arena_label(id: u8) -> &'static str {
-    match sim::ArenaId::from_u8(id) {
-        sim::ArenaId::Anchor => "ANCHOR",
-        sim::ArenaId::Crossing => "CROSSING",
-        sim::ArenaId::Reliquary => "RELIQUARY",
-        sim::ArenaId::Pit => "PIT",
-        sim::ArenaId::Vigil => "VIGIL",
-        sim::ArenaId::Gallery => "GALLERY",
-        sim::ArenaId::Forest => "FOREST",
-    }
+    render::arena::info(sim::ArenaId::from_u8(id)).label
 }
 
 /// Unix seconds → "10 JUL" (UTC). The civil-from-days algorithm (Howard
