@@ -20,11 +20,6 @@
 //! tap. It contains what the log does: the device model, the room that was
 //! dialed, and the names of the two players.
 
-// The banner is Android's (the only platform with a share sheet behind
-// it); the rest of the module still builds and tests everywhere.
-// platform-gate-ok: the browser has no crash log to collect either.
-#![cfg_attr(not(target_os = "android"), allow(dead_code))]
-
 use std::path::{Path, PathBuf};
 
 use bevy::prelude::*;
@@ -36,11 +31,6 @@ use crate::screen::AppScreen;
 
 /// The panic log's file name, inside [`crate::paths::diagnostics_dir`].
 pub const CRASH_LOG: &str = "crash.log";
-
-/// `crash.log` keeps this many bytes of history, newest last. A panic
-/// taken while another unwinds, or two launches that each die, must not
-/// erase the first cause.
-pub const CRASH_LOG_CAP: usize = 16 * 1024;
 
 /// Holds the token (below) of the newest crash already handed over.
 const ACK_FILE: &str = "crash_ack";
@@ -73,7 +63,7 @@ struct Evidence {
 }
 
 /// The last `max` bytes of `text`, cut forward to a character boundary.
-fn tail_chars(text: &str, max: usize) -> &str {
+pub(crate) fn tail_chars(text: &str, max: usize) -> &str {
     if text.len() <= max {
         return text;
     }
@@ -96,19 +86,6 @@ fn tail_lines(text: &str, lines: usize) -> &str {
         }
     }
     text
-}
-
-/// Append one entry to a crash log's text and keep the newest
-/// [`CRASH_LOG_CAP`] bytes. Pure, so the panic hook's bookkeeping is
-/// tested without panicking.
-pub fn appended_crash_log(existing: &str, entry: &str) -> String {
-    let mut text = String::with_capacity(existing.len() + entry.len() + 1);
-    text.push_str(existing);
-    if !text.is_empty() && !text.ends_with('\n') {
-        text.push('\n');
-    }
-    text.push_str(entry);
-    tail_chars(&text, CRASH_LOG_CAP).to_string()
 }
 
 /// The plain-text report a tester sends. Pure for tests.
@@ -218,7 +195,7 @@ fn acknowledge(token: u64) {
 /// it ended either way. The lines above this one in the log file are the
 /// last thing the previous run wrote.
 fn collect(mut notice: ResMut<CrashNotice>) {
-    let last_exit = crate::lifecycle::last_exit();
+    let last_exit = crate::platform::last_exit();
     if let Some(exit) = &last_exit {
         tracing::info!(
             target: "two_top::crash",
@@ -315,18 +292,12 @@ fn notice_input(touches: Res<Touches>, window: Res<WindowSize>, mut notice: ResM
         evidence.crash_log.as_deref(),
         &evidence.log_tail,
     );
-    #[cfg(target_os = "android")]
-    crate::android::share_text("2-Top crash report", &report);
-    // platform-gate-ok: desktop and browser only ever see the preview.
-    #[cfg(not(target_os = "android"))]
-    eprintln!("{report}");
+    crate::platform::share_text("2-Top crash report", &report);
     acknowledge(evidence.token);
 }
 
 /// A synthetic notice for laying the banner out without crashing a phone:
 /// `TWOTOP_CRASH_NOTICE=1` on the desktop build.
-// platform-gate-ok: harmless in a browser (no such env var there).
-#[cfg(not(target_os = "android"))]
 fn preview(mut notice: ResMut<CrashNotice>) {
     if std::env::var("TWOTOP_CRASH_NOTICE").is_ok_and(|v| v == "1") {
         notice.0 = Some(Evidence {
@@ -352,11 +323,16 @@ impl Plugin for CrashReportPlugin {
                 )
                     .chain(),
             );
-        #[cfg(target_os = "android")]
-        app.add_systems(Startup, collect);
-        // platform-gate-ok: the preview is the non-Android arm everywhere.
-        #[cfg(not(target_os = "android"))]
-        app.add_systems(Startup, preview);
+        // Collected wherever there is a share sheet to hand the report to;
+        // elsewhere a notice would offer a tap that goes nowhere.
+        app.add_systems(
+            Startup,
+            (
+                collect
+                    .run_if(|profile: Res<crate::platform::DeviceProfile>| profile.has_share_sheet),
+                preview,
+            ),
+        );
     }
 }
 
@@ -372,18 +348,6 @@ mod tests {
         assert_eq!(tail_chars("aéb", 2), "b");
         assert_eq!(tail_lines("a\nb\nc\n", 2), "b\nc\n");
         assert_eq!(tail_lines("a\nb", 5), "a\nb");
-    }
-
-    #[test]
-    fn the_crash_log_appends_and_keeps_the_newest_bytes() {
-        let two = appended_crash_log("first\n", "second\n");
-        assert_eq!(two, "first\nsecond\n");
-        // A log with no trailing newline still separates its entries.
-        assert_eq!(appended_crash_log("first", "second\n"), "first\nsecond\n");
-        let long = "x".repeat(CRASH_LOG_CAP);
-        let capped = appended_crash_log(&long, "newest\n");
-        assert_eq!(capped.len(), CRASH_LOG_CAP);
-        assert!(capped.ends_with("newest\n"), "the newest entry survives");
     }
 
     #[test]

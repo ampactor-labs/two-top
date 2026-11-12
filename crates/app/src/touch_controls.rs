@@ -95,14 +95,19 @@ pub struct TouchControlsPlugin;
 impl Plugin for TouchControlsPlugin {
     fn build(&self, app: &mut App) {
         // Wherever the primary pointer is a finger — asked at runtime, not
-        // guessed from the target triple (see `crate::capability`). The
+        // guessed from the target triple (`platform::DeviceProfile`). The
         // browser build was originally left off this list entirely, so
         // every phone that opened the Pages link got a game it could
         // touch but not see the controls of. Asking the device means a
         // desktop browser is not shown thumb rings it has no thumbs for,
         // and a touchscreen laptop is.
-        let shown = crate::capability::touch_primary()
-            || std::env::var("TWOTOP_SHOW_TOUCH").is_ok_and(|v| v == "1");
+        let touch_primary = app
+            .world()
+            .get_resource::<crate::platform::DeviceProfile>()
+            .copied()
+            .unwrap_or_else(crate::platform::DeviceProfile::detect)
+            .touch_primary;
+        let shown = touch_primary || std::env::var("TWOTOP_SHOW_TOUCH").is_ok_and(|v| v == "1");
         app.insert_resource(TouchControlsShown(shown))
             .init_resource::<HintsUsed>()
             .add_systems(Startup, spawn_controls)

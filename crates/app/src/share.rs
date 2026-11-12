@@ -220,7 +220,7 @@ struct DropReceipt {
 }
 
 /// Post `bytes` to the drop and compose the watch link. Runs on its own
-/// thread (`crate::off_main_thread`); reports through the channel.
+/// thread (`crate::platform::off_main_thread`); reports through the channel.
 #[cfg(not(target_family = "wasm"))]
 fn post_tape(drop_url: String, watch_url: String, bytes: Vec<u8>) -> Result<String, String> {
     let receipt: DropReceipt = ureq::post(&format!("{}/tape", drop_url.trim_end_matches('/')))
@@ -232,12 +232,16 @@ fn post_tape(drop_url: String, watch_url: String, bytes: Vec<u8>) -> Result<Stri
     Ok(compose_watch_url(&watch_url, &receipt.id))
 }
 
-fn spawn_share_labels(mut commands: Commands, config: Res<ShareConfig>) {
+fn spawn_share_labels(
+    mut commands: Commands,
+    config: Res<ShareConfig>,
+    profile: Res<crate::platform::DeviceProfile>,
+) {
     // Native with no drop baked: nothing to offer. The browser always has
     // something to offer, because it can hand the tape to the viewer as a
     // download even when there is nowhere to post it — and a browser
     // player has no replays folder to reach into otherwise.
-    if !config.complete() && !cfg!(target_family = "wasm") {
+    if !config.complete() && !profile.can_download_tapes {
         return;
     }
     for (on_summary, (fx, fy)) in [(true, SUMMARY_ANCHOR), (false, THEATER_ANCHOR)] {
@@ -368,7 +372,7 @@ fn drive_share(
             // follow-up" and do nothing, which made the web build
             // share-only-inbound for no reason the platform imposes.
             #[cfg(not(target_family = "wasm"))]
-            crate::off_main_thread("twotop-share", move || {
+            crate::platform::off_main_thread("twotop-share", move || {
                 let _ = tx.send(post_tape(drop_url, watch_url, bytes));
             });
             #[cfg(target_family = "wasm")]

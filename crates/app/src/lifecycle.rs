@@ -31,24 +31,11 @@ pub fn device_summary() -> &'static str {
     DEVICE.get().map(String::as_str).unwrap_or("")
 }
 
-/// The platform's half of the device line (the GPU half comes from wgpu).
-fn platform_summary() -> String {
-    #[cfg(target_os = "android")]
-    {
-        crate::android::device_summary()
-    }
-    // platform-gate-ok: the browser's OS/arch line is as good as desktop's.
-    #[cfg(not(target_os = "android"))]
-    {
-        format!("{} {}", std::env::consts::OS, std::env::consts::ARCH)
-    }
-}
-
 /// `Startup`: name the device and the GPU, once, where a bug report will
 /// carry it. The renderer already exists by `Startup`, so the adapter is
 /// the one the game is actually drawing with.
 fn describe_device(adapter: Option<Res<bevy::render::renderer::RenderAdapterInfo>>) {
-    let mut line = platform_summary();
+    let mut line = crate::platform::device_summary();
     if let Some(adapter) = adapter {
         line.push_str(&format!(
             ", {} ({:?}, {} {})",
@@ -145,19 +132,6 @@ impl LastExit {
     }
 }
 
-/// The most recent exit record for this app, where the platform keeps one.
-pub fn last_exit() -> Option<LastExit> {
-    #[cfg(target_os = "android")]
-    {
-        crate::android::last_exit()
-    }
-    // platform-gate-ok: no platform but Android keeps an exit record.
-    #[cfg(not(target_os = "android"))]
-    {
-        None
-    }
-}
-
 /// Does a press of the phone's Back reach the game (as Escape)?
 ///
 /// Everywhere but live play. On gesture navigation a thumb that drags the
@@ -165,9 +139,9 @@ pub fn last_exit() -> Option<LastExit> {
 /// round Escape arms QUIT: two stray swipes would end a ranked match. A
 /// live round is in a match, with an opponent present (not waiting, not a
 /// tape), and not yet decided.
-// Android's to apply; it lives here so it is tested where the tests run.
-// platform-gate-ok: a browser has no Back key for the game to read.
-#[cfg_attr(not(target_os = "android"), allow(dead_code))]
+// Android's to apply (the only build with a Back key the game reads); it
+// lives here so it is tested where the tests run.
+#[allow(dead_code)]
 pub fn back_reaches_the_game(in_match: bool, no_opponent: bool, match_over: bool) -> bool {
     !in_match || no_opponent || match_over
 }
@@ -181,32 +155,6 @@ pub const WAITING_SCREEN_ON_SECS: f32 = 180.0;
 /// opponent (`waiting_secs`). Menus keep the system's own timeout.
 pub fn wants_screen_on(in_match: bool, waiting_secs: Option<f32>) -> bool {
     in_match && waiting_secs.is_none_or(|waited| waited < WAITING_SCREEN_ON_SECS)
-}
-
-/// Hold the screen on, or hand it back to the system's timeout.
-///
-/// Android sets `FLAG_KEEP_SCREEN_ON` on the window. The browser asks the
-/// page, which owns the Screen Wake Lock (`web/index.html` defines
-/// `twotopKeepAwake`; a page without it, or a browser without the API, is
-/// simply a screen that times out as before). Desktop has nothing to hold.
-fn keep_screen_on(on: bool) {
-    #[cfg(target_os = "android")]
-    crate::android::keep_screen_on(on);
-    #[cfg(target_family = "wasm")]
-    {
-        use wasm_bindgen::{JsCast, JsValue};
-        let Some(window) = web_sys::window() else {
-            return;
-        };
-        let Ok(hook) = js_sys::Reflect::get(&window, &JsValue::from_str("twotopKeepAwake")) else {
-            return;
-        };
-        if let Some(hook) = hook.dyn_ref::<js_sys::Function>() {
-            let _ = hook.call1(&window, &JsValue::from_bool(on));
-        }
-    }
-    #[cfg(not(any(target_os = "android", target_family = "wasm")))]
-    let _ = on;
 }
 
 /// Apply [`wants_screen_on`] whenever its answer changes.
@@ -225,7 +173,7 @@ fn hold_screen_on(
     let waiting = offer.since.map(|since| time.elapsed_secs() - since);
     let want = wants_screen_on(*screen.get() == AppScreen::InMatch, waiting);
     if *applied != Some(want) {
-        keep_screen_on(want);
+        crate::platform::keep_screen_on(want);
         *applied = Some(want);
     }
 }

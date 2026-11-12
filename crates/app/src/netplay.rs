@@ -356,7 +356,7 @@ pub(crate) fn parse_ice_response(body: &str) -> Option<RtcIceServerConfig> {
 }
 
 /// Blocking fetch of the vendor's ICE config (runs on its own thread via
-/// `crate::off_main_thread` — never the main one). Tight timeout: the
+/// `crate::platform::off_main_thread` — never the main one). Tight timeout: the
 /// fallback exists. The
 /// browser's twin is [`fetch_ice_web`]; both feed the same channel that
 /// [`finish_ice_fetch`] polls, so the socket-open path is identical.
@@ -454,7 +454,7 @@ fn start_matchbox(world: &mut World) {
         // page's own `fetch`, driven by the JS event loop. Both hand the
         // same `Option<RtcIceServerConfig>` to the same receiver below.
         #[cfg(not(target_family = "wasm"))]
-        crate::off_main_thread("twotop-ice", move || {
+        crate::platform::off_main_thread("twotop-ice", move || {
             let _ = tx.send(fetch_ice(&ice_url, ice_key.as_deref()));
         });
         #[cfg(target_family = "wasm")]

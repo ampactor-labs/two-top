@@ -7,9 +7,9 @@
 //!   * the `android_main` export at the bottom of this file — looked up by
 //!     the Android NativeActivity glue at app launch when the crate is
 //!     compiled as a `cdylib` and packaged into an APK by cargo-apk. It
-//!     hands straight to `android::main`, which owns the process's
-//!     lifetime (what `#[bevy_main]` generated here did not).
-//!   * `web::web_start` — the browser entry.
+//!     hands straight to `platform::android::main`, which owns the
+//!     process's lifetime (what `#[bevy_main]` generated here did not).
+//!   * `platform::web::web_start` — the browser entry.
 
 use bevy::prelude::*;
 use bevy_ggrs::GgrsPlugin;
@@ -23,14 +23,11 @@ use sim::{
 use std::collections::HashMap;
 
 mod anchor;
-#[cfg(target_os = "android")]
-mod android;
 mod arena_select;
 mod attest;
 mod audio;
 mod bot;
 mod camera;
-mod capability;
 mod crash_report;
 mod dark_beyond;
 mod debug_overlay;
@@ -44,6 +41,7 @@ mod lobby_overlay;
 mod logging;
 mod netplay;
 mod paths;
+mod platform;
 mod pointer;
 mod profile;
 mod recorder;
@@ -56,8 +54,6 @@ mod shade;
 mod share;
 mod theater;
 mod touch_controls;
-#[cfg(target_family = "wasm")]
-mod web;
 use anchor::{FullScreenSprite, ScreenAnchorPlugin};
 use attest::AttestPlugin;
 use audio::GameAudioPlugin;
@@ -78,30 +74,6 @@ use screen::{AppScreen, ScreenPlugin};
 use settings::SettingsPlugin;
 use theater::TheaterPlugin;
 use touch_controls::TouchControlsPlugin;
-
-/// Run blocking work on a thread of its own.
-///
-/// Bevy's task pools are NOT that in this build. The curated feature list
-/// in `Cargo.toml` leaves `multi_threaded` off (one thread runs every
-/// system, which is what the phone build was tuned and verified on), and
-/// without it `IoTaskPool` is the single-threaded pool: `spawn` runs the
-/// task right there on the caller's thread until it first waits, and a
-/// task that never waits — a blocking HTTP request — simply runs to
-/// completion inside the frame that spawned it. The ICE credential fetch
-/// and the tape upload were both "on the IO pool" in exactly that sense:
-/// tapping FIND OPPONENT froze the game for the length of a DNS lookup, a
-/// TLS handshake and a request, and on a network that swallows packets
-/// that is seconds — long enough for Android to offer to close the app.
-///
-/// A thread that cannot be spawned drops `work` unrun, and with it the
-/// channel sender it holds, so the caller's poll sees a disconnect and
-/// takes its fallback.
-#[cfg(not(target_family = "wasm"))]
-pub(crate) fn off_main_thread(name: &'static str, work: impl FnOnce() + Send + 'static) {
-    if let Err(e) = std::thread::Builder::new().name(name.into()).spawn(work) {
-        tracing::warn!(target: "two_top::app", name, error = %e, "could not spawn a worker thread");
-    }
-}
 
 /// Desktop window size, overridable via `TWOTOP_WINDOW=WxH` (e.g. `540x1200`
 /// to preview a tall-phone aspect). Defaults to the 2:3 portrait that frames
@@ -128,8 +100,14 @@ pub fn run() {
 
     let netplay = NetplayConfig::from_env_and_args();
     let online = netplay.room_url.is_some();
+    // What this device is and can do, asked once; every presentation
+    // policy reads it (`platform::DeviceProfile`).
+    let profile = platform::DeviceProfile::detect();
+    tracing::info!(target: "two_top::app", ?profile, "device profile");
 
     let mut app = App::new();
+    // First, so every plugin's `build` reads the same answer.
+    app.insert_resource(profile);
     app
         // Disable bevy's LogPlugin: we own the subscriber installed
         // above. LogPlugin would try to call `set_global_default` again
@@ -189,10 +167,9 @@ pub fn run() {
                 ..default()
             });
             // Phones request the GPU device with the core feature set only
-            // (see `capability::core_gpu_features_only`). The browser keeps
-            // Bevy's own WebGL2 settings untouched.
-            #[cfg(not(target_family = "wasm"))]
-            let plugins = if capability::core_gpu_features_only() {
+            // (`DeviceProfile::core_gpu_only`). The browser keeps Bevy's own
+            // WebGL2 settings untouched (the profile never asks it to).
+            if profile.core_gpu_only {
                 plugins.set(bevy::render::RenderPlugin {
                     render_creation: bevy::render::settings::WgpuSettings {
                         disabled_features: Some(bevy::render::settings::WgpuFeatures::all()),
@@ -203,8 +180,7 @@ pub fn run() {
                 })
             } else {
                 plugins
-            };
-            plugins
+            }
         })
         .add_plugins(GgrsPlugin::<GgrsCfg>::default())
         .add_plugins(SimPlugin)
@@ -295,8 +271,7 @@ pub fn run() {
     if online {
         app.add_plugins(MatchboxPlugin);
     }
-    #[cfg(target_os = "android")]
-    app.add_plugins(android::AndroidPlugin);
+    app.add_plugins(platform::PlatformPlugin);
 
     // One input chain, the same on every platform (level signals only).
     // The keyboard/gamepad source writes every local handle (WASD for P0,
@@ -320,8 +295,10 @@ pub fn run() {
             .chain()
             .after(input_desktop::read_local_desktop_inputs),
     );
-    #[cfg(not(any(target_os = "android", target_family = "wasm")))]
-    app.add_systems(Update, toggle_fullscreen);
+    app.add_systems(
+        Update,
+        toggle_fullscreen.run_if(|profile: Res<platform::DeviceProfile>| profile.fullscreen_key),
+    );
     app.add_systems(
         bevy_ggrs::prelude::ReadInputs,
         (
@@ -338,11 +315,6 @@ pub fn run() {
     if let Some(cap) = capture_config_from_env() {
         app.insert_resource(cap).add_systems(Last, capture_frame);
     }
-
-    // The browser entry's autoplay: a tape carried in by the page rolls
-    // once the Title is reached (src/web.rs).
-    #[cfg(target_family = "wasm")]
-    app.add_systems(Update, web::watch_autoplay);
 
     app.run();
 
@@ -416,8 +388,8 @@ fn mirror_keyboard_for_flip(
 
 /// Desktop: toggle borderless fullscreen on F11 — handy for showing a
 /// couch match on the big screen. Android manages its own fullscreen, and
-/// a browser's is the page's (the manifest asks for it on install).
-#[cfg(not(any(target_os = "android", target_family = "wasm")))]
+/// a browser's is the page's (the manifest asks for it on install), so it
+/// runs only where `DeviceProfile::fullscreen_key` says so.
 fn toggle_fullscreen(
     keys: Res<bevy::input::ButtonInput<bevy::input::keyboard::KeyCode>>,
     mut windows: Query<&mut Window>,
@@ -499,11 +471,11 @@ fn log_app_exit(mut events: MessageReader<AppExit>) {
 
 /// The symbol `android-activity`'s NativeActivity glue calls on its own
 /// thread once the Java activity exists. Everything about that thread's
-/// lifetime — and the process's — is `android::main`'s business.
+/// lifetime — and the process's — is `platform::android::main`'s business.
 #[cfg(target_os = "android")]
 #[unsafe(no_mangle)]
 fn android_main(android_app: bevy::android::android_activity::AndroidApp) {
-    android::main(android_app);
+    platform::android::main(android_app);
 }
 
 /// `Startup`: spawn the *persistent* scene — camera, the desktop control
@@ -1017,6 +989,7 @@ fn setup(
     asset_server: Res<AssetServer>,
     mut atlases: ResMut<Assets<TextureAtlasLayout>>,
     selected: Res<SelectedArena>,
+    profile: Res<platform::DeviceProfile>,
 ) {
     // Camera. Mobile and desktop both frame the whole playable arena with
     // stable AutoMin constraints. That keeps competitive information fair
@@ -1027,7 +1000,7 @@ fn setup(
     // pickup auras) bloom, while `Tonemapping::None` keeps every other pixel
     // exactly on the locked 16-color palette. `Bloom::OLD_SCHOOL` carries a
     // high threshold so the matte cloaks and floor never wash out.
-    // ONE camera, and the glow is a runtime decision (see `capability`).
+    // ONE camera, and the glow is a runtime decision (`DeviceProfile`).
     // This used to be two `cfg` blocks, which meant a phone browser took
     // the desktop one and paid ~65 ms/frame for an HDR + bloom chain it
     // could not afford, while the APK on the same handset ran lean at 60.
@@ -1053,7 +1026,7 @@ fn setup(
                 ..OrthographicProjection::default_2d()
             }),
         ));
-        if capability::lean_render() {
+        if profile.lean_render {
             // Overdriven accent colors clamp to white instead of
             // blooming — the trade the product platform already makes.
             tracing::info!(target: "two_top::app", "lean render: no HDR, no bloom");
@@ -1064,21 +1037,15 @@ fn setup(
             ));
         }
     }
-    // Native desktop only: the couch-play legend. It named keys on a
-    // touchscreen for as long as the browser build took the desktop arm.
-    #[cfg(not(any(target_os = "android", target_family = "wasm")))]
-    {
-        // Couch-play control legend (desktop only — touch needs none).
-        // World-space Text2d (the app has no bevy_ui), pinned to the bottom
-        // of the *screen* so it stays clear of the top-edge HUD (pips +
-        // round clock) on any window aspect. Bounded so a narrow window
-        // wraps the long lines instead of clipping them off both edges.
+    // The couch-play legend, wherever a keyboard is the likely input: the
+    // desktop build and a laptop browser (which had no controls on screen
+    // at all), never a touchscreen. World-space Text2d (the app has no
+    // bevy_ui), pinned to the bottom of the *screen* so it stays clear of
+    // the top-edge HUD (pips + round clock) on any window aspect. Bounded
+    // so a narrow window wraps the long lines instead of clipping them.
+    if profile.shows_keyboard_legend {
         commands.spawn((
-            Text2d::new(
-                "P0: WASD  -  Space throw  -  LShift dash  -  T taunt\n\
-                 P1: Arrows  -  RShift throw  -  RCtrl dash  -  Enter taunt\n\
-                 or controllers (build --features gamepad)  -  F11 fullscreen",
-            ),
+            Text2d::new(keyboard_legend(profile.fullscreen_key)),
             TextFont {
                 font_size: 26.0,
                 ..default()
@@ -1174,6 +1141,19 @@ fn setup(
             Transform::from_xyz(0.0, 0.0, -1.0),
         ));
     }
+}
+
+/// The couch keyboard legend. It used to end with "or controllers (build
+/// --features gamepad)": a build instruction, shown to players.
+fn keyboard_legend(fullscreen_key: bool) -> String {
+    let mut legend = String::from(
+        "P0: WASD  -  Space throw  -  LShift dash  -  T taunt\n\
+         P1: Arrows  -  RShift throw  -  RCtrl dash  -  Enter taunt",
+    );
+    if fullscreen_key {
+        legend.push_str("\nF11 fullscreen");
+    }
+    legend
 }
 
 /// Horizontal floor bands (source texture rows per strip: 480 / 20 = 24 px).

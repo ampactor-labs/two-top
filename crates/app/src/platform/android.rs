@@ -428,6 +428,163 @@ pub fn share_text(title: &str, text: &str) {
     });
 }
 
+// ---- The sit-down ritual's warm start: a join link on the clipboard ----
+
+/// The prefix the join page writes to the clipboard. Only this exact form
+/// is ever acted on — anything else on the clipboard is not ours to read.
+const JOIN_SCHEME: &str = "twotop://join/";
+
+/// How long after the join page writes the clipboard its link still
+/// counts as meant for us. The tap that writes it is the tap that brings
+/// 2-Top to the front, so this only has to cover a slow phone.
+const CLIP_FRESH_MS: i64 = 2 * 60 * 1000;
+
+/// Whether the primary clip is plain text set within [`CLIP_FRESH_MS`],
+/// judged from `getPrimaryClipDescription` alone — the clipboard read
+/// Android 12+ does not announce with a toast. A description with no
+/// usable timestamp (before API 26, or a vendor that reports 0) counts as
+/// fresh so the link still works there; those phones pay the toast they
+/// already paid before this check existed.
+fn clip_is_fresh_text(
+    env: &mut jni::JNIEnv,
+    cm: &jni::objects::JObject,
+) -> jni::errors::Result<bool> {
+    use jni::objects::JValue;
+    let desc = env
+        .call_method(
+            cm,
+            "getPrimaryClipDescription",
+            "()Landroid/content/ClipDescription;",
+            &[],
+        )?
+        .l()?;
+    if desc.is_null() {
+        return Ok(false);
+    }
+    let text = env.new_string("text/*")?;
+    let is_text = env
+        .call_method(
+            &desc,
+            "hasMimeType",
+            "(Ljava/lang/String;)Z",
+            &[JValue::Object(&text)],
+        )?
+        .z()?;
+    if !is_text {
+        return Ok(false);
+    }
+    // getTimestamp is API 26+ and min_sdk is 24: a missing method is an
+    // unknown age, not a stale clip.
+    let set_at = match env.call_method(&desc, "getTimestamp", "()J", &[]) {
+        Ok(v) => v.j()?,
+        Err(_) => {
+            let _ = env.exception_clear();
+            0
+        }
+    };
+    if set_at <= 0 {
+        return Ok(true);
+    }
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(set_at);
+    Ok(now - set_at <= CLIP_FRESH_MS)
+}
+
+/// Android, warm start: the join page's OPEN IN 2-TOP button also copies
+/// its `twotop://join/...` link to the clipboard, because a running app
+/// never sees the new intent (see [`launch_uri`]). When 2-Top regains
+/// focus on the Title, a join link on the clipboard is claimed — applied
+/// to the dial, then wiped so it fires once. Nothing else on the
+/// clipboard is ever kept or logged.
+pub fn clipboard_join_link() -> Option<String> {
+    use jni::objects::{JObject, JValue};
+    with_activity("clipboard", |env, activity| {
+        let name = env.new_string("clipboard")?;
+        let cm = env
+            .call_method(
+                activity,
+                "getSystemService",
+                "(Ljava/lang/String;)Ljava/lang/Object;",
+                &[JValue::Object(&name)],
+            )?
+            .l()?;
+        if cm.is_null() || !env.call_method(&cm, "hasPrimaryClip", "()Z", &[])?.z()? {
+            return Ok(None);
+        }
+        // Android 12+ toasts "2-Top pasted from your clipboard" on every
+        // getPrimaryClip, and this runs on every return to the Title. The
+        // clip's DESCRIPTION is the one read that toast does not cover, so
+        // it decides first: only fresh plain text (the join page writes it
+        // on the very tap that brings 2-Top forward) is worth reading.
+        // Anything older, or of another kind, is someone else's clipboard
+        // and stays unread.
+        if !clip_is_fresh_text(env, &cm)? {
+            return Ok(None);
+        }
+        let clip = env
+            .call_method(&cm, "getPrimaryClip", "()Landroid/content/ClipData;", &[])?
+            .l()?;
+        if clip.is_null() || env.call_method(&clip, "getItemCount", "()I", &[])?.i()? < 1 {
+            return Ok(None);
+        }
+        let item = env
+            .call_method(
+                &clip,
+                "getItemAt",
+                "(I)Landroid/content/ClipData$Item;",
+                &[JValue::Int(0)],
+            )?
+            .l()?;
+        if item.is_null() {
+            return Ok(None);
+        }
+        let text = env
+            .call_method(&item, "getText", "()Ljava/lang/CharSequence;", &[])?
+            .l()?;
+        if text.is_null() {
+            return Ok(None);
+        }
+        let text = env
+            .call_method(&text, "toString", "()Ljava/lang/String;", &[])?
+            .l()?;
+        let text: String = env.get_string(&jni::objects::JString::from(text))?.into();
+        if !text.trim().starts_with(JOIN_SCHEME) {
+            return Ok(None);
+        }
+        // Claimed: wipe it so the next focus doesn't re-apply it. API 28+
+        // has clearPrimaryClip; older phones get an empty clip instead.
+        if env
+            .call_method(&cm, "clearPrimaryClip", "()V", &[])
+            .is_err()
+        {
+            let _ = env.exception_clear();
+            let empty = env.new_string("")?;
+            let label = JObject::from(env.new_string("")?);
+            let blank = env
+                .call_static_method(
+                    "android/content/ClipData",
+                    "newPlainText",
+                    "(Ljava/lang/CharSequence;Ljava/lang/CharSequence;)Landroid/content/ClipData;",
+                    &[
+                        JValue::Object(&label),
+                        JValue::Object(&JObject::from(empty)),
+                    ],
+                )?
+                .l()?;
+            env.call_method(
+                &cm,
+                "setPrimaryClip",
+                "(Landroid/content/ClipData;)V",
+                &[JValue::Object(&blank)],
+            )?;
+        }
+        Ok(Some(text))
+    })
+    .flatten()
+}
+
 /// Android's Back, as the key every screen already reads as "back".
 ///
 /// winit reports Back as a handled key, so the system never acts on it and

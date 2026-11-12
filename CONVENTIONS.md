@@ -83,11 +83,11 @@ Hard rules. Violations cause subtle bugs that are expensive to find. The CI and 
   `scripts/check_platform_gates.py` enforces this in CI.
 - **No way out of `android_main` leaves the process alive.** `android-activity`
   catches a panic and keeps the process; winit cannot build a second event
-  loop in it; every later launch then closes on sight. `crates/app/src/android.rs`
+  loop in it; every later launch then closes on sight. `crates/app/src/platform/android.rs`
   owns the entry point so that a main-thread panic aborts, a clean return
   exits, and a destroyed activity exits. Do not reintroduce `#[bevy_main]`,
   and do not add a path that returns from `android::main`.
-- **All JNI goes through `android::with_activity`.** It hands out the real
+- **All JNI goes through `platform::android::with_activity`.** It hands out the real
   Activity (not `ndk_context`'s Application), scopes every call in a local
   reference frame, and clears any pending Java exception. A bare
   `attach_current_thread` + `call_method` leaks references on a thread that
@@ -95,7 +95,15 @@ Hard rules. Violations cause subtle bugs that are expensive to find. The CI and 
 - **A Bevy task pool is not a background thread here.** `multi_threaded` is
   off, so `IoTaskPool::spawn` runs the task on the caller's thread until it
   first awaits. Anything that blocks (HTTP, DNS, large file I/O) goes through
-  `crate::off_main_thread`. See MORGAN_NOTES § "Why Bevy runs one thread here".
+  `platform::off_main_thread`. See MORGAN_NOTES § "Why Bevy runs one thread here".
+- **Policy reads `platform::DeviceProfile`, never the compile target.** In
+  `crates/app`, a `target_os`/`target_family` gate belongs only in
+  `platform/` (the adapter: JNI, the page, desktop), the bootstrap in
+  `lib.rs`, and the per-platform I/O backends `scripts/check_platform_gates.py`
+  allowlists with their reasons (`logging`, `paths`, `netplay`, `share`).
+  Everything else asks the profile (touch-primary, lean render, legend,
+  share sheet, ...) or calls a `platform::` function, so a decision made
+  once reaches every build. The script fails CI otherwise.
 - **Never call a browser API that may be missing through a plain web-sys
   binding.** A binding without `catch` throws a JS exception through the wasm
   frames when the method is `undefined`, and winit's web runner never recovers

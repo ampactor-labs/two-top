@@ -179,18 +179,36 @@ fn install_panic_hook() {
             let path = dir.join(crate::crash_report::CRASH_LOG);
             let entry = crash_entry(&location, &payload);
             let existing = std::fs::read_to_string(&path).unwrap_or_default();
-            let _ = crate::paths::write_atomic(
-                &path,
-                crate::crash_report::appended_crash_log(&existing, &entry).as_bytes(),
-            );
+            let _ =
+                crate::paths::write_atomic(&path, appended_crash_log(&existing, &entry).as_bytes());
         }
         previous(info);
         #[cfg(target_os = "android")]
-        if crate::android::is_main_thread() {
+        if crate::platform::android::is_main_thread() {
             shutdown();
             std::process::abort();
         }
     }));
+}
+
+/// `crash.log` keeps this many bytes of history, newest last. A panic
+/// taken while another unwinds, or two launches that each die, must not
+/// erase the first cause.
+#[cfg(not(target_family = "wasm"))]
+const CRASH_LOG_CAP: usize = 16 * 1024;
+
+/// Append one entry to a crash log's text and keep the newest
+/// [`CRASH_LOG_CAP`] bytes. Pure, so the panic hook's bookkeeping is
+/// tested without panicking.
+#[cfg(not(target_family = "wasm"))]
+fn appended_crash_log(existing: &str, entry: &str) -> String {
+    let mut text = String::with_capacity(existing.len() + entry.len() + 1);
+    text.push_str(existing);
+    if !text.is_empty() && !text.ends_with('\n') {
+        text.push('\n');
+    }
+    text.push_str(entry);
+    crate::crash_report::tail_chars(&text, CRASH_LOG_CAP).to_string()
 }
 
 /// One `crash.log` entry: when, which build, which thread, where, what,
@@ -425,6 +443,21 @@ mod tests {
     fn init_logging_twice_does_not_panic() {
         let _first = super::init_logging();
         let _second = super::init_logging();
+    }
+
+    #[test]
+    fn the_crash_log_appends_and_keeps_the_newest_bytes() {
+        let two = super::appended_crash_log("first\n", "second\n");
+        assert_eq!(two, "first\nsecond\n");
+        // A log with no trailing newline still separates its entries.
+        assert_eq!(
+            super::appended_crash_log("first", "second\n"),
+            "first\nsecond\n"
+        );
+        let long = "x".repeat(super::CRASH_LOG_CAP);
+        let capped = super::appended_crash_log(&long, "newest\n");
+        assert_eq!(capped.len(), super::CRASH_LOG_CAP);
+        assert!(capped.ends_with("newest\n"), "the newest entry survives");
     }
 
     /// A crash entry names the build, the thread and the location, and

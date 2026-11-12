@@ -822,7 +822,7 @@ It also explains why no crash log ever matched: the second launch's
 panic **overwrote** `crash.log` with "Failed to build event loop",
 erasing the one that mattered.
 
-Fixed in `crates/app/src/android.rs`, which now owns `android_main`. A
+Fixed in `crates/app/src/platform/android.rs`, which now owns `android_main`. A
 panic on the main thread aborts from the hook, after `crash.log`
 (append-only now, capped) is written; Android gets a crash it
 understands and the next launch is cold. A clean return exits. A second
@@ -867,7 +867,7 @@ into a fresh one.
   release we install on (`min_sdk` 24) caps it at 512 and aborts past
   that.
 
-One seam now (`android::with_activity`): the real Activity from
+One seam now (`platform::android::with_activity`): the real Activity from
 `ANDROID_APP`, a local frame per call, and no pending exception left
 behind, whichever way the closure ends.
 
@@ -878,7 +878,7 @@ behind, whichever way the closure ends.
 waits. The ICE credential fetch and the tape upload are blocking `ureq`
 calls: they ran, whole, inside the frame that spawned them. ureq's
 timeout does not cover DNS. Both are on real threads now
-(`crate::off_main_thread`).
+(`platform::off_main_thread`).
 
 ### 🟠 A crash on a friend's phone could not be reported
 

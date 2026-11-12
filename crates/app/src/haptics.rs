@@ -44,51 +44,12 @@ fn is_local(local: &LocalPlayerHandle, handle: usize) -> bool {
     local.0.is_none_or(|lh| lh == handle)
 }
 
-/// Fire a `ms`-millisecond vibration one-shot on the device.
-///
-/// Android: one JNI hop to the platform `Vibrator` (`android::vibrate`).
-/// Best-effort — a missing or permission-denied vibrator is logged and
-/// swallowed; it must never take down the game loop.
-#[cfg(target_os = "android")]
+/// Fire a `ms`-millisecond vibration one-shot on the device: the
+/// platform's business (`platform::vibrate` — JNI on Android, a guarded
+/// `navigator.vibrate` in the browser, nothing on desktop).
 fn vibrate(ms: i64) {
-    crate::android::vibrate(ms);
+    crate::platform::vibrate(ms);
 }
-
-/// The browser's vibrator. `navigator.vibrate` is the web's one haptic
-/// primitive: a duration, nothing else — which is exactly the shape this
-/// module already speaks. Chrome on Android honours it, so the browser
-/// build keeps the feel layer on the phones most likely to open it.
-///
-/// iOS Safari does not implement it AT ALL, and that is not the silent
-/// no-op the first cut took it for. web-sys binds `vibrate` as a plain
-/// method call with no `catch`, so on an iPhone the call was
-/// `undefined(...)`: a `TypeError` thrown straight through the wasm frames
-/// with winit's runner still borrowed. Every later event then queued
-/// behind that borrow forever — the game froze, without a panic or a log
-/// line, on the first throw or the first kill of every iPhone session.
-/// So the function is looked up and called by hand: a missing vibrator is
-/// a missing property, and a throwing one is an `Err` that is dropped.
-#[cfg(target_family = "wasm")]
-fn vibrate(ms: i64) {
-    use wasm_bindgen::{JsCast, JsValue};
-    let Some(window) = web_sys::window() else {
-        return;
-    };
-    let navigator = window.navigator();
-    let Ok(method) = js_sys::Reflect::get(&navigator, &JsValue::from_str("vibrate")) else {
-        return;
-    };
-    let Some(method) = method.dyn_ref::<js_sys::Function>() else {
-        return;
-    };
-    // Browsers refuse it outside a user gesture; that refusal is a `false`
-    // or an exception, and neither may take down the game loop.
-    let _ = method.call1(&navigator, &JsValue::from_f64(ms.max(0) as f64));
-}
-
-/// Desktop and everything else: vibration is a no-op.
-#[cfg(not(any(target_os = "android", target_family = "wasm")))]
-fn vibrate(_ms: i64) {}
 
 /// Throw haptic: a local player's primary fang appearing (same edge the throw
 /// SFX uses). Side-fangs (Multishot) and the remote opponent are excluded.

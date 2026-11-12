@@ -44,7 +44,7 @@ fatal. On Android that is wrong twice over:
    until Android gets round to killing the cached process. "Sometimes it
    crashes right after opening" is this.
 
-`crates/app/src/android.rs` closes the second half on its own (no path
+`crates/app/src/platform/android.rs` closes the second half on its own (no path
 out of `android_main` leaves a process behind any more). This patch
 closes the first, so the frame is skipped and the match survives.
 
