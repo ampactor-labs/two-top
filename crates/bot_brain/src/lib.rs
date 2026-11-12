@@ -531,6 +531,13 @@ fn spar(v: &BotView) -> PlayerInput {
     )
 }
 
+/// A moving target that never fights back: the sparring partner's slow
+/// drift and nothing else. First Blood's kill lesson aims at this — a
+/// standing bot teaches nothing about leading a throw.
+pub fn amble(v: &BotView) -> PlayerInput {
+    input_from(wander_dir(v), 0)
+}
+
 /// Level-0 drift: a slow, gentle wander (a Lissajous drift), clamped to the
 /// island.
 fn wander_dir(v: &BotView) -> Vec2 {
@@ -1479,6 +1486,14 @@ mod tests {
         v.me = Vec2::new(150.0, 0.0);
         v.threat = Some((Vec2::new(0.0, -60.0), Vec2::new(0.0, 15.0)));
         assert_eq!(bot_decide(&v).buttons & PlayerInput::DASH_DOWN, 0);
+    }
+
+    #[test]
+    fn the_amble_moves_and_never_throws() {
+        let v = base_view();
+        let input = amble(&v);
+        assert_eq!(input.buttons, 0);
+        assert!(input.stick_x != 0 || input.stick_y != 0);
     }
 
     #[test]

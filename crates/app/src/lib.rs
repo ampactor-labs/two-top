@@ -140,12 +140,13 @@ pub fn run() {
                     ..default()
                 })
                 .disable::<bevy::log::LogPlugin>();
-            // Desktop asset root. Bevy's file asset reader resolves its base
-            // from CARGO_MANIFEST_DIR under `cargo run`, which points at
-            // `crates/app/assets` — a dir that does not exist. The runtime
-            // assets (sprites, arena floors, HUD atlases, the 12 audio cues)
-            // live at the workspace root (`assets/`, two levels up), so aim
-            // the reader there; the build-time path makes it cwd-independent.
+            // Desktop asset root: wherever this build's assets actually are
+            // (`platform::desktop::asset_root` — beside a shipped binary,
+            // in a macOS bundle, or the checkout under `cargo run`). It was
+            // the checkout's absolute path, baked in at compile time, which
+            // left a build on any other machine untextured and silent. No
+            // `.meta` sidecars ship, so the probe for each is skipped (as in
+            // the browser).
             // Android deliberately keeps the default ("assets"): cargo-apk
             // bundles `../../assets` (Cargo.toml `[package.metadata.android]
             // assets`) as the APK asset root, so the in-code load paths
@@ -155,7 +156,10 @@ pub fn run() {
             // workspace assets dir beside index.html.
             #[cfg(not(any(target_os = "android", target_family = "wasm")))]
             let plugins = plugins.set(bevy::asset::AssetPlugin {
-                file_path: concat!(env!("CARGO_MANIFEST_DIR"), "/../../assets").to_string(),
+                file_path: platform::desktop::asset_root()
+                    .to_string_lossy()
+                    .into_owned(),
+                meta_check: bevy::asset::AssetMetaCheck::Never,
                 ..default()
             });
             // The browser skips Bevy's `.meta` sidecar probe. By default every
