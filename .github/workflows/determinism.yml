@@ -134,6 +134,12 @@ jobs:
   tsv-diff:
     name: cross-platform TSV diff
     needs: determinism
+    # Run whenever the matrix finishes, and compare the TSVs that exist: a
+    # lane that produced none (a failure, or a runner that never started —
+    # the macOS lanes are cancelled at their first second while macOS
+    # runners are unavailable to this repo) is red in its own job, and was
+    # skipping this, the comparison of all the others, with it.
+    if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4
@@ -165,6 +171,8 @@ jobs:
               fail=1
             fi
           done
+          compared=$(ls -d tsvs/checksum-* | wc -l)
+          echo "compared $compared lane(s) against the linux-x64 baseline"
           if [[ $fail -ne 0 ]]; then
             echo "Cross-platform TSV diff failed — see scripts/diagnose_desync.sh"
             exit 1
