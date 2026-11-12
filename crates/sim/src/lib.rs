@@ -2066,6 +2066,15 @@ pub fn throw_boomerangs(
         .iter()
         .map(|(p, _, pos, ..)| (p.handle, pos.0))
         .collect();
+    // Spawns are queued and issued in handle order after the loop, never
+    // in query order: bevy_ggrs mixes each rollback entity's registration
+    // index into the frame checksum, registration follows spawn order, and
+    // a rollback restore can reorder this query's table on one peer and not
+    // the other. Two fangs thrown on one frame registered in opposite
+    // orders on the two phones — same state, different checksums — and the
+    // match ended as a desync (`tests/spawn_order.rs`).
+    let mut thrown: std::collections::BTreeMap<usize, ThrownFangs> =
+        std::collections::BTreeMap::new();
     for (
         player,
         dead,
@@ -2162,10 +2171,48 @@ pub fn throw_boomerangs(
             charged_reach(power)
         };
         empowered.0 = false;
+        thrown.insert(
+            player.handle,
+            ThrownFangs {
+                origin: pos.0,
+                velocity,
+                reach,
+                modifier,
+            },
+        );
+        // Phase 15: kick the throw animation. Reset to frame 0 so the
+        // 6-frame wind-up plays from the start. `advance_animation`
+        // will keep it ticking until is_finished(), then the
+        // observable-state path in that system snaps back to Idle.
+        anim.anim_id = AnimState::THROW;
+        anim.ticks = 0;
+    }
+    for (handle, throw) in thrown {
+        throw.spawn(&mut commands, handle, frame.0);
+    }
+}
+
+/// One player's release, queued by [`throw_boomerangs`] so every throw of
+/// a frame spawns in handle order.
+struct ThrownFangs {
+    origin: Vec2F,
+    velocity: Vec2F,
+    reach: Fix,
+    modifier: Option<PickupKind>,
+}
+
+impl ThrownFangs {
+    fn spawn(self, commands: &mut Commands, owner_handle: usize, frame: u32) {
+        let ThrownFangs {
+            origin,
+            velocity,
+            reach,
+            modifier,
+        } = self;
         // The primary (recallable, catchable) fang flies straight.
         commands.spawn((
             Boomerang {
-                owner_handle: player.handle,
+                owner_handle,
                 state: BoomerangState::Flying,
             },
             BoomerangMods {
@@ -2174,10 +2221,10 @@ pub fn throw_boomerangs(
                 despawn_at_frame: None,
                 wall_bounces: 0,
             },
-            ThrowOrigin(pos.0),
+            ThrowOrigin(origin),
             ThrowReach(reach),
-            PositionF(pos.0),
-            PreviousPositionF(pos.0),
+            PositionF(origin),
+            PreviousPositionF(origin),
             VelocityF(velocity),
         ));
         // Multishot adds two fire-and-forget side-fangs at ±15°. They share
@@ -2185,11 +2232,11 @@ pub fn throw_boomerangs(
         // `is_secondary` so recall/catch ignore them and a wall hit (or the
         // lifetime backstop) despawns them.
         if matches!(modifier, Some(PickupKind::Multishot)) {
-            let expire = frame.0 + MULTISHOT_SECONDARY_LIFETIME_FRAMES;
+            let expire = frame + MULTISHOT_SECONDARY_LIFETIME_FRAMES;
             for theta in [MULTISHOT_FAN_RAD, -MULTISHOT_FAN_RAD] {
                 commands.spawn((
                     Boomerang {
-                        owner_handle: player.handle,
+                        owner_handle,
                         state: BoomerangState::Flying,
                     },
                     BoomerangMods {
@@ -2198,18 +2245,12 @@ pub fn throw_boomerangs(
                         despawn_at_frame: Some(expire),
                         wall_bounces: 0,
                     },
-                    PositionF(pos.0),
-                    PreviousPositionF(pos.0),
+                    PositionF(origin),
+                    PreviousPositionF(origin),
                     VelocityF(velocity.rotate(theta)),
                 ));
             }
         }
-        // Phase 15: kick the throw animation. Reset to frame 0 so the
-        // 6-frame wind-up plays from the start. `advance_animation`
-        // will keep it ticking until is_finished(), then the
-        // observable-state path in that system snaps back to Idle.
-        anim.anim_id = AnimState::THROW;
-        anim.ticks = 0;
     }
 }
 
@@ -2468,18 +2509,25 @@ pub fn drop_fire_trail(
     if !frame.0.is_multiple_of(FIRE_TRAIL_INTERVAL_TICKS) {
         return;
     }
-    for (boom, mods, pos) in &boomerangs {
-        if matches!(boom.state, BoomerangState::Flying)
-            && matches!(mods.modifier, Some(PickupKind::Fire))
-        {
-            commands.spawn((
-                FireTrailCell {
-                    owner_handle: boom.owner_handle,
-                    expires_at_frame: frame.0 + FIRE_TRAIL_LIFETIME_FRAMES,
-                },
-                PositionF(pos.0),
-            ));
-        }
+    // In a fixed order, never the query's (see `throw_boomerangs`): a Fire
+    // multishot drops three cells on one frame.
+    let mut cells: Vec<(usize, i32, i32)> = boomerangs
+        .iter()
+        .filter(|(boom, mods, _)| {
+            matches!(boom.state, BoomerangState::Flying)
+                && matches!(mods.modifier, Some(PickupKind::Fire))
+        })
+        .map(|(boom, _, pos)| (boom.owner_handle, pos.0.x.to_bits(), pos.0.y.to_bits()))
+        .collect();
+    cells.sort_unstable();
+    for (owner_handle, x, y) in cells {
+        commands.spawn((
+            FireTrailCell {
+                owner_handle,
+                expires_at_frame: frame.0 + FIRE_TRAIL_LIFETIME_FRAMES,
+            },
+            PositionF(Vec2F::new(Fix::from_bits(x), Fix::from_bits(y))),
+        ));
     }
 }
 

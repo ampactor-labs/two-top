@@ -58,6 +58,7 @@ pub struct BotBrain(bot_brain::Brain);
 /// sparring partner.
 pub fn drive_bot(world: &mut World) {
     if !world.resource::<PracticeMode>().0 {
+        drive_autopilot(world);
         return;
     }
     let lesson = world
@@ -101,6 +102,48 @@ pub fn drive_bot(world: &mut World) {
     };
     if let Some(mut local) = world.get_resource_mut::<LocalInputs<GgrsCfg>>() {
         local.0.insert(BOT_HANDLE, input);
+    }
+}
+
+/// The autopilot's own memory, separate from the practice bot's.
+#[derive(Resource, Default)]
+struct AutopilotBrain(bot_brain::Brain);
+
+/// `TWOTOP_AUTOPILOT=<tier>`: the bot brain plays this device's side of
+/// an ONLINE match. A dev and test knob only: the two-peer smoke runs two
+/// app processes against each other through a real signaling server with
+/// nobody at either keyboard, and each needs someone playing. Read once.
+fn autopilot_tier() -> Option<u32> {
+    static TIER: std::sync::OnceLock<Option<u32>> = std::sync::OnceLock::new();
+    *TIER.get_or_init(|| {
+        std::env::var("TWOTOP_AUTOPILOT")
+            .ok()
+            .and_then(|v| v.parse().ok())
+    })
+}
+
+fn drive_autopilot(world: &mut World) {
+    let Some(tier) = autopilot_tier() else {
+        return;
+    };
+    let Some(handle) = world.resource::<crate::netplay::LocalPlayerHandle>().0 else {
+        return;
+    };
+    if !world.contains_resource::<AutopilotBrain>() {
+        world.init_resource::<AutopilotBrain>();
+    }
+    // Seeded per install: two copies of one bot in mirrored seats otherwise
+    // play a mirror match, fangs passing each other for good.
+    let seed = world.resource::<crate::profile::LocalProfile>().install_id as u32;
+    let input = match bot_brain::view_for(world, handle, tier, None, seed) {
+        Some(view) => world.resource_mut::<AutopilotBrain>().0.decide(view),
+        None => {
+            world.resource_mut::<AutopilotBrain>().0.forget();
+            PlayerInput::default()
+        }
+    };
+    if let Some(mut local) = world.get_resource_mut::<LocalInputs<GgrsCfg>>() {
+        local.0.insert(handle, input);
     }
 }
 

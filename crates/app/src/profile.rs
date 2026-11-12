@@ -468,7 +468,13 @@ fn open_name_entry_on_first_boot(
     mut next: ResMut<NextState<AppScreen>>,
     mut done: Local<bool>,
 ) {
-    if *done || profile.named || netplay.room_url.is_none() {
+    // A scripted run (capture, autostart, the two-peer smoke) has nobody
+    // to type a name.
+    if *done
+        || profile.named
+        || netplay.room_url.is_none()
+        || std::env::var_os("TWOTOP_AUTOSTART").is_some()
+    {
         return;
     }
     if *screen.get() != AppScreen::Title {

@@ -39,7 +39,7 @@ pub enum Seat {
 }
 
 /// How one match went.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MatchReport {
     /// Final score, seat 0 then seat 1.
     pub score: (u8, u8),
@@ -51,6 +51,9 @@ pub struct MatchReport {
     pub empty_rounds: u32,
     /// Rounds played.
     pub rounds: u32,
+    /// Frames whose re-simulation under rollback did not match the first
+    /// run (always empty at check distance 0). Any entry is a desync.
+    pub mismatched_frames: Vec<i32>,
 }
 
 impl MatchReport {
@@ -76,6 +79,10 @@ enum Driver {
     Bot(Brain, u32),
     Strafer,
 }
+
+/// Frames a rollback re-simulation disagreed on (`SyncTestMismatch`).
+#[derive(Resource, Default)]
+struct Mismatches(Vec<i32>);
 
 #[derive(Resource)]
 struct Seats {
@@ -139,11 +146,13 @@ fn seat_inputs(world: &mut World) {
 /// A headless match on `arena`, ready to step: the live spawn points, the
 /// arena's walls, cover, pyres and trees, and the real round flow
 /// (countdown, 30 s rounds, first to five).
-fn build(arena: ArenaId, seats: [Seat; 2], seed: u32) -> App {
+fn build(arena: ArenaId, seats: [Seat; 2], seed: u32, check_distance: usize) -> App {
     let mut sb = SessionBuilder::<GgrsCfg>::new()
         .with_num_players(2)
         .expect("two players")
-        .with_check_distance(0)
+        // ggrs requires `check_dist < max_prediction` strictly.
+        .with_max_prediction_window((check_distance + 1).max(8))
+        .with_check_distance(check_distance)
         .with_input_delay(0);
     for handle in 0..2 {
         sb = sb
@@ -160,6 +169,12 @@ fn build(arena: ArenaId, seats: [Seat; 2], seed: u32) -> App {
     app.add_plugins(GgrsPlugin::<GgrsCfg>::default());
     app.add_plugins(SimPlugin);
     app.insert_resource(Session::SyncTest(session));
+    // bevy_ggrs only warns (to a log this app has no plugin for) and
+    // triggers this; catch it, or a mismatch passes in silence.
+    app.init_resource::<Mismatches>();
+    app.add_observer(|t: On<SyncTestMismatch>, mut seen: ResMut<Mismatches>| {
+        seen.0.extend(t.mismatched_frames.iter().copied());
+    });
     app.insert_resource(sim::SelectedArena(arena));
     app.insert_resource(Seats {
         drivers: seats.map(|seat| match seat {
@@ -208,9 +223,35 @@ pub fn play_watched(
     seats: [Seat; 2],
     seed: u32,
     max_seconds: u32,
+    watch: impl FnMut(&mut World, u32),
+) -> MatchReport {
+    play_inner(arena, seats, seed, max_seconds, 0, watch)
+}
+
+/// [`play`] under rollback: every frame is re-simulated `check_distance`
+/// frames back and its checksum compared, the way a live session rolls
+/// back on a late input. A whole match of throws, catches, dashes, kills
+/// and round resets, where the `sync_test` binary only walks two players
+/// left and right. A mismatch is a desync waiting for two phones.
+pub fn play_rolled_back(
+    arena: ArenaId,
+    seats: [Seat; 2],
+    seed: u32,
+    max_seconds: u32,
+    check_distance: usize,
+) -> MatchReport {
+    play_inner(arena, seats, seed, max_seconds, check_distance, |_, _| {})
+}
+
+fn play_inner(
+    arena: ArenaId,
+    seats: [Seat; 2],
+    seed: u32,
+    max_seconds: u32,
+    check_distance: usize,
     mut watch: impl FnMut(&mut World, u32),
 ) -> MatchReport {
-    let mut app = build(arena, seats, seed);
+    let mut app = build(arena, seats, seed, check_distance);
     let cap = max_seconds * sim::TICK_HZ as u32;
     let mut ticks = 0;
     let mut rounds = 0;
@@ -237,12 +278,16 @@ pub fn play_watched(
         was_in_round = in_round;
         let finished = matches!(state, MatchState::MatchOver);
         if finished || ticks >= cap {
+            let mut mismatched_frames = app.world().resource::<Mismatches>().0.clone();
+            mismatched_frames.sort_unstable();
+            mismatched_frames.dedup();
             return MatchReport {
                 score: (score.p0, score.p1),
                 ticks,
                 finished,
                 empty_rounds,
                 rounds,
+                mismatched_frames,
             };
         }
     }

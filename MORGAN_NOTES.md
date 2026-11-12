@@ -184,6 +184,16 @@ Two more online bugs surfaced while proving this end to end, both invisible to e
 
 Online arena agreement has three possible shapes: random-by-room-hash (the old way — which also silently pinned quick match to ONE arena forever, since the public room string never changes), a host-picks handshake over the side channel (protocol work, a mid-handshake arena respawn on the joining side, and someone's pick silently loses), or making the pick part of the room name itself. The room name wins because agreement becomes structural — two peers in `two-top-CURS-pit` cannot disagree about the table, the arena is known before anything spawns, and zero new netcode ships. The cost is that quick match partitions by arena; with this game's player pool that is a feature (you queue for the table you want), and friends coordinate the same way they already coordinate codes: "dial CURS, pick the Pit."
 
+## Why same-frame spawns go in handle order, and what two real peers found (0.16)
+
+Netplay had been verified on one machine: `SyncTestSession` at check distance 16, the fuzz soak and the cross-platform replay matrix. All three run one simulation. The first time two app processes played each other for real (`scripts/two_peer_smoke.sh`: a local matchbox server, two desktop builds, the bot brain at each keyboard), they desynced at frame 210 — every run where both bots threw on the same frame.
+
+The states were identical. A per-frame state log from each peer (`TWOTOP_STATE_LOG`) agreed field for field through the desync. What differed was bevy_ggrs's checksum: it hashes each rollback entity's registration index alongside its components, and the two fangs thrown on frame 203 had registered in opposite orders on the two machines. `throw_boomerangs` spawned while iterating the player query, and a rollback restore had reordered that query's table on one peer. The sim agreed; the checksum said it did not; the match ended.
+
+The fix queues a frame's spawns and issues them in handle order (fire cells too, by owner then position). No simulated state changes — the canonical demo's 1800-frame checksum TSV and the fuzz seeds are byte-identical before and after — so there is no `SIM_VERSION` bump and every tape still plays. CONVENTIONS now carries the rule.
+
+One more thing the two peers found, left open on purpose: input delay means a THROW pressed in the last three frames of a round lands after `MatchOver`, where `sim::apply_rematch` reads it as a rematch. Both sims restart at once (in sync, no desync) and the summary, the tape and the signed result are all skipped. The online rematch gate cannot see it coming (at read time the match is still on). The right fix is in the sim — a rematch press only counts after `MatchOver` has lasted longer than any input delay — and that changes outcomes, so it waits for a deliberate `SIM_VERSION` bump.
+
 ## Rejected alternatives, briefly
 
 - **4-player FFA** — rejected for MVP. The chaos hides bad balance, the rollback CPU budget gets tight with 4 players' inputs, and the matchmaking complexity isn't worth it for a portfolio piece. 1v1 is sharper and demos better.

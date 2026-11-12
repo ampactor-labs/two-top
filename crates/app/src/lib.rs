@@ -56,6 +56,7 @@ mod screen;
 mod settings;
 mod shade;
 mod share;
+mod state_log;
 mod theater;
 mod touch_controls;
 mod ui;
@@ -234,6 +235,7 @@ pub fn run() {
         .add_plugins(callout::CalloutPlugin)
         .add_plugins(first_blood::FirstBloodPlugin)
         .add_plugins(nudges::NudgesPlugin)
+        .add_plugins(state_log::StateLogPlugin)
         .add_plugins(HudPlugin)
         .add_plugins(DebugInputOverlayPlugin)
         .add_plugins(net::NetPlugin)
