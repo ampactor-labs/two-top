@@ -874,6 +874,7 @@ pub fn pause_for(state: bevy::window::AppLifecycle) -> Option<bool> {
 /// (The browser's tab-hidden case is the page's: `web/index.html`.)
 fn pause_audio_while_away(
     mut lifecycle: MessageReader<bevy::window::AppLifecycle>,
+    mut away: ResMut<AudioAway>,
     sinks: Query<&AudioSink>,
 ) {
     use bevy::audio::AudioSinkPlayback as _;
@@ -884,12 +885,33 @@ fn pause_audio_while_away(
     else {
         return;
     };
+    away.0 = pause;
     for sink in &sinks {
         if pause {
             sink.pause();
         } else {
             sink.play();
         }
+    }
+}
+
+/// Whether the app is away (suspended): set by [`pause_audio_while_away`].
+#[derive(Resource, Default)]
+struct AudioAway(bool);
+
+/// A sound started on the suspending frame, or while away, has no
+/// `AudioSink` yet when [`pause_audio_while_away`] runs: bevy_audio
+/// creates sinks in `PostUpdate`. Such a sound — a music bed that began on
+/// that frame among them — played on over whatever app came next. This
+/// pauses each new sink the frame it appears, while away; the resume
+/// plays it with the rest.
+fn hold_new_sinks_while_away(away: Res<AudioAway>, added: Query<&AudioSink, Added<AudioSink>>) {
+    use bevy::audio::AudioSinkPlayback as _;
+    if !away.0 {
+        return;
+    }
+    for sink in &added {
+        sink.pause();
     }
 }
 
@@ -900,7 +922,11 @@ pub struct GameAudioPlugin;
 impl Plugin for GameAudioPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<MusicMix>()
+            .init_resource::<AudioAway>()
             .add_systems(Startup, load_audio_and_start_music)
+            // `Last`: after bevy_audio's (private) PostUpdate set that
+            // creates the sinks.
+            .add_systems(Last, hold_new_sinks_while_away)
             .add_systems(
                 Update,
                 (
@@ -925,8 +951,10 @@ impl Plugin for GameAudioPlugin {
                     // Before the mixer, so a fresh bed's zero volume is
                     // raised the same frame it spawns.
                     arena_air_bed.before(mix_music),
-                    // Last: a cue spawned on the suspending frame is
-                    // paused with the rest.
+                    // Last, so every sink that exists this frame is paused;
+                    // the ones spawned this frame get their sinks in
+                    // PostUpdate and are held in `Last`
+                    // (`hold_new_sinks_while_away`).
                     pause_audio_while_away
                         .after(mix_music)
                         .after(match_point_heartbeat)
