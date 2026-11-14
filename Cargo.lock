@@ -4411,6 +4411,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "net_harness"
+version = "0.16.0"
+dependencies = [
+ "bevy",
+ "bevy_ggrs",
+ "net",
+ "sim",
+]
+
+[[package]]
 name = "nix"
 version = "0.26.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
