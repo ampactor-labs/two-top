@@ -79,11 +79,16 @@ ephemeral vendor below instead; the APK CI workflow refuses to carry
 `crates/ice_vendor` is a tiny HTTP service that holds the relay secret
 server-side and answers `GET /ice` with a THROWAWAY credential pair the
 TURN server refuses once its embedded timestamp expires (the TURN REST
-API convention, draft-uberti-behave-turn-rest). The app fetches it at
-match entry when `TWOTOP_ICE_URL` is set — a URL, not a secret, so it
-is safe to bake into public builds — with a 2.5 s timeout falling back
-to the baked/STUN-only config. The fetch rides the SUMMONING wait, so
-it costs nothing visible.
+API convention, draft-uberti-behave-turn-rest). When `TWOTOP_ICE_URL`
+is set (a URL, not a secret, so it is safe to bake into public builds)
+the app fetches it ahead of the match, as the title comes up, and keeps
+a relay answer in memory until half its credential's life is spent: a
+match, a rematch or a re-dial opens its socket at once on it. Without a
+kept answer (the first match after a cold start that went straight in,
+or a vendor that has not answered) the match fetches for itself, adopting
+a fetch already out, with a 2.5 s budget falling back to the
+baked/STUN-only config. A STUN-only answer is used and never kept, so it
+can never stand between a phone and the relay.
 
 Two backends, picked by env:
 
@@ -102,7 +107,15 @@ Two backends, picked by env:
   verifies offline.
 
 Neither set ⇒ the vendor answers STUN-only, which still exercises the
-whole fetch path. `ICE_TTL_SECS` tunes the credential lifetime
+whole fetch path.
+
+The vendor never makes a caller wait on anything upstream. HMAC
+credentials are computed on the spot; in Cloudflare mode a background
+thread mints a credential every quarter of its lifetime and every caller
+is handed the current one, with its remaining lifetime as `ttl_secs` (it
+is served until half spent). One Cloudflare call per hour at the default
+TTL, however many duels start, and a slow Cloudflare no longer holds the
+phones in line behind it past their 2.5 s budget. `ICE_TTL_SECS` tunes the credential lifetime
 (default 4 h). Deploy the vendor anywhere HTTPS lives — a second
 Railway service off this repo with start command
 `cargo run -p ice_vendor --release` works — then bake its URL:
@@ -118,7 +131,10 @@ bake the same value from `TWOTOP_ICE_KEY` (the repo secret for CI,
 the env for `scripts/phone.sh`); a build without it gets the 403 and
 falls back to STUN-only. The key ships inside every APK, so it filters
 drive-by scrapers rather than authenticating anyone; the per-IP bucket
-and the credential TTL are what bound abuse. Bake the key into the
+and the credential TTL are what bound abuse. The bucket (a burst of 30,
+then one per 2 s) is sized for phones on mobile data, many of which share
+one carrier address: with credentials minted on a timer a flood mints
+nothing, so it only has to bound request volume. Bake the key into the
 builds before setting it on the vendor.
 
 ---
@@ -241,17 +257,53 @@ locally — no negotiation round-trip. Player *entities* are spawned
 identically on both sides (same `setup`), so only "which handle reads
 local input" differs; the deterministic sim guarantees the rest.
 
-The ggrs session is built with `input_delay = 2`, desync detection on
-(`interval = 30`, ~2 checks/sec), and a **9 s disconnect timeout** —
-the away grace that lets a phone survive a notification-shade peek or
-a short call banner and rejoin the live match (ggrs replays the missed
-ticks on resume). During an interruption the healthy side's overlay
-shows `<NAME> AWAY` after ~1 s of silence; at 9 s ggrs declares the
-peer gone and the match forfeits (net's own silence FSM backstops at
-10 s). A `DesyncDetected` event logs a loud `ERROR` on
+The ggrs session is built with `input_delay = 3`, desync detection on
+(`interval = 30`, ~2 checks/sec), and ggrs's disconnect timeout at
+20 s, a ceiling: the away grace is net's silence FSM. A peer silent
+without a word is forfeited at **9 s** (`net::FORFEIT_AFTER_FRAMES`); a
+phone going to the background (or a hidden tab) first sends
+`NetMsg::Pausing` on its last update, and that peer is held for **20 s**
+(`net::PAUSED_FORFEIT_AFTER_FRAMES`), long enough for a notification-shade
+peek, a short call, or a trip to the chat app, and it rejoins the live
+match on return (ggrs replays the missed ticks). During either wait the
+healthy side shows `<NAME> AWAY` (or `STEPPED AWAY`) after ~1 s of
+silence, with the seconds left. The phone that was away does not hold
+its own sleep against the peer: a frame gap restarts the peer's silence
+on its side. `scripts/pause_smoke.sh` runs both cases on two real peers
+(an announced 14 s pause carries on; `SILENT=1`, the same freeze
+unannounced, is forfeited 9.5 s in). A `DesyncDetected` event logs a loud `ERROR` on
 `target: two_top::net`; a `Disconnected` event (or a `Bye` on the
 side-channel — the clean-leave path) forfeits the match (sets
 `sim::MatchState::MatchOver`).
+
+Leaving a live match sends that `Bye` and then keeps the socket **and**
+the ggrs session alive for one more second (`netplay::GOODBYE_LINGER_SECS`)
+before dropping them. matchbox's message loop exits the moment any one
+channel's queue closes, and the session owns channel 0, so dropping it in
+the same frame tore the connection down before the goodbye left: on two
+real peers the quitter booked its loss while the one who stayed heard
+nothing and booked the match unfinished 9 s later. With the linger the
+stayer hears the goodbye within milliseconds and books the concession.
+
+Silence is only measured once the session exists. Before the swap (the
+wait, and the table handshake) the app pins the last-message stamp every
+frame: a peer that leaves then is matchbox's to report
+(`PeerState::Disconnected`), and the grace timer, which ages on real time,
+never reads a minute spent waiting in the room as a silent peer.
+
+ggrs's sync handshake has no timeout of its own, so the app gives a fresh
+session **12 s to synchronize** (`netplay::SYNC_BUDGET_SECS`; a healthy
+sync is five round trips, well under a second). A peer that says goodbye,
+or whose connection closes, before the first frame ends the wait at once.
+Either way nothing is recorded and no goodbye is sent (it would read as a
+concession to a peer whose own sync finished first); the app re-dials the
+room once on its own, and if that pairing fails the same way the overlay
+says `COULDN'T REACH YOUR CHALLENGER`, with PLAY THE BOT offered at once.
+Until the sync lands, no duel is underway: the far seat stays empty, QUIT
+reads CANCEL and costs nothing, and after 2 s the overlay says
+`REACHING <NAME>…`. `cargo run -p app --example silent_peer -- <room>
+silent|leave` is a peer that pairs and then never syncs (or leaves), for
+checking all of this against a real room.
 
 ### Loopback verification (Gate 0 — done, automatable)
 
@@ -264,6 +316,31 @@ Forfeited`) within ~2.5 s. A transient stall (CPU contention) surfaced
 as `NetworkInterrupted` and cleanly `NetworkResumed` with no desync.
 The three gates below additionally require **real devices / real
 networks** and remain operator-executed.
+
+That loopback run had nobody playing, and an idle match never threw two
+fangs on one frame. `scripts/two_peer_smoke.sh` is the same setup with
+the bot brain at each keyboard (`TWOTOP_AUTOPILOT`): its first runs
+desynced at frame 210 every time both sides threw together, a
+spawn-order fault no single-process check could see (MORGAN_NOTES, "Why
+same-frame spawns go in handle order"). Run it after any change to the
+sim, the netplay driver or matchbox:
+
+```sh
+cargo install matchbox_server --version 0.14.0 --locked
+cargo build -p app -p replay_sync
+VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/lvp_icd.json scripts/two_peer_smoke.sh
+```
+
+It passes when both peers decide a match with no desync, both tapes
+replay to the same per-frame checksums, and each attestation verifies.
+`STATE_LOG_DIR=<dir>` makes each peer write every frame's state there
+(`TWOTOP_STATE_LOG`) for diffing when it does not. The server is pinned
+at 0.14.0 (`deploy/matchbox/Dockerfile`), the client's matchbox line;
+bump the two together.
+
+A live session also logs its link every 5 s (`two_top::net::link`: ping,
+frames behind, kbps) and a one-line `match link summary` at the end of
+each match.
 
 ---
 
@@ -320,10 +397,12 @@ If either side desyncs visibly, take both `.bmrg.log` files and run
 ### Gate 3: forfeit on long disconnection
 
 * Same setup, but kill connectivity on one device for 12+ seconds.
-* The surviving device transitions `<NAME> AWAY → <NAME> FLED - the
-  field is yours` at ~9 s of silence (ggrs `Disconnected`;
-  `FORFEIT_AFTER_FRAMES = 600` is the 10 s fallback), records a career
-  WIN, and offers the top-band LEAVE.
+* The surviving device counts `<NAME> AWAY` down and transitions to
+  `<NAME> FLED - the field is yours` at ~9 s of silence (net's silence
+  FSM, `FORFEIT_AFTER_FRAMES = 540`; 20 s if the phone announced it was
+  going to the background), records the match **unfinished** (a dropped
+  link proves nothing about who left: nobody's win, nobody's loss), and
+  offers the top-band LEAVE.
 * `sim::MatchState::MatchOver` fires (the round flow ends; HUD shows
   match-over state).
 * The forfeiting peer, on coming back, sees `MATCH ABANDONED — you

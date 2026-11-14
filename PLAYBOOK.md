@@ -448,6 +448,20 @@ signaling server pairs you → you fight.
 This uses your local debug keystore to sign a release build for sideload
 playtesting. For store distribution, use a real upload/release key instead.
 
+**When it crashes on their phone** you do not need the phone. The next
+time they open 2-Top the title shows LAST RUN CRASHED / TAP HERE TO SEND
+THE REPORT; the tap opens their share sheet on a text report (phone, GPU,
+how Android says the run ended, the panic, the log tail) and they send it
+to you like any other message. `SIDELOAD.md` § After a crash has what is
+in it and where the same files sit for `adb`.
+
+**Friends on iPhone** play the web build: send them the Pages URL (or let
+them scan a private room's join QR, which offers PLAY IN THE BROWSER on an
+iPhone). Safari → Share → **Add to Home Screen** gives them the full-screen
+game and keeps their identity and rivalry ledger from being evicted; the
+page itself says so the first few times. Browser and APK meet in the same
+rooms, on the same sim version.
+
 For same-wifi: the signaling server runs on your machine (Rung 4 setup).
 For cross-network: deploy `matchbox_server` to a public host (see Rung 5).
 
@@ -488,17 +502,43 @@ the share; `replay_sync --attest` verifies them wherever the files are.
 
 **The gauntlet (practice vs the bot).** Tap PRACTICE VS BOT on the Title
 (P on desktop), then PLAY. The match runs the normal local session with the
-bot supplying player 2's inputs — it keeps range, plants visibly before it
-throws, dashes through your fangs, and steers its recalls. Beat it and your
-GAUNTLET TIER climbs (the button label carries the number); every tier the
-bot opens a little sharper — harder throws, then (from tier 3) a dodge
-reflex that fires on some of your throws and more of them as it climbs,
-tighter aim — up to a beatable ceiling at tier 10. Lose and the tier drops
-one rung (never back to the dummy; best tier is remembered in
-`career.json`), so a losing streak keeps easing the bot off. A fresh
-install's bot starts as a passive dummy that only starts lobbing back once
-you have landed three kills, so the first match is the tutorial. Practice results never touch the online career W-L.
+bot supplying player 2's inputs — it keeps range, routes around cover to a
+clear line, plants visibly before it throws, dashes out of your fangs'
+lanes, and steers its recalls. Beat it and your GAUNTLET TIER climbs (the
+button label carries the number); every tier the bot opens a little
+sharper — harder throws, a quicker read of you, throws that lead where
+you are walking, then (from tier 3) a dodge reflex that fires on some of
+your throws and more of them as it climbs — up to a beatable ceiling at
+tier 10. Lose and the tier drops one rung (never back to tier 0; best tier
+is remembered in `career.json`), so a losing streak keeps easing the bot
+off. Within a match it eases a notch while it leads by two kills and
+sharpens a notch while you do. A fresh install starts at tier 0, a
+sparring partner: slow, telegraphed lobs every few seconds and no
+dodging, so even a player who has not found the controls meets a fang in
+flight and a finished match. The summary says where the ladder went
+(UP TO GAUNTLET 4, GAUNTLET MASTERED). The ladder is tuned against a
+headless bench (`docs/BOT_LADDER.md`). Practice results never touch the
+online career W-L.
 `TWOTOP_PRACTICE=1` env arms it for desktop automation.
+
+**First Blood.** A fresh install (no match ever played) goes from naming
+itself straight into a guided practice match on the Vigil that teaches one
+verb at a time — move, throw, recall and catch, a charged kill, dodging a
+throw, the perfect catch, the edge — then a match to five against tier 1,
+and a summary that offers FIND OPPONENT. One line on screen at a time, worded
+for touch or keys by what the player last used; each stage moves on when the
+player actually does the thing. SKIP (the quit chip) ends it for good; a
+player who arrived by a join link never gets it unasked; SETTINGS → HOW TO
+PLAY runs it again. `TWOTOP_FIRST_BLOOD=1` forces it (`0` keeps it away;
+capture and autostart runs keep it away unless forced), and
+`TWOTOP_LESSON_STAGE=dodge` (any stage) starts it partway, for checking one
+stage. Progress is `progress.json` beside `settings.json`.
+
+In real matches (online and practice, not couch) the same line speaks up at
+three moments: GET BACK ON THE FLOOR whenever you are out past the edge,
+HOLD A DIRECTION after two dashes pressed with the stick at rest, and PICK
+IT UP, OR RECALL when your fang has lain loose for three seconds. The last
+two stop after three showings ever (`crates/app/src/nudges.rs`).
 
 **Trading tapes.** A match tape is a ~14 KB `.bmrg` file, and the sim is
 deterministic, so a friend's tape plays on your device exactly as it played

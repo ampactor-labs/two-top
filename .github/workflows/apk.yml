@@ -86,11 +86,26 @@ jobs:
             -storepass android -keypass android -alias androiddebugkey \
             -dname "CN=Android Debug,O=Android,C=US" \
             -keyalg RSA -keysize 2048 -validity 10000
+      - name: Room server (deploy/endpoints.env unless the repo variable says otherwise)
+        shell: bash
+        env:
+          ROOM_VAR: ${{ vars.TWOTOP_ROOM }}
+        run: |
+          . deploy/endpoints.env
+          echo "TWOTOP_ROOM=${ROOM_VAR:-$TWOTOP_ROOM_DEFAULT}" >> "$GITHUB_ENV"
+          echo "baking room server ${ROOM_VAR:-$TWOTOP_ROOM_DEFAULT}"
+      - name: Say whether this build can relay
+        shell: bash
+        env:
+          TWOTOP_ICE_URL: ${{ vars.TWOTOP_ICE_URL }}
+        run: |
+          if [ -z "$TWOTOP_ICE_URL" ]; then
+            echo "::warning title=No TURN relay::TWOTOP_ICE_URL is unset, so this build is STUN-only: two phones on mobile data (carrier NAT) will not connect. Deploy crates/ice_vendor and set the TWOTOP_ICE_URL repo variable (SIGNALING.md)."
+          fi
       - name: Build release APK
         env:
           CARGO_APK_RELEASE_KEYSTORE: ${{ github.workspace }}/debug.keystore
           CARGO_APK_RELEASE_KEYSTORE_PASSWORD: android
-          TWOTOP_ROOM: ${{ vars.TWOTOP_ROOM || 'wss://two-top-matchbox-production.up.railway.app/two-top?next=2' }}
           # The ephemeral-ICE vendor URL (crates/ice_vendor). A URL, not a
           # credential — safe in a public binary. Unset ⇒ STUN-only, as now.
           TWOTOP_ICE_URL: ${{ vars.TWOTOP_ICE_URL }}

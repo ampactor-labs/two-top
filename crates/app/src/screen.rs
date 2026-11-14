@@ -22,16 +22,30 @@
 use bevy::prelude::*;
 use bevy::text::TextBounds;
 use bevy_ggrs::prelude::*;
-use fixed_math::Vec2F;
 use render::{PLAYER_RENDER_SIZE, player_atlas_layout};
 use sim::{
-    Boomerang, GgrsCfg, MATCH_WIN_THRESHOLD, MatchScore, MatchState, Pickup, Player, PositionF,
-    PreviousPositionF, SelectedArena, VelocityF, arena_obstacles_for, arena_walls,
+    Boomerang, GgrsCfg, MATCH_WIN_THRESHOLD, MatchScore, MatchState, Pickup, Player, SelectedArena,
 };
 
 use crate::anchor::ScreenAnchor;
 use crate::netplay::NetplayConfig;
+use crate::ui;
+use crate::ui::in_band;
 use input_touch::WindowSize;
+
+// The screen's larger pieces, each in its own file. They see this
+// module's private items, and everything they export reads as
+// `crate::screen::…` as it always did.
+mod bot_offer;
+mod match_world;
+mod quit;
+mod summary;
+
+use bot_offer::*;
+pub(crate) use match_world::rebuild_match;
+use match_world::*;
+pub use quit::*;
+pub use summary::*;
 
 /// True while the player is sitting in an online room with no opponent yet
 /// (connecting or waiting for a peer). The whole "you wait alone at your
@@ -51,7 +65,8 @@ pub struct AwaitingPeer(pub bool);
 pub const BOT_OFFER_DELAY_SECS: f32 = 5.0;
 
 /// Whether the bot may be offered to a player still waiting for a peer.
-/// A summons that failed outright (`SummonFailed`) is offered at once —
+/// A summons that failed outright (`SummonFailed`, `PeerUnreachable`) is
+/// offered at once —
 /// there is nothing left to wait for.
 pub fn bot_offer_armed(waited_secs: f32, summons_failed: bool) -> bool {
     summons_failed || waited_secs >= BOT_OFFER_DELAY_SECS
@@ -75,6 +90,12 @@ pub struct BotOffer {
 /// re-enters InMatch on arrival with practice armed.
 #[derive(Resource, Default)]
 pub struct PendingBotMatch(pub bool);
+
+/// Set by FIND OPPONENT on the summary after First Blood: the Title passes
+/// it straight on into an online match, the way [`PendingBotMatch`] passes
+/// a bot match (practice has been disarmed on the way out).
+#[derive(Resource, Default)]
+pub struct PendingFindOpponent(pub bool);
 
 /// Which screen the app is showing. Both local and online builds boot into
 /// [`Title`](Self::Title); online starts the netplay lifecycle only after the
@@ -148,7 +169,9 @@ impl Plugin for ScreenPlugin {
             .init_resource::<VictoryPose>()
             .init_resource::<PendingUiThrow>()
             .init_resource::<PendingBotMatch>()
+            .init_resource::<PendingFindOpponent>()
             .init_resource::<QuitArm>()
+            .init_resource::<MatchOverSince>()
             .add_systems(Startup, spawn_overlays)
             .add_plugins(RollbackClockPlugin)
             .add_systems(OnEnter(AppScreen::InMatch), spawn_match)
@@ -163,6 +186,7 @@ impl Plugin for ScreenPlugin {
             .add_systems(
                 Update,
                 (
+                    track_match_over,
                     update_awaiting_peer,
                     update_bot_offer.after(update_awaiting_peer),
                     pick_arena.run_if(in_state(AppScreen::Title)),
@@ -206,430 +230,6 @@ fn update_victory_pose(
             1
         }
     });
-}
-
-/// Build a fresh local SyncTest session (2 local players, distinct per-handle
-/// inputs, input-delay 0) — the couch-versus / dev session. Inserted on match
-/// start; a fresh one each time so the rollback frame count restarts at 0.
-fn build_synctest_session() -> Session<GgrsCfg> {
-    let mut sb = SessionBuilder::<GgrsCfg>::new()
-        .with_num_players(2)
-        .expect("with_num_players")
-        .with_check_distance(2)
-        .with_input_delay(0);
-    for i in 0..2 {
-        sb = sb.add_player(PlayerType::Local, i).expect("add_player");
-    }
-    Session::SyncTest(sb.start_synctest_session().expect("synctest"))
-}
-
-/// `OnEnter(InMatch)`: spawn the two duelists, the arena walls, and the
-/// selected arena's props, then (couch only) install a fresh SyncTest session.
-/// Spawn order is fixed so rollback entity ids are bit-identical across hosts
-/// (CONVENTIONS § Determinism). Online leaves the session to `perform_swap`.
-#[allow(clippy::too_many_arguments)]
-fn spawn_match(
-    mut commands: Commands,
-    asset_server: Res<AssetServer>,
-    mut atlases: ResMut<Assets<TextureAtlasLayout>>,
-    selected: Res<SelectedArena>,
-    netplay: Res<NetplayConfig>,
-    practice: Res<crate::bot::PracticeMode>,
-    theater: Res<crate::theater::TheaterMode>,
-    flip: Res<render::PerspectiveFlip>,
-) {
-    // Rollback numbering restarts with every match. bevy_ggrs hashes each
-    // entity's registration index into the desync checksum and never
-    // forgets one, so without this two phones with different histories
-    // (one had played the bot first) disagree from frame 0 and the first
-    // checksum exchange calls a healthy duel a DESYNC.
-    commands.insert_resource(bevy_ggrs::RollbackOrdered::default());
-    let shadow_img = spawn_duelists(&mut commands, &asset_server, &mut atlases, flip.0);
-    spawn_arena(
-        &mut commands,
-        &asset_server,
-        &mut atlases,
-        &selected,
-        flip.0,
-        shadow_img,
-    );
-
-    // Theater: the tape drives a playback session (check_distance 0 +
-    // input_delay 0 — the snapshot-scrub requirements). Couch + practice:
-    // a fresh local session starts the sim from frame 0 (practice forces
-    // local even on an online build — the bot supplies handle 1). Online:
-    // the matchbox driver inserts the P2P session once the peer connects.
-    if theater.active() {
-        commands.insert_resource(crate::theater::build_playback_session());
-    } else if netplay.room_url.is_none() || practice.0 {
-        commands.insert_resource(build_synctest_session());
-    }
-}
-
-/// The two duelists (sprite, shadow, charge ring, aim telegraph), in the
-/// fixed handle order the rollback numbering depends on. Returns the
-/// shadow texture for the table's cover to share.
-fn spawn_duelists(
-    commands: &mut Commands,
-    asset_server: &AssetServer,
-    atlases: &mut Assets<TextureAtlasLayout>,
-    flip: f32,
-) -> Handle<Image> {
-    let layout = player_atlas_layout(atlases);
-    let sheets = [
-        (
-            0usize,
-            "sprites/players/duelist_a_sheet.png",
-            Vec2F::from_cm(0, -300),
-        ),
-        (
-            1usize,
-            "sprites/players/duelist_b_sheet.png",
-            Vec2F::from_cm(0, 300),
-        ),
-    ];
-    let shadow_img = asset_server.load("sprites/fx/shadow_blob.png");
-    let charge_ring_img = asset_server.load("sprites/fx/charge_ring.png");
-    for (handle, sheet, spawn) in sheets {
-        let (sx, sy) = spawn.to_f32();
-        let player = commands
-            .spawn((
-                MatchEntity,
-                Player { handle },
-                PositionF(spawn),
-                PreviousPositionF(spawn),
-                VelocityF(Vec2F::ZERO),
-                Sprite {
-                    image: asset_server.load(sheet),
-                    texture_atlas: Some(TextureAtlas {
-                        layout: layout.clone(),
-                        index: 0,
-                    }),
-                    custom_size: Some(Vec2::splat(PLAYER_RENDER_SIZE)),
-                    ..default()
-                },
-                Transform::default(),
-                // 2.5D: sort the duelist by its feet so a closer player draws
-                // over a farther one (and gets occluded by raised cover behind).
-                render::YSorted {
-                    foot_offset: PLAYER_FOOT_OFFSET,
-                },
-            ))
-            .id();
-        // A drop shadow under the feet — the cheapest "stands on the floor" cue.
-        render::spawn_ground_shadow(
-            commands,
-            shadow_img.clone(),
-            player,
-            PLAYER_FOOT_OFFSET,
-            PLAYER_RENDER_SIZE * 0.72,
-            Vec2::new(sx, render::tilt_y(sy * flip)),
-        );
-        // A charge ring under the feet — hidden until they wind up a throw,
-        // then it tightens + blooms toward full charge.
-        let aura = render::spawn_charge_aura(
-            commands,
-            charge_ring_img.clone(),
-            player,
-            PLAYER_FOOT_OFFSET,
-        );
-        commands.entity(aura).insert(MatchEntity);
-        // The aim telegraph — the public plant both duelists can read.
-        let beam = render::spawn_aim_telegraph(commands, player, handle);
-        commands.entity(beam).insert(MatchEntity);
-    }
-    shadow_img
-}
-
-/// The table itself: boundary walls, the arena's cover (collision body +
-/// raised 2.5D composite) and its props. Split from [`spawn_match`] so an
-/// online pair can lay it again once they agree on the table and know
-/// which edge each one sits at ([`rebuild_arena`]).
-fn spawn_arena(
-    commands: &mut Commands,
-    asset_server: &AssetServer,
-    atlases: &mut Assets<TextureAtlasLayout>,
-    selected: &SelectedArena,
-    flip: f32,
-    shadow_img: Handle<Image>,
-) {
-    // Arena boundary walls — fixed order for bit-identical entity ids.
-    for wall in arena_walls() {
-        commands.spawn((MatchEntity, wall));
-    }
-
-    // Inner cover (paintball-style Obstacle blocks): the invisible collision
-    // body + a raised 2.5D composite so the cover has real height. Fixed order
-    // (after the boundary, before props) keeps entity ids bit-identical across
-    // hosts — the visual composite spawns no rollback components, so its
-    // entities never enter the rollback id space.
-    for wall in arena_obstacles_for(selected.0) {
-        let (min_x, min_y_raw) = wall.rect.min.to_f32();
-        let (max_x, max_y_raw) = wall.rect.max.to_f32();
-        // Foreshorten the footprint Y into the tabletop tilt (visual only — the
-        // collision `wall` keeps its true coords). The block's RISE is a screen-
-        // vertical height scaled by its base row's depth, so far cover stands
-        // shorter than near cover — the same perspective the duelists obey.
-        // The footprint's WIDTH stays collision-true (the table's X axis is
-        // not projected), so a fang that visually clears a corner really does.
-        let y0 = render::tilt_y(min_y_raw * flip);
-        let y1 = render::tilt_y(max_y_raw * flip);
-        let (min_y, max_y) = if y0 < y1 { (y0, y1) } else { (y1, y0) };
-        let near_row = (min_y_raw * flip).min(max_y_raw * flip);
-        let rise = OBSTACLE_RISE * render::depth_scale(near_row);
-        commands.spawn((MatchEntity, wall));
-        spawn_obstacle_block(
-            commands,
-            shadow_img.clone(),
-            selected.0,
-            min_x,
-            min_y,
-            max_x,
-            max_y,
-            rise,
-        );
-    }
-
-    // Selected arena's props (pyres / chasm / doors) — tagged `ArenaProp`.
-    render::spawn_arena_props(commands, asset_server, atlases, selected, flip);
-}
-
-/// Online, after the table handshake and before the session starts: tear
-/// down what match entry laid and lay it again on the agreed table, now
-/// with this seat's `PerspectiveFlip` (the entry-time layout predates
-/// knowing which edge we sit at). The duelists are rebuilt too and the
-/// rollback numbering restarted, because entry numbered the props of
-/// whichever table THIS phone had picked — the two sides must number the
-/// agreed table identically. Runs on both peers, table changed or not; no
-/// session exists yet, so nothing here is rolled back.
-#[allow(clippy::type_complexity)]
-pub(crate) fn rebuild_match(
-    mut commands: Commands,
-    asset_server: Res<AssetServer>,
-    mut atlases: ResMut<Assets<TextureAtlasLayout>>,
-    selected: Res<SelectedArena>,
-    flip: Res<render::PerspectiveFlip>,
-    old: Query<
-        Entity,
-        Or<(
-            With<MatchEntity>,
-            With<render::ArenaProp>,
-            With<render::GroundShadow>,
-        )>,
-    >,
-) {
-    for entity in &old {
-        commands.entity(entity).despawn();
-    }
-    // Applied after the despawns, before the spawns' registration hooks.
-    commands.insert_resource(bevy_ggrs::RollbackOrdered::default());
-    let shadow_img = spawn_duelists(&mut commands, &asset_server, &mut atlases, flip.0);
-    spawn_arena(
-        &mut commands,
-        &asset_server,
-        &mut atlases,
-        &selected,
-        flip.0,
-        shadow_img,
-    );
-}
-
-/// Per-arena cover skin: the front-face and lid colors plus which motif the
-/// lid carries. Flat quads still sell the 2.5D read (dither at this scale is
-/// noise — the validated depth mock); *identity* comes from the register and
-/// one quiet motif per arena, so a crate, a pillar, a reliquary bar, a pit
-/// stone, and a museum plinth stop being the same gray box everywhere.
-struct CoverSkin {
-    front: Color,
-    top: Color,
-    motif: CoverMotif,
-}
-
-enum CoverMotif {
-    /// Anchor: rope lashing across the crate lid (an X of thin straps).
-    Lashing,
-    /// Crossing: two vertical flutes carved into the pillar's front face.
-    Flutes,
-    /// Reliquary: the sealed teal seam along the bar's long axis.
-    Seam,
-    /// The Pit: an ember crack — the stone remembers the strikes.
-    Crack,
-    /// The Gallery: the lit bone rim on the plinth's near lid edge.
-    PlinthRim,
-}
-
-fn cover_skin(arena: sim::ArenaId) -> CoverSkin {
-    use render::palette as pal;
-    match arena {
-        sim::ArenaId::Anchor => CoverSkin {
-            front: pal::BRUISE_SHADOW,
-            top: pal::WARM_BONE_SHADE,
-            motif: CoverMotif::Lashing,
-        },
-        sim::ArenaId::Crossing => CoverSkin {
-            front: pal::DEEP_ASH,
-            top: pal::COLD_STONE,
-            motif: CoverMotif::Flutes,
-        },
-        sim::ArenaId::Reliquary => CoverSkin {
-            front: pal::BRUISE_SHADOW,
-            top: pal::WARM_BONE_SHADE,
-            motif: CoverMotif::Seam,
-        },
-        sim::ArenaId::Pit => CoverSkin {
-            front: pal::CHARCOAL_LINE,
-            top: pal::BRUISE_SHADOW,
-            motif: CoverMotif::Crack,
-        },
-        sim::ArenaId::Gallery => CoverSkin {
-            front: pal::DEEP_ASH,
-            top: pal::COLD_STONE,
-            motif: CoverMotif::PlinthRim,
-        },
-        // No obstacles on these rosters today; a sane default if one lands.
-        sim::ArenaId::Vigil | sim::ArenaId::Forest => CoverSkin {
-            front: pal::CHARCOAL_LINE,
-            top: pal::COLD_STONE,
-            motif: CoverMotif::PlinthRim,
-        },
-    }
-}
-
-/// Spawn the raised-cover composite for one obstacle footprint: a cast shadow,
-/// a void silhouette, a shaded front face, a contact/AO band, and the lit top
-/// face — colored and marked per arena via [`cover_skin`]. Flat-color quads;
-/// the *height* + outline + shadow are what sell the 2.5D read. Sorted by the
-/// front (nearest) base via [`render::ground_z`] so a duelist behind the block
-/// is occluded and one in front draws over it. All quads are tagged
-/// `MatchEntity` for teardown and carry no rollback components.
-#[allow(clippy::too_many_arguments)]
-fn spawn_obstacle_block(
-    commands: &mut Commands,
-    shadow_img: Handle<Image>,
-    arena: sim::ArenaId,
-    min_x: f32,
-    min_y: f32,
-    max_x: f32,
-    max_y: f32,
-    rise: f32,
-) {
-    let w = max_x - min_x;
-    let d = max_y - min_y;
-    let cx = (min_x + max_x) * 0.5;
-    let total_h = rise + d;
-    let z = render::ground_z(min_y);
-    let skin = cover_skin(arena);
-
-    let mut quad = |color: Color, size: Vec2, center: Vec2, zz: f32, angle: f32| {
-        commands.spawn((
-            MatchEntity,
-            Sprite {
-                color,
-                custom_size: Some(size),
-                ..default()
-            },
-            Transform::from_xyz(center.x, center.y, zz).with_rotation(Quat::from_rotation_z(angle)),
-        ));
-    };
-    // Void silhouette → front → contact → top → motif; explicit z orders it.
-    quad(
-        render::palette::VOID,
-        Vec2::new(w + 6.0, total_h + 6.0),
-        Vec2::new(cx, min_y + total_h * 0.5),
-        z - 0.002,
-        0.0,
-    );
-    quad(
-        skin.front,
-        Vec2::new(w, rise),
-        Vec2::new(cx, min_y + rise * 0.5),
-        z,
-        0.0,
-    );
-    quad(
-        render::palette::BRUISE_SHADOW,
-        Vec2::new(w, 4.0),
-        Vec2::new(cx, min_y + 2.0),
-        z + 0.001,
-        0.0,
-    );
-    let lid_c = Vec2::new(cx, min_y + rise + d * 0.5);
-    quad(skin.top, Vec2::new(w, d), lid_c, z + 0.001, 0.0);
-    // The motif rides just above the lid (and the flutes above the front).
-    let mz = z + 0.0015;
-    match skin.motif {
-        CoverMotif::Lashing => {
-            let len = (w * w + d * d).sqrt() - 6.0;
-            let angle = (d / w).atan();
-            quad(
-                render::palette::CHARCOAL_LINE,
-                Vec2::new(len, 3.0),
-                lid_c,
-                mz,
-                angle,
-            );
-            quad(
-                render::palette::CHARCOAL_LINE,
-                Vec2::new(len, 3.0),
-                lid_c,
-                mz,
-                -angle,
-            );
-        }
-        CoverMotif::Flutes => {
-            for side in [-1.0f32, 1.0] {
-                quad(
-                    render::palette::BRUISE_SHADOW,
-                    Vec2::new((w / 6.0).max(2.0), rise - 4.0),
-                    Vec2::new(cx + side * w * 0.25, min_y + rise * 0.5),
-                    mz,
-                    0.0,
-                );
-            }
-        }
-        CoverMotif::Seam => {
-            let along_x = w >= d;
-            let size = if along_x {
-                Vec2::new(w - 6.0, 2.0)
-            } else {
-                Vec2::new(2.0, d - 6.0)
-            };
-            quad(render::palette::DEEP_TEAL, size, lid_c, mz, 0.0);
-        }
-        CoverMotif::Crack => {
-            quad(
-                render::palette::EMBER,
-                Vec2::new(w.min(d) * 0.9, 2.0),
-                lid_c,
-                mz,
-                0.6,
-            );
-        }
-        CoverMotif::PlinthRim => {
-            quad(
-                render::palette::BONE,
-                Vec2::new(w, 2.0),
-                Vec2::new(cx, min_y + rise + 1.0),
-                mz,
-                0.0,
-            );
-        }
-    }
-
-    // Cast shadow on the floor, nudged toward the bottom-right (light top-left),
-    // below the ground-actor band so a duelist in front steps over it.
-    let mut shadow_color = Color::WHITE;
-    shadow_color.set_alpha(render::GROUND_SHADOW_ALPHA);
-    commands.spawn((
-        MatchEntity,
-        Sprite {
-            image: shadow_img,
-            color: shadow_color,
-            custom_size: Some(Vec2::new(w * 1.15, d * 0.9)),
-            ..default()
-        },
-        Transform::from_xyz(cx + 8.0, min_y + d * 0.15, -0.45),
-    ));
 }
 
 /// `OnExit(InMatch)`: practice is a per-entry choice, not a sticky mode.
@@ -791,33 +391,27 @@ const TITLE_BODY_WIDTH: f32 = 1080.0;
 // mode toggle 0.68–0.74 · private dial 0.75–0.81 · primary 0.82–0.93,
 // which stops clear of the phone's nav-bar / gesture strip (~last 6%).
 
-/// The line under the diorama: the arena name (couch, tappable to cycle)
-/// or the career record (online).
-const SUBLINE_RECT: (f32, f32) = (0.52, 0.58);
-const SUBLINE_ANCHOR_Y: f32 = 1.0 - 2.0 * 0.55;
-/// PRACTICE · REPLAYS · SETTINGS share one row, split on window-x.
-const SECONDARY_ROW_RECT: (f32, f32) = (0.59, 0.66);
-const SECONDARY_ANCHOR_Y: f32 = 1.0 - 2.0 * 0.625;
+// The bands themselves live in `ui::title` (one table, overlap-tested);
+// these names keep the call sites short.
+const SUBLINE_RECT: ui::Band = ui::title::SUBLINE;
+const SUBLINE_ANCHOR_Y: f32 = ui::band_anchor_y(SUBLINE_RECT);
+const SECONDARY_ROW_RECT: ui::Band = ui::title::SECONDARY_ROW;
+const SECONDARY_ANCHOR_Y: f32 = ui::band_anchor_y(SECONDARY_ROW_RECT);
+/// PRACTICE · RIVALS · REPLAYS · SETTINGS split the secondary row on
+/// window-x at these fractions.
 const SECONDARY_PRACTICE_X: f32 = 0.26;
 const SECONDARY_RIVALS_X: f32 = 0.50;
 const SECONDARY_REPLAYS_X: f32 = 0.74;
-/// QUICK MATCH | PRIVATE, sitting directly on top of the button it
-/// relabels (room_code.rs draws it; the adjacency is the explanation).
-pub const MODE_TOGGLE_RECT: (f32, f32) = (0.68, 0.74);
-pub const MODE_TOGGLE_ANCHOR_Y: f32 = 1.0 - 2.0 * 0.71;
-/// The private dial's row — empty while QUICK MATCH is selected.
-pub const DIAL_RECT: (f32, f32) = (0.75, 0.81);
-pub const DIAL_ANCHOR_Y: f32 = 1.0 - 2.0 * 0.78;
-const PLAY_BTN_RECT: (f32, f32) = (0.82, 0.93);
-const PLAY_ANCHOR_Y: f32 = 1.0 - 2.0 * 0.875;
-
-/// One top strip, one meaning, every screen: tapping it goes BACK — leave
-/// the online match, back to the couch lobby, exit the tape. Starts below
-/// any camera cutout/status bar (the v9 device pass moved every target off
-/// the notch; keep it that way).
-pub const TOP_EXIT_BAND: (f32, f32) = (0.05, 0.16);
+pub const MODE_TOGGLE_RECT: ui::Band = ui::title::MODE_TOGGLE;
+pub const MODE_TOGGLE_ANCHOR_Y: f32 = ui::band_anchor_y(MODE_TOGGLE_RECT);
+pub const DIAL_RECT: ui::Band = ui::title::DIAL;
+pub const DIAL_ANCHOR_Y: f32 = ui::band_anchor_y(DIAL_RECT);
+const PLAY_BTN_RECT: ui::Band = ui::title::PLAY;
+const PLAY_ANCHOR_Y: f32 = ui::band_anchor_y(PLAY_BTN_RECT);
+/// The app-wide BACK strip (`ui::TOP_EXIT`).
+pub const TOP_EXIT_BAND: ui::Band = ui::TOP_EXIT;
 /// Screen-anchor Y for whatever labels the top-exit strip.
-pub const TOP_EXIT_ANCHOR_Y: f32 = 1.0 - (TOP_EXIT_BAND.0 + TOP_EXIT_BAND.1);
+pub const TOP_EXIT_ANCHOR_Y: f32 = ui::band_anchor_y(TOP_EXIT_BAND);
 
 /// Which title action a button fires.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -842,11 +436,6 @@ pub enum BtnRole {
     Border,
     Fill,
     Label,
-}
-
-/// True if a touch at window-fraction `y_down` fell in a button band.
-fn in_band(y_down: f32, band: (f32, f32)) -> bool {
-    y_down >= band.0 && y_down < band.1
 }
 
 /// Spawn one piece of a bordered box button. `insert_marker` stamps the
@@ -1055,12 +644,11 @@ fn pick_arena(
         next.set(AppScreen::ArenaSelect);
         return;
     }
-    let win = window.0;
-    if win.y > 0.0
-        && touches
-            .iter_just_pressed()
-            .any(|t| in_band(t.position().y / win.y, SUBLINE_RECT))
-    {
+    if ui::tapped(
+        touches.iter_just_pressed().map(|t| t.position()),
+        SUBLINE_RECT,
+        window.0,
+    ) {
         next.set(AppScreen::ArenaSelect);
     }
 }
@@ -1068,6 +656,7 @@ fn pick_arena(
 /// The single title input handler: keyboard shortcuts plus taps dispatched to
 /// the visible button bands. No more invisible screen-half zones — a touch
 /// only does something when it lands on the PLAY or PRACTICE button.
+#[allow(clippy::too_many_arguments)]
 fn title_buttons_input(
     keys: Res<ButtonInput<KeyCode>>,
     touches: Res<Touches>,
@@ -1075,12 +664,15 @@ fn title_buttons_input(
     mut next: ResMut<NextState<AppScreen>>,
     mut practice: ResMut<crate::bot::PracticeMode>,
     mut pending_bot: ResMut<PendingBotMatch>,
+    mut pending_find: ResMut<PendingFindOpponent>,
     mut autostart: Local<Option<Option<AppScreen>>>,
 ) {
     // A bot fallback tapped mid-wait lands on the Title for one frame:
-    // go straight back in with practice armed.
-    if pending_bot.0 {
+    // go straight back in with practice armed. FIND OPPONENT after the
+    // lesson lands here the same way, practice off.
+    if pending_bot.0 || pending_find.0 {
         pending_bot.0 = false;
+        pending_find.0 = false;
         next.set(AppScreen::InMatch);
         return;
     }
@@ -1274,11 +866,11 @@ fn back_to_lobby(
     }
     // Escape (desktop) or the labeled LOBBY strip — the one universal
     // top-exit band every screen shares.
-    let win = window.0;
-    let tapped = win.y > 0.0
-        && touches
-            .iter_just_pressed()
-            .any(|t| in_band(t.position().y / win.y, TOP_EXIT_BAND));
+    let tapped = ui::tapped(
+        touches.iter_just_pressed().map(|t| t.position()),
+        TOP_EXIT_BAND,
+        window.0,
+    );
     if keys.just_pressed(KeyCode::Escape) || tapped {
         next.set(AppScreen::Title);
     }
@@ -1291,13 +883,16 @@ fn update_awaiting_peer(
     practice: Res<crate::bot::PracticeMode>,
     theater: Res<crate::theater::TheaterMode>,
     lobby: Res<net::LobbyState>,
+    sync: Res<crate::netplay::SyncWait>,
     mut awaiting: ResMut<AwaitingPeer>,
 ) {
+    // Paired but not yet synchronized is still waiting: the challenger
+    // has not arrived until their first frame has.
     awaiting.0 = *screen.get() == AppScreen::InMatch
         && netplay.room_url.is_some()
         && !practice.0
         && !theater.active()
-        && !lobby.is_in_match();
+        && (!lobby.is_in_match() || sync.waiting());
 }
 
 /// Arm PLAY THE BOT only once the summons has actually hung (or failed).
@@ -1313,7 +908,10 @@ fn update_bot_offer(
     }
     let now = time.elapsed_secs();
     let since = *offer.since.get_or_insert(now);
-    let failed = matches!(*lobby, net::LobbyState::SummonFailed);
+    let failed = matches!(
+        *lobby,
+        net::LobbyState::SummonFailed | net::LobbyState::PeerUnreachable
+    );
     offer.armed = bot_offer_armed(now - since, failed);
 }
 
@@ -1378,7 +976,7 @@ fn update_title_overlay(
         // this side's offer in the table handshake. The career
         // record joins it once there is one.
         let online = netplay.room_url.is_some();
-        let arena_line = format!("< {} >", arena_name(selected.0));
+        let arena_line = format!("< {} >", render::arena::info(selected.0).name);
         text.0 = if online && career.total() > 0 {
             format!("{arena_line}\ncareer {}W-{}L", career.wins, career.losses)
         } else {
@@ -1386,779 +984,6 @@ fn update_title_overlay(
         };
     } else {
         *vis = Visibility::Hidden;
-    }
-}
-
-/// Compose the MatchOver summary CARD — the facts only (winner, score,
-/// rivalry, the fled note, the saved-tape note). The ACTIONS live on real
-/// buttons now (`update_summary_buttons`): the card never again instructs
-/// a phone player to "press ESC" or tap an invisible zone. Pure for tests.
-#[allow(clippy::too_many_arguments)]
-fn summary_text(
-    score: MatchScore,
-    online: bool,
-    practice: bool,
-    theater_names: Option<[Option<String>; 2]>,
-    local_handle: Option<usize>,
-    local_name: &str,
-    peer: Option<net::ProfileData>,
-    rivalry: Option<String>,
-    opponent_gone: bool,
-    we_fled: bool,
-    desynced: bool,
-    unfinished: bool,
-    saved: bool,
-) -> String {
-    let p0_won = score.p0 >= MATCH_WIN_THRESHOLD;
-
-    // Theater: the tape ran out — say who won it; the marquee up top is
-    // already the way out.
-    if let Some(names) = theater_names {
-        let idx = if p0_won { 0 } else { 1 };
-        let fallback = if p0_won { "CUR" } else { "STAG" };
-        let who = names[idx].clone().unwrap_or_else(|| fallback.to_string());
-        return format!("{who} WINS\n\n{}  -  {}\n\nTAPE ENDS", score.p0, score.p1);
-    }
-
-    if !online || practice {
-        let winner = winner_label(score);
-        let replay_line = if saved { "\n\nreplay saved" } else { "" };
-        return format!("{winner}\n\n{}  -  {}{replay_line}", score.p0, score.p1);
-    }
-
-    // Online: name the winner by who they ARE when we know it. An earned
-    // score is the verdict; a forfeit goes to whoever stayed at the table
-    // (same rule the grudge ledger scores by) — the old score-only check
-    // crowned the FLED player whenever nobody had reached the threshold.
-    // A desync: this phone's score is not a fact the other phone shares.
-    // Say so, crown nobody, and promise no tape and no ledger line.
-    if desynced {
-        return format!(
-            "THE TWO PHONES STOPPED AGREEING\n\n{}  -  {}\n\nthis one doesn't count",
-            score.p0, score.p1
-        );
-    }
-    let me = local_handle.unwrap_or(0);
-    let peer_name = crate::profile::peer_name(peer);
-    let threshold_hit = score.p0 >= MATCH_WIN_THRESHOLD || score.p1 >= MATCH_WIN_THRESHOLD;
-    let i_won = if threshold_hit {
-        if me == 0 { p0_won } else { !p0_won }
-    } else {
-        opponent_gone && !we_fled
-    };
-    let winner = if i_won {
-        format!("{local_name} WINS")
-    } else {
-        format!("{peer_name} WINS")
-    };
-    let rivalry_line = rivalry.map(|r| format!("\n{r}")).unwrap_or_default();
-    // Nobody reached the threshold, nobody conceded, and we did not freeze:
-    // a dropped link is not a result. Crown nobody.
-    //
-    // `!threshold_hit` is load-bearing and matches `grudge::match_outcome`,
-    // which tests the score BEFORE the forfeit: a peer whose link dies in
-    // the same window as the deciding kill still lost 5-2, and this card
-    // read CONNECTION LOST over a win the ledger had already banked.
-    if unfinished && !threshold_hit {
-        return format!(
-            "CONNECTION LOST\n\n{}  -  {}{rivalry_line}\n\nunfinished - nobody's win",
-            score.p0, score.p1
-        );
-    }
-    let gone_line = if opponent_gone {
-        if we_fled {
-            "\n\nmatch abandoned - you left the duel"
-        } else {
-            "\n\nthe field is yours"
-        }
-    } else {
-        ""
-    };
-    let replay_line = if saved { "\nreplay saved" } else { "" };
-    format!(
-        "{winner}\n\n{}  -  {}{rivalry_line}{gone_line}{replay_line}",
-        score.p0, score.p1
-    )
-}
-
-/// The primary summary button's label — the RUN IT BACK handshake as a
-/// state machine the thumb can read. A gone opponent flips the slot to the
-/// bot offer (`bot_fallback_input` owns that tap); `None` is kept for any
-/// state that must hide the button outright. Pure for tests.
-pub fn primary_label(
-    online: bool,
-    practice: bool,
-    consent: net::RematchConsent,
-    peer_name: &str,
-    opponent_gone: bool,
-) -> Option<String> {
-    if !online || practice {
-        return Some("PLAY AGAIN".to_string());
-    }
-    if opponent_gone {
-        // Nobody left to run it back with — offer the opponent who never
-        // leaves instead. `bot_fallback_input` owns the tap.
-        return Some("PLAY THE BOT".to_string());
-    }
-    Some(match (consent.local, consent.peer) {
-        (false, false) => "RUN IT BACK".to_string(),
-        (true, false) => format!("WAITING ON {peer_name}..."),
-        (false, true) => format!("{peer_name} IS IN - RUN IT BACK"),
-        (true, true) => "RUNNING IT BACK...".to_string(),
-    })
-}
-
-#[allow(clippy::too_many_arguments)]
-fn update_summary_overlay(
-    screen: Res<State<AppScreen>>,
-    state: Res<MatchState>,
-    score: Res<MatchScore>,
-    netplay: Res<NetplayConfig>,
-    practice: Res<crate::bot::PracticeMode>,
-    theater: Res<crate::theater::TheaterMode>,
-    local: Res<crate::netplay::LocalPlayerHandle>,
-    profile: Res<crate::profile::LocalProfile>,
-    peer: Res<net::PeerProfile>,
-    career: Res<crate::grudge::CareerRecord>,
-    lobby: Res<net::LobbyState>,
-    saved: Res<crate::recorder::LastSavedReplay>,
-    absence: Res<crate::netplay::RecentAbsence>,
-    time: Res<Time<Real>>,
-    mut q: Query<(&mut Text2d, &mut Visibility), With<SummaryOverlay>>,
-) {
-    let Ok((mut text, mut vis)) = q.single_mut() else {
-        return;
-    };
-    // Belt and braces with the reset in `despawn_match`: the card is a
-    // MATCH screen element, so it checks the screen too. It used to key on
-    // MatchState alone and burned itself onto the title and the replay list.
-    if *screen.get() == AppScreen::InMatch && matches!(*state, MatchState::MatchOver) {
-        *vis = Visibility::Visible;
-        let opponent_gone = matches!(*lobby, net::LobbyState::Forfeited { .. });
-        let desynced = matches!(*lobby, net::LobbyState::Desynced { .. });
-        // If OUR phone went away just before the forfeit, the walk-out is
-        // ours — the card owns the blame line (the summoning overlay that
-        // used to carry it stands down at MatchOver).
-        let we_fled = opponent_gone
-            && absence.within(
-                time.elapsed_secs(),
-                crate::netplay::RecentAbsence::FORFEIT_BLAME_SECS,
-            );
-        // A silent drop nobody conceded and we did not cause: unfinished,
-        // the same verdict the ledger reaches (`grudge::match_outcome`).
-        let unfinished = matches!(
-            *lobby,
-            net::LobbyState::Forfeited {
-                conceded: false,
-                ..
-            }
-        ) && !we_fled;
-        text.0 = summary_text(
-            *score,
-            netplay.room_url.is_some(),
-            practice.0,
-            theater.active().then(|| theater.header_names()),
-            local.0,
-            &profile.name_string(),
-            peer.0,
-            career.rivalry_line(peer.0),
-            opponent_gone,
-            we_fled,
-            desynced,
-            unfinished,
-            saved.0.is_some(),
-        );
-    } else {
-        *vis = Visibility::Hidden;
-    }
-}
-
-// ---- Summary action buttons ----
-// The endgame's actions are BUTTONS, not instructions: the touch controls
-// hide at MatchOver, so "tap THROW" pointed at an invisible zone, and
-// "press ESC" pointed at a key the phone doesn't have. The primary button
-// carries the whole RUN IT BACK handshake state; the top strip is the one
-// universal BACK gesture, labeled.
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum SummaryAction {
-    /// PLAY AGAIN (couch/practice) / the RUN IT BACK handshake (online).
-    Primary,
-    /// The labeled top-exit strip: LOBBY (couch/practice) / LEAVE (online).
-    Exit,
-}
-
-#[derive(Component)]
-struct SummaryButton {
-    action: SummaryAction,
-    role: BtnRole,
-}
-
-/// A tap on PLAY AGAIN must become a real THROW input so the in-sim
-/// `apply_rematch` restarts the match the rollback-correct way. The tap
-/// arms this counter; `inject_ui_throw` (ReadInputs) ORs THROW_DOWN into
-/// the local player's input while it runs down — a held press with a clean
-/// rising edge, exactly as if the thumb had pressed the throw zone.
-#[derive(Resource, Default)]
-pub struct PendingUiThrow(pub u8);
-
-/// Frames the injected press holds. A few ticks survive the forgiveness
-/// window and any same-frame ordering; release follows for a clean edge
-/// next time.
-const UI_THROW_FRAMES: u8 = 4;
-
-pub fn inject_ui_throw(
-    mut pending: ResMut<PendingUiThrow>,
-    local_players: Res<bevy_ggrs::LocalPlayers>,
-    inputs: Option<ResMut<bevy_ggrs::LocalInputs<sim::GgrsCfg>>>,
-) {
-    if pending.0 == 0 {
-        return;
-    }
-    let Some(mut inputs) = inputs else {
-        return;
-    };
-    pending.0 -= 1;
-    // Couch has two local handles; P0's press restarts for everyone
-    // (apply_rematch fires on either player's edge).
-    if let Some(&handle) = local_players.0.first()
-        && let Some(input) = inputs.0.get_mut(&handle)
-    {
-        input.buttons |= sim::PlayerInput::THROW_DOWN;
-    }
-}
-
-fn spawn_summary_buttons(commands: &mut Commands) {
-    // Primary sits in the PLAY slot — the same thumb position that started
-    // the match offers to restart it.
-    for role in [BtnRole::Border, BtnRole::Fill, BtnRole::Label] {
-        spawn_button_part(
-            commands,
-            role,
-            Vec2::new(0.0, PLAY_ANCHOR_Y),
-            Vec2::new(760.0, 150.0),
-            44.0,
-            &mut |ec, role| {
-                ec.insert(SummaryButton {
-                    action: SummaryAction::Primary,
-                    role,
-                });
-            },
-        );
-    }
-    for role in [BtnRole::Border, BtnRole::Fill, BtnRole::Label] {
-        spawn_button_part(
-            commands,
-            role,
-            Vec2::new(0.0, TOP_EXIT_ANCHOR_Y),
-            Vec2::new(340.0, 76.0),
-            30.0,
-            &mut |ec, role| {
-                ec.insert(SummaryButton {
-                    action: SummaryAction::Exit,
-                    role,
-                });
-            },
-        );
-    }
-}
-
-// ---- The in-match QUIT button ----
-// Live play had no exit at all: the top strip is the TAUNT zone, Escape and
-// the top-exit band only work at MatchOver, and the online SUMMONING wait
-// could hold a player hostage forever. A small corner rect (the quit zone,
-// carved out of the taunt strip in `input_touch` so a tap there never
-// flexes) carries a bordered QUIT chip: first tap arms it (SURE?), second
-// tap within the window quits. Quitting a live online duel records an
-// honest loss first — same blame the away-grace forfeit assigns.
-
-/// Armed-confirm state: `Some(elapsed_secs)` while the first tap waits for
-/// its confirmation.
-#[derive(Resource, Default)]
-pub struct QuitArm(pub Option<f32>);
-
-/// Seconds the armed state waits for the confirming tap.
-const QUIT_CONFIRM_SECS: f32 = 2.5;
-
-/// Screen-anchor X of the quit chip: the center of the quit-zone rect
-/// ([QUIT_ZONE_X_FRAC, 1.0] in window fractions, mapped to [-1, 1]).
-const QUIT_BTN_ANCHOR_X: f32 = input_touch::QUIT_ZONE_X_FRAC;
-
-#[derive(Component)]
-struct QuitButton {
-    role: BtnRole,
-}
-
-fn spawn_quit_button(commands: &mut Commands) {
-    for role in [BtnRole::Border, BtnRole::Fill, BtnRole::Label] {
-        spawn_button_part(
-            commands,
-            role,
-            Vec2::new(QUIT_BTN_ANCHOR_X, TOP_EXIT_ANCHOR_Y),
-            Vec2::new(190.0, 62.0),
-            24.0,
-            &mut |ec, role| {
-                ec.insert(QuitButton { role });
-            },
-        );
-    }
-}
-
-/// The quit label states, pure for tests: the summoning wait needs no
-/// confirmation (nothing at stake yet), a live match asks twice.
-pub fn quit_label(awaiting: bool, armed: bool) -> &'static str {
-    if awaiting {
-        "CANCEL"
-    } else if armed {
-        "SURE?"
-    } else {
-        "QUIT"
-    }
-}
-
-/// Taps on the quit corner (and Escape on desktop) — the arm/confirm state
-/// machine plus the actual teardown. Exclusive-world because the online
-/// leave touches the non-send socket.
-fn quit_button_input(world: &mut World) {
-    if world.resource::<crate::theater::TheaterMode>().active() {
-        return; // the theater's marquee owns the exit gesture
-    }
-    if matches!(*world.resource::<MatchState>(), MatchState::MatchOver) {
-        // The summary's LEAVE/LOBBY buttons own the endgame; a stale arm
-        // must not leak into the next match.
-        world.resource_mut::<QuitArm>().0 = None;
-        return;
-    }
-    let now = world.resource::<Time<Real>>().elapsed_secs();
-    {
-        let mut arm = world.resource_mut::<QuitArm>();
-        if let Some(at) = arm.0
-            && now - at > QUIT_CONFIRM_SECS
-        {
-            arm.0 = None;
-        }
-    }
-
-    let esc = world
-        .resource::<ButtonInput<KeyCode>>()
-        .just_pressed(KeyCode::Escape);
-    let win = world.resource::<WindowSize>().0;
-    let southpaw = world.resource::<input_touch::Southpaw>().0;
-    let tapped = win.y > 0.0
-        && world.resource::<Touches>().iter_just_pressed().any(|t| {
-            let p = if southpaw {
-                input_touch::mirror_x(t.position(), win)
-            } else {
-                t.position()
-            };
-            input_touch::is_quit_zone(p, win)
-        });
-    if !(esc || tapped) {
-        return;
-    }
-
-    // Waiting alone in an online room stakes nothing — one tap cancels.
-    let awaiting = world.resource::<AwaitingPeer>().0;
-    if !awaiting && world.resource::<QuitArm>().0.is_none() {
-        world.resource_mut::<QuitArm>().0 = Some(now);
-        return;
-    }
-    world.resource_mut::<QuitArm>().0 = None;
-
-    let online = world.resource::<NetplayConfig>().room_url.is_some()
-        && !world.resource::<crate::bot::PracticeMode>().0;
-    if online {
-        // Abandoning a live duel is a loss, filed before the goodbye. A
-        // pre-swap wait (no session yet) or a peer who already fled stakes
-        // no result.
-        let established = world
-            .resource::<crate::netplay::LocalPlayerHandle>()
-            .0
-            .is_some();
-        let peer_fled = world.resource::<net::LobbyState>().is_terminal();
-        if established && !peer_fled {
-            let peer = world.resource::<net::PeerProfile>().0;
-            let mut record = world.resource_mut::<crate::grudge::CareerRecord>();
-            crate::grudge::record_abandoned_loss(&mut record, peer);
-        }
-        crate::netplay::leave_online_match(world);
-    } else if world.resource::<crate::bot::PracticeMode>().0
-        && world.resource::<crate::bot::ShadeStyle>().0.is_none()
-        && matches!(
-            *world.resource::<MatchState>(),
-            MatchState::InRound { .. } | MatchState::RoundOver { .. }
-        )
-    {
-        // Quitting a live gauntlet match is a loss — the same rule as the
-        // duel above. The countdown stakes nothing; a shade spar moves
-        // nothing.
-        let mut record = world.resource_mut::<crate::grudge::CareerRecord>();
-        crate::grudge::record_gauntlet_quit(&mut record);
-    }
-    world
-        .resource_mut::<NextState<AppScreen>>()
-        .set(AppScreen::Title);
-}
-
-type QuitButtonQuery<'w, 's> = Query<
-    'w,
-    's,
-    (
-        &'static QuitButton,
-        &'static mut Visibility,
-        &'static mut ScreenAnchor,
-        Option<&'static mut Sprite>,
-        Option<&'static mut Text2d>,
-        Option<&'static mut TextColor>,
-    ),
->;
-
-fn update_quit_button(
-    screen: Res<State<AppScreen>>,
-    state: Res<MatchState>,
-    theater: Res<crate::theater::TheaterMode>,
-    awaiting: Res<AwaitingPeer>,
-    arm: Res<QuitArm>,
-    southpaw: Res<input_touch::Southpaw>,
-    mut q: QuitButtonQuery,
-) {
-    let shown = *screen.get() == AppScreen::InMatch
-        && !matches!(*state, MatchState::MatchOver)
-        && !theater.active();
-    let armed = arm.0.is_some();
-    // Southpaw mirrors the quit corner to the top-left with the other zones.
-    let anchor_x = if southpaw.0 {
-        -QUIT_BTN_ANCHOR_X
-    } else {
-        QUIT_BTN_ANCHOR_X
-    };
-    for (btn, mut vis, mut anchor, sprite, text, color) in &mut q {
-        *vis = if shown {
-            Visibility::Visible
-        } else {
-            Visibility::Hidden
-        };
-        if !shown {
-            continue;
-        }
-        anchor.frac.x = anchor_x;
-        match btn.role {
-            BtnRole::Border => {
-                if let Some(mut s) = sprite {
-                    s.color = render::palette::HOT_BONE.with_alpha(if armed { 1.0 } else { 0.55 });
-                }
-            }
-            BtnRole::Fill => {
-                if let Some(mut s) = sprite {
-                    s.color = if armed {
-                        render::palette::HOT_BONE
-                    } else {
-                        render::palette::DEEP_ASH.with_alpha(0.75)
-                    };
-                }
-            }
-            BtnRole::Label => {
-                if let Some(mut t) = text {
-                    t.0 = quit_label(awaiting.0, armed).to_string();
-                }
-                if let Some(mut c) = color {
-                    c.0 = if armed {
-                        render::palette::VOID
-                    } else {
-                        render::palette::HOT_BONE.with_alpha(0.75)
-                    };
-                }
-            }
-        }
-    }
-}
-
-// ---- The bot fallback ----
-// "Play against a bot" must stay one tap away in every state, including
-// the two online states that used to strand a player without it: the
-// waiting room (the summons can hang forever if nobody else is online) and
-// the fled-opponent summary (whose primary slot was dead). Both convert to
-// a practice match on the spot.
-
-/// The waiting room's bot offer. Shown only while [`AwaitingPeer`] is up,
-/// in the PLAY slot — the thumb that just tapped FIND OPPONENT is already
-/// there, and the touch overlays hide while awaiting so the band is free.
-#[derive(Component)]
-struct BotOfferButton {
-    role: BtnRole,
-}
-
-fn spawn_bot_offer_button(commands: &mut Commands) {
-    for role in [BtnRole::Border, BtnRole::Fill, BtnRole::Label] {
-        spawn_button_part(
-            commands,
-            role,
-            Vec2::new(0.0, PLAY_ANCHOR_Y),
-            Vec2::new(760.0, 150.0),
-            44.0,
-            &mut |ec, role| {
-                ec.insert(BotOfferButton { role });
-            },
-        );
-    }
-}
-
-/// Show the waiting room's PLAY THE BOT button while the summons hangs.
-/// The fled-opponent summary offers the same escape through the summary
-/// primary (`primary_label`), so this one keys off [`AwaitingPeer`] alone.
-fn update_bot_offer_button(
-    offer: Res<BotOffer>,
-    mut q: Query<(&BotOfferButton, &mut Visibility, Option<&mut Text2d>)>,
-) {
-    for (btn, mut vis, text) in &mut q {
-        *vis = if offer.armed {
-            Visibility::Visible
-        } else {
-            Visibility::Hidden
-        };
-        if offer.armed
-            && btn.role == BtnRole::Label
-            && let Some(mut t) = text
-        {
-            t.0 = "PLAY THE BOT".to_string();
-        }
-    }
-}
-
-/// A tap in the PLAY slot (or P) while the bot is on offer: arm practice,
-/// fold the online attempt, and bounce through Title — [`PendingBotMatch`]
-/// re-enters InMatch on arrival, so the full teardown/spawn path runs
-/// (sessionless clock reset included) instead of a hand-rolled in-place
-/// session swap. Exclusive-world because the teardown touches the
-/// non-send socket. No result is recorded: the wait staked nothing, and a
-/// fled opponent's forfeit was filed when they fled.
-fn bot_fallback_input(world: &mut World) {
-    if world.resource::<crate::theater::TheaterMode>().active() {
-        return;
-    }
-    let online = world.resource::<NetplayConfig>().room_url.is_some()
-        && !world.resource::<crate::bot::PracticeMode>().0;
-    if !online {
-        return;
-    }
-    let awaiting = world.resource::<BotOffer>().armed;
-    let fled_summary = matches!(*world.resource::<MatchState>(), MatchState::MatchOver)
-        && world.resource::<net::LobbyState>().is_terminal();
-    if !(awaiting || fled_summary) {
-        return;
-    }
-    let key = world
-        .resource::<ButtonInput<KeyCode>>()
-        .just_pressed(KeyCode::KeyP);
-    let win = world.resource::<WindowSize>().0;
-    let tapped = win.y > 0.0
-        && world
-            .resource::<Touches>()
-            .iter_just_pressed()
-            .any(|t| in_band(t.position().y / win.y, PLAY_BTN_RECT));
-    if !(key || tapped) {
-        return;
-    }
-    world.resource_mut::<crate::bot::PracticeMode>().0 = true;
-    crate::netplay::leave_online_match(world);
-    world.resource_mut::<PendingBotMatch>().0 = true;
-    world
-        .resource_mut::<NextState<AppScreen>>()
-        .set(AppScreen::Title);
-}
-
-type SummaryButtonQuery<'w, 's> = Query<
-    'w,
-    's,
-    (
-        &'static SummaryButton,
-        &'static mut Visibility,
-        Option<&'static mut Sprite>,
-        Option<&'static mut Text2d>,
-        Option<&'static mut TextColor>,
-    ),
->;
-
-#[allow(clippy::too_many_arguments)]
-fn update_summary_buttons(
-    screen: Res<State<AppScreen>>,
-    state: Res<MatchState>,
-    netplay: Res<NetplayConfig>,
-    practice: Res<crate::bot::PracticeMode>,
-    theater: Res<crate::theater::TheaterMode>,
-    peer: Res<net::PeerProfile>,
-    consent: Res<net::RematchConsent>,
-    lobby: Res<net::LobbyState>,
-    mut q: SummaryButtonQuery,
-) {
-    let over = *screen.get() == AppScreen::InMatch
-        && matches!(*state, MatchState::MatchOver)
-        // The theater's marquee owns the top strip and a tape needs no
-        // rematch button — the summary card alone says TAPE ENDS.
-        && !theater.active();
-    let online = netplay.room_url.is_some();
-    // Fled or desynced: either way the slot reads PLAY THE BOT.
-    let opponent_gone = lobby.is_terminal();
-    let peer_name = crate::profile::peer_name(peer.0);
-    let primary = primary_label(online, practice.0, *consent, &peer_name, opponent_gone);
-    // Local consent shows as a pressed/armed button: inverted fill — unless
-    // the opponent has gone, where the slot now reads PLAY THE BOT and a
-    // stale pre-flight consent must not render it pressed.
-    let armed = online && !practice.0 && consent.local && !consent.peer && !opponent_gone;
-
-    for (btn, mut vis, sprite, text, color) in &mut q {
-        let shown = over
-            && match btn.action {
-                SummaryAction::Primary => primary.is_some(),
-                SummaryAction::Exit => true,
-            };
-        *vis = if shown {
-            Visibility::Visible
-        } else {
-            Visibility::Hidden
-        };
-        if !shown {
-            continue;
-        }
-        let inverted = btn.action == SummaryAction::Primary && armed;
-        match btn.role {
-            BtnRole::Border => {
-                if let Some(mut s) = sprite {
-                    s.color = render::palette::HOT_BONE;
-                }
-            }
-            BtnRole::Fill => {
-                if let Some(mut s) = sprite {
-                    s.color = if inverted {
-                        render::palette::HOT_BONE
-                    } else {
-                        render::palette::DEEP_ASH
-                    };
-                }
-            }
-            BtnRole::Label => {
-                if let Some(mut t) = text {
-                    t.0 = match btn.action {
-                        SummaryAction::Primary => primary.clone().unwrap_or_default(),
-                        SummaryAction::Exit => if online && !practice.0 {
-                            "LEAVE"
-                        } else {
-                            "LOBBY"
-                        }
-                        .to_string(),
-                    };
-                }
-                if let Some(mut c) = color {
-                    c.0 = if inverted {
-                        render::palette::VOID
-                    } else {
-                        render::palette::HOT_BONE
-                    };
-                }
-            }
-        }
-    }
-}
-
-/// Taps on the summary's PRIMARY button. Couch/practice: arm the injected
-/// THROW (the input-driven rematch). Online: give consent — the same thing
-/// a raw THROW press means at MatchOver (`netplay::gate_rematch_inputs`
-/// converts those), so both paths converge on one handshake.
-#[allow(clippy::too_many_arguments)]
-fn summary_buttons_input(
-    screen: Res<State<AppScreen>>,
-    state: Res<MatchState>,
-    netplay: Res<NetplayConfig>,
-    practice: Res<crate::bot::PracticeMode>,
-    theater: Res<crate::theater::TheaterMode>,
-    touches: Res<Touches>,
-    window: Res<WindowSize>,
-    lobby: Res<net::LobbyState>,
-    mut consent: ResMut<net::RematchConsent>,
-    mut queue: ResMut<net::NetSendQueue>,
-    mut pending: ResMut<PendingUiThrow>,
-) {
-    if *screen.get() != AppScreen::InMatch
-        || !matches!(*state, MatchState::MatchOver)
-        || theater.active()
-    {
-        return;
-    }
-    let win = window.0;
-    if win.y <= 0.0 {
-        return;
-    }
-    let tapped_primary = touches
-        .iter_just_pressed()
-        .any(|t| in_band(t.position().y / win.y, PLAY_BTN_RECT));
-    if !tapped_primary {
-        return;
-    }
-    let online = netplay.room_url.is_some() && !practice.0;
-    if !online {
-        pending.0 = UI_THROW_FRAMES;
-        return;
-    }
-    if lobby.is_terminal() {
-        return; // nobody left to run it back with, or no session worth it
-    }
-    if !consent.local {
-        consent.local = true;
-        queue.0.push(net::NetMsg::RematchWant);
-    }
-}
-
-/// Online summary exit: a top-band tap or Escape LEAVES the match cleanly —
-/// goodbye on the side-channel, socket + session torn down, back to Title.
-/// Exclusive-world because the teardown touches the non-send socket.
-fn online_leave_input(world: &mut World) {
-    let online = world.resource::<NetplayConfig>().room_url.is_some();
-    let practice = world.resource::<crate::bot::PracticeMode>().0;
-    let theater = world.resource::<crate::theater::TheaterMode>().active();
-    if !online || practice || theater {
-        return;
-    }
-    if !matches!(*world.resource::<MatchState>(), MatchState::MatchOver) {
-        return;
-    }
-    let esc = world
-        .resource::<ButtonInput<KeyCode>>()
-        .just_pressed(KeyCode::Escape);
-    let win = world.resource::<WindowSize>().0;
-    let tapped = win.y > 0.0
-        && world
-            .resource::<Touches>()
-            .iter_just_pressed()
-            .any(|t| in_band(t.position().y / win.y, TOP_EXIT_BAND));
-    if !(esc || tapped) {
-        return;
-    }
-    crate::netplay::leave_online_match(world);
-    world
-        .resource_mut::<NextState<AppScreen>>()
-        .set(AppScreen::Title);
-}
-
-fn arena_name(id: sim::ArenaId) -> &'static str {
-    match id {
-        sim::ArenaId::Anchor => "Anchor",
-        sim::ArenaId::Crossing => "Crossing",
-        sim::ArenaId::Reliquary => "Reliquary",
-        sim::ArenaId::Pit => "The Pit",
-        sim::ArenaId::Vigil => "The Vigil",
-        sim::ArenaId::Gallery => "The Gallery",
-        sim::ArenaId::Forest => "The Forest",
-    }
-}
-
-/// The match decided when a player's kills reached `MATCH_WIN_THRESHOLD`. P0 is
-/// the Cur, P1 the Stag (ART_DIRECTION v2). Pure for testing; the deciding
-/// kill always belongs to exactly one side (it's a one-hit-kill game).
-fn winner_label(score: MatchScore) -> &'static str {
-    if score.p0 >= MATCH_WIN_THRESHOLD {
-        "CUR WINS"
-    } else {
-        "STAG WINS"
     }
 }
 
@@ -2187,15 +1012,6 @@ mod tests {
             }),
             "STAG WINS"
         );
-    }
-
-    #[test]
-    fn arena_names_cover_every_variant() {
-        for arena in sim::ALL_ARENAS {
-            assert!(!arena_name(arena).is_empty());
-        }
-        assert_eq!(arena_name(sim::ArenaId::Anchor), "Anchor");
-        assert_eq!(arena_name(sim::ArenaId::Pit), "The Pit");
     }
 
     fn online_summary(gone: bool) -> String {
@@ -2314,11 +1130,12 @@ mod tests {
 
     #[test]
     fn quit_label_walks_its_states() {
-        assert_eq!(quit_label(false, false), "QUIT");
-        assert_eq!(quit_label(false, true), "SURE?");
+        assert_eq!(quit_label(false, false, false), "QUIT");
+        assert_eq!(quit_label(false, false, true), "SURE?");
+        assert_eq!(quit_label(false, true, false), "SKIP");
         // The summoning wait cancels in one tap — no arming, no SURE?.
-        assert_eq!(quit_label(true, false), "CANCEL");
-        assert_eq!(quit_label(true, true), "CANCEL");
+        assert_eq!(quit_label(true, false, false), "CANCEL");
+        assert_eq!(quit_label(true, false, true), "CANCEL");
     }
 
     #[test]
@@ -2368,6 +1185,54 @@ mod tests {
         );
         assert!(text.contains("CUR WINS"), "{text}");
         assert!(text.contains("replay saved"), "{text}");
+    }
+}
+
+#[cfg(test)]
+mod practice_summary_tests {
+    use super::*;
+
+    #[test]
+    fn the_lesson_ends_ready_either_way() {
+        let won = MatchScore {
+            p0: MATCH_WIN_THRESHOLD,
+            p1: 1,
+        };
+        let text = first_blood_summary(won, Some((0, 1)), false);
+        assert!(text.starts_with("YOU'RE READY"), "{text}");
+        assert!(text.contains("FIRST BLOOD"), "{text}");
+        assert!(text.contains("UP TO GAUNTLET 1"), "{text}");
+        let lost = MatchScore {
+            p0: 3,
+            p1: MATCH_WIN_THRESHOLD,
+        };
+        let text = first_blood_summary(lost, Some((0, 0)), false);
+        assert!(text.starts_with("YOU'RE READY"), "{text}");
+        assert!(!text.contains("GAUNTLET"), "{text}");
+    }
+
+    #[test]
+    fn the_practice_card_speaks_to_the_player_and_names_the_rung() {
+        let won = MatchScore {
+            p0: MATCH_WIN_THRESHOLD,
+            p1: 2,
+        };
+        let lost = MatchScore {
+            p0: 1,
+            p1: MATCH_WIN_THRESHOLD,
+        };
+        let text = practice_summary(won, None, Some((3, 4)), true);
+        assert!(text.starts_with("YOU WIN"), "{text}");
+        assert!(text.contains("UP TO GAUNTLET 4"), "{text}");
+        assert!(text.contains("replay saved"), "{text}");
+        assert!(!text.contains("CUR"), "{text}");
+        let text = practice_summary(lost, None, Some((5, 4)), false);
+        assert!(text.starts_with("THE BOT WINS"), "{text}");
+        assert!(text.contains("DOWN TO GAUNTLET 4"), "{text}");
+        // A shade moves no rung and is named as what it is.
+        let text = practice_summary(lost, Some("CURS"), None, false);
+        assert!(text.starts_with("CURS SHADE WINS"), "{text}");
+        assert!(!text.contains("GAUNTLET"), "{text}");
     }
 }
 
@@ -2456,5 +1321,32 @@ mod unfinished_summary_tests {
         assert!(text.contains("nobody's win"), "{text}");
         assert!(!text.contains("WINS"), "{text}");
         assert!(text.contains("3RD MEETING"), "{text}");
+    }
+}
+
+#[cfg(test)]
+mod rematch_lockout_tests {
+    use super::*;
+
+    #[test]
+    fn the_decided_match_is_not_settled_until_the_lockout_has_run() {
+        assert!(!MatchOverSince(None).settled(100.0));
+        let since = MatchOverSince(Some(10.0));
+        assert!(!since.settled(10.0));
+        assert!(!since.settled(10.0 + REMATCH_LOCKOUT_SECS - 0.01));
+        assert!(since.settled(10.0 + REMATCH_LOCKOUT_SECS));
+    }
+
+    #[test]
+    fn a_thumb_held_through_the_lockout_must_lift_before_it_counts() {
+        // Mashing through the kill: nothing arms during the lockout.
+        assert!(!rematch_armed(false, false, true));
+        assert!(!rematch_armed(false, false, false));
+        // Lockout over, but THROW still down from the fight: not yet.
+        assert!(!rematch_armed(false, true, true));
+        // The thumb comes up: armed, and the next press is a real one.
+        assert!(rematch_armed(false, true, false));
+        // Armed stays armed while the press it was waiting for arrives.
+        assert!(rematch_armed(true, true, true));
     }
 }

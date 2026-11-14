@@ -74,6 +74,8 @@ pub fn addr_to_peer(addr: NetAddr) -> PeerId {
 /// reference impl; we mirror the warning for parity).
 pub struct MatchboxBridge {
     channel: WebRtcChannel,
+    /// The socket under the channel has ended; logged once, then quiet.
+    link_lost_logged: bool,
 }
 
 impl MatchboxBridge {
@@ -92,7 +94,10 @@ impl MatchboxBridge {
                  channel config.",
             );
         }
-        Self { channel }
+        Self {
+            channel,
+            link_lost_logged: false,
+        }
     }
 
     /// Surrender the wrapped channel — useful for tests or for
@@ -136,11 +141,11 @@ pub fn encode_message(msg: &Message) -> Packet {
 // decoder runs, so the guard is the first — and only — caller that ever
 // hands it something it cannot survive.
 //
-// Still open upstream, and not closable at this boundary: protocol.rs also
-// `assert!(last_recv_frame + 1 >= body.start_frame)` on the wire's own
-// `start_frame`. Checking that needs ggrs's private receive bookkeeping,
-// so a hostile peer can still trip it mid-match. The honest fix is a
-// warn-and-drop in ggrs itself.
+// Not closable at this boundary: protocol.rs also `assert!`ed
+// `last_recv_frame + 1 >= body.start_frame` on the wire's own `start_frame`,
+// which needs ggrs's private receive bookkeeping to check. That one is
+// fixed in ggrs itself: the vendored copy (vendor/README.md) drops such a
+// packet with a warning (`an_input_that_skips_ahead_is_dropped_not_fatal`).
 
 /// One player's input on the wire, as ggrs sizes it: the bincode-1 fixint
 /// encoding of `sim::PlayerInput`, four one-byte fields. `size_of` is
@@ -152,6 +157,10 @@ const INPUT_BYTES_PER_PLAYER: usize = std::mem::size_of::<sim::PlayerInput>();
 /// phone, and ggrs sizes a frame as `bytes_per_player × handles.len()` on
 /// both ends, so this is the one number the guard must agree with it on.
 const PLAYERS_PER_PEER: usize = 1;
+
+/// Players in a session: what ggrs sizes its connection-status table by,
+/// and the length it indexes a remote Input's list up to. 2-Top is a duel.
+const SESSION_PLAYERS: usize = 2;
 
 /// The exact frame width an honest peer sends, every frame.
 const INPUT_FRAME_BYTES: usize = INPUT_BYTES_PER_PLAYER * PLAYERS_PER_PEER;
@@ -336,6 +345,14 @@ fn refuse_reason(bytes: &[u8]) -> Option<&'static str> {
         return None;
     };
     match wire.body {
+        // ggrs reads one connection status per player out of the body
+        // (`body.peer_connect_status[i]`, unchecked) unless the peer is
+        // asking to disconnect: a shorter list was an index panic.
+        WireBody::Input(input)
+            if !input.disconnect_requested && input.peer_connect_status.len() < SESSION_PLAYERS =>
+        {
+            Some("connection status list shorter than the player count")
+        }
         WireBody::Input(input) => input_stream_frames(&input).err(),
         _ => None,
     }
@@ -381,8 +398,24 @@ pub fn decode_packet(message: (PeerId, Packet)) -> Option<(NetAddr, Message)> {
 }
 
 impl NonBlockingSocket<NetAddr> for MatchboxBridge {
+    /// Never panics. matchbox's `WebRtcChannel::send` does (`"Send
+    /// failed"`) once the socket's future has ended — and it ends for the
+    /// whole socket, data channels included, the moment the signaling
+    /// websocket closes after pairing: the room server redeploying, or a
+    /// phone moving from Wi-Fi to cellular. ggrs sends every frame, so
+    /// every match in progress used to crash on the next frame. A failed
+    /// send is a packet lost on a dead link; the app sees the closed
+    /// socket and ends the match (`netplay`'s link-lost check).
     fn send_to(&mut self, msg: &Message, addr: &NetAddr) {
-        self.channel.send(encode_message(msg), addr_to_peer(*addr));
+        if self
+            .channel
+            .try_send(encode_message(msg), addr_to_peer(*addr))
+            .is_err()
+            && !self.link_lost_logged
+        {
+            self.link_lost_logged = true;
+            tracing::warn!(target: "two_top::net", "ggrs channel closed under the session — link lost");
+        }
     }
 
     fn receive_all_messages(&mut self) -> Vec<(NetAddr, Message)> {
@@ -473,6 +506,14 @@ pub enum NetMsg {
     /// the session. Reliable + ordered, so it always lands ahead of the
     /// peer's `Profile`.
     Table { arena: u8 },
+    /// "This phone is going away for a moment" — the app is being
+    /// backgrounded (a notification-shade peek, a call, a switch to the
+    /// chat app) or its tab hidden. Sent on the last update before it
+    /// sleeps. The receiver gives it [`PAUSED_FORFEIT_AFTER_FRAMES`] of
+    /// silence instead of [`FORFEIT_AFTER_FRAMES`] before forfeiting, and
+    /// says so on screen. An old build cannot decode it and ignores it,
+    /// which is the old behaviour.
+    Pausing,
 }
 
 /// Encode a side-channel message. Infallible for these types (postcard on
@@ -807,6 +848,12 @@ pub enum LobbyState {
     /// player is told, and CANCEL / PLAY THE BOT are the exits. Replaces
     /// a fall-back to `Idle`, which rendered nothing at all.
     SummonFailed,
+    /// Paired, but the session never synchronized: the peer vanished
+    /// between pairing and the first frame, or packets never got through,
+    /// twice (the app re-dials once on its own first). Nothing was at
+    /// stake and nothing is recorded; the player is told, and CANCEL /
+    /// PLAY THE BOT are the exits, as for [`LobbyState::SummonFailed`].
+    PeerUnreachable,
 }
 
 impl LobbyState {
@@ -925,21 +972,66 @@ pub fn detect_peer_connection_edge(
 #[derive(Resource, Default, Clone, Copy, Debug)]
 pub struct LastPeerMessageFrame(pub u32);
 
+/// The clock the silence FSM ages on: real time since boot, counted in
+/// 60 Hz ticks, so every `*_AFTER_FRAMES` threshold keeps its meaning.
+/// [`LastPeerMessageFrame`] is stamped from it.
+///
+/// It was the sim's `FrameCount`, and that clock stops exactly when it is
+/// needed: a P2P session stops advancing frames once the peer's inputs stop
+/// arriving (ggrs holds at its prediction window), so silence never aged
+/// past the 16 frames of that window, the lobby never reached
+/// `Disconnected`, OPPONENT AWAY could never show, and the healthy side
+/// stared at a frozen board until ggrs's own timeout. Disconnection is
+/// observed locally on each phone either way; nothing here is simulated.
+/// Monotonic: it only ever moves forward (a test can set it ahead).
+#[derive(Resource, Default, Clone, Copy, Debug)]
+pub struct SilenceClock(pub u32);
+
+/// `Update`, before the grace timer: advance [`SilenceClock`] to now.
+/// No time plugin (a bare test app): the clock holds still.
+pub fn advance_silence_clock(time: Option<Res<Time<Real>>>, mut clock: ResMut<SilenceClock>) {
+    let Some(time) = time else {
+        return;
+    };
+    let now = (time.elapsed_secs_f64() * f64::from(sim::TICK_HZ as u32)) as u32;
+    clock.0 = clock.0.max(now);
+}
+
 /// Frames of peer silence that trigger `Connected -> Disconnected`.
 /// 60 = 1 s @ 60 Hz. Short enough that the UI can surface a
 /// reconnect spinner immediately on a real disconnect; long enough
 /// that ordinary packet jitter doesn't cause spurious flickers.
 pub const DISCONNECT_AFTER_FRAMES: u32 = 60;
 
-/// Frames of peer silence that trigger `Disconnected -> Forfeited`.
-/// 600 = 10 s @ 60 Hz — the grace window that lets a phone survive a
-/// notification-shade peek or a short call screen without losing the
-/// match. ggrs's own disconnect (9 s, `app::netplay::DISCONNECT_TIMEOUT`)
-/// is the authoritative trigger and fires just before this; the silence
-/// FSM here is the fallback for the pre-swap window and for anything
-/// ggrs misses. The `Forfeited` transition also sets
-/// `sim::MatchState::MatchOver`, ending the round in the sim layer.
-pub const FORFEIT_AFTER_FRAMES: u32 = 600;
+/// Frames of peer silence that trigger `Disconnected -> Forfeited`, for a
+/// peer that went quiet without a word. 540 = 9 s @ 60 Hz. This FSM is
+/// the authority: ggrs's own disconnect timeout
+/// (`app::netplay::GGRS_DISCONNECT_TIMEOUT`) is set at the paused grace
+/// below, a ceiling it only reaches if this one somehow does not fire.
+/// The `Forfeited` transition also sets `sim::MatchState::MatchOver`,
+/// ending the round in the sim layer.
+pub const FORFEIT_AFTER_FRAMES: u32 = 540;
+
+/// The same for a peer that said it was going away ([`NetMsg::Pausing`]):
+/// 1200 = 20 s, long enough for a notification-shade peek, a short call
+/// or a trip to the chat app to send the room code, without losing the
+/// match.
+pub const PAUSED_FORFEIT_AFTER_FRAMES: u32 = 1200;
+
+/// Silence the FSM forfeits a peer at.
+pub fn forfeit_after(peer_paused: bool) -> u32 {
+    if peer_paused {
+        PAUSED_FORFEIT_AFTER_FRAMES
+    } else {
+        FORFEIT_AFTER_FRAMES
+    }
+}
+
+/// The peer said it was going away ([`NetMsg::Pausing`]) and has not been
+/// heard from since. Cleared when its traffic resumes and when a session
+/// starts or ends.
+#[derive(Resource, Default, Clone, Copy, Debug)]
+pub struct PeerPaused(pub bool);
 
 /// Pure helper: given the current lobby state, the current frame,
 /// and the last-message frame, return the next lobby state if a
@@ -948,7 +1040,7 @@ pub const FORFEIT_AFTER_FRAMES: u32 = 600;
 /// Transitions:
 ///   - `Connected` after `DISCONNECT_AFTER_FRAMES` of silence ->
 ///     `Disconnected`.
-///   - `Disconnected` after `FORFEIT_AFTER_FRAMES` of silence ->
+///   - `Disconnected` after `forfeit_after` of silence ->
 ///     `Forfeited` (terminal).
 ///   - `Disconnected` whose elapsed silence dropped below the
 ///     disconnect threshold -> `Connected` (reconnect happened).
@@ -957,6 +1049,7 @@ pub fn next_lobby_state_for_silence(
     curr: &LobbyState,
     frame: u32,
     last_msg: u32,
+    forfeit_after: u32,
 ) -> Option<LobbyState> {
     let elapsed = frame.saturating_sub(last_msg);
     match curr {
@@ -966,7 +1059,7 @@ pub fn next_lobby_state_for_silence(
                 since_frame: last_msg,
             })
         }
-        LobbyState::Disconnected { peer_id, .. } if elapsed >= FORFEIT_AFTER_FRAMES => {
+        LobbyState::Disconnected { peer_id, .. } if elapsed >= forfeit_after => {
             Some(LobbyState::Forfeited {
                 peer_id: *peer_id,
                 conceded: false,
@@ -980,18 +1073,19 @@ pub fn next_lobby_state_for_silence(
 }
 
 /// `Update`-schedule system: drives the disconnection-grace timer.
-/// Reads `FrameCount` (post-tick value, since Update runs after
-/// `GgrsSchedule`) + `LastPeerMessageFrame`. Writes the next
+/// Reads [`SilenceClock`] + `LastPeerMessageFrame`. Writes the next
 /// `LobbyState` if a threshold was crossed, and pulses
 /// `sim::MatchState::MatchOver` on a `Forfeited` transition so the
 /// in-sim round flow ends.
 pub fn tick_disconnection_grace(
-    frame: Res<sim::FrameCount>,
+    frame: Res<SilenceClock>,
     last_msg: Res<LastPeerMessageFrame>,
+    paused: Res<PeerPaused>,
     mut lobby: ResMut<LobbyState>,
     mut match_state: ResMut<sim::MatchState>,
 ) {
-    if let Some(next) = next_lobby_state_for_silence(&lobby, frame.0, last_msg.0) {
+    let forfeit_after = forfeit_after(paused.0);
+    if let Some(next) = next_lobby_state_for_silence(&lobby, frame.0, last_msg.0, forfeit_after) {
         let became_forfeit = matches!(next, LobbyState::Forfeited { .. });
         tracing::warn!(
             target: "two_top::net::peer",
@@ -1036,6 +1130,8 @@ impl Plugin for NetPlugin {
             .init_resource::<LobbyState>()
             .init_resource::<PendingP2PSwap>()
             .init_resource::<LastPeerMessageFrame>()
+            .init_resource::<SilenceClock>()
+            .init_resource::<PeerPaused>()
             .init_resource::<PeerProfile>()
             .init_resource::<PeerKeys>()
             .init_resource::<PeerSig>()
@@ -1043,7 +1139,10 @@ impl Plugin for NetPlugin {
             .init_resource::<NetSendQueue>()
             .add_systems(
                 Update,
-                (detect_peer_connection_edge, tick_disconnection_grace),
+                (
+                    detect_peer_connection_edge,
+                    (advance_silence_clock, tick_disconnection_grace).chain(),
+                ),
             );
     }
 }
@@ -1066,6 +1165,45 @@ mod tests {
     fn matchbox_bridge_impls_non_blocking_socket() {
         fn assert_impl<T: NonBlockingSocket<NetAddr>>() {}
         assert_impl::<MatchboxBridge>();
+    }
+
+    /// The link-lost crash: once the socket's future is gone (the room
+    /// server restarted, the phone changed networks), matchbox's `send`
+    /// panics. The bridge must keep accepting sends as lost packets, and
+    /// the closure must be visible to the app through `any_channel_closed`
+    /// on what remains of the socket.
+    // Not on Android: it builds a real matchbox socket, which links
+    // webrtc's interface enumeration (`getifaddrs`, API 24+), and the
+    // determinism lane links Android test binaries against API 21. The
+    // app itself ships at a level that has it; the bridge logic is the same
+    // on every target and runs here on the others.
+    // platform-gate-ok: a native test; the browser never runs net's tests.
+    #[cfg(not(target_os = "android"))]
+    #[test]
+    fn a_bridge_over_a_dead_socket_drops_packets_instead_of_panicking() {
+        let (mut socket, message_loop) =
+            matchbox_socket::WebRtcSocketBuilder::new("ws://127.0.0.1:1/room")
+                .add_channel(ChannelConfig::unreliable())
+                .add_channel(ChannelConfig::reliable())
+                .build();
+        let mut channel = socket.take_channel(0).expect("channel 0");
+        assert!(!socket.any_channel_closed(), "a fresh socket is open");
+        // The socket's future ending is what drops its receivers.
+        drop(message_loop);
+        assert!(
+            socket.any_channel_closed(),
+            "the side channel reports the loss"
+        );
+        // A ggrs `Message` cannot be built outside ggrs, so the bridge's
+        // send path is exercised through the call it now makes: `try_send`
+        // answers Err where matchbox's `send` panicked with "Send failed".
+        assert!(
+            channel
+                .try_send(vec![1u8, 2, 3].into_boxed_slice(), addr_to_peer(NetAddr(7)))
+                .is_err()
+        );
+        let mut bridge = MatchboxBridge::new(channel);
+        assert!(bridge.receive_all_messages().is_empty());
     }
 
     /// The `PeerId` ↔ `NetAddr` bijection must round-trip losslessly
@@ -1312,6 +1450,7 @@ mod tests {
             .is_in_match()
         );
         assert!(!LobbyState::SummonFailed.is_in_match());
+        assert!(!LobbyState::PeerUnreachable.is_in_match());
     }
 
     #[test]
@@ -1335,6 +1474,7 @@ mod tests {
             LobbyState::Idle,
             LobbyState::Connecting,
             LobbyState::SummonFailed,
+            LobbyState::PeerUnreachable,
             LobbyState::WaitingForPeer { our_id: peer },
             LobbyState::Connected { peer_id: peer },
             LobbyState::Disconnected {
@@ -1448,7 +1588,12 @@ mod tests {
         let peer = dummy_peer();
         // Frame 50, last msg at 49 — only 1 frame of silence.
         assert_eq!(
-            next_lobby_state_for_silence(&LobbyState::Connected { peer_id: peer }, 50, 49),
+            next_lobby_state_for_silence(
+                &LobbyState::Connected { peer_id: peer },
+                50,
+                49,
+                FORFEIT_AFTER_FRAMES
+            ),
             None,
         );
     }
@@ -1459,11 +1604,41 @@ mod tests {
         let last_msg = 100;
         let now = last_msg + DISCONNECT_AFTER_FRAMES;
         assert_eq!(
-            next_lobby_state_for_silence(&LobbyState::Connected { peer_id: peer }, now, last_msg),
+            next_lobby_state_for_silence(
+                &LobbyState::Connected { peer_id: peer },
+                now,
+                last_msg,
+                FORFEIT_AFTER_FRAMES
+            ),
             Some(LobbyState::Disconnected {
                 peer_id: peer,
                 since_frame: last_msg,
             }),
+        );
+    }
+
+    /// The AWAY overlay could never show: the grace timer aged on the sim's
+    /// frame clock, which a P2P session stops advancing once the peer's
+    /// inputs stop arriving. On the silence clock, a peer silent for a
+    /// second of real time reads as away, whatever the frame count does.
+    #[test]
+    fn silence_ages_while_the_sim_frame_stands_still() {
+        let mut app = App::new();
+        app.add_plugins(NetPlugin);
+        let peer = dummy_peer();
+        *app.world_mut().resource_mut::<LobbyState>() = LobbyState::Connected { peer_id: peer };
+        // The sim froze a few frames past the last message (its prediction
+        // window), so a frame clock reads no silence; real time moves on.
+        app.world_mut().resource_mut::<sim::FrameCount>().0 = 10;
+        app.world_mut().resource_mut::<LastPeerMessageFrame>().0 = 0;
+        app.world_mut().resource_mut::<SilenceClock>().0 = DISCONNECT_AFTER_FRAMES + 1;
+        app.update();
+        assert!(
+            matches!(
+                *app.world().resource::<LobbyState>(),
+                LobbyState::Disconnected { .. }
+            ),
+            "a second of real silence is away"
         );
     }
 
@@ -1479,13 +1654,50 @@ mod tests {
                     since_frame: last_msg
                 },
                 now,
-                last_msg
+                last_msg,
+                FORFEIT_AFTER_FRAMES,
             ),
             Some(LobbyState::Forfeited {
                 peer_id: peer,
                 conceded: false,
             }),
         );
+    }
+
+    /// A peer that said it was going away is not forfeited at the quiet
+    /// threshold; it is at the paused one.
+    #[test]
+    fn a_paused_peer_gets_the_longer_grace() {
+        let peer = dummy_peer();
+        let away = LobbyState::Disconnected {
+            peer_id: peer,
+            since_frame: 0,
+        };
+        let quiet = forfeit_after(false);
+        let paused = forfeit_after(true);
+        assert!(paused > quiet);
+        assert_eq!(next_lobby_state_for_silence(&away, quiet, 0, paused), None);
+        assert_eq!(
+            next_lobby_state_for_silence(&away, paused, 0, paused),
+            Some(LobbyState::Forfeited {
+                peer_id: peer,
+                conceded: false,
+            }),
+        );
+
+        let mut app = App::new();
+        app.add_plugins(NetPlugin);
+        *app.world_mut().resource_mut::<LobbyState>() = away.clone();
+        app.world_mut().resource_mut::<PeerPaused>().0 = true;
+        app.world_mut().resource_mut::<SilenceClock>().0 = FORFEIT_AFTER_FRAMES + 10;
+        app.update();
+        assert_eq!(*app.world().resource::<LobbyState>(), away, "still waiting");
+        app.world_mut().resource_mut::<SilenceClock>().0 = PAUSED_FORFEIT_AFTER_FRAMES;
+        app.update();
+        assert!(matches!(
+            *app.world().resource::<LobbyState>(),
+            LobbyState::Forfeited { .. }
+        ));
     }
 
     #[test]
@@ -1501,7 +1713,8 @@ mod tests {
                     since_frame: 800
                 },
                 now,
-                last_msg
+                last_msg,
+                FORFEIT_AFTER_FRAMES,
             ),
             Some(LobbyState::Connected { peer_id: peer }),
         );
@@ -1518,7 +1731,8 @@ mod tests {
                     conceded: false,
                 },
                 10_000,
-                0
+                0,
+                FORFEIT_AFTER_FRAMES,
             ),
             None,
         );
@@ -1535,7 +1749,7 @@ mod tests {
             peer_id: peer,
             since_frame: 0,
         };
-        app.world_mut().resource_mut::<sim::FrameCount>().0 = FORFEIT_AFTER_FRAMES + 10;
+        app.world_mut().resource_mut::<SilenceClock>().0 = FORFEIT_AFTER_FRAMES + 10;
         app.world_mut().resource_mut::<LastPeerMessageFrame>().0 = 0;
 
         app.update();
@@ -1628,6 +1842,60 @@ mod input_stream_tests {
                 bytes: bitfield_rle::encode(delta),
             }),
         }
+    }
+
+    /// A real `P2PSession` fed one honest Input and then one whose start
+    /// frame skips past what it has received. ggrs 0.12 `assert!`ed on
+    /// that (`protocol.rs`, `on_input`) — one packet from a stranger in the
+    /// public room took the whole app down. The vendored ggrs drops it.
+    #[test]
+    fn an_input_that_skips_ahead_is_dropped_not_fatal() {
+        use ggrs::{NonBlockingSocket, PlayerType, SessionBuilder};
+        struct Inject(Vec<(sim::NetAddr, Message)>);
+        impl NonBlockingSocket<sim::NetAddr> for Inject {
+            fn send_to(&mut self, _: &Message, _: &sim::NetAddr) {}
+            fn receive_all_messages(&mut self) -> Vec<(sim::NetAddr, Message)> {
+                std::mem::take(&mut self.0)
+            }
+        }
+        let peer = PeerId(Uuid::from_u128(1));
+        let honest = input_message(&[vec![0; 4]]);
+        let mut skips_ahead = input_message(&[vec![0; 4]]);
+        if let WireBody::Input(input) = &mut skips_ahead.body {
+            input.start_frame = 100;
+        }
+        let inbound = [honest, skips_ahead]
+            .iter()
+            .map(|m| decode_packet((peer, packet(m))).expect("well-formed, so the guard passes it"))
+            .collect();
+        let mut session = SessionBuilder::<sim::GgrsCfg>::new()
+            .with_num_players(2)
+            .unwrap()
+            .add_player(PlayerType::Local, 0)
+            .unwrap()
+            .add_player(PlayerType::Remote(peer_to_addr(peer)), 1)
+            .unwrap()
+            .start_p2p_session(Inject(inbound))
+            .unwrap();
+        session.poll_remote_clients();
+    }
+
+    /// ggrs indexes the remote's connection-status list once per player,
+    /// unchecked: a short one was an index panic, so the guard refuses it.
+    #[test]
+    fn a_short_connection_status_list_is_refused() {
+        let peer = PeerId(Uuid::from_u128(1));
+        let mut short = input_message(&[vec![0; 4]]);
+        if let WireBody::Input(input) = &mut short.body {
+            input.peer_connect_status.truncate(1);
+        }
+        assert!(decode_packet((peer, packet(&short))).is_none());
+        // Asking to disconnect, ggrs reads no list: nothing to refuse.
+        if let WireBody::Input(input) = &mut short.body {
+            input.disconnect_requested = true;
+        }
+        assert!(decode_packet((peer, packet(&short))).is_some());
+        assert!(decode_packet((peer, packet(&input_message(&[vec![0; 4]])))).is_some());
     }
 
     #[test]

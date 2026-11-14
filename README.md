@@ -16,9 +16,19 @@ Download `two-top.apk` from the newest release at https://github.com/ampactor-la
 
 ### A browser
 
-Open https://ampactor.dev/two-top/ in a phone or desktop browser. The deployed page has no signaling room URL baked in (the address where two peers meet), so it boots into local mode: the practice bot (PRACTICE VS BOT), couch versus on a keyboard, the replay theater, and any shared match by its link (`#watch=<id>`). On an iPhone, Share then Add to Home Screen installs it as a fullscreen icon (`web/manifest.webmanifest`).
+Open https://ampactor.dev/two-top/ in a phone or desktop browser. It is the same game as the APK and meets it in the same rooms: FIND OPPONENT, PRIVATE codes, a join link's PLAY IN THE BROWSER (the Pages workflow bakes in the public room, as `apk.yml` does). It also has the practice bot, couch versus on one keyboard (WASD/Space/Left Shift against the arrows/Right Shift/Right Control), the replay theater, and any shared match by its link (`#watch=<id>`). On an iPhone, Share then Add to Home Screen installs it as a fullscreen icon that keeps its identity and rivalry ledger (`web/manifest.webmanifest`); the page says so on an iPhone's first visits.
+
+### On a computer: the desktop app
+
+Windows, macOS and Linux builds are published on every push to main as the rolling [`desktop-latest`](https://github.com/ampactor-labs/two-top/releases/tag/desktop-latest) release (`.github/workflows/desktop.yml`). Each plays on the public quick-match room out of the box, keeps its files in the usual per-user places (settings and progress in the config directory, tapes under Downloads/two-top, logs in the local data directory), and takes a keyboard or a controller.
+
+- **Windows:** unzip `2-Top-windows-x86_64.zip` anywhere and run `2-Top.exe`. The build is not signed, so SmartScreen says "Windows protected your PC" the first time: choose **More info**, then **Run anyway**.
+- **macOS** (Apple silicon and Intel): unzip `2-Top-macos-universal.zip` and move `2-Top.app` to Applications. It is not notarized, so the first open says it cannot be checked: open **System Settings → Privacy & Security** and choose **Open Anyway** (or Control-click the app, **Open**). After that it opens normally.
+- **Linux** (x86_64, glibc 2.35+): `tar -xzf 2-Top-linux-x86_64.tar.gz` and run `2-Top/two-top`. It needs a Vulkan driver (Mesa's is fine), ALSA's runtime (`libasound2`) and `libxkbcommon-x11` (present on desktop installs; a minimal system may need `libxkbcommon-x11-0`); `two-top.desktop` and `two-top.png` are in the folder for a menu entry.
 
 ### A desktop build, for development
+
+The game-feel numbers (screen shake, kill flash, kill-cam, camera lean, fang trails, phone buzzes) live in one place, `render::tuning::Tuning`, which every build reads. To tune by eye without rebuilding, `TWOTOP_TUNING_DUMP=tune.json` writes the current values out, and `TWOTOP_TUNING=tune.json` runs the game watching that file: an edit lands within half a second. Copy the values that win back into `Tuning::default()`.
 
 Two players share one keyboard:
 
@@ -47,7 +57,7 @@ Decisions that shaped it, with the reasoning in [`MORGAN_NOTES.md`](MORGAN_NOTES
 - No `f32`, `f64` or `glam` in `sim`; clippy's `disallowed-types` denies the float types there. Sim collections are `BTreeMap`s, checksums use `bevy_ggrs`'s portable hasher, and gameplay randomness comes from one rolled-back RNG.
 - The wire carries level signals only (stick, aim, buttons held), never press or release events. Presses are derived in the sim by diffing against the rolled-back input history, so a re-simulation cannot lose them.
 - Replays are strictly version-matched: `sim::SIM_VERSION` (15 today) is stamped into every tape and rides the online room name, and any change to the simulation bumps it. There is no migration path; old tapes play on archived tagged builds.
-- Online play is peer to peer, and the public APK carries no relay secret. Phones on mobile data usually sit behind carrier NAT (address sharing that blocks direct connections), which needs a TURN relay server to carry the traffic. When a build has the vendor's URL baked in, it fetches short-lived TURN credentials from `ice_vendor` at match entry, so the relay works and a leaked credential dies within hours.
+- Online play is peer to peer, and the public APK carries no relay secret. Phones on mobile data usually sit behind carrier NAT (address sharing that blocks direct connections), which needs a TURN relay server to carry the traffic. When a build has the vendor's URL baked in, it fetches short-lived TURN credentials from `ice_vendor` ahead of the match, so the relay works and a leaked credential dies within hours.
 
 ### What is in the game
 
@@ -116,7 +126,7 @@ Two things are not tested anywhere automated. Audio and haptics need a real devi
 The two-phone test over Wi-Fi against mobile data passed once, at an earlier revision, and nobody has re-run it since the netplay layer changed: the prediction window, the disconnect and forfeit rules, the packet guards and the browser relay path are all newer than that test. Until it runs again, cross-carrier play is a path that was verified and then drifted. Loopback on one machine and the CI matrix cover the simulation and say nothing about a real network.
 
 - The deployed browser build has no online mode: the Pages build bakes no signaling room, so FIND OPPONENT never appears there. Nobody has played an online match from a browser build, and as of the last audit pass nobody had opened the page on a real iPhone (`docs/ROLEPLAY_AUDIT.md`, "Still unverified"); its browser-specific fixes have been verified only by the build gates and the checksum probe, with no one testing them on a phone.
-- There is no native iOS app and no desktop packaging; `cargo run -p app` is the desktop build, and it is a dev tool.
+- There is no native iOS app. The desktop builds are unsigned (one OS prompt on first launch, above).
 - There is no in-app way to enter a room URL. Desktop uses `--room` or `MATCHBOX_ROOM`; the APK bakes `TWOTOP_ROOM` at build time.
 - The public APK relays through TURN only if the credential vendor's URL was baked at build time. Without it, two phones behind carrier NAT find each other through the signaling server and then never connect (`SIGNALING.md`).
 - A phone call still forfeits the match after 9 seconds of silence, with no reconnect and no wake lock.

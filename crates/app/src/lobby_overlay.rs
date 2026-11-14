@@ -64,6 +64,9 @@ fn spawn_summoning(mut commands: Commands) {
 /// instead of breathing dots forever.
 const STALL_DIAGNOSIS_SECS: f32 = 15.0;
 
+/// Seconds a paired session may spend synchronizing in silence.
+const SYNC_WORD_SECS: f32 = 2.0;
+
 /// While in-match but pre-peer, the wait is a *ceremony*, not a debug
 /// string: SUMMONING with a breathing ellipsis and the dialed room. The
 /// bad states (away / forfeit) speak plainly and large, and a stalled
@@ -77,6 +80,12 @@ fn update_summoning(
     room: Res<RoomCode>,
     peer_profile: Res<net::PeerProfile>,
     absence: Res<crate::netplay::RecentAbsence>,
+    sync: Res<crate::netplay::SyncWait>,
+    silence: (
+        Res<net::SilenceClock>,
+        Res<net::LastPeerMessageFrame>,
+        Res<net::PeerPaused>,
+    ),
     mut stall: Local<Option<(std::mem::Discriminant<LobbyState>, f32)>>,
     mut q: Query<(&mut Text2d, &mut Visibility), With<SummoningText>>,
 ) {
@@ -143,9 +152,14 @@ fn update_summoning(
             }
             Some(m)
         }
-        LobbyState::Disconnected { .. } => Some(format!(
-            "{challenger} AWAY{dots}\nhold the field - forfeit soon"
-        )),
+        LobbyState::Disconnected { .. } => {
+            let (clock, heard, paused) = silence;
+            let left = away_secs_left(clock.0, heard.0, paused.0);
+            // A peer that said it was stepping out is waited for longer,
+            // and the wait says so.
+            let what = if paused.0 { "STEPPED AWAY" } else { "AWAY" };
+            Some(format!("{challenger} {what}\n\n{left}\n\nhold the field"))
+        }
         LobbyState::Forfeited { .. } => {
             // If OUR phone went away just before the forfeit, we are the
             // one who fled — say so instead of gaslighting the player.
@@ -159,6 +173,16 @@ fn update_summoning(
             "COULDN'T REACH THE ROOM SERVER\n\ncheck this phone's connection,\nthen CANCEL and try again"
                 .to_string(),
         ),
+        // Paired, and the first frame is taking its time: say so after a
+        // moment rather than show a frozen board (it normally lands in
+        // well under a second; `netplay::SYNC_BUDGET_SECS` bounds it).
+        LobbyState::Connected { .. } if sync.waiting() => {
+            (since > SYNC_WORD_SECS).then(|| format!("REACHING {challenger}{dots}"))
+        }
+        LobbyState::PeerUnreachable => Some(
+            "COULDN'T REACH YOUR CHALLENGER\n\ntry both on Wi-Fi,\nor both on data,\nthen CANCEL and try again"
+                .to_string(),
+        ),
         // A desync ends at MatchOver, where the summary card owns the screen.
         LobbyState::Idle | LobbyState::Connected { .. } | LobbyState::Desynced { .. } => None,
     };
@@ -169,6 +193,14 @@ fn update_summoning(
         }
         None => *vis = Visibility::Hidden,
     }
+}
+
+/// Whole seconds until an away peer is forfeited (net's silence FSM), never
+/// below 1 while the overlay still shows. Pure for tests.
+fn away_secs_left(clock: u32, last_heard: u32, paused: bool) -> u32 {
+    let silent = clock.saturating_sub(last_heard);
+    let left = net::forfeit_after(paused).saturating_sub(silent);
+    left.div_ceil(sim::TICK_HZ as u32).max(1)
 }
 
 /// "CURS" → "C U R S" (the glyphs read as a dialed code, not a word).
@@ -249,6 +281,23 @@ fn update_overlay(
             )
         }
         LobbyState::SummonFailed => "lobby: summons FAILED (signaling lost)".to_string(),
+        LobbyState::PeerUnreachable => "lobby: peer UNREACHABLE (sync never finished)".to_string(),
     };
     text.0 = label;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_away_countdown_reaches_the_forfeit_and_waits_longer_for_a_pause() {
+        let hz = sim::TICK_HZ as u32;
+        // A second of silence: the AWAY overlay has just come up.
+        assert_eq!(away_secs_left(hz, 0, false), 8);
+        assert_eq!(away_secs_left(hz, 0, true), 19);
+        // The last moment before the forfeit still shows a 1, never a 0.
+        assert_eq!(away_secs_left(net::FORFEIT_AFTER_FRAMES - 1, 0, false), 1);
+        assert_eq!(away_secs_left(net::FORFEIT_AFTER_FRAMES + 50, 0, false), 1);
+    }
 }

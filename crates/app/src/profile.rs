@@ -56,11 +56,11 @@ const KEY_ROWS: [&str; 4] = ["1234567890", "QWERTYUIOP", "ASDFGHJKL", "ZXCVBNM"]
 // ---- Title: your name over your demon's head ----
 /// Tap anywhere on your demon (or its name) to re-enter the keyboard.
 const NAME_TAP_RECT: (f32, f32) = (0.30, 0.50);
-const NAME_ANCHOR_Y: f32 = 1.0 - 2.0 * 0.335;
+const NAME_ANCHOR_Y: f32 = crate::ui::anchor_y(0.335);
 
 // ---- NameEntry screen (window-fraction, y-down) ----
 /// The name you're typing, with its blinking cursor.
-const ENTRY_ANCHOR_Y: f32 = 1.0 - 2.0 * 0.28;
+const ENTRY_ANCHOR_Y: f32 = crate::ui::anchor_y(0.28);
 /// The keyboard: four ragged rows low on the screen where a phone keyboard
 /// lives, plus a DEL/DONE row under it.
 const KEY_TOP: f32 = 0.44;
@@ -296,35 +296,14 @@ fn load_profile() -> LocalProfile {
 /// happened — and with `paths::write_atomic` on every save, the only way
 /// to get here anymore is outside interference (a hand edit, a bad disk).
 fn read_profile(path: &std::path::Path) -> LocalProfile {
-    let Ok(text) = crate::paths::read_document(path) else {
-        return LocalProfile::default();
-    };
-    match serde_json::from_str(&text) {
-        Ok(profile) => profile,
-        Err(e) => {
-            tracing::error!(
-                target: "two_top::profile",
-                error = %e,
-                "profile.json is corrupt — quarantining it and reminting",
-            );
-            crate::paths::quarantine_corrupt(path);
-            LocalProfile::default()
-        }
-    }
+    crate::paths::read_json(path, "profile.json").unwrap_or_default()
 }
 
 fn save_profile(profile: &LocalProfile) {
     let Some(path) = profile_path() else {
         return;
     };
-    if let Some(parent) = path.parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
-    if let Ok(json) = serde_json::to_string_pretty(profile)
-        && let Err(e) = crate::paths::write_atomic(&path, json.as_bytes())
-    {
-        tracing::warn!(target: "two_top::profile", error = %e, "failed to save profile");
-    }
+    crate::paths::write_json(&path, profile, "profile.json");
 }
 
 /// Your name over your demon on the title.
@@ -335,13 +314,29 @@ struct TitleName;
 #[derive(Component)]
 struct EntryLine;
 
-/// One key of the keyboard: a letter at (row, col), or an action.
+/// One key of the keyboard: a letter at (row, col), or an action — plus
+/// the screen's two words, the prompt above the line and SKIP in the
+/// shared top strip, which share the keys' show/hide.
 #[derive(Component, Clone, Copy, PartialEq)]
 enum GridKey {
     Letter { row: usize, col: usize },
     Del,
     Done,
+    Prompt,
+    Skip,
 }
+
+/// The name as it stood when the keyboard opened (the dealt placeholder
+/// for a fresh install): what SKIP keeps.
+#[derive(Resource, Default)]
+struct NameBeforeEntry(String);
+
+/// The question over the line: the keyboard used to open with no word on
+/// it, and a newcomer met a blinking cursor before any idea of what it
+/// wanted.
+const PROMPT: &str = "WHAT DO THEY CALL YOU?";
+/// Where the prompt sits: above the entry line, below the top strip.
+const PROMPT_FY: f32 = 0.20;
 
 fn spawn_name_ui(mut commands: Commands, netplay: Res<NetplayConfig>) {
     // Couch builds carry no identity to exchange; the name is online-only.
@@ -388,7 +383,7 @@ fn spawn_name_ui(mut commands: Commands, netplay: Res<NetplayConfig>) {
             },
             TextColor(color),
             TextLayout::new_with_justify(Justify::Center),
-            ScreenAnchor::new(fx * 2.0 - 1.0, 1.0 - 2.0 * fy, 0.0, 0.0),
+            ScreenAnchor::new(crate::ui::anchor_x(fx), crate::ui::anchor_y(fy), 0.0, 0.0),
             Transform::from_xyz(0.0, 0.0, 201.0),
             Visibility::Hidden,
         ));
@@ -405,6 +400,14 @@ fn spawn_name_ui(mut commands: Commands, netplay: Res<NetplayConfig>) {
             );
         }
     }
+    key(GridKey::Prompt, 0.5, PROMPT_FY, 34.0, render::palette::BONE);
+    key(
+        GridKey::Skip,
+        0.5,
+        (crate::ui::TOP_EXIT.0 + crate::ui::TOP_EXIT.1) * 0.5,
+        30.0,
+        render::palette::COLD_STONE,
+    );
     key(
         GridKey::Del,
         0.28,
@@ -425,7 +428,11 @@ fn spawn_name_ui(mut commands: Commands, netplay: Res<NetplayConfig>) {
 /// type — the dealt placeholder exists so the wire is never empty, not so
 /// you have to backspace it before your own name. Editing a name you
 /// already chose keeps it, so a one-letter fix stays a one-letter fix.
-fn clear_placeholder_on_entry(mut profile: ResMut<LocalProfile>) {
+fn clear_placeholder_on_entry(
+    mut profile: ResMut<LocalProfile>,
+    mut before: ResMut<NameBeforeEntry>,
+) {
+    before.0 = profile.name.clone();
     if !profile.named {
         profile.name.clear();
     }
@@ -440,7 +447,13 @@ fn open_name_entry_on_first_boot(
     mut next: ResMut<NextState<AppScreen>>,
     mut done: Local<bool>,
 ) {
-    if *done || profile.named || netplay.room_url.is_none() {
+    // A scripted run (capture, autostart, the two-peer smoke) has nobody
+    // to type a name.
+    if *done
+        || profile.named
+        || netplay.room_url.is_none()
+        || std::env::var_os("TWOTOP_AUTOSTART").is_some()
+    {
         return;
     }
     if *screen.get() != AppScreen::Title {
@@ -478,6 +491,7 @@ fn name_entry_input(
     keys: Res<ButtonInput<KeyCode>>,
     touches: Res<Touches>,
     window: Res<WindowSize>,
+    before: Res<NameBeforeEntry>,
     mut profile: ResMut<LocalProfile>,
     mut next: ResMut<NextState<AppScreen>>,
 ) {
@@ -488,7 +502,9 @@ fn name_entry_input(
         for t in touches.iter_just_pressed() {
             let p = t.position();
             let (fx, fy) = (p.x / win.x, p.y / win.y);
-            if (ACTION_BAND.0..ACTION_BAND.1).contains(&fy) {
+            if crate::ui::in_band(fy, crate::ui::TOP_EXIT) {
+                hit = Some(GridKey::Skip);
+            } else if (ACTION_BAND.0..ACTION_BAND.1).contains(&fy) {
                 hit = Some(if fx < 0.5 {
                     GridKey::Del
                 } else {
@@ -561,6 +577,18 @@ fn name_entry_input(
         Some(GridKey::Del) => {
             profile.name.pop();
         }
+        Some(GridKey::Skip) => {
+            // Leave with the name you came in with: the dealt one on a
+            // fresh install (claimed, so the keyboard does not reopen).
+            profile.name = if before.0.is_empty() {
+                default_name(profile.install_id)
+            } else {
+                before.0.clone()
+            };
+            profile.named = true;
+            save_profile(&profile);
+            next.set(AppScreen::Title);
+        }
         _ => {}
     }
 }
@@ -632,6 +660,14 @@ fn update_name_ui(
                 text.0 = "DONE".to_string();
                 color.0 = render::palette::SPARK;
             }
+            GridKey::Prompt => {
+                text.0 = PROMPT.to_string();
+                color.0 = render::palette::BONE;
+            }
+            GridKey::Skip => {
+                text.0 = "SKIP".to_string();
+                color.0 = render::palette::COLD_STONE;
+            }
             GridKey::Letter { row, col } => {
                 text.0 = KEY_ROWS[row]
                     .chars()
@@ -649,6 +685,7 @@ pub struct ProfilePlugin;
 impl Plugin for ProfilePlugin {
     fn build(&self, app: &mut App) {
         app.insert_resource(load_profile())
+            .init_resource::<NameBeforeEntry>()
             .add_systems(Startup, spawn_name_ui)
             .add_systems(OnEnter(AppScreen::NameEntry), clear_placeholder_on_entry)
             .add_systems(

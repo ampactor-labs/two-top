@@ -4,18 +4,17 @@
 //! plugins, two synchronized Players in a SyncTestSession). It's called
 //! from two places:
 //!   * `crates/app/src/main.rs` — desktop binary; calls `app::run()`.
-//!   * the `android_main` extern generated below by `#[bevy_main]` —
-//!     loaded by the Android NativeActivity at app launch when the crate
-//!     is compiled as a `cdylib` and packaged into an APK by cargo-apk.
-//!
-//! The `#[bevy_main]` macro is a no-op on every non-android target, so
-//! the `fn main()` it wraps is just an unreachable private function in
-//! desktop builds — the real desktop entry is `src/main.rs`.
+//!   * the `android_main` export at the bottom of this file — looked up by
+//!     the Android NativeActivity glue at app launch when the crate is
+//!     compiled as a `cdylib` and packaged into an APK by cargo-apk. It
+//!     hands straight to `platform::android::main`, which owns the
+//!     process's lifetime (what `#[bevy_main]` generated here did not).
+//!   * `platform::web::web_start` — the browser entry.
 
 use bevy::prelude::*;
 use bevy_ggrs::GgrsPlugin;
 use fixed_math::Fix;
-use input_touch::{CursorPosition, InputTouchPlugin, WindowSize, update_touch_state};
+use input_touch::{InputTouchPlugin, WindowSize, update_touch_state};
 use render::{EffectsPlugin, RenderSyncPlugin};
 use sim::{
     AnimState, BOOMERANG_HALF_EXTENT_CM, Boomerang, GgrsCfg, Player, PositionF, SelectedArena,
@@ -28,19 +27,26 @@ mod arena_select;
 mod attest;
 mod audio;
 mod bot;
+mod callout;
 mod camera;
-mod capability;
+mod crash_report;
 mod dark_beyond;
 mod debug_overlay;
 mod devour;
+mod first_blood;
 mod grudge;
 mod haptics;
 mod hud;
 mod intro_card;
+mod lesson;
+mod lifecycle;
 mod lobby_overlay;
 mod logging;
 mod netplay;
+mod nudges;
 mod paths;
+mod platform;
+mod pointer;
 mod profile;
 mod recorder;
 mod rivals;
@@ -50,10 +56,11 @@ mod screen;
 mod settings;
 mod shade;
 mod share;
+mod state_log;
 mod theater;
 mod touch_controls;
-#[cfg(target_family = "wasm")]
-mod web;
+mod tuning_reload;
+mod ui;
 use anchor::{FullScreenSprite, ScreenAnchorPlugin};
 use attest::AttestPlugin;
 use audio::GameAudioPlugin;
@@ -100,8 +107,14 @@ pub fn run() {
 
     let netplay = NetplayConfig::from_env_and_args();
     let online = netplay.room_url.is_some();
+    // What this device is and can do, asked once; every presentation
+    // policy reads it (`platform::DeviceProfile`).
+    let profile = platform::DeviceProfile::detect();
+    tracing::info!(target: "two_top::app", ?profile, "device profile");
 
     let mut app = App::new();
+    // First, so every plugin's `build` reads the same answer.
+    app.insert_resource(profile);
     app
         // Disable bevy's LogPlugin: we own the subscriber installed
         // above. LogPlugin would try to call `set_global_default` again
@@ -133,12 +146,13 @@ pub fn run() {
                     ..default()
                 })
                 .disable::<bevy::log::LogPlugin>();
-            // Desktop asset root. Bevy's file asset reader resolves its base
-            // from CARGO_MANIFEST_DIR under `cargo run`, which points at
-            // `crates/app/assets` — a dir that does not exist. The runtime
-            // assets (sprites, arena floors, HUD atlases, the 12 audio cues)
-            // live at the workspace root (`assets/`, two levels up), so aim
-            // the reader there; the build-time path makes it cwd-independent.
+            // Desktop asset root: wherever this build's assets actually are
+            // (`platform::desktop::asset_root` — beside a shipped binary,
+            // in a macOS bundle, or the checkout under `cargo run`). It was
+            // the checkout's absolute path, baked in at compile time, which
+            // left a build on any other machine untextured and silent. No
+            // `.meta` sidecars ship, so the probe for each is skipped (as in
+            // the browser).
             // Android deliberately keeps the default ("assets"): cargo-apk
             // bundles `../../assets` (Cargo.toml `[package.metadata.android]
             // assets`) as the APK asset root, so the in-code load paths
@@ -148,7 +162,10 @@ pub fn run() {
             // workspace assets dir beside index.html.
             #[cfg(not(any(target_os = "android", target_family = "wasm")))]
             let plugins = plugins.set(bevy::asset::AssetPlugin {
-                file_path: concat!(env!("CARGO_MANIFEST_DIR"), "/../../assets").to_string(),
+                file_path: platform::desktop::asset_root()
+                    .to_string_lossy()
+                    .into_owned(),
+                meta_check: bevy::asset::AssetMetaCheck::Never,
                 ..default()
             });
             // The browser skips Bevy's `.meta` sidecar probe. By default every
@@ -161,10 +178,9 @@ pub fn run() {
                 ..default()
             });
             // Phones request the GPU device with the core feature set only
-            // (see `capability::core_gpu_features_only`). The browser keeps
-            // Bevy's own WebGL2 settings untouched.
-            #[cfg(not(target_family = "wasm"))]
-            let plugins = if capability::core_gpu_features_only() {
+            // (`DeviceProfile::core_gpu_only`). The browser keeps Bevy's own
+            // WebGL2 settings untouched (the profile never asks it to).
+            if profile.core_gpu_only {
                 plugins.set(bevy::render::RenderPlugin {
                     render_creation: bevy::render::settings::WgpuSettings {
                         disabled_features: Some(bevy::render::settings::WgpuFeatures::all()),
@@ -175,8 +191,7 @@ pub fn run() {
                 })
             } else {
                 plugins
-            };
-            plugins
+            }
         })
         .add_plugins(GgrsPlugin::<GgrsCfg>::default())
         .add_plugins(SimPlugin)
@@ -195,6 +210,8 @@ pub fn run() {
         // per-platform below; the two must never both be installed or
         // they'd race over `LocalInputs<GgrsCfg>`.
         .add_plugins(InputTouchPlugin)
+        // The mouse as a finger, ahead of every touch reader (`pointer`).
+        .add_plugins(pointer::PointerPlugin)
         .add_plugins(RenderSyncPlugin)
         .add_plugins(EffectsPlugin)
         .add_plugins(GameAudioPlugin)
@@ -216,12 +233,19 @@ pub fn run() {
         .add_plugins(runes::RunesPlugin)
         .add_plugins(TouchControlsPlugin)
         .add_plugins(BotPlugin)
+        .add_plugins(callout::CalloutPlugin)
+        .add_plugins(first_blood::FirstBloodPlugin)
+        .add_plugins(nudges::NudgesPlugin)
+        .add_plugins(state_log::StateLogPlugin)
+        .add_plugins(tuning_reload::TuningReloadPlugin)
         .add_plugins(HudPlugin)
         .add_plugins(DebugInputOverlayPlugin)
         .add_plugins(net::NetPlugin)
         .add_plugins(LobbyOverlayPlugin)
         .add_plugins(ScreenPlugin)
         .add_plugins(SettingsPlugin)
+        .add_plugins(lifecycle::LifecyclePlugin)
+        .add_plugins(crash_report::CrashReportPlugin)
         .init_resource::<FangTextures>()
         .init_resource::<netplay::LocalPlayerHandle>()
         .init_resource::<netplay::SessionIds>()
@@ -263,64 +287,44 @@ pub fn run() {
     if online {
         app.add_plugins(MatchboxPlugin);
     }
+    app.add_plugins(platform::PlatformPlugin);
 
-    // Platform input source (level signals only; exactly one source).
-    // Android: touch. Everything else (PC): keyboard — WASD for P0, arrows
-    // for P1, so two friends play couch versus on one keyboard. After the
-    // source (and the bot's patch): the online rematch gate converts a
-    // MatchOver THROW press into handshake consent, and — when a tape is
-    // loaded — the theater's playback source replaces the whole map.
-    #[cfg(target_os = "android")]
+    // One input chain, the same on every platform (level signals only).
+    // The keyboard/gamepad source writes every local handle (WASD for P0,
+    // arrows for P1, so two friends play couch versus on one keyboard);
+    // the flip mirror reflects it for a P1 seat; then the touch source
+    // overwrites the local handle, but only while a finger (or the mouse,
+    // `pointer`) is actually down, so a keyboard is never stamped over;
+    // then the bot patches handle 1 in practice. After that: the rematch
+    // hold, the UI's injected THROW, the online rematch gate, and — when a
+    // tape is loaded — the theater's playback source, which replaces the
+    // whole map.
+    //
+    // This used to be three chains. Android took touch as its only source
+    // (and wrote one finger to BOTH handles), native desktop never read
+    // touch at all, and the browser layered the two. A touch layer fixed
+    // on one platform stayed broken on another until someone noticed.
+    app.add_plugins(input_desktop::DesktopInputsPlugin);
     app.add_systems(
         bevy_ggrs::prelude::ReadInputs,
-        // The bot patches handle 1 after the touch source's insert applies.
-        (read_android_touch_inputs, bot::drive_bot).chain(),
+        (mirror_keyboard_for_flip, read_touch_inputs, bot::drive_bot)
+            .chain()
+            .after(input_desktop::read_local_desktop_inputs),
     );
-    // platform-gate-ok: the browser takes the keyboard source too, and
-    // layers the touch source below over it.
-    #[cfg(not(target_os = "android"))]
-    {
-        app.add_plugins(input_desktop::DesktopInputsPlugin);
-        // Mirror-for-flip runs between the keyboard source and the bot: the
-        // P1 window of a desktop loopback session needs the same world-Y
-        // reflection as the P1 phone, and the bot's world-space inputs must
-        // never be mirrored (it patches handle 1 afterwards).
-        //
-        // The browser gets a SECOND source layered on after the mirror.
-        // One wasm binary serves a phone and a laptop, and it was taking
-        // the keyboard-only branch on both: `read_android_touch_inputs`
-        // is the only thing anywhere that turns `TouchState` into
-        // `LocalInputs`, and it is Android-gated. So a phone browser drew
-        // controls (once they were un-gated) that fed nothing — the stick
-        // moved under the thumb and the duelist never did. `TouchState`
-        // is maintained on every platform; only the wire into ggrs was
-        // missing. The touch source runs last and overwrites only while a
-        // finger is actually down, so a laptop browser keeps WASD and
-        // couch versus.
-        #[cfg(not(target_family = "wasm"))]
-        app.add_systems(
-            bevy_ggrs::prelude::ReadInputs,
-            (mirror_desktop_inputs_for_flip, bot::drive_bot)
-                .chain()
-                .after(input_desktop::read_local_desktop_inputs),
-        );
-        #[cfg(target_family = "wasm")]
-        app.add_systems(
-            bevy_ggrs::prelude::ReadInputs,
-            (
-                mirror_desktop_inputs_for_flip,
-                read_web_touch_inputs,
-                bot::drive_bot,
-            )
-                .chain()
-                .after(input_desktop::read_local_desktop_inputs),
-        );
-        #[cfg(not(target_family = "wasm"))]
-        app.add_systems(Update, toggle_fullscreen);
-    }
+    app.add_systems(
+        Update,
+        toggle_fullscreen.run_if(|profile: Res<platform::DeviceProfile>| profile.fullscreen_key),
+    );
+    // The nudges watch the local player's DASH presses where inputs are
+    // made (a directionless press does nothing the sim could show).
+    app.add_systems(
+        bevy_ggrs::prelude::ReadInputs,
+        nudges::watch_dash_presses.after(bot::drive_bot),
+    );
     app.add_systems(
         bevy_ggrs::prelude::ReadInputs,
         (
+            screen::hold_rematch_until_settled,
             screen::inject_ui_throw,
             netplay::gate_rematch_inputs,
             replay::playback_inputs_system.run_if(resource_exists::<replay::ReplayPlayback>),
@@ -334,57 +338,39 @@ pub fn run() {
         app.insert_resource(cap).add_systems(Last, capture_frame);
     }
 
-    // The browser entry's autoplay: a tape carried in by the page rolls
-    // once the Title is reached (src/web.rs).
+    // A panic that unwinds out of the whole app ended the run; mark it for
+    // the next launch's crash notice and hand it on (on Android the
+    // platform adapter turns it into an abort). Panics something below
+    // caught — a detached task's — never get here and leave no mark.
+    #[cfg(not(target_family = "wasm"))]
+    if let Err(panic) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| app.run())) {
+        logging::mark_fatal_panic();
+        std::panic::resume_unwind(panic);
+    }
     #[cfg(target_family = "wasm")]
-    app.add_systems(Update, web::watch_autoplay);
-
     app.run();
 
     tracing::info!(target: "two_top::app", "two-top exiting cleanly");
 }
 
-#[cfg(target_os = "android")]
-fn read_android_touch_inputs(
-    mut commands: Commands,
-    touch_state: Res<input_touch::TouchState>,
-    local_players: Res<bevy_ggrs::LocalPlayers>,
-    local_handle: Res<netplay::LocalPlayerHandle>,
-    flip: Res<render::PerspectiveFlip>,
-) {
-    let mut input = input_touch::quantize_inputs(&touch_state);
-    // The flipped client (P1's phone) renders the world mirrored top-for-
-    // bottom so its player sits at the near edge; its screen drags must be
-    // reflected into world space PRE-wire or "down" walks the character up
-    // (and aim inverts with it). Both peers still exchange plain world-space
-    // inputs, so determinism is untouched.
-    if flip.0 < 0.0 {
-        input = input_touch::mirror_input_y(input);
-    }
-    let mut map = bevy::platform::collections::HashMap::default();
-    if let Some(handle) = local_handle.0 {
-        map.insert(handle, input);
-    } else {
-        for handle in &local_players.0 {
-            map.insert(*handle, input);
-        }
-    }
-    commands.insert_resource(bevy_ggrs::LocalInputs::<GgrsCfg>(map));
-}
-
-/// The browser's touch source: the same `TouchState` -> `LocalInputs`
-/// step [`read_android_touch_inputs`] does, layered over the keyboard
-/// source instead of replacing it.
+/// The touch source, on every platform: `TouchState` (fingers, and the
+/// mouse as a finger) into `LocalInputs`, layered over the keyboard.
 ///
-/// Overwrites the local handle's input ONLY while a finger is engaged
-/// ([`input_touch::is_engaged`]), because the same wasm binary serves a
-/// laptop browser where the keyboard is the only input device — an
-/// unconditional write would stamp neutral over every keystroke. Mirrors
-/// for the flipped (P1) client itself, exactly as the Android reader
-/// does, and therefore runs AFTER `mirror_desktop_inputs_for_flip` so the
-/// reflection is applied once, not twice.
-#[cfg(target_family = "wasm")]
-fn read_web_touch_inputs(
+/// Overwrites ONLY while engaged ([`input_touch::is_engaged`], which
+/// includes the one-frame sticky release of an aimed throw), so a keyboard
+/// player is never stamped over with neutral. Online it drives this
+/// device's handle; with no handle assigned (couch, practice, First Blood)
+/// it drives the near seat, P0 — the bot takes P1 in practice, and in
+/// couch versus P1 stays on the keyboard. It used to drive every local
+/// handle at once, so one finger moved both couch players.
+///
+/// The flipped (P1) online client renders the world mirrored top-for-
+/// bottom so its player sits at the near edge; its screen drags are
+/// reflected into world space here, PRE-wire, or "down" walks the
+/// character up. Runs after [`mirror_keyboard_for_flip`] so the keyboard's
+/// reflection and this one are each applied exactly once. Both peers still
+/// exchange plain world-space inputs, so determinism is untouched.
+fn read_touch_inputs(
     touch_state: Res<input_touch::TouchState>,
     local_players: Res<bevy_ggrs::LocalPlayers>,
     local_handle: Res<netplay::LocalPlayerHandle>,
@@ -401,24 +387,23 @@ fn read_web_touch_inputs(
     if flip.0 < 0.0 {
         input = input_touch::mirror_input_y(input);
     }
-    if let Some(handle) = local_handle.0 {
+    if let Some(handle) = touch_handle(local_handle.0, &local_players.0) {
         inputs.0.insert(handle, input);
-    } else {
-        for handle in &local_players.0 {
-            inputs.0.insert(*handle, input);
-        }
     }
 }
 
-/// Desktop twin of the flip mirror inside `read_android_touch_inputs`: when
-/// this window is the flipped (P1) client of an online session, reflect the
-/// keyboard's world-Y before the wire so "up" on this screen moves the
+/// Which handle a finger drives: this device's online handle, else the
+/// lowest local one (P0). Pure for tests.
+fn touch_handle(online: Option<usize>, local: &[usize]) -> Option<usize> {
+    online.or_else(|| local.iter().copied().min())
+}
+
+/// The keyboard/gamepad's twin of the flip in [`read_touch_inputs`]: when
+/// this window is the flipped (P1) client of an online session, reflect
+/// the keyboard's world-Y before the wire so "up" on this screen moves the
 /// character up on this screen. Couch and practice run with flip = 1.0, so
-/// this is a no-op everywhere but a desktop loopback P1 window.
-// platform-gate-ok: the browser runs the keyboard source, so it needs
-// this mirror as much as a native desktop client does.
-#[cfg(not(target_os = "android"))]
-fn mirror_desktop_inputs_for_flip(
+/// this is a no-op everywhere but an online P1 seat.
+fn mirror_keyboard_for_flip(
     flip: Res<render::PerspectiveFlip>,
     inputs: Option<ResMut<bevy_ggrs::LocalInputs<GgrsCfg>>>,
 ) {
@@ -435,8 +420,8 @@ fn mirror_desktop_inputs_for_flip(
 
 /// Desktop: toggle borderless fullscreen on F11 — handy for showing a
 /// couch match on the big screen. Android manages its own fullscreen, and
-/// a browser's is the page's (the manifest asks for it on install).
-#[cfg(not(any(target_os = "android", target_family = "wasm")))]
+/// a browser's is the page's (the manifest asks for it on install), so it
+/// runs only where `DeviceProfile::fullscreen_key` says so.
 fn toggle_fullscreen(
     keys: Res<bevy::input::ButtonInput<bevy::input::keyboard::KeyCode>>,
     mut windows: Query<&mut Window>,
@@ -454,12 +439,6 @@ fn toggle_fullscreen(
     }
 }
 
-/// Phase 13: surface graceful-shutdown events into the diagnostic log.
-/// Bevy's `AppExit` event fires when the window closes or
-/// `app.send_event(AppExit::Success)` is invoked elsewhere. Reading it
-/// here gives the log a clear "shutdown initiated" line right before
-/// the `App::run()` loop unwinds — useful for distinguishing a clean
-/// exit from a panic-driven termination.
 /// Phase 18 Task 5.6 — frame-time instrumentation. Accumulates per-frame
 /// `Time<Real>` deltas and emits a periodic `two_top::perf` summary (avg / max
 /// / count over the 60 fps budget) so a profiling session surfaces slow
@@ -506,6 +485,12 @@ fn frame_time_watch(time: Res<Time<Real>>, mut stats: Local<FrameStats>) {
     }
 }
 
+/// Phase 13: surface graceful-shutdown events into the diagnostic log.
+/// Bevy's `AppExit` event fires when the window closes or
+/// `app.send_event(AppExit::Success)` is invoked elsewhere. Reading it
+/// here gives the log a clear "shutdown initiated" line right before
+/// the `App::run()` loop unwinds — useful for distinguishing a clean
+/// exit from a panic-driven termination.
 fn log_app_exit(mut events: MessageReader<AppExit>) {
     for ev in events.read() {
         tracing::info!(
@@ -516,9 +501,13 @@ fn log_app_exit(mut events: MessageReader<AppExit>) {
     }
 }
 
-#[bevy_main]
-fn main() {
-    run();
+/// The symbol `android-activity`'s NativeActivity glue calls on its own
+/// thread once the Java activity exists. Everything about that thread's
+/// lifetime — and the process's — is `platform::android::main`'s business.
+#[cfg(target_os = "android")]
+#[unsafe(no_mangle)]
+fn android_main(android_app: bevy::android::android_activity::AndroidApp) {
+    platform::android::main(android_app);
 }
 
 /// `Startup`: spawn the *persistent* scene — camera, the desktop control
@@ -529,20 +518,6 @@ fn main() {
 /// swap its texture when the lobby arena picker changes [`SelectedArena`].
 #[derive(Component)]
 struct ArenaFloor;
-
-/// Composed floor backdrop per arena (DESIGN_DIRECTION § 4 — one quiet shared
-/// composition retinted per arena; props carry the rest of the identity).
-fn arena_floor_asset(id: sim::ArenaId) -> &'static str {
-    match id {
-        sim::ArenaId::Anchor => "arenas/anchor_floor.png",
-        sim::ArenaId::Crossing => "arenas/crossing_floor.png",
-        sim::ArenaId::Reliquary => "arenas/reliquary_floor.png",
-        sim::ArenaId::Pit => "arenas/pit_floor.png",
-        sim::ArenaId::Vigil => "arenas/vigil_floor.png",
-        sim::ArenaId::Gallery => "arenas/gallery_floor.png",
-        sim::ArenaId::Forest => "arenas/forest_floor.png",
-    }
-}
 
 /// Swap the backdrop texture when the lobby arena picker changes the selection,
 /// so the Title screen previews the chosen arena's floor and the match starts on
@@ -555,7 +530,7 @@ fn update_arena_floor(
     if !selected.is_changed() {
         return;
     }
-    let path = arena_floor_asset(selected.0);
+    let path = render::arena::info(selected.0).floor;
     for mut sprite in &mut q {
         sprite.image = asset_server.load(path);
     }
@@ -773,13 +748,13 @@ fn spawn_title_diorama(
         (
             DioramaPart::NearDemon,
             "sprites/players/duelist_a_sheet.png",
-            1.0 - 2.0 * 0.42,
+            crate::ui::anchor_y(0.42),
             render::PLAYER_RENDER_SIZE * 3.1,
         ),
         (
             DioramaPart::FarDemon,
             "sprites/players/duelist_b_sheet.png",
-            1.0 - 2.0 * 0.26,
+            crate::ui::anchor_y(0.26),
             render::PLAYER_RENDER_SIZE * 2.1,
         ),
     ] {
@@ -811,7 +786,7 @@ fn spawn_title_diorama(
             custom_size: Some(Vec2::splat(render::PLAYER_RENDER_SIZE * 1.9)),
             ..default()
         },
-        anchor::ScreenAnchor::new(0.0, 1.0 - 2.0 * 0.26, 0.0, 0.0),
+        anchor::ScreenAnchor::new(0.0, crate::ui::anchor_y(0.26), 0.0, 0.0),
         Transform::from_xyz(0.0, 0.0, 101.0),
         Visibility::Hidden,
     ));
@@ -1032,6 +1007,7 @@ fn setup(
     asset_server: Res<AssetServer>,
     mut atlases: ResMut<Assets<TextureAtlasLayout>>,
     selected: Res<SelectedArena>,
+    profile: Res<platform::DeviceProfile>,
 ) {
     // Camera. Mobile and desktop both frame the whole playable arena with
     // stable AutoMin constraints. That keeps competitive information fair
@@ -1042,7 +1018,7 @@ fn setup(
     // pickup auras) bloom, while `Tonemapping::None` keeps every other pixel
     // exactly on the locked 16-color palette. `Bloom::OLD_SCHOOL` carries a
     // high threshold so the matte cloaks and floor never wash out.
-    // ONE camera, and the glow is a runtime decision (see `capability`).
+    // ONE camera, and the glow is a runtime decision (`DeviceProfile`).
     // This used to be two `cfg` blocks, which meant a phone browser took
     // the desktop one and paid ~65 ms/frame for an HDR + bloom chain it
     // could not afford, while the APK on the same handset ran lean at 60.
@@ -1068,7 +1044,7 @@ fn setup(
                 ..OrthographicProjection::default_2d()
             }),
         ));
-        if capability::lean_render() {
+        if profile.lean_render {
             // Overdriven accent colors clamp to white instead of
             // blooming — the trade the product platform already makes.
             tracing::info!(target: "two_top::app", "lean render: no HDR, no bloom");
@@ -1079,21 +1055,15 @@ fn setup(
             ));
         }
     }
-    // Native desktop only: the couch-play legend. It named keys on a
-    // touchscreen for as long as the browser build took the desktop arm.
-    #[cfg(not(any(target_os = "android", target_family = "wasm")))]
-    {
-        // Couch-play control legend (desktop only — touch needs none).
-        // World-space Text2d (the app has no bevy_ui), pinned to the bottom
-        // of the *screen* so it stays clear of the top-edge HUD (pips +
-        // round clock) on any window aspect. Bounded so a narrow window
-        // wraps the long lines instead of clipping them off both edges.
+    // The couch-play legend, wherever a keyboard is the likely input: the
+    // desktop build and a laptop browser (which had no controls on screen
+    // at all), never a touchscreen. World-space Text2d (the app has no
+    // bevy_ui), pinned to the bottom of the *screen* so it stays clear of
+    // the top-edge HUD (pips + round clock) on any window aspect. Bounded
+    // so a narrow window wraps the long lines instead of clipping them.
+    if profile.shows_keyboard_legend {
         commands.spawn((
-            Text2d::new(
-                "P0: WASD  -  Space throw  -  LShift dash  -  T taunt\n\
-                 P1: Arrows  -  RShift throw  -  RCtrl dash  -  Enter taunt\n\
-                 or controllers (build --features gamepad)  -  F11 fullscreen",
-            ),
+            Text2d::new(keyboard_legend(profile.fullscreen_key)),
             TextFont {
                 font_size: 26.0,
                 ..default()
@@ -1173,7 +1143,7 @@ fn setup(
     // The title's table (shown only on the title; see `update_title_diorama`).
     spawn_title_diorama(&mut commands, &asset_server, &mut atlases);
 
-    let floor_img = asset_server.load(arena_floor_asset(selected.0));
+    let floor_img = asset_server.load(render::arena::info(selected.0).floor);
     for i in 0..FLOOR_STRIPS {
         let v0 = FLOOR_SRC_H * i as f32 / FLOOR_STRIPS as f32;
         let v1 = FLOOR_SRC_H * (i + 1) as f32 / FLOOR_STRIPS as f32;
@@ -1189,6 +1159,19 @@ fn setup(
             Transform::from_xyz(0.0, 0.0, -1.0),
         ));
     }
+}
+
+/// The couch keyboard legend. It used to end with "or controllers (build
+/// --features gamepad)": a build instruction, shown to players.
+fn keyboard_legend(fullscreen_key: bool) -> String {
+    let mut legend = String::from(
+        "P0: WASD  -  Space throw  -  LShift dash  -  T taunt\n\
+         P1: Arrows  -  RShift throw  -  RCtrl dash  -  Enter taunt",
+    );
+    if fullscreen_key {
+        legend.push_str("\nF11 fullscreen");
+    }
+    legend
 }
 
 /// Horizontal floor bands (source texture rows per strip: 480 / 20 = 24 px).
@@ -1362,27 +1345,31 @@ fn sync_sprite_atlas_from_anim(
     }
 }
 
-/// Mirrors the primary `Window`'s logical size and cursor position into
-/// the resources `input_touch` reads. Lives in the app crate (not
-/// `input_touch`) because only the app pulls in `bevy_window` —
-/// `input_touch` stays headless-friendly for tests and CI.
-/// Ordered before `input_touch::update_touch_state` so the same-frame
-/// touch sync sees fresh metrics.
-fn update_window_metrics(
-    window: Query<&Window>,
-    mut window_size: ResMut<WindowSize>,
-    mut cursor_pos: ResMut<CursorPosition>,
-) {
+/// Mirrors the primary `Window`'s logical size into the resource
+/// `input_touch` reads. Lives in the app crate (not `input_touch`) because
+/// only the app pulls in `bevy_window` — `input_touch` stays
+/// headless-friendly for tests and CI. Ordered before
+/// `input_touch::update_touch_state` so the same-frame touch sync sees
+/// fresh metrics. (The mouse reaches `input_touch` as a finger, through
+/// `pointer`, so no cursor position is mirrored any more.)
+fn update_window_metrics(window: Query<&Window>, mut window_size: ResMut<WindowSize>) {
     let Ok(w) = window.single() else { return };
     window_size.0 = Vec2::new(w.width(), w.height());
-    if let Some(pos) = w.cursor_position() {
-        cursor_pos.0 = pos;
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_finger_drives_the_online_seat_or_else_p0_alone() {
+        assert_eq!(touch_handle(Some(1), &[1]), Some(1));
+        // Couch / practice / First Blood: both handles are local, and a
+        // finger is the near seat's — never both players at once.
+        assert_eq!(touch_handle(None, &[0, 1]), Some(0));
+        assert_eq!(touch_handle(None, &[1, 0]), Some(0));
+        assert_eq!(touch_handle(None, &[]), None);
+    }
 
     #[test]
     fn actor_pose_idle_is_neutral() {

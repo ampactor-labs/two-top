@@ -145,6 +145,33 @@ Or watch everything from the app's process:
 adb logcat --pid=$(adb shell pidof com.ampactorlabs.twotop)
 ```
 
+### After a crash
+
+Logcat is a ring buffer, so the release build also keeps its own record
+in the app's external files dir: a day-rotated log (seven days kept) and
+`crash.log`, which every panic is appended to with the build, the thread
+and the device. With a cable:
+
+```sh
+adb pull /sdcard/Android/data/com.ampactorlabs.twotop/files/crash.log
+```
+
+```sh
+adb pull /sdcard/Android/data/com.ampactorlabs.twotop/files/logs
+```
+
+Without one (a friend's phone): the next launch after a crash shows
+**LAST RUN CRASHED / TAP HERE TO SEND THE REPORT** under the title.
+Tapping it opens Android's share sheet on a plain-text report (build,
+phone model and Android version, GPU and driver, how Android says the
+last run ended, the panic, and the last 60 log lines), and they send it
+however they would have told you anyway. On Android 11+ the report also
+covers deaths no Rust code sees, a crash inside the GPU driver or an ANR,
+because it reads the system's own exit record.
+
+On a phone with no external storage the same files live in the app's
+private dir instead, where only the in-app report can reach them.
+
 ## Troubleshooting
 
 | Symptom | Cause | Fix |
@@ -155,7 +182,8 @@ adb logcat --pid=$(adb shell pidof com.ampactorlabs.twotop)
 | `INSTALL_FAILED_USER_RESTRICTED` | Some Samsung devices block sideload | Settings → Apps → Special access → Install unknown apps → enable for the source (file manager, etc.) |
 | Bare "App not installed" from the package installer | An existing install signed with a DIFFERENT key (a `phone.sh` build vs the CI release, or vice versa) — Android refuses cross-key updates and won't say why | Either uninstall 2-Top first (wipes career/settings on that phone), or make every builder share one key: set the repo's `APK_KEYSTORE` secret to `base64 -w0 ~/.android/debug.keystore` so CI signs with the dev box's key. Every APK workflow run prints its signing cert. |
 | App installs but launches to a black screen, no error | wgpu can't find a Vulkan-capable GPU | Verify device supports Vulkan 1.1+ (`adb shell pm list features | grep vulkan`); some pre-2018 devices won't. |
-| App immediately exits | Look at `adb logcat` for a Rust panic — the SyncTest mismatch observer is intentional and any output containing "SyncTestMismatch" indicates a real determinism violation, not a build issue |
+| App immediately exits | A panic on the main thread aborts on purpose (`crates/app/src/platform/android.rs`), so Android shows its own "2-Top has stopped" and the next launch offers the report: see *After a crash* above. A report or logcat containing "SyncTestMismatch" is the intentional mismatch observer and indicates a real determinism violation, not a build issue |
+| A crash report whose only line is "the process died outside Rust" | No panic ran: the GPU driver, the OS or an ANR ended the process | Read the report's `last exit:` line (`CRASH_NATIVE`, `ANR`, ...) and its device line; `adb bugreport` on that phone has the native backtrace |
 | Launches but silent / untextured sprites | Assets dir not packaged into the APK | Confirm `assets = "../../assets"` in `[package.metadata.android]` packages `assets/audio` + `assets/sprites` into the APK |
 | Throw / kill don't vibrate | `VIBRATE` missing, or haptics disabled in settings | `VIBRATE` is now declared in the manifest; enable haptics in the Title-screen settings |
 

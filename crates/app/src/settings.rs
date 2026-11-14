@@ -98,26 +98,16 @@ fn load_settings() -> Settings {
     let Some(path) = settings_path() else {
         return Settings::default();
     };
-    match crate::paths::read_document(&path) {
-        Ok(text) => serde_json::from_str::<Settings>(&text)
-            .map(Settings::clamped)
-            .unwrap_or_default(),
-        Err(_) => Settings::default(),
-    }
+    crate::paths::read_json::<Settings>(&path, "settings.json")
+        .map(Settings::clamped)
+        .unwrap_or_default()
 }
 
 fn save_settings(settings: &Settings) {
     let Some(path) = settings_path() else {
         return;
     };
-    if let Some(parent) = path.parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
-    if let Ok(json) = serde_json::to_string_pretty(settings)
-        && let Err(e) = crate::paths::write_atomic(&path, json.as_bytes())
-    {
-        tracing::warn!(target: "two_top::settings", error = %e, "failed to save settings");
-    }
+    crate::paths::write_json(&path, settings, "settings.json");
 }
 
 pub struct SettingsPlugin;
@@ -131,6 +121,7 @@ impl Plugin for SettingsPlugin {
                 (
                     adjust_settings.run_if(in_state(AppScreen::Settings)),
                     settings_back.run_if(in_state(AppScreen::Settings)),
+                    settings_how_to_play.run_if(in_state(AppScreen::Settings)),
                     update_setting_rows,
                 ),
             );
@@ -144,13 +135,31 @@ fn settings_back(
     window: Res<WindowSize>,
     mut next: ResMut<NextState<AppScreen>>,
 ) {
-    let win = window.0;
-    let tapped = win.y > 0.0
-        && touches
-            .iter_just_pressed()
-            .any(|t| (BACK_BAND.0..BACK_BAND.1).contains(&(t.position().y / win.y)));
+    let tapped = crate::ui::tapped(
+        touches.iter_just_pressed().map(|t| t.position()),
+        BACK_BAND,
+        window.0,
+    );
     if tapped || keys.just_pressed(KeyCode::Escape) {
         next.set(AppScreen::Title);
+    }
+}
+
+/// HOW TO PLAY: First Blood again, from the top.
+fn settings_how_to_play(
+    touches: Res<Touches>,
+    window: Res<WindowSize>,
+    mut fb: ResMut<crate::first_blood::FirstBlood>,
+    mut practice: ResMut<crate::bot::PracticeMode>,
+    mut selected: ResMut<sim::SelectedArena>,
+    mut next: ResMut<NextState<AppScreen>>,
+) {
+    if crate::ui::tapped(
+        touches.iter_just_pressed().map(|t| t.position()),
+        HOW_TO_PLAY_BAND,
+        window.0,
+    ) {
+        crate::first_blood::begin(&mut fb, &mut practice, &mut selected, &mut next);
     }
 }
 
@@ -183,7 +192,7 @@ fn push_deadzone(
 // whichever group your eye reached first. The gap BEFORE a header is now
 // most of twice the gap after it, and the rows inside a group are tight —
 // which is the whole job of a group header.
-const GROUPS_TOP: f32 = 0.205;
+const GROUPS_TOP: f32 = 0.215;
 const GROUP_HEADER_H: f32 = 0.028;
 const ROW_PITCH: f32 = 0.070;
 const GROUP_GAP: f32 = 0.060;
@@ -201,7 +210,10 @@ const ROW_ARROW_X: f32 = 300.0;
 /// 2 music, 3 deadzone, 4 southpaw, 5 shake — `adjust_settings`' keys).
 const GROUPS: [(&str, [usize; 2]); 3] = [("FEEL", [0, 5]), ("AUDIO", [1, 2]), ("CONTROL", [3, 4])];
 /// BACK, matching the replays screen's band exactly.
-const BACK_BAND: (f32, f32) = (0.86, 0.96);
+const BACK_BAND: crate::ui::Band = crate::ui::BACK;
+/// HOW TO PLAY: under the heading, clear of the top strip (BACK's, on
+/// every screen) and above the first group.
+const HOW_TO_PLAY_BAND: crate::ui::Band = (0.162, 0.210);
 
 /// The computed screen layout: a y-down band per setting row (indexed by
 /// the row's settled id) and a center fy per group header.
@@ -260,10 +272,17 @@ enum RowPart {
     ArrowRight,
 }
 
-/// The bordered BACK button's parts (the same button chrome every other
-/// screen's BACK wears — this one was a bare floating word).
+/// The screen's two buttons, in the bordered chrome every other screen's
+/// buttons wear: BACK, and HOW TO PLAY (First Blood again, any time).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SettingsAction {
+    Back,
+    HowToPlay,
+}
+
+/// One part of one of the screen's buttons.
 #[derive(Component)]
-struct SettingsBack(crate::screen::BtnRole);
+struct SettingsBack(SettingsAction, crate::screen::BtnRole);
 
 fn spawn_setting_rows(mut commands: Commands) {
     let l = layout();
@@ -276,7 +295,7 @@ fn spawn_setting_rows(mut commands: Commands) {
         },
         TextColor(render::palette::HOT_BONE),
         TextLayout::new_with_justify(Justify::Center),
-        crate::anchor::ScreenAnchor::new(0.0, 1.0 - 2.0 * HEADING_FY, 0.0, 0.0),
+        crate::anchor::ScreenAnchor::new(0.0, crate::ui::anchor_y(HEADING_FY), 0.0, 0.0),
         Transform::from_xyz(0.0, 0.0, 210.0),
         Visibility::Hidden,
     ));
@@ -290,7 +309,12 @@ fn spawn_setting_rows(mut commands: Commands) {
             },
             TextColor(render::palette::COLD_STONE),
             TextLayout::new_with_justify(Justify::Center),
-            crate::anchor::ScreenAnchor::new(0.0, 1.0 - 2.0 * l.header_centers[g], 0.0, 0.0),
+            crate::anchor::ScreenAnchor::new(
+                0.0,
+                crate::ui::anchor_y(l.header_centers[g]),
+                0.0,
+                0.0,
+            ),
             Transform::from_xyz(0.0, 0.0, 210.0),
             Visibility::Hidden,
         ));
@@ -354,23 +378,38 @@ fn spawn_setting_rows(mut commands: Commands) {
             ));
         }
     }
-    // BACK in the shared bordered-box language, at the shared band.
-    let back_anchor_y = 1.0 - (BACK_BAND.0 + BACK_BAND.1);
-    for role in [
-        crate::screen::BtnRole::Border,
-        crate::screen::BtnRole::Fill,
-        crate::screen::BtnRole::Label,
-    ] {
-        crate::screen::spawn_button_part(
-            &mut commands,
-            role,
-            Vec2::new(0.0, back_anchor_y),
+    // BACK in the shared bordered-box language, at the shared band; HOW
+    // TO PLAY, smaller, under the heading.
+    for (action, band, size, font) in [
+        (
+            SettingsAction::Back,
+            BACK_BAND,
             Vec2::new(340.0, 76.0),
             40.0,
-            &mut |ec, role| {
-                ec.insert(SettingsBack(role));
-            },
-        );
+        ),
+        (
+            SettingsAction::HowToPlay,
+            HOW_TO_PLAY_BAND,
+            Vec2::new(420.0, 64.0),
+            30.0,
+        ),
+    ] {
+        for role in [
+            crate::screen::BtnRole::Border,
+            crate::screen::BtnRole::Fill,
+            crate::screen::BtnRole::Label,
+        ] {
+            crate::screen::spawn_button_part(
+                &mut commands,
+                role,
+                Vec2::new(0.0, crate::ui::band_anchor_y(band)),
+                size,
+                font,
+                &mut |ec, role| {
+                    ec.insert(SettingsBack(action, role));
+                },
+            );
+        }
     }
 }
 
@@ -423,10 +462,14 @@ fn update_setting_rows(
             Visibility::Hidden
         };
         if open
-            && part.0 == crate::screen::BtnRole::Label
+            && part.1 == crate::screen::BtnRole::Label
             && let Some(mut t) = text
         {
-            t.0 = "BACK".to_string();
+            t.0 = match part.0 {
+                SettingsAction::Back => "BACK",
+                SettingsAction::HowToPlay => "HOW TO PLAY",
+            }
+            .to_string();
         }
     }
 }
@@ -567,8 +610,22 @@ mod tests {
         }
         // A header tap adjusts nothing.
         assert_eq!(row_at(l.header_centers[0]), None);
-        // Neither does the BACK band (settings_back owns it).
+        // Neither does the BACK band (settings_back owns it), nor HOW TO
+        // PLAY's.
         assert_eq!(row_at((BACK_BAND.0 + BACK_BAND.1) * 0.5), None);
+        assert_eq!(
+            row_at((HOW_TO_PLAY_BAND.0 + HOW_TO_PLAY_BAND.1) * 0.5),
+            None
+        );
+    }
+
+    #[test]
+    fn how_to_play_sits_between_the_exit_strip_and_the_first_row() {
+        let l = layout();
+        assert!(!crate::ui::overlaps(HOW_TO_PLAY_BAND, crate::ui::TOP_EXIT));
+        for band in l.row_bands {
+            assert!(!crate::ui::overlaps(HOW_TO_PLAY_BAND, band), "{band:?}");
+        }
     }
 
     #[test]

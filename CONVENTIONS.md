@@ -21,6 +21,7 @@ Hard rules. Violations cause subtle bugs that are expensive to find. The CI and 
 - **Use `with_copy` over `with_clone`** wherever possible. Our types are `Copy`.
 - **Hash components that affect gameplay** with `checksum_component_with_hash::<T>()`. Markers don't need this; their presence/absence is checked elsewhere.
 - **No mid-tick `Commands::insert` / `remove::<T>()` on existing rollback entities.** Bevy archetype transitions during a tick that bevy_ggrs may later resimulate produce non-deterministic state — the snapshot/restore machinery preserves component VALUES per `RollbackId` but not archetype-table-row positions across the despawn-and-respawn rollback restoration uses for entities absent from the rollback target's snapshot. If you need transient state on a rollback entity (`is_dying`, `is_stunned`, etc.), put it as a VALUE on an always-present component and mutate in place. See `sim::Dead { respawn_at_frame: Option<u32> }` (auto-required by `Player`) for the canonical pattern. Phase 11 originally got this wrong with Dead-as-add/remove; the nightly fuzzer caught the desyncs at seeds 29 and 61.
+- **Spawn rollback entities in a fixed order, never in query order.** bevy_ggrs mixes each rollback entity's registration index into the frame checksum, registration follows spawn order, and a rollback restore can reorder a table on one peer and not the other — so a system that spawns while iterating a query can register the same entities in different orders on two machines: identical state, different checksums, and the match ends as a desync. Queue the spawns and issue them sorted (by player handle, then by a value of the state). A match's starting entities come from one place, `sim::spawn_match_world`; never lay a table by hand. `throw_boomerangs` and `drop_fire_trail` are the pattern; `sim/tests/spawn_order.rs` reorders a table to prove it. A single-process SyncTest cannot see this class: only two processes can (`scripts/two_peer_smoke.sh`).
 - **Component VALUE mutation is fine; bumping fields via `&mut C` is safe across rollback** as long as the component is already present. Hit-stop's `commands.entity(killer).insert(StunFrames(..))` works because `StunFrames` is auto-required on `Player` — the insert is a value update, not an archetype change. *And:* hit-stop dispatch goes through `Commands` (deferred), not direct `&mut StunFrames`, so the bump isn't visible to other within-system reads — that detail prevented an order-sensitive coincident-kill bug where the boomerang iteration order would have determined who survived a simultaneous two-way hit.
 
 ## Math and Geometry
@@ -81,6 +82,39 @@ Hard rules. Violations cause subtle bugs that are expensive to find. The CI and 
   ```
 
   `scripts/check_platform_gates.py` enforces this in CI.
+- **No way out of `android_main` leaves the process alive.** `android-activity`
+  catches a panic and keeps the process; winit cannot build a second event
+  loop in it; every later launch then closes on sight. `crates/app/src/platform/android.rs`
+  owns the entry point so that a main-thread panic aborts, a clean return
+  exits, and a destroyed activity exits. Do not reintroduce `#[bevy_main]`,
+  and do not add a path that returns from `android::main`.
+- **All JNI goes through `platform::android::with_activity`.** It hands out the real
+  Activity (not `ndk_context`'s Application), scopes every call in a local
+  reference frame, and clears any pending Java exception. A bare
+  `attach_current_thread` + `call_method` leaks references on a thread that
+  never returns to Java.
+- **A Bevy task pool is not a background thread here.** `multi_threaded` is
+  off, so `IoTaskPool::spawn` runs the task on the caller's thread until it
+  first awaits. Anything that blocks (HTTP, DNS, large file I/O) goes through
+  `platform::off_main_thread`. See MORGAN_NOTES § "Why Bevy runs one thread here".
+- **Policy reads `platform::DeviceProfile`, never the compile target.** In
+  `crates/app`, a `target_os`/`target_family` gate belongs only in
+  `platform/` (the adapter: JNI, the page, desktop), the bootstrap in
+  `lib.rs`, and the per-platform I/O backends `scripts/check_platform_gates.py`
+  allowlists with their reasons (`logging`, `paths`, `netplay`, `share`).
+  Everything else asks the profile (touch-primary, lean render, legend,
+  share sheet, ...) or calls a `platform::` function, so a decision made
+  once reaches every build. The script fails CI otherwise.
+- **Never call a browser API that may be missing through a plain web-sys
+  binding.** A binding without `catch` throws a JS exception through the wasm
+  frames when the method is `undefined`, and winit's web runner never recovers
+  from that: the game freezes with no panic and no log (`navigator.vibrate` on
+  iOS did exactly this). Look it up with `js_sys::Reflect::get` and call it as
+  a `js_sys::Function` (`haptics.rs`, `lifecycle.rs`).
+- **`vendor/` is third-party source under `[patch.crates-io]`,** excluded from
+  the workspace. Each entry is a verbatim crate plus a minimal, documented
+  diff (`vendor/README.md`); it is removed, not maintained, at the next
+  upgrade of the crate it shadows.
 - **No `unsafe` in `sim` or `fixed_math` crates** without an `// SAFETY:` comment block explaining why.
 - **All public types in `sim` and `fixed_math` derive `Debug`.**
 

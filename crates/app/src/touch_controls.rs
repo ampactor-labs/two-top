@@ -95,14 +95,19 @@ pub struct TouchControlsPlugin;
 impl Plugin for TouchControlsPlugin {
     fn build(&self, app: &mut App) {
         // Wherever the primary pointer is a finger — asked at runtime, not
-        // guessed from the target triple (see `crate::capability`). The
+        // guessed from the target triple (`platform::DeviceProfile`). The
         // browser build was originally left off this list entirely, so
         // every phone that opened the Pages link got a game it could
         // touch but not see the controls of. Asking the device means a
         // desktop browser is not shown thumb rings it has no thumbs for,
         // and a touchscreen laptop is.
-        let shown = crate::capability::touch_primary()
-            || std::env::var("TWOTOP_SHOW_TOUCH").is_ok_and(|v| v == "1");
+        let touch_primary = app
+            .world()
+            .get_resource::<crate::platform::DeviceProfile>()
+            .copied()
+            .unwrap_or_else(crate::platform::DeviceProfile::detect)
+            .touch_primary;
+        let shown = touch_primary || std::env::var("TWOTOP_SHOW_TOUCH").is_ok_and(|v| v == "1");
         app.insert_resource(TouchControlsShown(shown))
             .init_resource::<HintsUsed>()
             .add_systems(Startup, spawn_controls)
@@ -211,7 +216,7 @@ fn spawn_controls(
             HintZone::Taunt,
             0.0,
             0.44,
-            "tap the ring above to flex\nfinish it: tier up",
+            "tap the ring above to flex\nfinish it: +1 streak",
         ),
     ] {
         commands.spawn((
@@ -239,7 +244,7 @@ fn taunt_anchor() -> ScreenAnchor {
     // a notch/status bar never covers the mark.
     ScreenAnchor::new(
         0.0,
-        1.0 - 2.0 * (input_touch::TAUNT_ZONE_Y_FRAC * 0.72),
+        crate::ui::anchor_y(input_touch::TAUNT_ZONE_Y_FRAC * 0.72),
         0.0,
         0.0,
     )
@@ -278,7 +283,7 @@ fn dash_active() -> Color {
 /// Screen px (top-left origin, y-down) to world, through the same visible
 /// rect the anchor pass computed this frame.
 fn screen_to_world(p: Vec2, win: Vec2, rect: &ViewRect) -> Vec2 {
-    let frac = Vec2::new(p.x / win.x * 2.0 - 1.0, 1.0 - p.y / win.y * 2.0);
+    let frac = Vec2::new(p.x / crate::ui::anchor_x(win.x), 1.0 - p.y / win.y * 2.0);
     rect.center + rect.half * frac
 }
 
@@ -310,6 +315,7 @@ fn update_controls(
     )>,
     booms: Query<(&sim::Boomerang, &sim::BoomerangMods)>,
     mut hints_used: ResMut<HintsUsed>,
+    first_blood: Res<crate::first_blood::FirstBlood>,
     mut parts: Query<(
         &Part,
         &mut Sprite,
@@ -572,7 +578,9 @@ fn update_controls(
             HintZone::Throw => anchor.frac.x = 0.5 * mirror,
             HintZone::Taunt => {}
         }
-        *vis = if live && !used {
+        // The lesson says one thing at a time in its own line; the
+        // standing captions would talk over it.
+        *vis = if live && !used && !first_blood.active {
             Visibility::Visible
         } else {
             Visibility::Hidden

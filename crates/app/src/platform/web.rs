@@ -35,6 +35,53 @@ pub fn web_start(watch_tape: Option<Vec<u8>>, join: Option<String>) {
     crate::run();
 }
 
+/// The browser's vibrator. `navigator.vibrate` is the web's one haptic
+/// primitive: a duration, nothing else — which is exactly the shape this
+/// module already speaks. Chrome on Android honours it, so the browser
+/// build keeps the feel layer on the phones most likely to open it.
+///
+/// iOS Safari does not implement it AT ALL, and that is not the silent
+/// no-op the first cut took it for. web-sys binds `vibrate` as a plain
+/// method call with no `catch`, so on an iPhone the call was
+/// `undefined(...)`: a `TypeError` thrown straight through the wasm frames
+/// with winit's runner still borrowed. Every later event then queued
+/// behind that borrow forever — the game froze, without a panic or a log
+/// line, on the first throw or the first kill of every iPhone session.
+/// So the function is looked up and called by hand: a missing vibrator is
+/// a missing property, and a throwing one is an `Err` that is dropped.
+pub(crate) fn vibrate(ms: i64) {
+    use wasm_bindgen::{JsCast, JsValue};
+    let Some(window) = web_sys::window() else {
+        return;
+    };
+    let navigator = window.navigator();
+    let Ok(method) = js_sys::Reflect::get(&navigator, &JsValue::from_str("vibrate")) else {
+        return;
+    };
+    let Some(method) = method.dyn_ref::<js_sys::Function>() else {
+        return;
+    };
+    // Browsers refuse it outside a user gesture; that refusal is a `false`
+    // or an exception, and neither may take down the game loop.
+    let _ = method.call1(&navigator, &JsValue::from_f64(ms.max(0) as f64));
+}
+
+/// Hold the screen on, or let it go: the page owns the Screen Wake Lock
+/// (`web/index.html` defines `twotopKeepAwake`; a page without it, or a
+/// browser without the API, is simply a screen that times out as before).
+pub(crate) fn keep_screen_on(on: bool) {
+    use wasm_bindgen::{JsCast, JsValue};
+    let Some(window) = web_sys::window() else {
+        return;
+    };
+    let Ok(hook) = js_sys::Reflect::get(&window, &JsValue::from_str("twotopKeepAwake")) else {
+        return;
+    };
+    if let Some(hook) = hook.dyn_ref::<js_sys::Function>() {
+        let _ = hook.call1(&window, &JsValue::from_bool(on));
+    }
+}
+
 /// The join link this page was opened with, if any.
 pub(crate) fn join_link() -> Option<String> {
     JOIN_LINK.get().cloned()
@@ -49,8 +96,8 @@ pub(crate) fn join_link() -> Option<String> {
 #[cfg(feature = "wasm-probe")]
 #[wasm_bindgen]
 pub fn checksum_golden_probe() -> String {
-    const GOLDEN: &str = include_str!("../../../tests/demos/canonical/match_v1.checksums.tsv");
-    const TAPE: &[u8] = include_bytes!("../../../tests/demos/canonical/match_v1.bmrg");
+    const GOLDEN: &str = include_str!("../../../../tests/demos/canonical/match_v1.checksums.tsv");
+    const TAPE: &[u8] = include_bytes!("../../../../tests/demos/canonical/match_v1.bmrg");
     let replay = match replay::decode_for_sim_version(TAPE, sim::SIM_VERSION) {
         Ok(r) => r,
         Err(e) => return format!("CHECKSUMS-FAIL decode: {e}"),

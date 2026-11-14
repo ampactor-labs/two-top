@@ -46,7 +46,7 @@ const LIST_MAX: usize = 8;
 const LIST_TOP: f32 = 0.20;
 const LIST_PITCH: f32 = 0.07;
 /// Replays list: the BACK band at the bottom.
-const BACK_BAND: (f32, f32) = (0.86, 0.96);
+const BACK_BAND: crate::ui::Band = crate::ui::BACK;
 /// Theater: the app-wide top-exit strip (`screen::TOP_EXIT_BAND`) leaves
 /// the tape — one gesture, one meaning, every screen.
 const EXIT_BAND: (f32, f32) = crate::screen::TOP_EXIT_BAND;
@@ -270,16 +270,10 @@ fn scan_tapes() -> Vec<TapeEntry> {
     tapes.into_iter().map(|(_, t)| t).collect()
 }
 
+/// A tape header's arena byte, as the replay list prints it. An id this
+/// build does not know reads as the first arena (`ArenaId::from_u8`).
 fn arena_label(id: u8) -> &'static str {
-    match sim::ArenaId::from_u8(id) {
-        sim::ArenaId::Anchor => "ANCHOR",
-        sim::ArenaId::Crossing => "CROSSING",
-        sim::ArenaId::Reliquary => "RELIQUARY",
-        sim::ArenaId::Pit => "PIT",
-        sim::ArenaId::Vigil => "VIGIL",
-        sim::ArenaId::Gallery => "GALLERY",
-        sim::ArenaId::Forest => "FOREST",
-    }
+    render::arena::info(sim::ArenaId::from_u8(id)).label
 }
 
 /// Unix seconds → "10 JUL" (UTC). The civil-from-days algorithm (Howard
@@ -385,7 +379,7 @@ fn enter_replays(
             },
             TextColor(color),
             TextLayout::new_with_justify(Justify::Center),
-            ScreenAnchor::new(0.0, 1.0 - 2.0 * fy, 0.0, 0.0),
+            ScreenAnchor::new(0.0, crate::ui::anchor_y(fy), 0.0, 0.0),
             Transform::from_xyz(0.0, 0.0, 210.0),
         ));
     }
@@ -405,7 +399,7 @@ fn enter_replays(
             },
             TextColor(render::palette::BONE.with_alpha(0.55)),
             TextLayout::new_with_justify(Justify::Center),
-            ScreenAnchor::new(0.0, 1.0 - 2.0 * 0.79, 0.0, 0.0),
+            ScreenAnchor::new(0.0, crate::ui::anchor_y(0.79), 0.0, 0.0),
             Transform::from_xyz(0.0, 0.0, 210.0),
         ));
         commands.spawn((
@@ -418,12 +412,12 @@ fn enter_replays(
             TextColor(render::palette::BONE.with_alpha(0.4)),
             TextLayout::new_with_justify(Justify::Center),
             TextBounds::new_horizontal(1000.0),
-            ScreenAnchor::new(0.0, 1.0 - 2.0 * 0.825, 0.0, 0.0),
+            ScreenAnchor::new(0.0, crate::ui::anchor_y(0.825), 0.0, 0.0),
             Transform::from_xyz(0.0, 0.0, 210.0),
         ));
     }
     // BACK wears the same bordered-box language as every other button.
-    let back_anchor_y = 1.0 - (BACK_BAND.0 + BACK_BAND.1);
+    let back_anchor_y = crate::ui::band_anchor_y(BACK_BAND);
     commands.spawn((
         ReplayScreenText,
         Sprite {
@@ -744,8 +738,8 @@ fn spawn_theater_ui(mut commands: Commands, theater: Res<TheaterMode>) {
             TextColor(render::palette::BONE),
             TextLayout::new_with_justify(Justify::Center),
             ScreenAnchor::new(
-                fx * 2.0 - 1.0,
-                1.0 - (SPEED_BAND.0 + SPEED_BAND.1),
+                crate::ui::anchor_x(fx),
+                crate::ui::band_anchor_y(SPEED_BAND),
                 0.0,
                 0.0,
             ),
@@ -762,6 +756,7 @@ fn despawn_theater_ui(mut commands: Commands, q: Query<Entity, With<TheaterMarqu
 
 /// Theater input: top strip exits, scrub band seeks, speed pips switch,
 /// anywhere else toggles pause. Desktop: Space / arrows / Home / End / Esc.
+#[allow(clippy::too_many_arguments)]
 fn theater_input(
     theater: Res<TheaterMode>,
     keys: Res<ButtonInput<KeyCode>>,
@@ -769,6 +764,7 @@ fn theater_input(
     window: Res<WindowSize>,
     frame: Res<sim::FrameCount>,
     controls: Option<ResMut<TheaterControls>>,
+    share: Res<crate::share::ShareTapBand>,
     mut next: ResMut<NextState<AppScreen>>,
 ) {
     // The transport only exists while a tape rolls — a live match reaches
@@ -827,6 +823,10 @@ fn theater_input(
                 controls.speed_idx = idx.min(SPEED_PRESETS.len() - 1);
             }
             continue; // scrub presses are handled with drags below
+        }
+        // The SHARE label's own tap is SHARE's, not a pause.
+        if share.hit(p, win) {
+            continue;
         }
         // Anywhere else: transport toggle.
         controls.paused = !controls.paused;
@@ -991,7 +991,7 @@ fn theater_update_ui(
     let progress = (frame.0 as f32 / total as f32).clamp(0.0, 1.0);
 
     // Band center/height in world units through the view rect.
-    let band_center_frac = 1.0 - (SCRUB_BAND.0 + SCRUB_BAND.1); // y-up anchor frac
+    let band_center_frac = crate::ui::band_anchor_y(SCRUB_BAND); // y-up anchor frac
     let center_y = rect.center.y + rect.half.y * band_center_frac;
     let width = rect.half.x * 2.0 * 0.92;
     let height = rect.half.y * 2.0 * 0.012;

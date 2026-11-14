@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=2-Top
+Comment=A one-on-one boomerang duel
+Exec=two-top
+Icon=two-top
+Terminal=false
+Categories=Game;ActionGame;
+StartupWMClass=2-Top

@@ -19,6 +19,11 @@ jobs:
   determinism:
     name: ${{ matrix.target }}
     runs-on: ${{ matrix.runs-on }}
+    # One shell everywhere: the Windows lane's default is PowerShell, and
+    # the steps below are written for bash (Git Bash ships on the runner).
+    defaults:
+      run:
+        shell: bash
     strategy:
       fail-fast: false
       matrix:
@@ -39,6 +44,13 @@ jobs:
             replay-sync: true
           - target: aarch64-apple-darwin
             runs-on: macos-14
+            pkg-args: --workspace --exclude app --exclude ice_vendor
+            replay-sync: true
+          # Windows: the desktop app ships here (desktop.yml), and a Windows
+          # player online against a phone is only safe if the two sims
+          # agree. Sim crates only, like the other non-Linux lanes.
+          - target: x86_64-pc-windows-msvc
+            runs-on: windows-latest
             pkg-args: --workspace --exclude app --exclude ice_vendor
             replay-sync: true
           # aarch64-linux-android: Phase 7.5 expanded scope from
@@ -90,7 +102,8 @@ jobs:
       # Non-android targets: build + run the test suite under nextest.
       - name: Run tests
         if: matrix.target != 'aarch64-linux-android'
-        run: cargo nextest run ${{ matrix.pkg-args }} --target ${{ matrix.target }} --locked
+        # --no-fail-fast: a new lane reports every failure in one run.
+        run: cargo nextest run ${{ matrix.pkg-args }} --target ${{ matrix.target }} --locked --no-fail-fast
       # Android: build-only via cargo build --tests. nextest can't *run*
       # tests under aarch64-linux-android without an android runtime, but
       # `cargo build --tests` exercises every test target's compilation
@@ -121,6 +134,12 @@ jobs:
   tsv-diff:
     name: cross-platform TSV diff
     needs: determinism
+    # Run whenever the matrix finishes, and compare the TSVs that exist: a
+    # lane that produced none (a failure, or a runner that never started —
+    # the macOS lanes are cancelled at their first second while macOS
+    # runners are unavailable to this repo) is red in its own job, and was
+    # skipping this, the comparison of all the others, with it.
+    if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4
@@ -152,6 +171,8 @@ jobs:
               fail=1
             fi
           done
+          compared=$(ls -d tsvs/checksum-* | wc -l)
+          echo "compared $compared lane(s) against the linux-x64 baseline"
           if [[ $fail -ne 0 ]]; then
             echo "Cross-platform TSV diff failed — see scripts/diagnose_desync.sh"
             exit 1

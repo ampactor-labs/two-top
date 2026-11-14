@@ -121,10 +121,12 @@ second player's inputs. Beat it and the gauntlet tier climbs one rung, up to a
 ceiling of 10 (`GAUNTLET_MAX_TIER` in `crates/app/src/grudge.rs`), where the
 button reads GAUNTLET MASTERED. Lose, or quit a live gauntlet match, and the
 tier drops one rung from the tier you lost at, never below 1. A fresh
-install's bot starts as a passive dummy, and within a match it sharpens one
-notch once you have landed three kills (`in_match_ramp` in
-`crates/app/src/bot.rs`), so the first match is the tutorial. Practice never
-touches the online record.
+install starts at tier 0, a sparring partner that lobs slow, telegraphed
+fangs on a fixed beat and never dodges. Within a match the bot moves one
+notch toward whoever is behind by two kills or more (`rubber_band` in
+`crates/bot_brain`). The brain and its tuning bench live in
+`crates/bot_brain`; the measured ladder is `docs/BOT_LADDER.md`. Practice
+never touches the online record.
 
 At three tapes against one rival, SPAR THEIR SHADE fits that rival's measured
 input habits (throw cadence, charge holds, dash appetite, plant discipline)

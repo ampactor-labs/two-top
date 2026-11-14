@@ -850,6 +850,71 @@ fn play_match_state_sfx(
     }
 }
 
+/// What a lifecycle change asks of the audio: `Some(true)` to pause every
+/// sink, `Some(false)` to resume them, `None` to leave them be. Pure for
+/// tests.
+pub fn pause_for(state: bevy::window::AppLifecycle) -> Option<bool> {
+    use bevy::window::AppLifecycle;
+    match state {
+        AppLifecycle::WillSuspend | AppLifecycle::Suspended => Some(true),
+        AppLifecycle::WillResume | AppLifecycle::Running => Some(false),
+        AppLifecycle::Idle => None,
+    }
+}
+
+/// Silence the game while it is away.
+///
+/// The music beds loop on the audio device's own thread, which does not
+/// stop when the app does. On Android, pressing Home, taking a call or
+/// switching to a chat app to send a room code left the title theme or the
+/// match groove playing over whatever came next, until the app was swiped
+/// away. The lifecycle message arrives on the last update before the app
+/// suspends and the first after it resumes. Nothing else in the game
+/// pauses a sink, so resuming all of them restores exactly what was there.
+/// (The browser's tab-hidden case is the page's: `web/index.html`.)
+fn pause_audio_while_away(
+    mut lifecycle: MessageReader<bevy::window::AppLifecycle>,
+    mut away: ResMut<AudioAway>,
+    sinks: Query<&AudioSink>,
+) {
+    use bevy::audio::AudioSinkPlayback as _;
+    let Some(pause) = lifecycle
+        .read()
+        .filter_map(|state| pause_for(*state))
+        .last()
+    else {
+        return;
+    };
+    away.0 = pause;
+    for sink in &sinks {
+        if pause {
+            sink.pause();
+        } else {
+            sink.play();
+        }
+    }
+}
+
+/// Whether the app is away (suspended): set by [`pause_audio_while_away`].
+#[derive(Resource, Default)]
+struct AudioAway(bool);
+
+/// A sound started on the suspending frame, or while away, has no
+/// `AudioSink` yet when [`pause_audio_while_away`] runs: bevy_audio
+/// creates sinks in `PostUpdate`. Such a sound — a music bed that began on
+/// that frame among them — played on over whatever app came next. This
+/// pauses each new sink the frame it appears, while away; the resume
+/// plays it with the rest.
+fn hold_new_sinks_while_away(away: Res<AudioAway>, added: Query<&AudioSink, Added<AudioSink>>) {
+    use bevy::audio::AudioSinkPlayback as _;
+    if !away.0 {
+        return;
+    }
+    for sink in &added {
+        sink.pause();
+    }
+}
+
 /// Plugin: loads the cue handles + starts both music beds, then runs the
 /// edge-detector playback systems and the per-frame music mixer in `Update`.
 pub struct GameAudioPlugin;
@@ -857,7 +922,11 @@ pub struct GameAudioPlugin;
 impl Plugin for GameAudioPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<MusicMix>()
+            .init_resource::<AudioAway>()
             .add_systems(Startup, load_audio_and_start_music)
+            // `Last`: after bevy_audio's (private) PostUpdate set that
+            // creates the sinks.
+            .add_systems(Last, hold_new_sinks_while_away)
             .add_systems(
                 Update,
                 (
@@ -882,6 +951,15 @@ impl Plugin for GameAudioPlugin {
                     // Before the mixer, so a fresh bed's zero volume is
                     // raised the same frame it spawns.
                     arena_air_bed.before(mix_music),
+                    // Last, so every sink that exists this frame is paused;
+                    // the ones spawned this frame get their sinks in
+                    // PostUpdate and are held in `Last`
+                    // (`hold_new_sinks_while_away`).
+                    pause_audio_while_away
+                        .after(mix_music)
+                        .after(match_point_heartbeat)
+                        .after(arena_air_bed)
+                        .after(play_match_state_sfx),
                 ),
             );
     }
@@ -893,6 +971,16 @@ mod tests {
 
     fn unit(x: f32, y: f32) -> Vec2 {
         Vec2::new(x, y).normalize()
+    }
+
+    #[test]
+    fn audio_pauses_on_the_way_out_and_resumes_on_the_way_back() {
+        use bevy::window::AppLifecycle;
+        assert_eq!(pause_for(AppLifecycle::WillSuspend), Some(true));
+        assert_eq!(pause_for(AppLifecycle::Suspended), Some(true));
+        assert_eq!(pause_for(AppLifecycle::WillResume), Some(false));
+        assert_eq!(pause_for(AppLifecycle::Running), Some(false));
+        assert_eq!(pause_for(AppLifecycle::Idle), None);
     }
 
     #[test]

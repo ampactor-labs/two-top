@@ -44,6 +44,9 @@ bevy = { version = "=0.18.1", default-features = false, features = [
 ] }
 fixed_math = { path = "../fixed_math" }
 sim = { path = "../sim" }
+# The feel numbers (`tuning::Tuning`) load from a dev override file.
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 # Render-side RNG for cosmetic spawning (ambient embers, particle
 # scatter). Per CONVENTIONS § Render Layer Rules: "Visual RNG is
 # separate. Use a different RNG for cosmetic randomness; never read

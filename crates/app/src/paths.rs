@@ -146,6 +146,16 @@ pub fn shared_dir() -> Option<PathBuf> {
     }
 }
 
+/// Where the log file and `crash.log` go: [`shared_dir`], where a cable
+/// can reach them, or the private [`config_dir`] on a phone that has no
+/// external storage to offer (some managed devices do not). They used to
+/// need the first and simply went unwritten without it — a crash on the
+/// very phones least like the dev box left no trace at all. The in-app
+/// crash report reads them from either place.
+pub fn diagnostics_dir() -> Option<PathBuf> {
+    shared_dir().or_else(config_dir)
+}
+
 /// Read a persisted document as raw bytes — the tape path's twin of
 /// [`read_document`]. Native: the file. Browser: the (base64-decoded)
 /// `localStorage` value.
@@ -260,11 +270,50 @@ fn write_atomic_fs(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     let mut tmp_name = file_name.to_os_string();
     tmp_name.push(".tmp");
     let tmp = path.with_file_name(tmp_name);
-    std::fs::write(&tmp, bytes)?;
-    std::fs::rename(&tmp, path).inspect_err(|_| {
-        // Leave the target alone; just don't leak the corpse.
-        let _ = std::fs::remove_file(&tmp);
-    })
+    // Either step can fail, and a full disk fails the FIRST one: clean up
+    // on both, or the phone with no room left is the one that keeps a
+    // half-written sibling. The target is never touched on failure.
+    std::fs::write(&tmp, bytes)
+        .and_then(|()| std::fs::rename(&tmp, path))
+        .inspect_err(|_| {
+            let _ = std::fs::remove_file(&tmp);
+        })
+}
+
+/// Read one persisted JSON document. `None` when there is none (a first
+/// boot) or it cannot be read; a document that is there but will not
+/// parse as `T` is quarantined beside it ([`quarantine_corrupt`]) and read
+/// as `None`, never silently replaced. `what` names it in the log. Every
+/// persisted document goes through here, so every one gets that promise.
+pub fn read_json<T: serde::de::DeserializeOwned>(path: &Path, what: &str) -> Option<T> {
+    let text = read_document(path).ok()?;
+    match serde_json::from_str(&text) {
+        Ok(value) => Some(value),
+        Err(e) => {
+            tracing::error!(
+                target: "two_top::paths",
+                file = what,
+                error = %e,
+                "unreadable — kept beside it as .corrupt, starting fresh",
+            );
+            quarantine_corrupt(path);
+            None
+        }
+    }
+}
+
+/// Save one persisted JSON document, atomically ([`write_atomic`]). A
+/// failure is logged; the game carries on with what it holds in memory.
+pub fn write_json<T: serde::Serialize>(path: &Path, value: &T, what: &str) {
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let result = serde_json::to_string_pretty(value)
+        .map_err(std::io::Error::other)
+        .and_then(|json| write_atomic(path, json.as_bytes()));
+    if let Err(e) = result {
+        tracing::warn!(target: "two_top::paths", file = what, error = %e, "could not save");
+    }
 }
 
 /// Move a file that exists but will not parse aside as a `.corrupt`
@@ -316,6 +365,38 @@ pub(crate) fn test_scratch(test: &str) -> PathBuf {
 mod tests {
     use super::*;
 
+    /// Every persisted document (settings, room code, lesson progress,
+    /// career, profile) reads through `read_json`. Settings and the room
+    /// code used to fall back to defaults on a file that would not parse,
+    /// and the next save wrote over the only copy.
+    #[test]
+    fn a_document_that_will_not_parse_is_kept_aside_and_reads_as_none() {
+        #[derive(serde::Serialize, serde::Deserialize, Debug, PartialEq)]
+        struct Doc {
+            volume: u8,
+        }
+        let dir = test_scratch("json_doc");
+        let path = dir.join("settings.json");
+        assert_eq!(
+            read_json::<Doc>(&path, "settings.json"),
+            None,
+            "absent: none"
+        );
+
+        write_json(&path, &Doc { volume: 7 }, "settings.json");
+        assert_eq!(read_json(&path, "settings.json"), Some(Doc { volume: 7 }));
+
+        std::fs::write(&path, "{\"volume\": 7, \"mu").unwrap();
+        assert_eq!(read_json::<Doc>(&path, "settings.json"), None);
+        assert!(!path.exists(), "moved aside, not left to be overwritten");
+        assert_eq!(
+            std::fs::read_to_string(dir.join("settings.json.corrupt")).unwrap(),
+            "{\"volume\": 7, \"mu",
+            "the bytes survive for a human to hand back"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn write_atomic_replaces_the_target_and_cleans_the_sibling() {
         let dir = test_scratch("atomic_replace");
@@ -343,6 +424,23 @@ mod tests {
         write_atomic(&path, b"next save").unwrap();
         assert_eq!(std::fs::read(&path).unwrap(), b"next save");
         assert!(!dir.join("state.json.tmp").exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_failed_write_leaves_no_sibling_behind() {
+        // The write itself fails (the parent directory does not exist), the
+        // way a full disk fails it: no `.tmp` may survive the attempt.
+        let dir = test_scratch("atomic_failed_write");
+        let missing = dir.join("no_such_dir");
+        assert!(write_atomic(&missing.join("state.json"), b"x").is_err());
+        assert!(!missing.exists());
+        // And a rename that fails (the target is a non-empty directory)
+        // cleans up the sibling it had already written.
+        let target = dir.join("taken");
+        std::fs::create_dir_all(target.join("inner")).unwrap();
+        assert!(write_atomic(&target, b"x").is_err());
+        assert!(!dir.join("taken.tmp").exists(), "no sibling left behind");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

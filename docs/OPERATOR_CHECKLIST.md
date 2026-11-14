@@ -362,11 +362,12 @@ room by default). The old APK predates the batch.
       music bed keeps playing on every menu screen (it used to switch to
       the match track in REPLAYS).
 - [ ] **Ephemeral ICE (once a vendor is deployed):** with
-      `TWOTOP_ICE_URL` baked, match entry logs `fetching ephemeral ICE
-      credentials` then `ice config resolved fetched=true`, and a
+      `TWOTOP_ICE_URL` baked, the title logs `fetching ice ahead of the
+      match` and match entry logs `ice config fetched ahead — no wait`
+      then `matchbox socket built … turn_relay=true`, and a
       cellular-vs-wifi pair connects through the relay. Kill the vendor
-      and re-enter — the fetch times out within ~2.5 s and the match
-      still works STUN-only on wifi.
+      and cold-start straight into a match — the fetch times out within
+      ~2.5 s and the match still works STUN-only on wifi.
 - [ ] Perspective: focal + UI reserve, spawn spread — do the duelists open too
       close to center?
 - [ ] Anything the 30-minute feel session (section E) surfaces, now including

@@ -9,7 +9,9 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-ROOM="${TWOTOP_ROOM:-wss://two-top-matchbox-production.up.railway.app/two-top?next=2}"
+# The default room lives in deploy/endpoints.env, shared with every CI build.
+. deploy/endpoints.env
+ROOM="${TWOTOP_ROOM:-$TWOTOP_ROOM_DEFAULT}"
 
 CARGO_APK_RELEASE_KEYSTORE="${CARGO_APK_RELEASE_KEYSTORE:-$HOME/.android/debug.keystore}" \
 CARGO_APK_RELEASE_KEYSTORE_PASSWORD="${CARGO_APK_RELEASE_KEYSTORE_PASSWORD:-android}" \

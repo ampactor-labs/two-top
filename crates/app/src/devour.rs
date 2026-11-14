@@ -21,8 +21,6 @@ const DEVOUR_HOLD: f32 = 0.7;
 const DEVOUR_FLIGHT: f32 = 0.9;
 /// Spin during flight (rad/sec) — the fang tumbles home one last time.
 const DEVOUR_SPIN: f32 = 9.0;
-/// Shake kick when the jaws close.
-const TRAUMA_DEVOUR: f32 = 0.45;
 
 /// The ceremonial fang. `t` runs from `-DEVOUR_HOLD` (waiting) through
 /// `0..DEVOUR_FLIGHT` (flying); the bite fires at the end.
@@ -51,6 +49,7 @@ fn devouring_ceremony(
     asset_server: Res<AssetServer>,
     assets: Option<Res<EffectAssets>>,
     mut shake: ResMut<ScreenShake>,
+    tuning: Res<render::tuning::Tuning>,
     players: Query<(&Player, &Transform), Without<DevourFang>>,
     mut fang: Query<(Entity, &mut DevourFang, &mut Transform, &mut Sprite), Without<Player>>,
     mut prev_over: Local<bool>,
@@ -120,7 +119,7 @@ fn devouring_ceremony(
                     60.0,
                 );
             }
-            shake.add_trauma(TRAUMA_DEVOUR);
+            shake.add_trauma(tuning.shake.devour);
             commands.entity(entity).despawn();
         }
     }

@@ -9,40 +9,14 @@
 
 use bevy::prelude::*;
 use rand::Rng as _;
-use render::{
-    CosmeticRng, LastKillPos, SHAKE_DECAY_PER_SEC, SHAKE_MAX_OFFSET, ScreenShake, shake_offset,
-};
+use render::tuning::Tuning;
+use render::{CosmeticRng, LastKillPos, ScreenShake, shake_offset};
 use sim::{Boomerang, BoomerangState, MatchState, Player, PositionF, TICK_HZ, VelocityF};
 
-/// Damping rate in 1/sec. Higher = camera snaps to target faster.
-/// 4.0 means ~250 ms time constant — responsive but not jarring.
-pub const CAMERA_FOLLOW_RATE: f32 = 4.0;
-
-/// Fraction of the action-centroid offset the camera leans toward. The
-/// whole arena stays framed (AutoMin guarantees the minimum view); the
-/// lean just gives the frame a subtle life that tracks the duel — the
-/// dynamic-camera feel without the fairness/legibility cost of a real
-/// zoomed follow cam (which stays deferred to live device tuning).
-pub const CAMERA_LEAN_FRAC: f32 = 0.12;
-
-/// Hard cap (world units) on the lean so the frame never wanders far
-/// enough to feel like a moving camera.
-pub const CAMERA_LEAN_MAX: f32 = 48.0;
-
 /// Pure lean: scale the action-centroid offset down and cap its length.
-pub fn lean_offset(centroid: Vec2) -> Vec2 {
-    (centroid * CAMERA_LEAN_FRAC).clamp_length_max(CAMERA_LEAN_MAX)
+pub fn lean_offset(centroid: Vec2, camera: &render::tuning::Camera) -> Vec2 {
+    (centroid * camera.lean_frac).clamp_length_max(camera.lean_max)
 }
-
-/// How much a live (Flying) boomerang pulls the follow centroid relative to a
-/// player (weight 1.0). The camera leans toward the in-flight threat so the
-/// thrown fang stays framed — the Boomerang-Fu "track the action" feel.
-pub const BOOMERANG_CAMERA_WEIGHT: f32 = 0.5;
-
-/// Seconds of player-velocity lookahead. The camera leads the duelists' motion
-/// so what they're moving toward is already on screen. Kept short so a dash
-/// burst doesn't fling the frame.
-pub const CAMERA_LOOKAHEAD_SEC: f32 = 0.15;
 
 /// Pure helper for frame-rate-independent exponential damping.
 /// `(current → target)` advances toward `target` by a fraction
@@ -54,8 +28,8 @@ pub fn damped_step(current: f32, target: f32, rate: f32, dt: f32) -> f32 {
 
 /// Linear trauma decay (pure, for testing). Trauma bleeds off at
 /// [`SHAKE_DECAY_PER_SEC`] per second, floored at zero.
-pub fn decay_trauma(trauma: f32, dt: f32) -> f32 {
-    (trauma - SHAKE_DECAY_PER_SEC * dt).max(0.0)
+pub fn decay_trauma(trauma: f32, dt: f32, decay_per_sec: f32) -> f32 {
+    (trauma - decay_per_sec * dt).max(0.0)
 }
 
 // ===========================================================================
@@ -66,29 +40,13 @@ pub fn decay_trauma(trauma: f32, dt: f32) -> f32 {
 //   1. base   — the follow target (mobile: damped player centroid; desktop:
 //               static origin framing the whole arena).
 //   2. kill-cam — on a round/match-ending kill, ease the camera onto the
-//               kill position and zoom in ×KILL_CAM_ZOOM, hold through the
+//               kill position and zoom in ×1.6, hold through the
 //               RoundOver/MatchOver beat, then ease back during the next
 //               Countdown.
 //   3. shake   — the cosmetic trauma offset (Task 5.1) added on top.
 // Because `compose_camera` recomputes from `base` every frame, the shake
 // and zoom can never accumulate drift into the base position.
 // ===========================================================================
-
-/// Zoom factor at the peak of the kill-cam beat (orthographic scale shrinks
-/// to `1/KILL_CAM_ZOOM`, so the world appears 1.6× larger).
-pub const KILL_CAM_ZOOM: f32 = 1.6;
-/// Render frames to ease the kill-cam fully in (and fully back out). The
-/// plan's 20-frame beat — counted in render frames, so it's ~0.33 s at 60 Hz
-/// and proportionally snappier on a high-refresh display.
-pub const KILL_CAM_EASE_FRAMES: f32 = 20.0;
-/// Peak blend of the MICRO punch — the camera beat every mid-round kill
-/// gets. Rounds are continuous kill-count, so most kills never reach
-/// `RoundOver`; without this they had no camera acknowledgment at all.
-/// Roughly half the full beat: felt, never disorienting, and the dead
-/// player's 3 s respawn wait means nothing on-screen is being hidden.
-pub const KILL_CAM_MICRO_STRENGTH: f32 = 0.45;
-/// Render frames the micro punch holds at peak before easing back.
-pub const KILL_CAM_MICRO_HOLD_FRAMES: f32 = 26.0;
 
 /// The follow/static base position the camera tracks before kill-cam + shake.
 /// Mobile damps it toward the player centroid; desktop leaves it at the
@@ -100,7 +58,7 @@ pub struct CameraBase(pub Vec2);
 /// `strength` = fully punched in on `target`); `zooming_in` is the ramp
 /// direction (true while holding on the kill, false while easing back).
 /// `strength` caps the blend per beat: 1.0 for the round/match-end punch,
-/// [`KILL_CAM_MICRO_STRENGTH`] for a mid-round kill. `hold_frames` is the
+/// [`tuning.camera.kill_cam_micro_strength`] for a mid-round kill. `hold_frames` is the
 /// remaining at-peak hold for a micro beat (`INFINITY` for the full beat,
 /// which holds until the next countdown releases it).
 #[derive(Resource, Clone, Copy)]
@@ -131,10 +89,10 @@ pub fn smoothstep(t: f32) -> f32 {
     t * t * (3.0 - 2.0 * t)
 }
 
-/// Orthographic scale at a given eased blend: 1.0 (neutral) → `1/KILL_CAM_ZOOM`
+/// Orthographic scale at a given eased blend: 1.0 (neutral) → `1/1.6`
 /// (zoomed in). Pure for testing.
-pub fn kill_cam_scale(eased: f32) -> f32 {
-    1.0 + (1.0 / KILL_CAM_ZOOM - 1.0) * eased
+pub fn kill_cam_scale(eased: f32, zoom: f32) -> f32 {
+    1.0 + (1.0 / zoom - 1.0) * eased
 }
 
 /// Label for the whole camera rig (base → kill-cam → shake composition).
@@ -168,6 +126,7 @@ impl Plugin for CameraFollowPlugin {
 /// the non-rollback `CameraBase`. Never feeds back into sim.
 fn update_camera_base(
     time: Res<Time<Real>>,
+    tuning: Res<Tuning>,
     players: Query<(&PositionF, &VelocityF), With<Player>>,
     boomerangs: Query<(&PositionF, &Boomerang)>,
     persp: Res<render::PerspectiveFlip>,
@@ -186,8 +145,8 @@ fn update_camera_base(
     if count == 0 {
         // No duelists (title screen / between matches): ease back to origin.
         let dt = time.delta_secs();
-        base.0.x = damped_step(base.0.x, 0.0, CAMERA_FOLLOW_RATE, dt);
-        base.0.y = damped_step(base.0.y, 0.0, CAMERA_FOLLOW_RATE, dt);
+        base.0.x = damped_step(base.0.x, 0.0, tuning.camera.follow_rate, dt);
+        base.0.y = damped_step(base.0.y, 0.0, tuning.camera.follow_rate, dt);
         return;
     }
     // Lean the centroid toward live (Flying) boomerangs so the thrown fang —
@@ -197,22 +156,22 @@ fn update_camera_base(
     for (p, b) in &boomerangs {
         if matches!(b.state, BoomerangState::Flying) {
             let (x, y) = p.0.to_f32();
-            weighted += Vec2::new(x, y) * BOOMERANG_CAMERA_WEIGHT;
-            weight += BOOMERANG_CAMERA_WEIGHT;
+            weighted += Vec2::new(x, y) * tuning.camera.fang_weight;
+            weight += tuning.camera.fang_weight;
         }
     }
     // Velocity is cm/tick; ×TICK_HZ → cm/sec; ×lookahead seconds → a cm lead.
-    let lead = (vel_sum / count as f32) * (TICK_HZ as f32 * CAMERA_LOOKAHEAD_SEC);
+    let lead = (vel_sum / count as f32) * (TICK_HZ as f32 * tuning.camera.lookahead_sec);
     let mut target = weighted / weight + lead;
     // The world renders Y-foreshortened into the tabletop tilt, so the camera —
     // which lives in that rendered space — must foreshorten its target Y to
     // stay centred on the action.
     target.y *= render::WORLD_TILT_Y * persp.0;
-    let target = lean_offset(target);
+    let target = lean_offset(target, &tuning.camera);
 
     let dt = time.delta_secs();
-    base.0.x = damped_step(base.0.x, target.x, CAMERA_FOLLOW_RATE, dt);
-    base.0.y = damped_step(base.0.y, target.y, CAMERA_FOLLOW_RATE, dt);
+    base.0.x = damped_step(base.0.x, target.x, tuning.camera.follow_rate, dt);
+    base.0.y = damped_step(base.0.y, target.y, tuning.camera.follow_rate, dt);
 }
 
 /// Layer 2: advance the kill-cam beat. Two beat tiers share the rig:
@@ -226,6 +185,7 @@ fn update_camera_base(
 ///   itself back while the round keeps running. Rounds are continuous
 ///   kill-count, so this is the beat most kills get.
 fn update_kill_cam(
+    tuning: Res<Tuning>,
     state: Res<MatchState>,
     score: Res<sim::MatchScore>,
     last_kill: Res<LastKillPos>,
@@ -255,11 +215,11 @@ fn update_kill_cam(
     } else if fresh_kill && matches!(now, MatchState::InRound { .. }) {
         kc.target = last_kill.0;
         kc.zooming_in = true;
-        kc.strength = KILL_CAM_MICRO_STRENGTH;
-        kc.hold_frames = KILL_CAM_MICRO_HOLD_FRAMES;
+        kc.strength = tuning.camera.kill_cam_micro_strength;
+        kc.hold_frames = tuning.camera.kill_cam_micro_hold_frames;
     }
 
-    let step = 1.0 / KILL_CAM_EASE_FRAMES;
+    let step = 1.0 / tuning.camera.kill_cam_ease_frames;
     if kc.zooming_in {
         kc.blend = (kc.blend + step).min(kc.strength);
         if kc.blend >= kc.strength {
@@ -284,8 +244,10 @@ fn update_kill_cam(
 /// The single camera writer: composes base + kill-cam ease + shake into the
 /// camera `Transform` and orthographic scale. Decays trauma and samples the
 /// shake offset here (the cosmetic RNG never feeds `SimRng`).
+#[allow(clippy::too_many_arguments)]
 fn compose_camera(
     time: Res<Time<Real>>,
+    tuning: Res<Tuning>,
     base: Res<CameraBase>,
     kc: Res<KillCam>,
     mut shake: ResMut<ScreenShake>,
@@ -293,15 +255,19 @@ fn compose_camera(
     settings: Res<crate::settings::Settings>,
     mut camera: Query<(&mut Transform, &mut Projection), With<Camera2d>>,
 ) {
-    shake.trauma = decay_trauma(shake.trauma, time.delta_secs());
+    shake.trauma = decay_trauma(shake.trauma, time.delta_secs(), tuning.shake.decay_per_sec);
     let angle = rng.0.gen_range(0.0..std::f32::consts::TAU);
     // The settings knob scales the OFFSET ceiling, not the trauma — decay
     // timing and every trauma edge stay identical at any intensity.
-    let offset = shake_offset(shake.trauma, SHAKE_MAX_OFFSET * settings.shake, angle);
+    let offset = shake_offset(
+        shake.trauma,
+        tuning.shake.max_offset * settings.shake,
+        angle,
+    );
 
     let eased = smoothstep(kc.blend);
     let pos = base.0.lerp(kc.target, eased);
-    let scale = kill_cam_scale(eased);
+    let scale = kill_cam_scale(eased, tuning.camera.kill_cam_zoom);
 
     let Ok((mut xform, mut projection)) = camera.single_mut() else {
         return;
@@ -359,19 +325,19 @@ mod tests {
     #[test]
     fn decay_trauma_bleeds_off_over_time() {
         // A 0.1 s frame removes 0.1 × SHAKE_DECAY_PER_SEC of trauma.
-        let t = decay_trauma(1.0, 0.1);
-        assert!((t - (1.0 - 0.1 * SHAKE_DECAY_PER_SEC)).abs() < 1e-6);
+        let t = decay_trauma(1.0, 0.1, Tuning::default().shake.decay_per_sec);
+        assert!((t - (1.0 - 0.1 * Tuning::default().shake.decay_per_sec)).abs() < 1e-6);
     }
 
     #[test]
     fn decay_trauma_floors_at_zero() {
         // A long frame can't drive trauma negative.
-        assert_eq!(decay_trauma(0.1, 10.0), 0.0);
+        assert_eq!(decay_trauma(0.1, 10.0, 1.8), 0.0);
     }
 
     #[test]
     fn decay_trauma_zero_dt_is_identity() {
-        assert!((decay_trauma(0.42, 0.0) - 0.42).abs() < 1e-6);
+        assert!((decay_trauma(0.42, 0.0, 1.8) - 0.42).abs() < 1e-6);
     }
 
     #[test]
@@ -397,27 +363,30 @@ mod tests {
 
     #[test]
     fn lean_is_a_small_fraction_of_the_centroid() {
-        let lean = lean_offset(Vec2::new(100.0, 0.0));
-        assert!((lean.x - 100.0 * CAMERA_LEAN_FRAC).abs() < 1e-5);
+        let lean = lean_offset(Vec2::new(100.0, 0.0), &Tuning::default().camera);
+        assert!((lean.x - 100.0 * Tuning::default().camera.lean_frac).abs() < 1e-5);
         assert_eq!(lean.y, 0.0);
     }
 
     #[test]
     fn lean_is_capped() {
-        let lean = lean_offset(Vec2::new(10_000.0, 0.0));
-        assert!((lean.length() - CAMERA_LEAN_MAX).abs() < 1e-4);
+        let lean = lean_offset(Vec2::new(10_000.0, 0.0), &Tuning::default().camera);
+        assert!((lean.length() - Tuning::default().camera.lean_max).abs() < 1e-4);
     }
 
     #[test]
     fn lean_of_center_is_zero() {
-        assert_eq!(lean_offset(Vec2::ZERO), Vec2::ZERO);
+        assert_eq!(
+            lean_offset(Vec2::ZERO, &Tuning::default().camera),
+            Vec2::ZERO
+        );
     }
 
     #[test]
     fn kill_cam_scale_neutral_at_zero_zoomed_at_one() {
-        assert!((kill_cam_scale(0.0) - 1.0).abs() < 1e-6);
-        assert!((kill_cam_scale(1.0) - 1.0 / KILL_CAM_ZOOM).abs() < 1e-6);
+        assert!((kill_cam_scale(0.0, 1.6) - 1.0).abs() < 1e-6);
+        assert!((kill_cam_scale(1.0, 1.6) - 1.0 / 1.6).abs() < 1e-6);
         // Smaller scale == zoomed in (world appears larger).
-        assert!(kill_cam_scale(1.0) < kill_cam_scale(0.0));
+        assert!(kill_cam_scale(1.0, 1.6) < kill_cam_scale(0.0, 1.6));
     }
 }

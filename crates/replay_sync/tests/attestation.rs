@@ -4,33 +4,25 @@
 //! statement is built FROM the re-simulated score, which is exactly how an
 //! honest client builds one.
 //!
-//! The canonical demo ends 2-2 (it is a determinism probe, not a decided
-//! match), so the decided-match cases ride the first fuzz seed whose
-//! random flailing reaches the score threshold — deterministic per seed
-//! and sim version, found by a bounded scan.
+//! The decided-match cases ride a real match: the bot bench plays one
+//! headless under the live rules and records the inputs every tick
+//! consumed, exactly what the game's own tape holds. (They used to ride the
+//! canonical choreography looped under the determinism probe's setup —
+//! duelists at the origin, rounds that never end — which no live match is,
+//! so a genuine signed result could never verify. `live_replay.rs` pins
+//! that.)
 
+use bot_brain::bench::{Seat, play_recorded};
 use net::{Attestation, MatchStatement, SeatStatement, pubkey_for, sig_to_hex, sign_statement};
 use replay::{DEV_SIM_VERSION, FORMAT_VERSION, MAGIC, Replay, ReplayHeader};
-use replay_sync::{build_app, canonical_replay, final_score, verify_attestation};
-use sim::{MATCH_WIN_THRESHOLD, PlayerInput};
+use replay_sync::{final_score, verify_attestation};
+use sim::{ArenaId, MATCH_WIN_THRESHOLD, PlayerInput};
 use std::sync::OnceLock;
 
 const KEY_A: &[u8; 32] = &[31u8; 32];
 const KEY_B: &[u8; 32] = &[32u8; 32];
 
-/// The canonical demo's hand-authored choreography, looped. One pass lands
-/// four kills in 1800 frames; every kill re-anchors both duelists to their
-/// spawns through the round flow, so a repeated pass keeps re-firing the
-/// same proven kill patterns from re-anchored state until the threshold
-/// lands. (Blind input-mashing was tried first and managed 1-1 in 9000
-/// frames — throws that connect need choreography, which the canonical
-/// tape already is.)
-fn looped_canonical_tape(loops: usize) -> Replay {
-    let base = canonical_replay();
-    let inputs: Vec<_> = std::iter::repeat_with(|| base.inputs.clone())
-        .take(loops)
-        .flatten()
-        .collect();
+fn tape(arena: ArenaId, inputs: Vec<[PlayerInput; 2]>) -> Replay {
     Replay {
         header: ReplayHeader {
             magic: MAGIC,
@@ -43,49 +35,40 @@ fn looped_canonical_tape(loops: usize) -> Replay {
             recorded_at: 0,
             winner: None,
             player_handles: [None, None],
-            arena_id: base.header.arena_id,
+            arena_id: arena.as_u8(),
         },
         inputs,
     }
 }
 
-/// A tape that re-simulates to a threshold-decided match, built the honest
-/// way: probe-run the looped duel, find the tick the threshold is reached,
-/// then truncate the tape just past it with a neutral tail. The tail is
-/// load-bearing — `apply_rematch` restarts on a THROW edge from either
-/// player during MatchOver, so a tape that kept pressing past the decision
-/// would re-simulate straight into a fresh 0-0.
-fn decided_replay() -> &'static Replay {
-    static DECIDED: OnceLock<Replay> = OnceLock::new();
-    DECIDED.get_or_init(|| {
-        let probe = looped_canonical_tape(4);
-        let mut app = build_app(probe.clone());
-        let mut decided_at = None;
-        let mut best = (0u8, 0u8);
-        for f in 0..probe.header.frame_count {
-            app.update();
-            let score = *app.world().resource::<sim::MatchScore>();
-            best = (best.0.max(score.p0), best.1.max(score.p1));
-            if score.p0 >= MATCH_WIN_THRESHOLD || score.p1 >= MATCH_WIN_THRESHOLD {
-                decided_at = Some(f);
-                break;
-            }
-        }
-        let decided_at = decided_at.unwrap_or_else(|| {
-            panic!(
-                "looped canonical duel never decided in {} frames (best score {best:?}) — raise the loop count",
-                probe.header.frame_count,
-            )
-        });
-        let mut inputs = probe.inputs[..=decided_at as usize].to_vec();
-        inputs.extend(std::iter::repeat_n([PlayerInput::default(); 2], 60));
-        let mut header = probe.header;
-        header.frame_count = inputs.len() as u32;
-        Replay { header, inputs }
+/// A real match, played to its decision and recorded tick by tick.
+fn played() -> &'static (bot_brain::bench::MatchReport, Vec<[PlayerInput; 2]>) {
+    static PLAYED: OnceLock<(bot_brain::bench::MatchReport, Vec<[PlayerInput; 2]>)> =
+        OnceLock::new();
+    PLAYED.get_or_init(|| {
+        let played = play_recorded(
+            ArenaId::Anchor,
+            [Seat::Bot { tier: 8 }, Seat::Bot { tier: 3 }],
+            7,
+            300,
+        );
+        assert!(played.0.finished, "the bench match must be decided");
+        played
     })
 }
 
-fn honest_attestation(replay: &replay::Replay) -> Attestation {
+/// The decided match's tape, with a second of neutral inputs after the
+/// deciding tick (the summary a phone keeps recording through).
+fn decided_replay() -> &'static Replay {
+    static DECIDED: OnceLock<Replay> = OnceLock::new();
+    DECIDED.get_or_init(|| {
+        let mut inputs = played().1.clone();
+        inputs.extend(std::iter::repeat_n([PlayerInput::default(); 2], 60));
+        tape(ArenaId::Anchor, inputs)
+    })
+}
+
+fn honest_attestation(replay: &Replay) -> Attestation {
     let score = final_score(replay);
     let statement = MatchStatement::new(
         replay.header.sim_version,
@@ -164,17 +147,28 @@ fn a_wrong_arena_claim_is_refused_before_resimulation() {
 /// The app only signs threshold-decided matches; a verifier must refuse an
 /// attestation over a tape that never got there, even if every signature
 /// and score checks out — otherwise a client could mint "results" out of
-/// practice flailing. The canonical 2-2 demo is exactly that tape.
+/// practice flailing. The first half of a real match is exactly that tape.
 #[test]
 fn an_undecided_tape_cannot_carry_a_result() {
-    let replay = canonical_replay();
-    let score = final_score(&replay);
+    let (report, inputs) = played();
+    let half = tape(ArenaId::Anchor, inputs[..inputs.len() / 2].to_vec());
+    let score = final_score(&half);
     assert!(
-        score.p0 < sim::MATCH_WIN_THRESHOLD && score.p1 < sim::MATCH_WIN_THRESHOLD,
-        "precondition: the canonical demo stays undecided ({} - {})",
+        score.p0 < MATCH_WIN_THRESHOLD && score.p1 < MATCH_WIN_THRESHOLD,
+        "precondition: half of a {:?} match stays undecided ({} - {})",
+        report.score,
         score.p0,
         score.p1,
     );
-    let err = verify_attestation(&replay, &honest_attestation(&replay)).unwrap_err();
+    let err = verify_attestation(&half, &honest_attestation(&half)).unwrap_err();
     assert!(err.contains("threshold"), "{err}");
+}
+
+/// The honest claim really is the played result, not just whatever the
+/// verifier re-simulates.
+#[test]
+fn the_verified_score_is_the_one_played() {
+    let (report, _) = played();
+    let score = final_score(decided_replay());
+    assert_eq!((score.p0, score.p1), report.score);
 }

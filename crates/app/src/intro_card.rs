@@ -61,7 +61,7 @@ fn spawn_intro_card(mut commands: Commands) {
                 render::palette::BONE.with_alpha(0.85)
             }),
             TextLayout::new_with_justify(Justify::Center),
-            ScreenAnchor::new(0.0, 1.0 - 2.0 * fy, 0.0, 0.0),
+            ScreenAnchor::new(0.0, crate::ui::anchor_y(fy), 0.0, 0.0),
             Transform::from_xyz(0.0, 0.0, 205.0),
             Visibility::Hidden,
         ));
@@ -85,6 +85,7 @@ fn update_intro_card(
     career: Res<crate::grudge::CareerRecord>,
     profile: Res<crate::profile::LocalProfile>,
     peer: Res<net::PeerProfile>,
+    first_blood: Res<crate::first_blood::FirstBlood>,
     mut q: Query<(&IntroCardLine, &mut Text2d, &mut Visibility)>,
 ) {
     let show = *screen.get() == AppScreen::InMatch
@@ -109,10 +110,13 @@ fn update_intro_card(
         career.gauntlet_tier,
         career.rivalry_line(peer.0),
     );
+    if first_blood.active {
+        stakes = "FIRST BLOOD".to_string();
+    }
     // Online the table was agreed at pairing and may not be the one this
     // player picked — say where they are sitting.
     if online {
-        let table = format!("AT {}", crate::arena_select::arena_title(selected.0));
+        let table = format!("AT {}", render::arena::info(selected.0).title);
         stakes = if stakes.is_empty() {
             table
         } else {

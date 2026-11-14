@@ -73,6 +73,8 @@ input_touch = { path = "../input_touch" }
 # touch source. Pulls the `keyboard` bevy feature in transitively.
 input_desktop = { path = "../input_desktop" }
 net = { path = "../net" }
+# The practice bot's brain (shared with its headless tuning bench).
+bot_brain = { path = "../bot_brain" }
 render = { path = "../render" }
 # Match recorder: every decided match is written out as a shareable .bmrg
 # replay (the deterministic sim makes the input tape a perfect recording).
@@ -120,14 +122,13 @@ qrcode = { version = "=0.14.1", default-features = false }
 # matchbox already pulls uuid; net uses it for the PeerId bijection.
 uuid = { version = "1", features = ["v4"] }
 
-# Phase 18 Task 5.4 — Android haptics. JNI hop to the platform `Vibrator`
-# via the activity handle from `ndk-context`. Android-only target deps so the
-# desktop build never pulls them; on desktop `vibrate` is a no-op. Versions
-# pinned to the copies already in the lock (via the android-activity stack)
-# so no new crate version is introduced.
+# The app's JNI (src/android.rs): haptics, the launch intent, the clipboard
+# join link, keep-screen-on's neighbours, the crash report's share sheet.
+# The JavaVM and the Activity both come from bevy's `ANDROID_APP`, so `jni`
+# is the only crate needed. Android-only, so the desktop build never pulls
+# it; 0.21 is a copy already in the lock.
 [target.'cfg(target_os = "android")'.dependencies]
 jni = "0.21"
-ndk-context = "0.1"
 
 # cargo-apk metadata for sideloading to Android dev devices.
 # See SIDELOAD.md for the full walkthrough. The repo identifier is
@@ -204,12 +205,19 @@ uses_cleartext_traffic = true
 [package.metadata.android.application.activity]
 orientation = "portrait"
 # Every config change we can absorb in-process. Anything NOT listed here
-# destroys and recreates the activity, which re-enters `android_main` in
-# the same process: the scheduled dark theme flipping at sunset (uiMode),
-# battery saver on several OEM skins (uiMode), a Display Size or font
-# change (density/fontScale), split-screen or a foldable unfolding
-# (smallestScreenSize/screenLayout). The renderer doesn't care about any
-# of them; `init_logging` survives a second call regardless.
+# destroys and recreates the activity: the scheduled dark theme flipping
+# at sunset (uiMode), battery saver on several OEM skins (uiMode), a
+# Display Size or font change (density/fontScale), split-screen or a
+# foldable unfolding (smallestScreenSize/screenLayout). The renderer
+# doesn't care about any of them.
+#
+# The list can never be complete: the platform keeps adding changes
+# (fontWeightAdjustment for the bold-text switch, colorMode, an overlay
+# change when Material You recolours), and a flag newer than the platform
+# jar `aapt` links against fails the APK build outright. So an unlisted
+# change is no longer fatal instead: src/android.rs notices the destroyed
+# activity and exits, and the system relaunches into a fresh process. It
+# used to hang the UI thread for good.
 config_changes = "orientation|keyboardHidden|keyboard|screenSize|smallestScreenSize|screenLayout|density|uiMode|fontScale|layoutDirection|locale|navigation|touchscreen|mcc|mnc"
 launch_mode = "singleTask"
 exported = true

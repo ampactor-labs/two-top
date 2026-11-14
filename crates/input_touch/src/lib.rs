@@ -17,17 +17,17 @@
 //!     `aim_angle_rad` its heading, mirroring the desktop throw-key +
 //!     d-pad model. Tap-vs-hold detection itself is left to sim's
 //!     `released_within(THROW_DOWN, …)` edge derivation (cycle 6).
-//!   * cycle 4: mouse-drag desktop fallback. Left mouse button is
-//!     synthesized into a single virtual touch with sentinel id
-//!     `MOUSE_TOUCH_ID`, merged into the touch event stream so the
-//!     same stick/throw logic drives it. Lets developers and CI
-//!     exercise the input layer without a touchscreen.
+//!   * cycle 4: the mouse as a finger. The app turns the left mouse
+//!     button into a touch with sentinel id `MOUSE_TOUCH_ID` before
+//!     Bevy's touch system runs (`app::pointer`), so this crate sees it
+//!     as one more finger and needs no mouse path of its own. (It used
+//!     to synthesize the touch here, which reached only the gameplay
+//!     layer: every menu, reading Bevy's `Touches`, stayed unclickable.)
 //!   * cycle 5: quantization to wire-format `PlayerInput` and the
 //!     `TouchInputsPlugin` that wires `read_local_touch_inputs` into
 //!     GGRS's `ReadInputs` schedule. This is the moment touch state
 //!     becomes a 4-byte deterministic input that flows into sim.
 
-use bevy::input::mouse::MouseButton;
 use bevy::input::touch::Touches;
 use bevy::prelude::*;
 use bevy_ggrs::prelude::ReadInputs;
@@ -65,12 +65,6 @@ pub const STICK_FOLLOW_RADIUS_PX: f32 = STICK_MAX_RADIUS_PX * STICK_DEADZONE_SAT
 #[derive(Resource, Debug, Clone, Copy, Default)]
 pub struct WindowSize(pub Vec2);
 
-/// Cursor position in logical pixels, for the desktop mouse-drag
-/// fallback. Same population pattern as `WindowSize`. ZERO when the
-/// cursor is outside the window or the app hasn't populated it yet.
-#[derive(Resource, Debug, Clone, Copy, Default)]
-pub struct CursorPosition(pub Vec2);
-
 /// Runtime-adjustable inner deadzone for the virtual stick (Phase 18 Task
 /// 5.5c). Defaults to [`STICK_DEADZONE_INNER`]; the app overwrites it from the
 /// persisted `Settings` (the deadzone feeds the stick *before* quantization to
@@ -99,9 +93,10 @@ pub fn mirror_x(pos: Vec2, window: Vec2) -> Vec2 {
     Vec2::new(window.x - pos.x, pos.y)
 }
 
-/// Sentinel id for the synthesized left-mouse-button touch. `u64::MAX`
-/// is well outside any real touchscreen id space (Bevy/Android emit
-/// small monotonic ids), so it cannot collide with a real touch.
+/// Finger id of the mouse, synthesized into Bevy's touch stream by the
+/// app (`app::pointer`). `u64::MAX` is well outside any real touchscreen
+/// id space (Bevy/Android emit small monotonic ids), so it cannot collide
+/// with a real touch.
 pub const MOUSE_TOUCH_ID: u64 = u64::MAX;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -169,6 +164,10 @@ pub struct TouchState {
     pub taunt_touch: Option<u64>,
     /// True iff a taunt-strip touch is currently held.
     pub taunt_held: bool,
+    /// Taps that began and ended between two frames, tracked for exactly
+    /// one frame and dropped at the start of the next
+    /// ([`apply_touch_events`]).
+    pub ending: Vec<u64>,
 }
 
 impl TouchState {
@@ -387,9 +386,14 @@ pub fn apply_touch_events(
 ) {
     state.frame = frame;
 
+    // Last frame's lightning taps have had their one frame.
+    let ended = std::mem::take(&mut state.ending);
+    state.touches.retain(|t| !ended.contains(&t.id));
+
     let mut dropped: Vec<u64> = just_released.into_iter().collect();
     dropped.extend(just_canceled);
     state.touches.retain(|t| !dropped.contains(&t.id));
+    let active: Vec<(u64, Vec2)> = active.into_iter().collect();
 
     for (id, pos) in just_pressed {
         // Bevy reuses ids after a touch ends; treat reuse as a brand-new
@@ -402,6 +406,18 @@ pub fn apply_touch_events(
             anchor_pos: pos,
             start_frame: frame,
         });
+        // A finger that landed AND lifted since the last frame: Bevy
+        // reports it pressed and released, and not held. Releases are
+        // applied above, before presses, so it used to be added after its
+        // own release and then tracked forever — a quick tap on THROW
+        // during a frame hitch held THROW down (the duelist stood there
+        // charging, and the tap-throw never came) until that id happened
+        // to be reused. It lives for this one frame, so the press is seen,
+        // and goes at the start of the next, so the release is too. (Still
+        // held means the id was reused by a new finger: that one stays.)
+        if dropped.contains(&id) && !active.iter().any(|(held, _)| *held == id) {
+            state.ending.push(id);
+        }
     }
 
     for (id, pos) in active {
@@ -424,49 +440,21 @@ pub fn apply_touch_events(
 }
 
 /// PreUpdate system: syncs `TouchState` against Bevy's `Touches` each
-/// frame, plus a synthesized virtual touch driven by the left mouse
-/// button (cycle 4 desktop fallback). Frame counter advances even when
-/// no touches are active so future cycles can measure
+/// frame (the mouse included: the app writes it into the touch stream as
+/// finger [`MOUSE_TOUCH_ID`]). Frame counter advances even when no
+/// touches are active so future cycles can measure
 /// elapsed-frames-since-touch-start without interleaved gaps.
-pub fn update_touch_state(
-    mut state: ResMut<TouchState>,
-    bevy_touches: Res<Touches>,
-    mouse_btn: Res<ButtonInput<MouseButton>>,
-    cursor: Res<CursorPosition>,
-) {
+pub fn update_touch_state(mut state: ResMut<TouchState>, bevy_touches: Res<Touches>) {
     let frame = state.frame.wrapping_add(1);
-
-    let cursor_pos = cursor.0;
-    let mouse_just_pressed = mouse_btn.just_pressed(MouseButton::Left);
-    let mouse_just_released = mouse_btn.just_released(MouseButton::Left);
-    let mouse_held = mouse_btn.pressed(MouseButton::Left);
-
-    let mouse_pressed_iter = mouse_just_pressed
-        .then_some((MOUSE_TOUCH_ID, cursor_pos))
-        .into_iter();
-    let mouse_released_iter = mouse_just_released.then_some(MOUSE_TOUCH_ID).into_iter();
-    // `pressed()` is false on the just_released frame, so this naturally
-    // excludes the release frame from active updates.
-    let mouse_active_iter = mouse_held
-        .then_some((MOUSE_TOUCH_ID, cursor_pos))
-        .into_iter();
-
     apply_touch_events(
         &mut state,
         frame,
         bevy_touches
             .iter_just_pressed()
-            .map(|t| (t.id(), t.position()))
-            .chain(mouse_pressed_iter),
-        bevy_touches
-            .iter_just_released()
-            .map(|t| t.id())
-            .chain(mouse_released_iter),
+            .map(|t| (t.id(), t.position())),
+        bevy_touches.iter_just_released().map(|t| t.id()),
         bevy_touches.iter_just_canceled().map(|t| t.id()),
-        bevy_touches
-            .iter()
-            .map(|t| (t.id(), t.position()))
-            .chain(mouse_active_iter),
+        bevy_touches.iter().map(|t| (t.id(), t.position())),
     );
 }
 
@@ -684,7 +672,6 @@ impl Plugin for InputTouchPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<TouchState>()
             .init_resource::<WindowSize>()
-            .init_resource::<CursorPosition>()
             .init_resource::<StickDeadzone>()
             .init_resource::<Southpaw>()
             .add_systems(
@@ -868,6 +855,85 @@ mod tests {
         assert_eq!(t.id, 11);
         assert_eq!(t.start_pos, second);
         assert_eq!(t.start_frame, 2);
+    }
+
+    #[test]
+    fn a_tap_inside_one_frame_is_seen_for_one_frame_then_released() {
+        // Bevy's shape for a finger that landed and lifted between two
+        // frames: just pressed, just released, not held.
+        let mut s = TouchState::default();
+        let pos = Vec2::new(700.0, 700.0);
+        apply_touch_events(
+            &mut s,
+            1,
+            vec![(4u64, pos)],
+            vec![4u64],
+            empty_canceled_helper(),
+            empty_active(),
+        );
+        assert_eq!(s.touches.len(), 1, "the press is seen");
+        apply_touch_events(
+            &mut s,
+            2,
+            empty_pressed(),
+            empty_id(),
+            empty_canceled_helper(),
+            empty_active(),
+        );
+        assert!(s.touches.is_empty(), "and released a frame later");
+        assert!(s.ending.is_empty());
+    }
+
+    #[test]
+    fn a_reused_id_that_is_still_held_is_not_cut_short() {
+        // A finger ended and a new one took its id in the same frame: the
+        // new one is held, and must survive the next frame.
+        let mut s = TouchState::default();
+        let pos = Vec2::new(300.0, 300.0);
+        apply_touch_events(
+            &mut s,
+            1,
+            vec![(11u64, pos)],
+            vec![11u64],
+            empty_canceled_helper(),
+            vec![(11u64, pos)],
+        );
+        apply_touch_events(
+            &mut s,
+            2,
+            empty_pressed(),
+            empty_id(),
+            empty_canceled_helper(),
+            vec![(11u64, pos)],
+        );
+        assert_eq!(s.touches.len(), 1);
+    }
+
+    #[test]
+    fn a_one_frame_tap_on_throw_fires_instead_of_sticking() {
+        let win = Vec2::new(1080.0, 2400.0);
+        let pos = Vec2::new(900.0, 1200.0);
+        let mut s = TouchState::default();
+        apply_touch_events(
+            &mut s,
+            1,
+            vec![(5u64, pos)],
+            vec![5u64],
+            empty_canceled_helper(),
+            empty_active(),
+        );
+        apply_throw_state(&mut s, win, false);
+        assert!(s.throw_held, "the tap is a press on its frame");
+        apply_touch_events(
+            &mut s,
+            2,
+            empty_pressed(),
+            empty_id(),
+            empty_canceled_helper(),
+            empty_active(),
+        );
+        apply_throw_state(&mut s, win, false);
+        assert!(!s.throw_held, "and a release on the next: the throw fires");
     }
 
     #[test]

@@ -10,17 +10,21 @@
 //! - **Dev (`debug_assertions`)**: `fmt` layer → `stderr`. Matches the
 //!   prior bevy-default behavior so existing dev workflow is preserved.
 //! - **Release desktop**: `fmt` layer (no ANSI) → daily-rotated file under
-//!   `<exe-dir>/logs/two_top.log`. Writes go through `tracing-appender`'s
+//!   the user's local data directory (`two-top/logs/two_top.log`). Writes go through `tracing-appender`'s
 //!   non-blocking writer so disk I/O never stalls the game thread.
 //! - **Release Android**: stderr/logcat AND a daily-rotated file beside the
-//!   replays (`crate::paths::shared_dir()/logs/`). The file half is what
-//!   makes a bug report possible: logcat is a ring buffer, so by the time a
-//!   tester walks back to a computer and says "it crashed", the panic has
-//!   long since rolled out of it — which is exactly how one on-device crash
-//!   stayed invisible through two reports. This used to be stderr-only
-//!   because NativeActivity gives no writable cwd; `paths::shared_dir()`
-//!   answers that now (the recorder has been writing tapes there all along),
-//!   and a failure to open it degrades to stderr instead of panicking.
+//!   replays (`crate::paths::diagnostics_dir()/logs/`). The file half is
+//!   what makes a bug report possible: logcat is a ring buffer, so by the
+//!   time a tester walks back to a computer and says "it crashed", the panic
+//!   has long since rolled out of it — which is exactly how one on-device
+//!   crash stayed invisible through two reports. This used to be stderr-only
+//!   because NativeActivity gives no writable cwd; `paths` answers that now
+//!   (the recorder has been writing tapes there all along), and a failure
+//!   to open it degrades to stderr instead of panicking. The tail of this
+//!   file rides in the crash report a tester can send
+//!   (`crate::crash_report`).
+//!
+//! Both file outputs keep a week of days and delete the rest.
 //!
 //! ## Filter
 //!
@@ -32,10 +36,12 @@
 //!
 //! ## Lifetime
 //!
-//! The release build's non-blocking appender owns a worker thread; the
-//! returned [`LogGuard`] must outlive the app or the worker is dropped
-//! and pending writes are lost. `run()` binds it with `let _guard = …;`
-//! immediately so it lives for the entire `App::run()` scope.
+//! The release build's non-blocking appender owns a worker thread, and
+//! whatever it has not written when the process ends is lost. The worker's
+//! guard lives in a static so that every way out can flush it: `run()`
+//! holds a [`LogGuard`] for a clean return, and the paths that end the
+//! process without returning (a panic that ends the run on Android, a
+//! destroyed activity) call [`shutdown`] themselves.
 
 use tracing_subscriber::EnvFilter;
 use tracing_subscriber::prelude::*;
@@ -48,46 +54,113 @@ const DEFAULT_FILTER: &str = "info,\
     wgpu_core=warn,wgpu_hal=warn,naga=warn,\
     bevy_app=warn,bevy_winit=warn,bevy_render=warn,bevy_ecs=warn";
 
-/// Holds resources whose `Drop` must run when the app exits. In
-/// release desktop, this carries the `tracing-appender` `WorkerGuard` that
-/// flushes pending log writes. In dev and Android release it's a unit struct —
-/// those paths write synchronously to stderr/logcat and have nothing to flush.
+/// File-name prefix of the rotated log (`two_top.log.<date>`).
+#[cfg(any(test, all(not(debug_assertions), not(target_family = "wasm"))))]
+pub const LOG_FILE_PREFIX: &str = "two_top.log";
+
+/// Days of log kept on disk. The appender made a file per day and never
+/// deleted one, in a directory the player cannot easily see.
+#[cfg(all(not(debug_assertions), not(target_family = "wasm")))]
+const LOG_FILES_KEPT: usize = 7;
+
+/// The file appender's worker guard. Dropping it flushes what the worker
+/// still holds and stops it. In a static, not in [`LogGuard`], because on
+/// Android the process usually ends without `run()` returning.
+#[cfg(not(target_family = "wasm"))]
+static FILE_WORKER: std::sync::Mutex<Option<tracing_appender::non_blocking::WorkerGuard>> =
+    std::sync::Mutex::new(None);
+
+/// Flush the log file and stop writing to it. For the paths that are about
+/// to end the process; logging to stderr/logcat carries on after it.
+pub fn shutdown() {
+    #[cfg(not(target_family = "wasm"))]
+    {
+        // A poisoned lock still holds the guard; take it either way.
+        let worker = match FILE_WORKER.lock() {
+            Ok(mut slot) => slot.take(),
+            Err(poisoned) => poisoned.into_inner().take(),
+        };
+        drop(worker);
+    }
+}
+
+/// Returned by [`init_logging`]; flushes the log file when `run()` returns.
+/// Only the guard from the call that actually installed the subscriber
+/// does so: a later call in the same process must not stop the first
+/// one's writer.
 #[must_use = "drop the LogGuard at the end of run() to flush pending log writes"]
 pub struct LogGuard {
-    #[cfg(all(
-        not(debug_assertions),
-        not(target_os = "android"),
-        not(target_family = "wasm")
-    ))]
-    _appender_guard: tracing_appender::non_blocking::WorkerGuard,
-    /// `None` when the phone gave us nowhere to write (then the log is
-    /// logcat-only, exactly as it was before) — never a reason to panic.
-    #[cfg(all(not(debug_assertions), target_os = "android"))]
-    _appender_guard: Option<tracing_appender::non_blocking::WorkerGuard>,
+    installed: bool,
+}
+
+impl Drop for LogGuard {
+    fn drop(&mut self) {
+        if self.installed {
+            shutdown();
+        }
+    }
+}
+
+/// A day-rotated, count-capped file writer in `dir`, with the guard that
+/// flushes it. `None` when the directory cannot be written.
+#[cfg(all(not(debug_assertions), not(target_family = "wasm")))]
+fn file_writer(
+    dir: &std::path::Path,
+) -> Option<(
+    tracing_appender::non_blocking::NonBlocking,
+    tracing_appender::non_blocking::WorkerGuard,
+)> {
+    std::fs::create_dir_all(dir).ok()?;
+    note_previous_run_log(dir);
+    let appender = tracing_appender::rolling::Builder::new()
+        .rotation(tracing_appender::rolling::Rotation::DAILY)
+        .filename_prefix(LOG_FILE_PREFIX)
+        .max_log_files(LOG_FILES_KEPT)
+        .build(dir)
+        .ok()?;
+    Some(tracing_appender::non_blocking(appender))
+}
+
+/// Keep a freshly built worker guard if its subscriber was installed;
+/// drop it (stopping a writer nothing logs through) if not.
+#[cfg(all(not(debug_assertions), not(target_family = "wasm")))]
+fn keep_worker(installed: bool, guard: Option<tracing_appender::non_blocking::WorkerGuard>) {
+    if installed && let Ok(mut slot) = FILE_WORKER.lock() {
+        *slot = guard;
+    }
 }
 
 /// Where the phone's log file lives: beside the replays, in the app's
-/// external files dir, so `adb pull` (or the tester's own Files app) can
-/// retrieve it with no permissions and no root.
+/// external files dir, so `adb pull` can retrieve it with no permissions
+/// and no root (and inside the private dir on a phone with no external
+/// storage, where the crash report is the only way out for it).
 #[cfg(all(not(debug_assertions), target_os = "android"))]
 fn android_log_dir() -> Option<std::path::PathBuf> {
-    let dir = crate::paths::shared_dir()?.join("logs");
-    std::fs::create_dir_all(&dir).ok()?;
-    Some(dir)
+    Some(crate::paths::diagnostics_dir()?.join("logs"))
 }
 
 /// Persist panics where a human can hand them back.
 ///
 /// A panic on the phone kills the process and prints to logcat, which is a
 /// ring buffer — by the time the tester says "it crashed", the message has
-/// rolled out and there is nothing to read (Android leaves no tombstone for
-/// an unwinding Rust panic). Writing the payload + location beside the
-/// replays means the next crash survives the walk back to the desk:
-/// `adb pull /sdcard/Android/data/<pkg>/files/crash.log`.
+/// rolled out and there is nothing to read. Each panic is appended to
+/// `crash.log` (newest last, capped) with the build, the thread and the
+/// device, and `crate::crash_report` offers that file on the next launch.
+///
+/// The hook only records. It runs at the panic site, before anything has
+/// had the chance to catch the unwind, so it cannot know whether this
+/// panic ends the run: a panic inside a detached task (matchbox's message
+/// loop, an asset load) is caught and dropped by the executor, and on
+/// Android those tasks run on the main thread. It used to abort on any
+/// main-thread panic, which turned every one of those survivable task
+/// panics — a peer's socket dying mid-match among them — into a crash.
+/// Whether a panic ENDED the run is decided where the unwind escapes:
+/// [`crate::run`] marks it ([`mark_fatal_panic`]) and the Android adapter
+/// turns it into an abort (`crate::platform::android::main`).
 #[cfg(not(target_family = "wasm"))]
 fn install_panic_hook() {
-    // A recreated activity keeps the hook it already has: chaining a
-    // second copy would write crash.log twice per panic.
+    // A second call keeps the hook it already has: chaining another copy
+    // would write each panic to crash.log twice.
     static INSTALLED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
     if INSTALLED.swap(true, std::sync::atomic::Ordering::SeqCst) {
         return;
@@ -105,26 +178,135 @@ fn install_panic_hook() {
             .or_else(|| info.payload().downcast_ref::<String>().cloned())
             .unwrap_or_else(|| "<non-string panic>".to_string());
         tracing::error!(target: "two_top::panic", %location, %payload, "PANIC");
-        if let Some(dir) = crate::paths::shared_dir() {
+        if let Some(dir) = crate::paths::diagnostics_dir() {
             let _ = std::fs::create_dir_all(&dir);
-            let _ = crate::paths::write_atomic(
-                &dir.join("crash.log"),
-                format!("2-Top panic\n  at {location}\n  {payload}\n").as_bytes(),
-            );
+            let path = dir.join(crate::crash_report::CRASH_LOG);
+            let entry = crash_entry(&location, &payload);
+            let existing = std::fs::read_to_string(&path).unwrap_or_default();
+            let _ =
+                crate::paths::write_atomic(&path, appended_crash_log(&existing, &entry).as_bytes());
         }
         previous(info);
     }));
 }
 
-/// A second `init_logging` in one process. `run()` IS `android_main`, and
-/// Android invokes it again whenever it recreates the activity without
-/// killing the process — the scheduled dark theme at sunset, a font-scale
-/// change, a foldable unfolding (see the manifest's `config_changes`,
-/// which absorbs the ones we know of). `.init()` panicked on the
-/// re-registration; keeping the subscriber that is already there is the
-/// whole answer, and the recreated activity logs through it.
+/// `crash.log` keeps this many bytes of history, newest last. A panic
+/// taken while another unwinds, or two launches that each die, must not
+/// erase the first cause.
 #[cfg(not(target_family = "wasm"))]
-fn note_reinit(e: &impl std::fmt::Display) {
+const CRASH_LOG_CAP: usize = 16 * 1024;
+
+/// Written beside `crash.log` when a panic ends the run, and only then:
+/// the next launch offers a crash report when this mark is newer than the
+/// last report handed over (`crate::crash_report`). `crash.log` itself is
+/// a history — it also holds panics the run survived (a task's, a helper
+/// thread's) and panics an older build wrote — so its date says nothing
+/// about how the last run ended.
+pub const FATAL_MARK: &str = "crash_fatal";
+
+/// Record that a panic is ending the run (see [`FATAL_MARK`]). Called on
+/// the way out by the one place that knows: the unwind has escaped the
+/// whole app.
+#[cfg(not(target_family = "wasm"))]
+pub fn mark_fatal_panic() {
+    let Some(dir) = crate::paths::diagnostics_dir() else {
+        return;
+    };
+    let _ = std::fs::create_dir_all(&dir);
+    let unix = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    let _ = crate::paths::write_atomic(&dir.join(FATAL_MARK), unix.to_string().as_bytes());
+}
+
+/// Where the previous run's log ended: the file it was writing and that
+/// file's length before this run wrote anything. Captured before the
+/// appender opens the directory, because this run appends to the same
+/// day's file (and starts a new one on a new day) — a tail read after
+/// that is this run's boot lines, not the last thing the previous run
+/// said.
+static PREVIOUS_RUN_LOG: std::sync::OnceLock<(std::path::PathBuf, u64)> =
+    std::sync::OnceLock::new();
+
+/// The previous run's log file and the byte length it ended at, when this
+/// run logs to a file.
+pub fn previous_run_log() -> Option<(std::path::PathBuf, u64)> {
+    PREVIOUS_RUN_LOG.get().cloned()
+}
+
+/// The newest rotated log among `paths`. The appender stamps the date into
+/// the name, so the newest is the last by name.
+#[cfg(any(test, all(not(debug_assertions), not(target_family = "wasm"))))]
+fn newest_log(paths: impl IntoIterator<Item = std::path::PathBuf>) -> Option<std::path::PathBuf> {
+    paths
+        .into_iter()
+        .filter(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with(LOG_FILE_PREFIX))
+        })
+        .max()
+}
+
+/// Note where the previous run's log ended, before this run's appender
+/// touches `dir`.
+#[cfg(all(not(debug_assertions), not(target_family = "wasm")))]
+fn note_previous_run_log(dir: &std::path::Path) {
+    let entries = std::fs::read_dir(dir)
+        .into_iter()
+        .flatten()
+        .filter_map(|entry| Some(entry.ok()?.path()));
+    if let Some(path) = newest_log(entries)
+        && let Ok(meta) = std::fs::metadata(&path)
+    {
+        let _ = PREVIOUS_RUN_LOG.set((path, meta.len()));
+    }
+}
+
+/// Append one entry to a crash log's text and keep the newest
+/// [`CRASH_LOG_CAP`] bytes. Pure, so the panic hook's bookkeeping is
+/// tested without panicking.
+#[cfg(not(target_family = "wasm"))]
+fn appended_crash_log(existing: &str, entry: &str) -> String {
+    let mut text = String::with_capacity(existing.len() + entry.len() + 1);
+    text.push_str(existing);
+    if !text.is_empty() && !text.ends_with('\n') {
+        text.push('\n');
+    }
+    text.push_str(entry);
+    crate::crash_report::tail_chars(&text, CRASH_LOG_CAP).to_string()
+}
+
+/// One `crash.log` entry: when, which build, which thread, where, what,
+/// and on what device.
+#[cfg(not(target_family = "wasm"))]
+fn crash_entry(location: &str, payload: &str) -> String {
+    let unix = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let thread = std::thread::current();
+    let mut entry = format!(
+        "=== 2-Top {} (sim {}) panic, unix {unix}, thread {} ===\n  at {location}\n  {payload}\n",
+        env!("CARGO_PKG_VERSION"),
+        sim::SIM_VERSION,
+        thread.name().unwrap_or("unnamed"),
+    );
+    let device = crate::lifecycle::device_summary();
+    if !device.is_empty() {
+        entry.push_str(&format!("  on {device}\n"));
+    }
+    entry
+}
+
+/// A second `init_logging` in one process. Keeping the subscriber that is
+/// already there is the whole answer: `.init()` panicked on the
+/// re-registration, and the second caller logs through the first one's
+/// subscriber. (On Android a second `android_main` no longer gets this
+/// far — `crate::android` — but the guard costs nothing.)
+#[cfg(not(target_family = "wasm"))]
+fn note_reinit(e: &tracing_subscriber::util::TryInitError) {
     eprintln!("two-top: tracing subscriber already installed ({e}) — keeping it");
 }
 
@@ -178,20 +360,19 @@ pub fn init_logging() -> LogGuard {
 
     #[cfg(all(debug_assertions, not(target_family = "wasm")))]
     {
-        if let Err(e) = tracing_subscriber::registry()
+        let installed = tracing_subscriber::registry()
             .with(filter)
             .with(tracing_subscriber::fmt::layer().with_writer(std::io::stderr))
             .try_init()
-        {
-            note_reinit(&e);
-        }
+            .inspect_err(note_reinit)
+            .is_ok();
         tracing::info!(
             target: "two_top::logging",
             static_max_level = ?static_max,
             mode = "dev",
             "tracing subscriber installed",
         );
-        LogGuard {}
+        LogGuard { installed }
     }
 
     #[cfg(all(not(debug_assertions), target_os = "android"))]
@@ -199,21 +380,19 @@ pub fn init_logging() -> LogGuard {
         // stderr (logcat) for live `adb logcat` monitoring, plus a file the
         // tester can hand back after the fact. Both, because each covers the
         // other's hole: logcat rolls, and a file cannot be watched live.
-        let file_layer = android_log_dir().map(|dir| {
-            let (writer, guard) = tracing_appender::non_blocking(tracing_appender::rolling::daily(
-                &dir,
-                "two_top.log",
-            ));
-            let layer = tracing_subscriber::fmt::layer()
-                .with_writer(writer)
-                .with_ansi(false);
-            (layer, guard, dir)
-        });
-        let (file_layer, appender_guard, dir) = match file_layer {
-            Some((layer, guard, dir)) => (Some(layer), Some(guard), Some(dir)),
-            None => (None, None, None),
+        let dir = android_log_dir();
+        let (file_layer, worker) = match dir.as_deref().and_then(file_writer) {
+            Some((writer, guard)) => (
+                Some(
+                    tracing_subscriber::fmt::layer()
+                        .with_writer(writer)
+                        .with_ansi(false),
+                ),
+                Some(guard),
+            ),
+            None => (None, None),
         };
-        if let Err(e) = tracing_subscriber::registry()
+        let installed = tracing_subscriber::registry()
             .with(filter)
             .with(
                 tracing_subscriber::fmt::layer()
@@ -222,9 +401,9 @@ pub fn init_logging() -> LogGuard {
             )
             .with(file_layer)
             .try_init()
-        {
-            note_reinit(&e);
-        }
+            .inspect_err(note_reinit)
+            .is_ok();
+        keep_worker(installed, worker);
         tracing::info!(
             target: "two_top::logging",
             static_max_level = ?static_max,
@@ -232,9 +411,7 @@ pub fn init_logging() -> LogGuard {
             log_file = ?dir,
             "tracing subscriber installed",
         );
-        LogGuard {
-            _appender_guard: appender_guard,
-        }
+        LogGuard { installed }
     }
 
     #[cfg(target_family = "wasm")]
@@ -261,7 +438,7 @@ pub fn init_logging() -> LogGuard {
         {
             web_sys::console::log_1(&format!("two-top: subscriber already installed ({e})").into());
         }
-        LogGuard {}
+        LogGuard { installed: false }
     }
 
     #[cfg(all(
@@ -271,24 +448,28 @@ pub fn init_logging() -> LogGuard {
     ))]
     {
         let log_dir = log_dir();
-        // Best-effort directory creation; if it fails the appender's
-        // open() will surface the underlying error.
-        let _ = std::fs::create_dir_all(&log_dir);
-        let appender = tracing_appender::rolling::daily(&log_dir, "two_top.log");
-        let (non_blocking, guard) = tracing_appender::non_blocking(appender);
-        if let Err(e) = tracing_subscriber::registry()
+        // A directory that cannot be written degrades to no log file
+        // (the old `rolling::daily` panicked on it instead).
+        let (file_layer, worker) = match file_writer(&log_dir) {
+            Some((writer, guard)) => (
+                Some(
+                    tracing_subscriber::fmt::layer()
+                        .with_writer(writer)
+                        .with_ansi(false),
+                ),
+                Some(guard),
+            ),
+            None => (None, None),
+        };
+        let installed = tracing_subscriber::registry()
             .with(filter)
-            .with(
-                tracing_subscriber::fmt::layer()
-                    .with_writer(non_blocking)
-                    .with_ansi(false),
-            )
+            .with(file_layer)
             .try_init()
-        {
-            note_reinit(&e);
-        }
+            .inspect_err(note_reinit)
+            .is_ok();
+        keep_worker(installed, worker);
         eprintln!(
-            "two-top: release logging to {}/two_top.log.<date>",
+            "two-top: release logging to {}/{LOG_FILE_PREFIX}.<date>",
             log_dir.display()
         );
         tracing::info!(
@@ -298,16 +479,21 @@ pub fn init_logging() -> LogGuard {
             log_dir = %log_dir.display(),
             "tracing subscriber installed",
         );
-        LogGuard {
-            _appender_guard: guard,
-        }
+        LogGuard { installed }
     }
 }
 
 /// Resolve the release log directory. Order:
-/// 1. `<exe-dir>/logs/` if the current exe path is resolvable.
-/// 2. `./logs/` as a last-resort cwd fallback.
+/// 1. the user's local data directory (`%LOCALAPPDATA%\two-top\logs`,
+///    `~/Library/Application Support/two-top/logs`,
+///    `~/.local/share/two-top/logs`);
+/// 2. `<exe-dir>/logs/` if the current exe path is resolvable;
+/// 3. `./logs/` as a last-resort cwd fallback.
 ///
+/// The executable's folder used to come first. A shipped desktop build
+/// lives where a user cannot write — Program Files, inside a signed
+/// `.app`, inside an AppImage's read-only mount — and the log simply went
+/// unwritten there.
 #[cfg(all(
     not(debug_assertions),
     not(target_os = "android"),
@@ -315,6 +501,9 @@ pub fn init_logging() -> LogGuard {
 ))]
 fn log_dir() -> std::path::PathBuf {
     use std::path::PathBuf;
+    if let Some(data) = dirs::data_local_dir() {
+        return data.join("two-top").join("logs");
+    }
     if let Ok(exe) = std::env::current_exe()
         && let Some(parent) = exe.parent()
     {
@@ -325,11 +514,54 @@ fn log_dir() -> std::path::PathBuf {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_newest_log_is_the_last_dated_one_with_the_prefix() {
+        use std::path::PathBuf;
+        let found = super::newest_log([
+            PathBuf::from("logs/two_top.log.2026-11-10"),
+            PathBuf::from("logs/two_top.log.2026-11-12"),
+            PathBuf::from("logs/zz-not-a-log"),
+            PathBuf::from("logs/two_top.log.2026-11-11"),
+        ]);
+        assert_eq!(found, Some(PathBuf::from("logs/two_top.log.2026-11-12")));
+        assert_eq!(super::newest_log([PathBuf::from("logs/other")]), None);
+    }
+
     /// The activity-recreation shape: `run()` twice in one process. The
     /// old `.init()` panicked here on the second registration.
     #[test]
     fn init_logging_twice_does_not_panic() {
         let _first = super::init_logging();
         let _second = super::init_logging();
+    }
+
+    #[test]
+    fn the_crash_log_appends_and_keeps_the_newest_bytes() {
+        let two = super::appended_crash_log("first\n", "second\n");
+        assert_eq!(two, "first\nsecond\n");
+        // A log with no trailing newline still separates its entries.
+        assert_eq!(
+            super::appended_crash_log("first", "second\n"),
+            "first\nsecond\n"
+        );
+        let long = "x".repeat(super::CRASH_LOG_CAP);
+        let capped = super::appended_crash_log(&long, "newest\n");
+        assert_eq!(capped.len(), super::CRASH_LOG_CAP);
+        assert!(capped.ends_with("newest\n"), "the newest entry survives");
+    }
+
+    /// A crash entry names the build, the thread and the location, and
+    /// ends in a newline so the next entry starts on its own line.
+    #[test]
+    fn a_crash_entry_carries_the_build_and_the_thread() {
+        let entry = super::crash_entry("src/lib.rs:1:1", "boom");
+        assert!(entry.starts_with(&format!(
+            "=== 2-Top {} (sim {}) panic",
+            env!("CARGO_PKG_VERSION"),
+            sim::SIM_VERSION
+        )));
+        assert!(entry.contains("thread "));
+        assert!(entry.contains("\n  at src/lib.rs:1:1\n  boom\n"));
+        assert!(entry.ends_with('\n'));
     }
 }

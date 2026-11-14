@@ -31,89 +31,24 @@ use sim::{Boomerang, BoomerangMods, Dead, Empowered, Player};
 use crate::netplay::LocalPlayerHandle;
 use crate::settings::Settings;
 
-/// Throw buzz — a light tick as the fang leaves your hand.
-pub const HAPTIC_THROW_MS: i64 = 10;
-/// Kill buzz — the heaviest, the one-hit-kill impact.
-pub const HAPTIC_KILL_MS: i64 = 60;
-/// Perfect-catch buzz — a crisp confirm of the skill beat.
-pub const HAPTIC_PERFECT_CATCH_MS: i64 = 15;
-
-/// Is `handle` a local player? `None` (couch/SyncTest — both players on one
-/// device) treats every handle as local.
-fn is_local(local: &LocalPlayerHandle, handle: usize) -> bool {
+/// Is `handle` a player holding this phone? Online, the one local handle.
+/// Practice runs a local session too (`None`), but only one of its two
+/// seats has a thumb on the screen: the bot's throws and catches used to
+/// buzz the player's hand as if they were the player's own. Couch (`None`,
+/// not practice): both players share the device, both buzz.
+fn is_local(local: &LocalPlayerHandle, practice: bool, handle: usize) -> bool {
+    if practice {
+        return handle != crate::bot::BOT_HANDLE;
+    }
     local.0.is_none_or(|lh| lh == handle)
 }
 
-/// Fire a `ms`-millisecond vibration one-shot on the device.
-///
-/// Android: hop into the JVM via the activity's `ndk_context`, fetch the
-/// `Vibrator` system service, and call the (legacy, API-24-safe) `vibrate(long)`
-/// overload. Best-effort — any JNI error is logged and swallowed; a missing or
-/// permission-denied vibrator must never take down the game loop.
-#[cfg(target_os = "android")]
+/// Fire a `ms`-millisecond vibration one-shot on the device: the
+/// platform's business (`platform::vibrate` — JNI on Android, a guarded
+/// `navigator.vibrate` in the browser, nothing on desktop).
 fn vibrate(ms: i64) {
-    use jni::JavaVM;
-    use jni::objects::{JObject, JValue};
-
-    let ctx = ndk_context::android_context();
-    let vm = match unsafe { JavaVM::from_raw(ctx.vm().cast()) } {
-        Ok(vm) => vm,
-        Err(e) => {
-            tracing::warn!(target: "two_top::haptics", error = %e, "JavaVM::from_raw failed");
-            return;
-        }
-    };
-    let mut env = match vm.attach_current_thread() {
-        Ok(env) => env,
-        Err(e) => {
-            tracing::warn!(target: "two_top::haptics", error = %e, "attach_current_thread failed");
-            return;
-        }
-    };
-    // The activity is the JNI Context we call getSystemService on.
-    let activity = unsafe { JObject::from_raw(ctx.context().cast()) };
-
-    let result = (|| -> jni::errors::Result<()> {
-        let service_name = env.new_string("vibrator")?;
-        let vibrator = env
-            .call_method(
-                &activity,
-                "getSystemService",
-                "(Ljava/lang/String;)Ljava/lang/Object;",
-                &[JValue::Object(&service_name)],
-            )?
-            .l()?;
-        env.call_method(&vibrator, "vibrate", "(J)V", &[JValue::Long(ms)])?;
-        Ok(())
-    })();
-
-    if let Err(e) = result {
-        // Clear any pending Java exception so the thread's JNIEnv stays usable.
-        let _ = env.exception_clear();
-        tracing::warn!(target: "two_top::haptics", error = %e, "vibrate failed");
-    }
+    crate::platform::vibrate(ms);
 }
-
-/// The browser's vibrator. `navigator.vibrate` is the web's one haptic
-/// primitive: a duration, nothing else — which is exactly the shape this
-/// module already speaks. Chrome on Android honours it, so the browser
-/// build keeps the feel layer on the phones most likely to open it;
-/// iOS Safari does not implement it and the call is a silent no-op
-/// there, which is the same nothing the build did before.
-#[cfg(target_family = "wasm")]
-fn vibrate(ms: i64) {
-    let Some(window) = web_sys::window() else {
-        return;
-    };
-    // Rejected by browsers outside a user gesture, and absent entirely on
-    // iOS — both surface as a bool/exception we deliberately drop. A
-    // missing vibrator must never take down the game loop.
-    let _ = window.navigator().vibrate_with_duration(ms.max(0) as u32);
-}
-
-/// Desktop and everything else: vibration is a no-op.
-#[cfg(not(any(target_os = "android", target_family = "wasm")))]
-fn vibrate(_ms: i64) {}
 
 /// Throw haptic: a local player's primary fang appearing (same edge the throw
 /// SFX uses). Side-fangs (Multishot) and the remote opponent are excluded.
@@ -121,7 +56,9 @@ fn haptic_on_throw(
     booms: Query<(&Boomerang, &BoomerangMods)>,
     players: Query<&Player>,
     local: Res<LocalPlayerHandle>,
+    practice: Res<crate::bot::PracticeMode>,
     settings: Res<Settings>,
+    tuning: Res<render::tuning::Tuning>,
     mut had_primary: Local<HashMap<usize, bool>>,
 ) {
     let mut present: HashMap<usize, bool> = HashMap::default();
@@ -134,8 +71,8 @@ fn haptic_on_throw(
         let handle = player.handle;
         let now = present.get(&handle).copied().unwrap_or(false);
         let was = had_primary.get(&handle).copied().unwrap_or(false);
-        if now && !was && settings.haptics && is_local(&local, handle) {
-            vibrate(HAPTIC_THROW_MS);
+        if now && !was && settings.haptics && is_local(&local, practice.0, handle) {
+            vibrate(tuning.haptics.throw_ms);
         }
         had_primary.insert(handle, now);
     }
@@ -145,13 +82,14 @@ fn haptic_on_throw(
 fn haptic_on_kill(
     players: Query<(&Player, &Dead)>,
     settings: Res<Settings>,
+    tuning: Res<render::tuning::Tuning>,
     mut prev: Local<HashMap<usize, bool>>,
 ) {
     for (player, dead) in &players {
         let now = dead.is_dying();
         let was = prev.get(&player.handle).copied().unwrap_or(false);
         if now && !was && settings.haptics {
-            vibrate(HAPTIC_KILL_MS);
+            vibrate(tuning.haptics.kill_ms);
         }
         prev.insert(player.handle, now);
     }
@@ -162,14 +100,16 @@ fn haptic_on_kill(
 fn haptic_on_perfect_catch(
     players: Query<(&Player, &Empowered)>,
     local: Res<LocalPlayerHandle>,
+    practice: Res<crate::bot::PracticeMode>,
     settings: Res<Settings>,
+    tuning: Res<render::tuning::Tuning>,
     mut prev: Local<HashMap<usize, bool>>,
 ) {
     for (player, emp) in &players {
         let now = emp.0;
         let was = prev.get(&player.handle).copied().unwrap_or(false);
-        if now && !was && settings.haptics && is_local(&local, player.handle) {
-            vibrate(HAPTIC_PERFECT_CATCH_MS);
+        if now && !was && settings.haptics && is_local(&local, practice.0, player.handle) {
+            vibrate(tuning.haptics.perfect_catch_ms);
         }
         prev.insert(player.handle, now);
     }
@@ -196,15 +136,23 @@ mod tests {
     #[test]
     fn local_filter_matches_only_the_local_handle() {
         let local = LocalPlayerHandle(Some(1));
-        assert!(!is_local(&local, 0));
-        assert!(is_local(&local, 1));
+        assert!(!is_local(&local, false, 0));
+        assert!(is_local(&local, false, 1));
+    }
+
+    #[test]
+    fn in_practice_only_the_player_buzzes() {
+        let local = LocalPlayerHandle(None);
+        let bot = crate::bot::BOT_HANDLE;
+        assert!(!is_local(&local, true, bot));
+        assert!(is_local(&local, true, 1 - bot));
     }
 
     #[test]
     fn local_filter_none_treats_every_handle_as_local() {
         // Couch/SyncTest: both players share the device.
         let local = LocalPlayerHandle(None);
-        assert!(is_local(&local, 0));
-        assert!(is_local(&local, 1));
+        assert!(is_local(&local, false, 0));
+        assert!(is_local(&local, false, 1));
     }
 }

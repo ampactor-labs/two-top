@@ -10,6 +10,6 @@ rust-version.workspace = true
 # input_touch consumes Bevy's `Touches` resource (PreUpdate) and emits
 # wire-format `PlayerInput` (cycle 5). Per CONVENTIONS, `TouchState` is
 # never rolled back and never serialized — pure local state.
-bevy = { version = "=0.18.1", default-features = false, features = ["std", "touch", "mouse"] }
+bevy = { version = "=0.18.1", default-features = false, features = ["std", "touch"] }
 bevy_ggrs = "=0.21"
 sim = { path = "../sim" }

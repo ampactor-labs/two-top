@@ -26,13 +26,47 @@ use crate::anchor::ScreenAnchor;
 use crate::screen::AppScreen;
 
 /// Where the SHARE label sits on the summary (window-fraction, y-down),
-/// and the tap band around it. Low corner, clear of the summary card and
-/// the primary/quit strips.
-const SUMMARY_ANCHOR: (f32, f32) = (0.80, 0.16);
-const SUMMARY_BAND: ((f32, f32), (f32, f32)) = ((0.62, 0.98), (0.10, 0.22));
-/// Theater placement: top-right, under the marquee line.
-const THEATER_ANCHOR: (f32, f32) = (0.82, 0.12);
-const THEATER_BAND: ((f32, f32), (f32, f32)) = ((0.66, 0.98), (0.06, 0.18));
+/// and the tap band around it: the right-hand corner just BELOW the
+/// app-wide exit strip (`screen::TOP_EXIT_BAND`), clear of the summary
+/// card under it, and ending where the touch layer's taunt strip ends —
+/// below that, the right half is the THROW zone, and at the summary a
+/// THROW is the rematch: a tap on the band's lower edge used to share the
+/// tape AND restart the match at 0-0 (online, latch RUN IT BACK).
+///
+/// Both used to reach up into that strip, and every screen reads a tap
+/// there as BACK. In the theater the label's own centre was inside it, so
+/// SHARE started the upload and left the tape in the same frame (the QR
+/// came up over the replay list and was gone a frame later); on the
+/// summary the top half of the label was also LOBBY, or online LEAVE,
+/// which says goodbye to the opponent and ends any rematch.
+const SUMMARY_ANCHOR: (f32, f32) = (0.80, 0.215);
+const SUMMARY_BAND: ((f32, f32), (f32, f32)) =
+    ((0.62, 0.98), (0.17, input_touch::TAUNT_ZONE_Y_FRAC));
+/// Theater placement: the same corner, under the BACK box. A tape plays
+/// itself, so no touch zone reads here — but the theater reads a tap
+/// anywhere outside its strips as pause, and skips this band while the
+/// label is up ([`ShareTapBand`]).
+const THEATER_ANCHOR: (f32, f32) = (0.82, 0.215);
+const THEATER_BAND: ((f32, f32), (f32, f32)) = ((0.66, 0.98), (0.17, 0.26));
+
+/// The SHARE band that is live this frame, if a label is showing: other
+/// screens' tap handlers leave a tap here to SHARE (the theater's
+/// pause-anywhere toggled playback on every share).
+#[derive(Resource, Default, Clone, Copy, Debug)]
+pub struct ShareTapBand(Option<((f32, f32), (f32, f32))>);
+
+impl ShareTapBand {
+    /// Is the window-pixel point `p` on the live SHARE label?
+    pub fn hit(&self, p: Vec2, window: Vec2) -> bool {
+        self.0
+            .is_some_and(|band| in_share_band(Vec2::new(p.x / window.x, p.y / window.y), band))
+    }
+}
+
+/// Is the window-fraction point `f` inside `band` (x range, y range)?
+fn in_share_band(f: Vec2, band: ((f32, f32), (f32, f32))) -> bool {
+    (band.0.0..band.0.1).contains(&f.x) && crate::ui::in_band(f.y, band.1)
+}
 
 /// QR module scale (screen pixels per module) is left to the sprite
 /// transform; this is the quiet zone in modules, per the QR spec minimum.
@@ -78,9 +112,7 @@ pub struct SharedTapePath(pub Option<PathBuf>);
 enum ShareState {
     #[default]
     Idle,
-    /// Native-only by construction: the wasm arm never posts, so the
-    /// variant is dead there and the lint knows it.
-    #[cfg_attr(target_family = "wasm", allow(dead_code))]
+    /// The tape is on its way to the drop; the answer arrives on `rx`.
     Posting {
         rx: std::sync::Mutex<std::sync::mpsc::Receiver<Result<String, String>>>,
     },
@@ -211,8 +243,8 @@ struct DropReceipt {
     id: String,
 }
 
-/// Post `bytes` to the drop and compose the watch link. Runs on the IO
-/// task pool; reports through the channel.
+/// Post `bytes` to the drop and compose the watch link. Runs on its own
+/// thread (`crate::platform::off_main_thread`); reports through the channel.
 #[cfg(not(target_family = "wasm"))]
 fn post_tape(drop_url: String, watch_url: String, bytes: Vec<u8>) -> Result<String, String> {
     let receipt: DropReceipt = ureq::post(&format!("{}/tape", drop_url.trim_end_matches('/')))
@@ -224,12 +256,16 @@ fn post_tape(drop_url: String, watch_url: String, bytes: Vec<u8>) -> Result<Stri
     Ok(compose_watch_url(&watch_url, &receipt.id))
 }
 
-fn spawn_share_labels(mut commands: Commands, config: Res<ShareConfig>) {
+fn spawn_share_labels(
+    mut commands: Commands,
+    config: Res<ShareConfig>,
+    profile: Res<crate::platform::DeviceProfile>,
+) {
     // Native with no drop baked: nothing to offer. The browser always has
     // something to offer, because it can hand the tape to the viewer as a
     // download even when there is nowhere to post it — and a browser
     // player has no replays folder to reach into otherwise.
-    if !config.complete() && !cfg!(target_family = "wasm") {
+    if !config.complete() && !profile.can_download_tapes {
         return;
     }
     for (on_summary, (fx, fy)) in [(true, SUMMARY_ANCHOR), (false, THEATER_ANCHOR)] {
@@ -242,7 +278,7 @@ fn spawn_share_labels(mut commands: Commands, config: Res<ShareConfig>) {
             },
             TextColor(render::palette::SPARK),
             TextLayout::new_with_justify(Justify::Center),
-            ScreenAnchor::new(fx * 2.0 - 1.0, 1.0 - 2.0 * fy, 0.0, 0.0),
+            ScreenAnchor::new(crate::ui::anchor_x(fx), crate::ui::anchor_y(fy), 0.0, 0.0),
             Transform::from_xyz(0.0, 0.0, 205.0),
             Visibility::Hidden,
         ));
@@ -283,8 +319,10 @@ fn drive_share(
     mut state: ResMut<ShareState>,
     mut labels: Query<(&ShareLabel, &mut Visibility, &mut Text2d)>,
     overlay: Query<Entity, With<ShareOverlayPiece>>,
+    mut live_band: ResMut<ShareTapBand>,
 ) {
     if !config.complete() {
+        live_band.0 = None;
         return;
     }
     let can_share = shareable(
@@ -298,6 +336,13 @@ fn drive_share(
     // Labels track the shareable surface; both hide while the flow is busy.
     let busy = !matches!(*state, ShareState::Idle);
     let posts = config.complete();
+    live_band.0 = can_share.as_ref().filter(|_| !busy).map(|(on_summary, _)| {
+        if *on_summary {
+            SUMMARY_BAND
+        } else {
+            THEATER_BAND
+        }
+    });
     for (label, mut vis, mut text) in &mut labels {
         let on = !busy
             && can_share
@@ -316,10 +361,9 @@ fn drive_share(
     let tapped_at = |band: ((f32, f32), (f32, f32))| {
         win.x > 0.0
             && win.y > 0.0
-            && touches.iter_just_pressed().any(|t| {
-                let (fx, fy) = (t.position().x / win.x, t.position().y / win.y);
-                (band.0.0..band.0.1).contains(&fx) && (band.1.0..band.1.1).contains(&fy)
-            })
+            && touches
+                .iter_just_pressed()
+                .any(|t| in_share_band(t.position() / win, band))
     };
 
     match &mut *state {
@@ -355,19 +399,19 @@ fn drive_share(
                 config.watch_url.clone().expect("checked complete"),
             );
             let (tx, rx) = std::sync::mpsc::channel();
-            // Native: a blocking post on the IO pool. Browser: the page's
-            // own fetch. The browser used to log "sharing is a follow-up"
-            // and do nothing, which made the web build share-only-inbound
-            // for no reason the platform actually imposes.
+            // Native: a blocking post on a thread of its own. Browser: the
+            // page's own fetch. The browser used to log "sharing is a
+            // follow-up" and do nothing, which made the web build
+            // share-only-inbound for no reason the platform imposes.
+            // The link is logged where it is made: if the player has left
+            // the screen by the time it lands, nobody is listening for it.
             #[cfg(not(target_family = "wasm"))]
-            bevy::tasks::IoTaskPool::get()
-                .spawn(async move {
-                    let _ = tx.send(post_tape(drop_url, watch_url, bytes));
-                })
-                .detach();
+            crate::platform::off_main_thread("twotop-share", move || {
+                let _ = tx.send(log_posted(post_tape(drop_url, watch_url, bytes)));
+            });
             #[cfg(target_family = "wasm")]
             wasm_bindgen_futures::spawn_local(async move {
-                let _ = tx.send(post_tape_web(drop_url, watch_url, bytes).await);
+                let _ = tx.send(log_posted(post_tape_web(drop_url, watch_url, bytes).await));
             });
             *state = ShareState::Posting {
                 rx: std::sync::Mutex::new(rx),
@@ -375,6 +419,15 @@ fn drive_share(
             tracing::info!(target: "two_top::share", "tape posting to the drop");
         }
         ShareState::Posting { rx } => {
+            // The player left the summary or the tape while it posted (a
+            // rematch, BACK). The card would have come up on whatever screen
+            // came next and closed a frame later; stand down instead. The
+            // post finishes unseen, and its link is in the log.
+            if can_share.is_none() {
+                tracing::info!(target: "two_top::share", "left the shared screen mid-post; the link will only be logged");
+                *state = ShareState::Idle;
+                return;
+            }
             let outcome = rx
                 .get_mut()
                 .expect("only this system ever locks the receiver")
@@ -409,6 +462,14 @@ fn drive_share(
             }
         }
     }
+}
+
+/// Log a post's outcome where it is made, then pass it on.
+fn log_posted(outcome: Result<String, String>) -> Result<String, String> {
+    if let Ok(url) = &outcome {
+        tracing::info!(target: "two_top::share", %url, "tape posted");
+    }
+    outcome
 }
 
 /// The QR card: code sprite center-screen, the link under it, the close
@@ -467,6 +528,7 @@ impl Plugin for SharePlugin {
         app.insert_resource(ShareConfig::from_env())
             .init_resource::<ShareState>()
             .init_resource::<SharedTapePath>()
+            .init_resource::<ShareTapBand>()
             .add_systems(Startup, spawn_share_labels)
             .add_systems(Update, drive_share);
     }
@@ -475,6 +537,60 @@ impl Plugin for SharePlugin {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_summary_share_tap_is_never_a_throw() {
+        // At the summary a THROW is the rematch. Every point of the band,
+        // in both layouts (southpaw mirrors the zones), must be dead to the
+        // throw and dash zones.
+        let win = Vec2::new(1080.0, 2340.0);
+        let ((x0, x1), (y0, y1)) = SUMMARY_BAND;
+        for i in 0..=20 {
+            for j in 0..20 {
+                let f = Vec2::new(
+                    x0 + (x1 - x0) * i as f32 / 20.0,
+                    y0 + (y1 - y0) * j as f32 / 20.0,
+                );
+                if !in_share_band(f, SUMMARY_BAND) {
+                    continue;
+                }
+                let p = f * win;
+                for probe in [p, input_touch::mirror_x(p, win)] {
+                    assert!(!input_touch::is_throw_zone(probe, win), "{f:?} throws");
+                    assert!(!input_touch::is_dash_zone(probe, win), "{f:?} dashes");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_live_band_answers_only_while_a_label_shows() {
+        let win = Vec2::new(1000.0, 2000.0);
+        let on_label = Vec2::new(820.0, 430.0);
+        assert!(!ShareTapBand::default().hit(on_label, win));
+        assert!(ShareTapBand(Some(THEATER_BAND)).hit(on_label, win));
+        assert!(!ShareTapBand(Some(THEATER_BAND)).hit(Vec2::new(200.0, 1000.0), win));
+    }
+
+    #[test]
+    fn no_share_target_reaches_into_the_exit_strip() {
+        let exit = crate::screen::TOP_EXIT_BAND;
+        for (anchor, band) in [
+            (SUMMARY_ANCHOR, SUMMARY_BAND),
+            (THEATER_ANCHOR, THEATER_BAND),
+        ] {
+            let (top, bottom) = band.1;
+            assert!(
+                top >= exit.1,
+                "band {band:?} overlaps the exit strip {exit:?}"
+            );
+            assert!(top < bottom);
+            assert!(
+                (top..bottom).contains(&anchor.1) && (band.0.0..band.0.1).contains(&anchor.0),
+                "the label at {anchor:?} sits inside its own band {band:?}",
+            );
+        }
+    }
 
     #[test]
     fn watch_urls_compose_with_and_without_trailing_slash() {

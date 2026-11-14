@@ -31,8 +31,13 @@
 //!
 //! Deploy: Railway service off this repo with start command
 //! `cargo run -p ice_vendor --release` (or any container). `PORT` is
-//! honored per platform convention. Single-threaded on purpose — the
-//! request rate is "a duel is starting somewhere".
+//! honored per platform convention. Requests are served on one thread,
+//! and every answer is ready before it is asked for: HMAC credentials are
+//! computed on the spot, and in Cloudflare mode a background thread keeps
+//! one minted credential fresh ([`Minted`]) that every caller shares. No
+//! request ever waits on Cloudflare: the phone gives the whole fetch
+//! 2.5 s, and one slow upstream call used to hold every caller queued
+//! behind it past that, down to STUN-only.
 
 use base64::Engine as _;
 use hmac::{Hmac, Mac};
@@ -56,7 +61,7 @@ const STUN_DEFAULTS: [&str; 2] = [
 
 /// The response contract shared with `app::netplay` — keep the field
 /// names in lockstep with the client's `IceResponse`.
-#[derive(Serialize, Debug, PartialEq)]
+#[derive(Serialize, Debug, PartialEq, Clone)]
 struct IceResponse {
     urls: Vec<String>,
     username: Option<String>,
@@ -95,18 +100,82 @@ fn ttl_from_env() -> u64 {
         .unwrap_or(DEFAULT_TTL_SECS)
 }
 
+// ---- Cloudflare: one credential, minted ahead -------------------------------
+//
+// A Cloudflare credential is minted by a call to Cloudflare, which took up to
+// its 5 s timeout while the request that needed it, and every request queued
+// behind it, waited. It is now minted in the background, ahead of need, and
+// every caller is handed the current one: one upstream call per refresh
+// interval, however many duels start, and none of them waits.
+
+/// A Cloudflare credential set and when it was minted.
+#[derive(Clone, Debug)]
+struct Minted {
+    response: IceResponse,
+    at: Instant,
+}
+
+/// How often the background thread mints a fresh credential: a quarter of
+/// its lifetime, so the one being handed out is always well inside the
+/// half-life [`cached_answer`] serves it to.
+fn refresh_every(ttl: u64) -> Duration {
+    Duration::from_secs((ttl / 4).max(10))
+}
+
+/// After a failed mint, try again this soon.
+const REFRESH_RETRY: Duration = Duration::from_secs(30);
+
+/// The minted credential as a caller should see it, while less than half
+/// its lifetime is spent: `ttl_secs` is what is left of it, so a phone
+/// never holds one past its expiry. `None` when there is none yet, or it
+/// is too old (the refresher has been failing): answer STUN-only.
+fn cached_answer(minted: Option<&Minted>, now: Instant, ttl: u64) -> Option<IceResponse> {
+    let minted = minted?;
+    let age = now.saturating_duration_since(minted.at).as_secs();
+    (age < ttl / 2).then(|| IceResponse {
+        ttl_secs: ttl - age,
+        ..minted.response.clone()
+    })
+}
+
+/// Keep `shared` holding a fresh Cloudflare credential, forever.
+fn refresh_cloudflare(
+    endpoint: String,
+    token: String,
+    ttl: u64,
+    shared: std::sync::Arc<std::sync::Mutex<Option<Minted>>>,
+) {
+    loop {
+        let wait = match cloudflare_credentials(&endpoint, &token, ttl) {
+            Ok(response) => {
+                let at = Instant::now();
+                *shared.lock().unwrap_or_else(|e| e.into_inner()) = Some(Minted { response, at });
+                refresh_every(ttl)
+            }
+            Err(e) => {
+                eprintln!("ice_vendor: cloudflare generate failed, retrying in 30 s: {e}");
+                REFRESH_RETRY
+            }
+        };
+        std::thread::sleep(wait);
+    }
+}
+
 // ---- Abuse throttling ------------------------------------------------------
 //
 // Anyone who extracts TWOTOP_ICE_URL from the public APK can hit /ice in a
-// loop, and each Cloudflare credential is billable relay capacity minted on
-// this project's key. The TTL bounds one credential's life, not the farming
-// rate; these two raises bound the rate.
+// loop. A flood no longer mints anything (Cloudflare credentials are minted
+// on a timer, HMAC ones cost a hash), so the bucket only bounds request
+// volume, and it is sized for the callers who need a relay most: phones on
+// mobile data share their carrier's public addresses, many to one, and the
+// old 5-then-1-per-30-s bucket turned them away to STUN-only, the one case
+// a relay exists for.
 
-/// Per-IP token bucket for `/ice`. The capacity covers a rematch flurry;
-/// after that it is one fetch per [`BUCKET_REFILL_SECS`]. A phone fetches
-/// once per match entry, so a human never sees a 429.
-const BUCKET_CAPACITY: u32 = 5;
-const BUCKET_REFILL_SECS: u64 = 30;
+/// Per-IP token bucket for `/ice`: a burst of [`BUCKET_CAPACITY`], then one
+/// fetch per [`BUCKET_REFILL_SECS`]. Thirty phones behind one carrier
+/// address can start a duel at once.
+const BUCKET_CAPACITY: u32 = 30;
+const BUCKET_REFILL_SECS: u64 = 2;
 /// Sweep threshold: past this many tracked addresses, entries idle long
 /// enough to have refilled completely are dropped — an attacker cycling
 /// source addresses rents memory instead of keeping it.
@@ -218,14 +287,21 @@ fn stun_urls() -> Vec<String> {
     STUN_DEFAULTS.iter().map(|s| s.to_string()).collect()
 }
 
-fn respond(backend: &Backend, ttl: u64) -> IceResponse {
+fn stun_only(ttl: u64) -> IceResponse {
+    IceResponse {
+        urls: stun_urls(),
+        username: None,
+        credential: None,
+        ttl_secs: ttl,
+    }
+}
+
+/// The answer to `GET /ice`. Never blocks: Cloudflare mode reads the
+/// credential the refresher minted (`minted`, with `now`), and answers
+/// STUN-only while there is none fresh enough.
+fn respond(backend: &Backend, ttl: u64, minted: Option<&Minted>, now: Instant) -> IceResponse {
     match backend {
-        Backend::StunOnly => IceResponse {
-            urls: stun_urls(),
-            username: None,
-            credential: None,
-            ttl_secs: ttl,
-        },
+        Backend::StunOnly => stun_only(ttl),
         Backend::Hmac(secret, turn_urls) => {
             let now = SystemTime::now()
                 .duration_since(UNIX_EPOCH)
@@ -241,16 +317,9 @@ fn respond(backend: &Backend, ttl: u64) -> IceResponse {
                 ttl_secs: ttl,
             }
         }
-        Backend::Cloudflare(endpoint, token) => cloudflare_credentials(endpoint, token, ttl)
-            .unwrap_or_else(|e| {
-                eprintln!("ice_vendor: cloudflare generate failed, answering STUN-only: {e}");
-                IceResponse {
-                    urls: stun_urls(),
-                    username: None,
-                    credential: None,
-                    ttl_secs: ttl,
-                }
-            }),
+        Backend::Cloudflare(..) => {
+            cached_answer(minted, now, ttl).unwrap_or_else(|| stun_only(ttl))
+        }
     }
 }
 
@@ -316,6 +385,11 @@ fn main() {
         Backend::StunOnly => "stun-only (no relay configured)",
     };
     let app_key = std::env::var("ICE_APP_KEY").ok().filter(|v| !v.is_empty());
+    let minted = std::sync::Arc::new(std::sync::Mutex::new(None::<Minted>));
+    if let Backend::Cloudflare(endpoint, token) = &backend {
+        let (endpoint, token, shared) = (endpoint.clone(), token.clone(), minted.clone());
+        std::thread::spawn(move || refresh_cloudflare(endpoint, token, ttl, shared));
+    }
     let mut limiter = RateLimiter::new();
     let trusted_hops = trusted_proxy_hops();
     let server = tiny_http::Server::http(("0.0.0.0", port))
@@ -359,7 +433,12 @@ fn main() {
                     "application/json",
                 )
             }
-            "/ice" => match serde_json::to_string(&respond(&backend, ttl)) {
+            "/ice" => match serde_json::to_string(&respond(
+                &backend,
+                ttl,
+                minted.lock().unwrap_or_else(|e| e.into_inner()).as_ref(),
+                Instant::now(),
+            )) {
                 Ok(json) => (200, json, "application/json"),
                 Err(e) => (500, format!("{{\"error\":\"{e}\"}}"), "application/json"),
             },
@@ -395,9 +474,75 @@ mod tests {
 
     #[test]
     fn stun_only_answers_carry_no_credentials() {
-        let r = respond(&Backend::StunOnly, 60);
+        let r = respond(&Backend::StunOnly, 60, None, Instant::now());
         assert_eq!(r.urls, stun_urls());
         assert!(r.username.is_none() && r.credential.is_none());
+    }
+
+    fn cloudflare() -> Backend {
+        Backend::Cloudflare("https://cf.invalid/{key_id}".into(), "token".into())
+    }
+
+    fn relay(ttl: u64) -> IceResponse {
+        let mut urls = stun_urls();
+        urls.push("turn:turn.cloudflare.com:3478?transport=udp".into());
+        IceResponse {
+            urls,
+            username: Some("u".into()),
+            credential: Some("c".into()),
+            ttl_secs: ttl,
+        }
+    }
+
+    #[test]
+    fn cloudflare_mode_answers_from_the_minted_credential_without_waiting() {
+        let ttl = 4 * 3600;
+        let t0 = Instant::now();
+        let minted = Minted {
+            response: relay(ttl),
+            at: t0,
+        };
+        // An hour in: the same credential, with the hour taken off its life.
+        let r = respond(
+            &cloudflare(),
+            ttl,
+            Some(&minted),
+            t0 + Duration::from_secs(3600),
+        );
+        assert_eq!(r.username.as_deref(), Some("u"));
+        assert_eq!(r.ttl_secs, ttl - 3600);
+        // Nothing minted yet (first seconds after boot): STUN-only, at once.
+        let r = respond(&cloudflare(), ttl, None, t0);
+        assert!(r.username.is_none());
+        assert_eq!(r.urls, stun_urls());
+    }
+
+    #[test]
+    fn a_credential_past_its_half_life_is_not_handed_out() {
+        let ttl = 4 * 3600;
+        let t0 = Instant::now();
+        let minted = Minted {
+            response: relay(ttl),
+            at: t0,
+        };
+        let half = t0 + Duration::from_secs(ttl / 2);
+        assert!(cached_answer(Some(&minted), half - Duration::from_secs(1), ttl).is_some());
+        assert!(cached_answer(Some(&minted), half, ttl).is_none());
+        // The refresher mints well before that.
+        assert!(refresh_every(ttl) < Duration::from_secs(ttl / 2));
+    }
+
+    #[test]
+    fn a_carrier_address_full_of_phones_is_not_turned_away() {
+        let mut limiter = RateLimiter::new();
+        let carrier: IpAddr = "100.64.0.1".parse().unwrap();
+        let t0 = Instant::now();
+        for phone in 0..30 {
+            assert!(
+                limiter.allow_at(carrier, t0),
+                "phone {phone} gets its relay"
+            );
+        }
     }
 
     #[test]
@@ -453,7 +598,7 @@ mod tests {
             "sesame".into(),
             vec!["turn:relay.example.com:3478?transport=udp".into()],
         );
-        let r = respond(&backend, 120);
+        let r = respond(&backend, 120, None, Instant::now());
         assert!(r.urls.starts_with(&stun_urls()));
         assert_eq!(
             r.urls.last().unwrap(),
