@@ -96,14 +96,19 @@ else
   TA=$(tape "$WORK/a.log"); TB=$(tape "$WORK/b.log")
   if [ -n "$TA" ] && [ -n "$TB" ]; then
     # The header carries each phone's own clock, so compare what the tapes
-    # replay to: the per-frame checksums of the whole match.
+    # replay to: the per-frame checksums of the match, re-simulated under
+    # the rules it was played by (--live). Each phone stops recording a
+    # moment after it saw the decision, so one tape can run a few ticks
+    # longer: compare the ticks both hold.
     RS=${REPLAY_SYNC:-target/debug/replay_sync}
-    "$RS" --demo "$TA" --output "$WORK/a.tsv" > /dev/null 2>&1
-    "$RS" --demo "$TB" --output "$WORK/b.tsv" > /dev/null 2>&1
-    if [ -s "$WORK/a.tsv" ] && cmp -s "$WORK/a.tsv" "$WORK/b.tsv"; then
-      echo "OK: both tapes replay to the same $(($(wc -l < "$WORK/a.tsv") - 1)) frames"
+    "$RS" --live --demo "$TA" --output "$WORK/a.tsv" > /dev/null 2>&1
+    "$RS" --live --demo "$TB" --output "$WORK/b.tsv" > /dev/null 2>&1
+    LA=$(wc -l < "$WORK/a.tsv"); LB=$(wc -l < "$WORK/b.tsv")
+    N=$(( LA < LB ? LA : LB ))
+    if [ "$N" -gt 1 ] && cmp -s <(head -n "$N" "$WORK/a.tsv") <(head -n "$N" "$WORK/b.tsv"); then
+      echo "OK: both tapes replay to the same $((N - 1)) frames (tapes $((LA - 1)) / $((LB - 1)))"
     else
-      echo "FAIL: the tapes replay differently (logs in $WORK)"; exit 1
+      echo "FAIL: the tapes replay differently (tapes $((LA - 1)) / $((LB - 1)); logs in $WORK)"; exit 1
     fi
     for t in "$TA" "$TB"; do
       att="${t%.bmrg}.attest.json"

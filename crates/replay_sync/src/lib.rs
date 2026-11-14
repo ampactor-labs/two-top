@@ -23,7 +23,7 @@ use replay::{
 };
 use sim::{
     Boomerang, DashState, GgrsCfg, MatchScore, MatchState, Player, PlayerInput, PositionF,
-    PreviousPositionF, SimPlugin, StunFrames, VelocityF, arena_walls,
+    PreviousPositionF, SimPlugin, StunFrames, VelocityF,
 };
 use std::fmt::Write as _;
 use std::path::PathBuf;
@@ -194,37 +194,71 @@ pub fn canonical_path() -> PathBuf {
         .join("tests/demos/canonical/match_v1.bmrg")
 }
 
-/// Build a fresh app configured for replay-driven sim with two players at
-/// the origin. Mirrors the integration-test setup so that local and CI runs
-/// produce comparable state.
+/// Build the determinism PROBE for `replay`: the setup the canonical demo,
+/// the fuzz seeds and every cross-platform lane re-simulate under. It is
+/// deliberately not a live match, in exactly three ways, and every TSV
+/// golden in the repo was produced by it:
 ///
-/// `pub` so integration tests (e.g. `tests/snapshot_round_trip.rs`) can
-/// drive the same exact app shape `compute_checksum_tsv` uses internally.
-pub fn build_app(replay: Replay) -> App {
-    build_app_with_check_distance(replay, 2)
+/// - both duelists start at the origin (the canonical choreography was
+///   authored there), not at [`sim::respawn_position`];
+/// - rounds never end ([`sim::InfiniteRoundPlugin`]), so a probe tape stays
+///   in play however long it runs;
+/// - SyncTest input delay 2, check distance 2.
+///
+/// Everything else, the table included, comes from the one
+/// [`sim::spawn_match_world`]. To re-simulate a recorded MATCH (a tape the
+/// game saved, or a signed result), use [`build_live_app`].
+pub fn build_probe_app(replay: Replay) -> App {
+    build_probe_app_with_check_distance(replay, 2)
 }
 
-/// Variant of [`build_app`] that lets the caller pick the SyncTest
-/// `check_distance`. Used by snapshot-restore round-trip tests that
-/// want `check_distance: 0` (no per-tick verification rollback —
-/// bevy_ggrs's internal verification snapshot ring is incompatible
-/// with `SimSnapshot::restore` overrides). The replay viewer's
-/// playback flow should also use `check_distance: 0` for the same
-/// reason — there's no input divergence in pure playback so
-/// verification is wasted work that also breaks scrub.
-pub fn build_app_with_check_distance(replay: Replay, check_distance: usize) -> App {
-    build_app_configurable(replay, check_distance, 2)
+/// [`build_probe_app`] with a chosen SyncTest `check_distance`. Snapshot
+/// round-trip tests want `0` (no per-tick verification rollback — bevy_ggrs's
+/// internal verification snapshot ring is incompatible with
+/// `SimSnapshot::restore` overrides).
+pub fn build_probe_app_with_check_distance(replay: Replay, check_distance: usize) -> App {
+    build_probe_app_configurable(replay, check_distance, 2)
 }
 
-/// Full-control variant of [`build_app`]. Used by snapshot-restore
-/// round-trip tests that need `input_delay: 0` (bevy_ggrs's input
-/// delay buffer holds N frames of inputs INTERNALLY — not visible to
-/// `SimSnapshot::capture`, not restorable by `SimSnapshot::restore`.
-/// With `input_delay > 0` the buffer state diverges between forward
-/// play and restore-then-replay paths). Replay viewer's playback
-/// loop should also use `input_delay: 0` since playback has no
-/// network latency to mask.
-pub fn build_app_configurable(replay: Replay, check_distance: usize, input_delay: u32) -> App {
+/// Full-control variant of [`build_probe_app`]. Snapshot-restore round-trip
+/// tests need `input_delay: 0`: bevy_ggrs's input-delay buffer holds N
+/// frames of inputs internally, invisible to `SimSnapshot::capture`, so
+/// with a delay the buffer diverges between forward play and
+/// restore-then-replay.
+pub fn build_probe_app_configurable(
+    replay: Replay,
+    check_distance: usize,
+    input_delay: u32,
+) -> App {
+    let mut app = replay_app(replay, check_distance, input_delay, true);
+    // The probe's one layout difference: both seats at the origin.
+    let duelists: Vec<Entity> = app
+        .world_mut()
+        .query_filtered::<Entity, With<Player>>()
+        .iter(app.world())
+        .collect();
+    for duelist in duelists {
+        app.world_mut()
+            .entity_mut(duelist)
+            .insert((PositionF(Vec2F::ZERO), PreviousPositionF(Vec2F::ZERO)));
+    }
+    app
+}
+
+/// Re-simulate a recorded MATCH exactly as it was played: the real round
+/// flow, the real spawn points, and the tape's inputs applied on the ticks
+/// they were consumed (a tape stores per-tick consumed inputs, so input
+/// delay 0 whatever delay the match was played at). This is what a signed
+/// result is checked against ([`final_score`], [`verify_attestation`]) and
+/// what `replay_sync --live` reports. Its setup is the game's own: the
+/// same [`sim::spawn_match_world`] the app lays the table with.
+pub fn build_live_app(replay: Replay) -> App {
+    replay_app(replay, 0, 0, false)
+}
+
+/// The one replay app both flavours share. `probe` adds
+/// [`sim::InfiniteRoundPlugin`]; everything else is identical.
+fn replay_app(replay: Replay, check_distance: usize, input_delay: u32, probe: bool) -> App {
     let mut sb = SessionBuilder::<GgrsCfg>::new()
         .with_num_players(replay.header.num_players as usize)
         .expect("with_num_players")
@@ -242,45 +276,17 @@ pub fn build_app_configurable(replay: Replay, check_distance: usize, input_delay
     )));
     app.add_plugins(GgrsPlugin::<GgrsCfg>::default());
     app.add_plugins(SimPlugin);
-    app.add_plugins(sim::InfiniteRoundPlugin);
+    if probe {
+        app.add_plugins(sim::InfiniteRoundPlugin);
+    }
     app.add_plugins(ReplayPlaybackPlugin);
     app.insert_resource(Session::SyncTest(session));
 
-    // Phase 16: reproduce the recorded arena. SelectedArena gates the
-    // arena-specific systems; the pyres are rollback entities that
-    // boomerang_pyre_collision / chain_ignition act on, so the headless
-    // determinism check must spawn them exactly as the live game does.
+    // The recorded arena gates the arena-specific systems; its pyres and
+    // trees are rollback entities the sim acts on.
     let arena = sim::ArenaId::from_u8(replay.header.arena_id);
     app.insert_resource(sim::SelectedArena(arena));
-
-    for handle in 0..replay.header.num_players as usize {
-        app.world_mut().spawn((
-            Player { handle },
-            PositionF(Vec2F::ZERO),
-            PreviousPositionF(Vec2F::ZERO),
-            VelocityF(Vec2F::ZERO),
-        ));
-    }
-
-    // Phase 9: spawn arena walls in their canonical fixed order so the
-    // `wall_collision` system has geometry to resolve against. Walls
-    // aren't rollback subjects (they don't change), so this is a one-
-    // shot spawn at app build time.
-    for wall in arena_walls() {
-        app.world_mut().spawn(wall);
-    }
-    // Per-arena obstacle cover, same fixed order as the live spawn. Without
-    // these the fuzz/matrix never exercised obstacle ricochets at all — a
-    // hole the obstacle-dense Gallery would have sailed straight through.
-    for wall in sim::arena_obstacles_for(arena) {
-        app.world_mut().spawn(wall);
-    }
-    for pyre in sim::arena_pyres_for(arena) {
-        app.world_mut().spawn(pyre);
-    }
-    for tree in sim::arena_trees_for(arena) {
-        app.world_mut().spawn(tree);
-    }
+    sim::spawn_match_world_now(app.world_mut(), arena);
 
     app.insert_resource(ReplayPlayback::new(replay));
     app
@@ -373,9 +379,17 @@ pub fn world_state_checksum(world: &mut World) -> u64 {
 /// one row per simulated frame. The string is ASCII and ends with a final
 /// newline so byte-by-byte cross-platform diff is unambiguous.
 pub fn compute_checksum_tsv(replay: &Replay) -> String {
-    let frames = replay.header.frame_count;
-    let mut app = build_app(replay.clone());
+    checksum_tsv(build_probe_app(replay.clone()), replay.header.frame_count)
+}
 
+/// [`compute_checksum_tsv`] for a recorded match, re-simulated under the
+/// rules it was played by ([`build_live_app`]). Two phones' tapes of one
+/// match agree here, tick for tick.
+pub fn compute_live_checksum_tsv(replay: &Replay) -> String {
+    checksum_tsv(build_live_app(replay.clone()), replay.header.frame_count)
+}
+
+fn checksum_tsv(mut app: App, frames: u32) -> String {
     let mut out = String::new();
     out.push_str(TSV_HEADER);
     out.push('\n');
@@ -405,7 +419,7 @@ pub fn compute_checksum_tsv(replay: &Replay) -> String {
 /// Replay the tape to its end and return the final match score — the
 /// re-simulated truth an attestation's claim is checked against.
 pub fn final_score(replay: &Replay) -> MatchScore {
-    let mut app = build_app(replay.clone());
+    let mut app = build_live_app(replay.clone());
     for _ in 0..replay.header.frame_count {
         app.update();
     }
@@ -464,7 +478,7 @@ pub fn verify_attestation(replay: &Replay, attestation: &net::Attestation) -> Re
 /// `Player.handle` order with `pos=` and `vel=` columns showing both the
 /// fixed-bit representation and the float approximation.
 pub fn dump_state_at(replay: &Replay, frame: u32) -> String {
-    let mut app = build_app(replay.clone());
+    let mut app = build_probe_app(replay.clone());
     let target = frame.min(replay.header.frame_count.saturating_sub(1));
     for _ in 0..=target {
         app.update();

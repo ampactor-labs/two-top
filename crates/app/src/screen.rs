@@ -22,11 +22,9 @@
 use bevy::prelude::*;
 use bevy::text::TextBounds;
 use bevy_ggrs::prelude::*;
-use fixed_math::Vec2F;
 use render::{PLAYER_RENDER_SIZE, player_atlas_layout};
 use sim::{
-    Boomerang, GgrsCfg, MATCH_WIN_THRESHOLD, MatchScore, MatchState, Pickup, Player, PositionF,
-    PreviousPositionF, SelectedArena, VelocityF, arena_obstacles_for, arena_walls,
+    Boomerang, GgrsCfg, MATCH_WIN_THRESHOLD, MatchScore, MatchState, Pickup, Player, SelectedArena,
 };
 
 use crate::anchor::ScreenAnchor;

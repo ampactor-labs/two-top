@@ -17,3 +17,8 @@ rand_xoshiro = "0.8"
 replay = { path = "../replay" }
 serde_json = "1"
 sim = { path = "../sim" }
+
+[dev-dependencies]
+# A real, decided match to re-simulate: the bot bench plays one headless
+# under the live rules and records the inputs every tick consumed.
+bot_brain = { path = "../bot_brain" }

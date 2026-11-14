@@ -843,35 +843,44 @@ pub struct DoorVisual;
 #[derive(Component)]
 pub struct ArenaProp;
 
+/// Dress the arena's props: sprites onto the pyres and trees
+/// [`sim::spawn_match_world`] laid (the sim owns those entities and their
+/// order), plus the purely visual chasm, bridge, sigils and doors.
 pub fn spawn_arena_props(
     commands: &mut Commands,
     asset_server: &AssetServer,
     atlases: &mut Assets<TextureAtlasLayout>,
     selected: &sim::SelectedArena,
     flip: f32,
+    laid: &sim::MatchWorld,
 ) {
-    spawn_pyres(commands, asset_server, atlases, selected, flip);
+    dress_pyres(commands, asset_server, atlases, &laid.pyres, flip);
+    dress_trees(commands, asset_server, atlases, &laid.trees, flip);
     match selected.0 {
         sim::ArenaId::Crossing => spawn_crossing(commands, asset_server, atlases, flip),
         sim::ArenaId::Reliquary => spawn_reliquary(commands, asset_server, atlases, flip),
-        sim::ArenaId::Forest => spawn_trees(commands, asset_server, atlases, selected, flip),
+        sim::ArenaId::Forest => {}
         // Anchor's pyre comes from spawn_pyres above; the 2026-07-16 roster
         // (Pit / Vigil / Gallery) is rules + geometry — no bespoke props.
         sim::ArenaId::Anchor | sim::ArenaId::Pit | sim::ArenaId::Vigil | sim::ArenaId::Gallery => {}
     }
 }
 
-/// Spawn the Forest's bone trees: the sim [`sim::BoneTree`] rollback
-/// component rides the sprite entity exactly like pyres do. Trees are TALL
-/// cover, so unlike the flat pyres they carry [`YSorted`] — a duelist in
-/// front draws over the trunk, one behind is occluded by the canopy.
-fn spawn_trees(
+/// Dress the Forest's bone trees: the sprite rides the entity that carries
+/// the sim [`sim::BoneTree`] rollback component, exactly like pyres do.
+/// Trees are TALL cover, so unlike the flat pyres they carry [`YSorted`] —
+/// a duelist in front draws over the trunk, one behind is occluded by the
+/// canopy.
+fn dress_trees(
     commands: &mut Commands,
     asset_server: &AssetServer,
     atlases: &mut Assets<TextureAtlasLayout>,
-    selected: &sim::SelectedArena,
+    trees: &[(Entity, sim::BoneTree)],
     flip: f32,
 ) {
+    if trees.is_empty() {
+        return;
+    }
     let layout = atlases.add(TextureAtlasLayout::from_grid(
         UVec2::splat(32),
         3,
@@ -880,16 +889,15 @@ fn spawn_trees(
         None,
     ));
     let image = asset_server.load("sprites/arena/bone_tree_sheet.png");
-    for tree in sim::arena_trees_for(selected.0) {
+    for &(entity, tree) in trees {
         let (center, size) = rect_center_size(tree.rect, flip);
         // The trunk footprint is the collision truth; the canopy rises off
         // it, scaled by the footprint row's table depth like obstacle rise.
         let (_, base_y) = tree.rect.min.to_f32();
         let rise = size.x * 2.1 * depth_scale(base_y * flip);
         let center_y = center.y + (rise - size.y) * 0.5;
-        commands.spawn((
+        commands.entity(entity).insert((
             ArenaProp,
-            tree,
             Sprite {
                 image: image.clone(),
                 texture_atlas: Some(TextureAtlas {
@@ -947,13 +955,16 @@ fn rect_center_size(rect: fixed_math::RectF, flip: f32) -> (Vec2, Vec2) {
     )
 }
 
-fn spawn_pyres(
+fn dress_pyres(
     commands: &mut Commands,
     asset_server: &AssetServer,
     atlases: &mut Assets<TextureAtlasLayout>,
-    selected: &sim::SelectedArena,
+    pyres: &[(Entity, sim::BonePyre)],
     flip: f32,
 ) {
+    if pyres.is_empty() {
+        return;
+    }
     let layout = atlases.add(TextureAtlasLayout::from_grid(
         UVec2::splat(32),
         3,
@@ -962,11 +973,10 @@ fn spawn_pyres(
         None,
     ));
     let image = asset_server.load("sprites/arena/bone_pyre_sheet.png");
-    for pyre in sim::arena_pyres_for(selected.0) {
+    for &(entity, pyre) in pyres {
         let (center, size) = rect_center_size(pyre.rect, flip);
-        commands.spawn((
+        commands.entity(entity).insert((
             ArenaProp,
-            pyre,
             Sprite {
                 image: image.clone(),
                 texture_atlas: Some(TextureAtlas {

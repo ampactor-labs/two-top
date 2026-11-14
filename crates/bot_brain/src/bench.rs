@@ -15,11 +15,7 @@ use bevy::prelude::*;
 use bevy::time::TimeUpdateStrategy;
 use bevy_ggrs::prelude::*;
 use bevy_ggrs::{GgrsPlugin, LocalInputs, Session};
-use fixed_math::Vec2F;
-use sim::{
-    ArenaId, GgrsCfg, MatchScore, MatchState, Player, PlayerInput, PositionF, PreviousPositionF,
-    SimPlugin, VelocityF,
-};
+use sim::{ArenaId, GgrsCfg, MatchScore, MatchState, PlayerInput, SimPlugin};
 
 use crate::{Brain, view_for};
 
@@ -186,28 +182,48 @@ fn build(arena: ArenaId, seats: [Seat; 2], seed: u32, check_distance: usize) -> 
     });
     app.add_systems(ReadInputs, seat_inputs);
 
-    for (handle, y) in [(0usize, -300), (1, 300)] {
-        let spawn = Vec2F::from_cm(0, y);
-        app.world_mut().spawn((
-            Player { handle },
-            PositionF(spawn),
-            PreviousPositionF(spawn),
-            VelocityF(Vec2F::ZERO),
-        ));
-    }
-    for wall in sim::arena_walls() {
-        app.world_mut().spawn(wall);
-    }
-    for wall in sim::arena_obstacles_for(arena) {
-        app.world_mut().spawn(wall);
-    }
-    for pyre in sim::arena_pyres_for(arena) {
-        app.world_mut().spawn(pyre);
-    }
-    for tree in sim::arena_trees_for(arena) {
-        app.world_mut().spawn(tree);
-    }
+    // The table the game lays, from the one place it is decided.
+    sim::spawn_match_world_now(app.world_mut(), arena);
     app
+}
+
+/// The inputs each tick consumed, recorded the way the game's own tape
+/// is (a re-simulated tick overwrites its slot), so a bench match can be
+/// saved as a tape and re-simulated elsewhere.
+#[derive(Resource, Default)]
+struct Tape(Vec<[PlayerInput; 2]>);
+
+fn record_tape(
+    frame: Res<sim::FrameCount>,
+    inputs: Res<PlayerInputs<GgrsCfg>>,
+    mut tape: ResMut<Tape>,
+) {
+    let Some(t) = frame.0.checked_sub(1) else {
+        return;
+    };
+    let pair = [inputs[0].0, inputs[1].0];
+    let t = t as usize;
+    if t < tape.0.len() {
+        tape.0[t] = pair;
+    } else {
+        tape.0.resize(t, [PlayerInput::default(); 2]);
+        tape.0.push(pair);
+    }
+}
+
+/// [`play`], also returning the inputs every tick consumed: the match as a
+/// tape (one `[seat 0, seat 1]` pair per tick, input delay 0).
+pub fn play_recorded(
+    arena: ArenaId,
+    seats: [Seat; 2],
+    seed: u32,
+    max_seconds: u32,
+) -> (MatchReport, Vec<[PlayerInput; 2]>) {
+    let mut tape = Vec::new();
+    let report = play_inner(arena, seats, seed, max_seconds, 0, true, |world, _| {
+        tape = world.resource::<Tape>().0.clone();
+    });
+    (report, tape)
 }
 
 /// Play one match to `MatchOver`, or until `max_seconds` of sim time.
@@ -225,7 +241,7 @@ pub fn play_watched(
     max_seconds: u32,
     watch: impl FnMut(&mut World, u32),
 ) -> MatchReport {
-    play_inner(arena, seats, seed, max_seconds, 0, watch)
+    play_inner(arena, seats, seed, max_seconds, 0, false, watch)
 }
 
 /// [`play`] under rollback: every frame is re-simulated `check_distance`
@@ -240,7 +256,15 @@ pub fn play_rolled_back(
     max_seconds: u32,
     check_distance: usize,
 ) -> MatchReport {
-    play_inner(arena, seats, seed, max_seconds, check_distance, |_, _| {})
+    play_inner(
+        arena,
+        seats,
+        seed,
+        max_seconds,
+        check_distance,
+        false,
+        |_, _| {},
+    )
 }
 
 fn play_inner(
@@ -249,9 +273,14 @@ fn play_inner(
     seed: u32,
     max_seconds: u32,
     check_distance: usize,
+    record: bool,
     mut watch: impl FnMut(&mut World, u32),
 ) -> MatchReport {
     let mut app = build(arena, seats, seed, check_distance);
+    if record {
+        app.init_resource::<Tape>();
+        app.add_systems(GgrsSchedule, record_tape.after(sim::advance_input_history));
+    }
     let cap = max_seconds * sim::TICK_HZ as u32;
     let mut ticks = 0;
     let mut rounds = 0;

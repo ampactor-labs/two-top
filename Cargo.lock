@@ -5536,6 +5536,7 @@ version = "0.16.0"
 dependencies = [
  "bevy",
  "bevy_ggrs",
+ "bot_brain",
  "fixed_math",
  "net",
  "rand_xoshiro",

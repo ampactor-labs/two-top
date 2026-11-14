@@ -3004,6 +3004,81 @@ pub fn respawn_position(handle: usize) -> Vec2F {
     }
 }
 
+/// What [`spawn_match_world`] laid on the table: every entity the
+/// simulation reads, so a caller can dress them (sprites, shadows) without
+/// spawning a second copy.
+#[derive(Debug, Clone)]
+pub struct MatchWorld {
+    /// The duelists, in handle order.
+    pub duelists: [Entity; 2],
+    /// The four boundary walls.
+    pub walls: Vec<Entity>,
+    /// The arena's cover, with each block's geometry.
+    pub obstacles: Vec<(Entity, Wall)>,
+    /// The arena's pyres.
+    pub pyres: Vec<(Entity, BonePyre)>,
+    /// The arena's trees.
+    pub trees: Vec<(Entity, BoneTree)>,
+}
+
+/// Lay a match on the table: the one place that decides what a match
+/// starts with and in which order. Duelists at [`respawn_position`] in
+/// handle order, then [`arena_walls`], [`arena_obstacles_for`],
+/// [`arena_pyres_for`], [`arena_trees_for`].
+///
+/// Every builder calls this: the game (which then adds sprites to the
+/// entities it returns), the replay verifier, the bot bench and the
+/// SyncTest probe. Order is load-bearing: bevy_ggrs mixes each rollback
+/// entity's registration index into the checksum, so two builders that
+/// spawned the same table in a different order would disagree from frame
+/// 0. And a second copy is how `replay_sync` came to re-simulate real
+/// tapes from the wrong spawn points, so no signed result could verify.
+pub fn spawn_match_world(commands: &mut Commands, arena: ArenaId) -> MatchWorld {
+    let duelists = [0usize, 1].map(|handle| {
+        let spawn = respawn_position(handle);
+        commands
+            .spawn((
+                Player { handle },
+                PositionF(spawn),
+                PreviousPositionF(spawn),
+                VelocityF(Vec2F::ZERO),
+            ))
+            .id()
+    });
+    let walls = arena_walls()
+        .into_iter()
+        .map(|wall| commands.spawn(wall).id())
+        .collect();
+    let obstacles = arena_obstacles_for(arena)
+        .into_iter()
+        .map(|wall| (commands.spawn(wall).id(), wall))
+        .collect();
+    let pyres = arena_pyres_for(arena)
+        .into_iter()
+        .map(|pyre| (commands.spawn(pyre).id(), pyre))
+        .collect();
+    let trees = arena_trees_for(arena)
+        .into_iter()
+        .map(|tree| (commands.spawn(tree).id(), tree))
+        .collect();
+    MatchWorld {
+        duelists,
+        walls,
+        obstacles,
+        pyres,
+        trees,
+    }
+}
+
+/// [`spawn_match_world`] straight into a `World` (headless builders), with
+/// the spawns applied before it returns.
+pub fn spawn_match_world_now(world: &mut World, arena: ArenaId) -> MatchWorld {
+    let mut queue = bevy::ecs::world::CommandQueue::default();
+    let laid = spawn_match_world(&mut Commands::new(&mut queue, world), arena);
+    queue.apply(world);
+    laid
+}
+
 /// `GgrsSchedule` system: revive any player whose `Dead.respawn_at_frame`
 /// has elapsed. Runs after `snapshot_previous` so we can use
 /// `snap_position` to collapse `PositionF`/`PreviousPositionF` to the

@@ -39,14 +39,12 @@ pub(super) fn spawn_match(
     // (one had played the bot first) disagree from frame 0 and the first
     // checksum exchange calls a healthy duel a DESYNC.
     commands.insert_resource(bevy_ggrs::RollbackOrdered::default());
-    let shadow_img = spawn_duelists(&mut commands, &asset_server, &mut atlases, flip.0);
-    spawn_arena(
+    lay_table(
         &mut commands,
         &asset_server,
         &mut atlases,
         &selected,
         flip.0,
-        shadow_img,
     );
 
     // Theater: the tape drives a playback session (check_distance 0 +
@@ -61,56 +59,68 @@ pub(super) fn spawn_match(
     }
 }
 
-/// The two duelists (sprite, shadow, charge ring, aim telegraph), in the
-/// fixed handle order the rollback numbering depends on. Returns the
-/// shadow texture for the table's cover to share.
-pub(super) fn spawn_duelists(
+/// Lay the table: the sim's own [`sim::spawn_match_world`] decides what a
+/// match starts with and in which order (the same call the replay verifier,
+/// the bot bench and the SyncTest probe make); everything here only dresses
+/// the entities it returns.
+fn lay_table(
     commands: &mut Commands,
     asset_server: &AssetServer,
     atlases: &mut Assets<TextureAtlasLayout>,
+    selected: &SelectedArena,
+    flip: f32,
+) {
+    let laid = sim::spawn_match_world(commands, selected.0);
+    let shadow_img = dress_duelists(commands, asset_server, atlases, &laid, flip);
+    dress_arena(
+        commands,
+        asset_server,
+        atlases,
+        selected,
+        flip,
+        shadow_img,
+        &laid,
+    );
+}
+
+/// The two duelists (sprite, shadow, charge ring, aim telegraph), dressed
+/// in handle order. Returns the shadow texture for the table's cover to
+/// share.
+fn dress_duelists(
+    commands: &mut Commands,
+    asset_server: &AssetServer,
+    atlases: &mut Assets<TextureAtlasLayout>,
+    laid: &sim::MatchWorld,
     flip: f32,
 ) -> Handle<Image> {
     let layout = player_atlas_layout(atlases);
     let sheets = [
-        (
-            0usize,
-            "sprites/players/duelist_a_sheet.png",
-            Vec2F::from_cm(0, -300),
-        ),
-        (
-            1usize,
-            "sprites/players/duelist_b_sheet.png",
-            Vec2F::from_cm(0, 300),
-        ),
+        "sprites/players/duelist_a_sheet.png",
+        "sprites/players/duelist_b_sheet.png",
     ];
     let shadow_img = asset_server.load("sprites/fx/shadow_blob.png");
     let charge_ring_img = asset_server.load("sprites/fx/charge_ring.png");
-    for (handle, sheet, spawn) in sheets {
-        let (sx, sy) = spawn.to_f32();
-        let player = commands
-            .spawn((
-                MatchEntity,
-                Player { handle },
-                PositionF(spawn),
-                PreviousPositionF(spawn),
-                VelocityF(Vec2F::ZERO),
-                Sprite {
-                    image: asset_server.load(sheet),
-                    texture_atlas: Some(TextureAtlas {
-                        layout: layout.clone(),
-                        index: 0,
-                    }),
-                    custom_size: Some(Vec2::splat(PLAYER_RENDER_SIZE)),
-                    ..default()
-                },
-                Transform::default(),
-                // 2.5D: sort the duelist by its feet so a closer player draws
-                // over a farther one (and gets occluded by raised cover behind).
-                render::YSorted {
-                    foot_offset: PLAYER_FOOT_OFFSET,
-                },
-            ))
-            .id();
+    for (handle, sheet) in sheets.into_iter().enumerate() {
+        let (sx, sy) = sim::respawn_position(handle).to_f32();
+        let player = laid.duelists[handle];
+        commands.entity(player).insert((
+            MatchEntity,
+            Sprite {
+                image: asset_server.load(sheet),
+                texture_atlas: Some(TextureAtlas {
+                    layout: layout.clone(),
+                    index: 0,
+                }),
+                custom_size: Some(Vec2::splat(PLAYER_RENDER_SIZE)),
+                ..default()
+            },
+            Transform::default(),
+            // 2.5D: sort the duelist by its feet so a closer player draws
+            // over a farther one (and gets occluded by raised cover behind).
+            render::YSorted {
+                foot_offset: PLAYER_FOOT_OFFSET,
+            },
+        ));
         // A drop shadow under the feet — the cheapest "stands on the floor" cue.
         render::spawn_ground_shadow(
             commands,
@@ -136,29 +146,26 @@ pub(super) fn spawn_duelists(
     shadow_img
 }
 
-/// The table itself: boundary walls, the arena's cover (collision body +
-/// raised 2.5D composite) and its props. Split from [`spawn_match`] so an
-/// online pair can lay it again once they agree on the table and know
-/// which edge each one sits at ([`rebuild_arena`]).
-pub(super) fn spawn_arena(
+/// The table itself: the boundary walls and the arena's cover (the sim's
+/// collision bodies, dressed with a raised 2.5D composite) and its props.
+fn dress_arena(
     commands: &mut Commands,
     asset_server: &AssetServer,
     atlases: &mut Assets<TextureAtlasLayout>,
     selected: &SelectedArena,
     flip: f32,
     shadow_img: Handle<Image>,
+    laid: &sim::MatchWorld,
 ) {
-    // Arena boundary walls — fixed order for bit-identical entity ids.
-    for wall in arena_walls() {
-        commands.spawn((MatchEntity, wall));
+    for &wall in &laid.walls {
+        commands.entity(wall).insert(MatchEntity);
     }
 
-    // Inner cover (paintball-style Obstacle blocks): the invisible collision
-    // body + a raised 2.5D composite so the cover has real height. Fixed order
-    // (after the boundary, before props) keeps entity ids bit-identical across
-    // hosts — the visual composite spawns no rollback components, so its
-    // entities never enter the rollback id space.
-    for wall in arena_obstacles_for(selected.0) {
+    // Inner cover: the invisible collision body (laid by the sim) + a raised
+    // 2.5D composite so the cover has real height. The composite spawns no
+    // rollback components, so its entities never enter the rollback id
+    // space.
+    for &(body, wall) in &laid.obstacles {
         let (min_x, min_y_raw) = wall.rect.min.to_f32();
         let (max_x, max_y_raw) = wall.rect.max.to_f32();
         // Foreshorten the footprint Y into the tabletop tilt (visual only — the
@@ -172,7 +179,7 @@ pub(super) fn spawn_arena(
         let (min_y, max_y) = if y0 < y1 { (y0, y1) } else { (y1, y0) };
         let near_row = (min_y_raw * flip).min(max_y_raw * flip);
         let rise = OBSTACLE_RISE * render::depth_scale(near_row);
-        commands.spawn((MatchEntity, wall));
+        commands.entity(body).insert(MatchEntity);
         spawn_obstacle_block(
             commands,
             shadow_img.clone(),
@@ -186,7 +193,7 @@ pub(super) fn spawn_arena(
     }
 
     // Selected arena's props (pyres / chasm / doors) — tagged `ArenaProp`.
-    render::spawn_arena_props(commands, asset_server, atlases, selected, flip);
+    render::spawn_arena_props(commands, asset_server, atlases, selected, flip, laid);
 }
 
 /// Online, after the table handshake and before the session starts: tear
@@ -218,14 +225,12 @@ pub(crate) fn rebuild_match(
     }
     // Applied after the despawns, before the spawns' registration hooks.
     commands.insert_resource(bevy_ggrs::RollbackOrdered::default());
-    let shadow_img = spawn_duelists(&mut commands, &asset_server, &mut atlases, flip.0);
-    spawn_arena(
+    lay_table(
         &mut commands,
         &asset_server,
         &mut atlases,
         &selected,
         flip.0,
-        shadow_img,
     );
 }
 
