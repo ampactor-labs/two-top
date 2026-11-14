@@ -121,10 +121,17 @@ done
 
 # 4: RUN IT BACK from both windows: THROW (Space) on the summary is
 # consent; once both have consented the match restarts on both.
+# Without a window manager focus can miss; press until the window's app
+# logs the consent (a repeat press is the same consent, never a second one).
 for peer in a b; do
   win=$(xdotool search --sync --onlyvisible --pid "${PID[$peer]}" 2>/dev/null | head -1)
   [ -n "$win" ] || fail "no window for peer $peer"
-  xdotool windowfocus --sync "$win" keydown space sleep 0.3 keyup space
+  for _ in 1 2 3 4 5; do
+    xdotool windowraise "$win" windowfocus --sync "$win" keydown space sleep 0.4 keyup space 2>/dev/null
+    sleep 1
+    strip "$WORK/$peer.log" | grep -q "rematch consent given" && break
+  done
+  strip "$WORK/$peer.log" | grep -q "rematch consent given" || fail "peer $peer never took the RUN IT BACK press"
 done
 deadline=$((SECONDS + 20))
 until [ "$(restarts "$WORK/a.log")" != 0 ] && [ "$(restarts "$WORK/b.log")" != 0 ]; do

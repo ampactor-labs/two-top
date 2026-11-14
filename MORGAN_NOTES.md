@@ -194,6 +194,16 @@ The fix queues a frame's spawns and issues them in handle order (fire cells too,
 
 One more thing the two peers found, left open on purpose: input delay means a THROW pressed in the last three frames of a round lands after `MatchOver`, where `sim::apply_rematch` reads it as a rematch. Both sims restart at once (in sync, no desync) and the summary, the tape and the signed result are all skipped. The online rematch gate cannot see it coming (at read time the match is still on). The fix is in the sim (SIM_VERSION 16): `MatchOver { rematch_at_frame }`, and `apply_rematch` ignores edges before it. "Longer than any input delay" was too short: online a press can also be made inside the prediction window, before the rollback that reveals the kill, so it lands up to input delay + prediction window − 1 ticks late (4 + 16 − 1 at the worst delay). The grace is 30, and the app fails to compile if the two ever outgrow it. The same bump made a rematch equal a fresh match: the catch streak (kept across round boundaries since v15) and the pickup timer (an absolute frame, so a pickup dropped at GO) used to carry over. A test replays a rematch tick for tick against a fresh table.
 
+## Why every online ending goes through one system
+
+There were five ways for a match to end out of band (ggrs's `Disconnected`, the silence FSM, a goodbye, a desync, the socket dying), and each wrote `MatchState` itself, at whatever frame it noticed, over a world that could hold up to 16 predicted ticks. A deciding kill that only ever existed in prediction could be booked, signed and stamped on the tape. And the settle compared against ggrs's `confirmed_frame()`, which moves on every render frame's poll, before the rollback that applies those inputs has run.
+
+Now the endings only make the lobby terminal, and `netplay::conclude_session` ends the match: it reads bevy_ggrs's `ConfirmedFrameCount` (written per request, so it matches what the world has applied), books the score from the recorder's per-tick trail at that frame, and keeps a decision only if its tick is confirmed. The settle uses the same counter against `MatchState::decided_at`. Tapes stop at the deciding tick (or the last confirmed one), so the two phones' tapes are the same bytes.
+
+The parked session is deliberate: dropping it would close ggrs's channel, and matchbox ends the whole socket when any channel closes, taking the side channel (the signatures, the last word) with it. "The duel began" moved from "our own sync finished" (which the two phones reach at different moments) to "the first GO is confirmed on both phones": before it nothing is booked and a QUIT costs nothing.
+
+`NetMsg::Ended` can only close a match unfinished or void it, and only before the receiver's own result settled: nothing a peer could not already do by going silent or sending a bad checksum.
+
 ## Rejected alternatives, briefly
 
 - **4-player FFA** — rejected for MVP. The chaos hides bad balance, the rollback CPU budget gets tight with 4 players' inputs, and the matchmaking complexity isn't worth it for a portfolio piece. 1v1 is sharper and demos better.

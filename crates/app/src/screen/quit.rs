@@ -119,17 +119,20 @@ pub(super) fn quit_button_input(world: &mut World) {
     let online = world.resource::<NetplayConfig>().room_url.is_some()
         && !world.resource::<crate::bot::PracticeMode>().0;
     if online {
-        // Abandoning a live duel is a loss, filed before the goodbye. A
-        // wait (no session yet, or one still synchronizing) or a peer who
-        // already fled stakes no result.
-        let established = crate::netplay::duel_underway(world);
+        // Abandoning a duel that has begun (its first GO confirmed on both
+        // phones) is a loss, filed before the concession goes out. Before
+        // that, or after the peer already left, nothing is at stake.
+        let began = crate::netplay::duel_began(world);
         let peer_fled = world.resource::<net::LobbyState>().is_terminal();
-        if established && !peer_fled {
+        let farewell = if began && !peer_fled {
             let peer = world.resource::<net::PeerProfile>().0;
             let mut record = world.resource_mut::<crate::grudge::CareerRecord>();
             crate::grudge::record_abandoned_loss(&mut record, peer);
-        }
-        crate::netplay::leave_online_match(world);
+            crate::netplay::Farewell::Concede
+        } else {
+            crate::netplay::Farewell::Close
+        };
+        crate::netplay::leave_online_match(world, farewell);
     } else if world.resource::<crate::bot::PracticeMode>().0
         && world.resource::<crate::bot::ShadeStyle>().0.is_none()
         && matches!(

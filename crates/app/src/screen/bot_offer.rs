@@ -93,7 +93,7 @@ pub(super) fn bot_fallback_input(world: &mut World) {
         return;
     }
     world.resource_mut::<crate::bot::PracticeMode>().0 = true;
-    crate::netplay::leave_online_match(world);
+    crate::netplay::leave_online_match(world, crate::netplay::Farewell::Close);
     world.resource_mut::<PendingBotMatch>().0 = true;
     world
         .resource_mut::<NextState<AppScreen>>()

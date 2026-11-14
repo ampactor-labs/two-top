@@ -364,3 +364,23 @@ fn match_state_variants_are_exhaustively_patternable() {
     );
     assert_eq!(label(MatchState::decided(0)), "match_over");
 }
+
+/// `OPENING_GO_TICK` is the tick the opening countdown flips to the round.
+#[test]
+fn the_opening_go_tick_is_where_the_first_round_starts() {
+    use sim::tick_match_state;
+    let mut app = App::new();
+    app.insert_resource(FrameCount(0));
+    app.insert_resource(MatchScore::default());
+    app.insert_resource(MatchState::default());
+    app.add_systems(Update, tick_match_state);
+    for tick in 0..=sim::OPENING_GO_TICK {
+        app.world_mut().resource_mut::<FrameCount>().0 = tick;
+        app.update();
+        assert_eq!(
+            app.world().resource::<MatchState>().is_in_round(),
+            tick == sim::OPENING_GO_TICK,
+            "tick {tick}"
+        );
+    }
+}

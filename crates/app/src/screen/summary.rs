@@ -81,12 +81,16 @@ pub(super) fn summary_text(
     }
     let gone_line = if opponent_gone {
         if we_fled {
-            "\n\nmatch abandoned - you left the duel"
+            "\n\nmatch abandoned - you left the duel".to_string()
+        } else if threshold_hit {
+            // The score decided it; the opponent leaving the summary after
+            // took nothing and handed over nothing.
+            format!("\n\n{peer_name} LEFT THE TABLE")
         } else {
-            "\n\nthe field is yours"
+            "\n\nthe field is yours".to_string()
         }
     } else {
-        ""
+        String::new()
     };
     let replay_line = if saved { "\nreplay saved" } else { "" };
     format!(
@@ -94,6 +98,17 @@ pub(super) fn summary_text(
         score.p0, score.p1
     )
 }
+
+/// The card while a decided online match is still unconfirmed: this phone
+/// predicted the deciding kill and has not yet heard the opponent's inputs
+/// up to it. It names nobody until it is a fact. Pure.
+pub fn waiting_card(peer_name: &str, score: MatchScore) -> String {
+    format!("WAITING FOR {peer_name}\n\n{}  -  {}", score.p0, score.p1)
+}
+
+/// Seconds a decided online match may stay unconfirmed before the card
+/// says it is waiting (a rollback normally confirms it within a beat).
+const WAITING_CARD_AFTER_SECS: f32 = 1.0;
 
 /// The practice summary card: who won, said to the player ("YOU WIN", not
 /// the Cur's name — the human is always the Cur in practice and nobody
@@ -173,6 +188,17 @@ pub fn primary_label(
     })
 }
 
+/// The rest of what the summary card reads (Bevy systems take at most
+/// sixteen parameters).
+#[derive(bevy::ecs::system::SystemParam)]
+pub(super) struct SummaryFacts<'w> {
+    shade: Res<'w, crate::bot::ShadeStyle>,
+    step: Res<'w, crate::grudge::GauntletStep>,
+    first_blood: Res<'w, crate::first_blood::FirstBlood>,
+    settled: Res<'w, crate::attest::MatchOverSettled>,
+    since: Res<'w, MatchOverSince>,
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(super) fn update_summary_overlay(
     screen: Res<State<AppScreen>>,
@@ -189,13 +215,16 @@ pub(super) fn update_summary_overlay(
     saved: Res<crate::recorder::LastSavedReplay>,
     absence: Res<crate::netplay::RecentAbsence>,
     time: Res<Time<Real>>,
-    (shade, step, first_blood): (
-        Res<crate::bot::ShadeStyle>,
-        Res<crate::grudge::GauntletStep>,
-        Res<crate::first_blood::FirstBlood>,
-    ),
+    facts: SummaryFacts,
     mut q: Query<(&mut Text2d, &mut Visibility), With<SummaryOverlay>>,
 ) {
+    let SummaryFacts {
+        shade,
+        step,
+        first_blood,
+        settled,
+        since,
+    } = facts;
     let Ok((mut text, mut vis)) = q.single_mut() else {
         return;
     };
@@ -225,6 +254,11 @@ pub(super) fn update_summary_overlay(
         ) && !we_fled;
         if first_blood.finished() {
             text.0 = first_blood_summary(*score, step.0, saved.0.is_some());
+            return;
+        }
+        let unconfirmed_for = since.0.map_or(0.0, |at| time.elapsed_secs() - at);
+        if !settled.settled && unconfirmed_for >= WAITING_CARD_AFTER_SECS {
+            text.0 = waiting_card(&crate::profile::peer_name(peer.0), *score);
             return;
         }
         if practice.0 && !theater.active() {
@@ -617,9 +651,19 @@ pub(super) fn summary_buttons_input(
     }
 }
 
-/// Online summary exit: a top-band tap or Escape LEAVES the match cleanly —
-/// goodbye on the side-channel, socket + session torn down, back to Title.
-/// Exclusive-world because the teardown touches the non-send socket.
+/// Seconds a LEAVE waits for the result to be filed on both phones: our
+/// own settle, and the peer's signature on a scored match.
+pub const LEAVE_FILING_WAIT_SECS: f32 = 3.0;
+
+/// A LEAVE asked for on an online summary, waiting for the filing; the
+/// deadline (`Time<Real>` seconds) after which it leaves regardless.
+#[derive(Resource, Default, Debug)]
+pub struct PendingLeave(pub Option<f32>);
+
+/// Online summary exit: a top-band tap, Escape or Android Back asks to
+/// LEAVE. Ignored through the summary's first beat (a taunt tap, or the
+/// second QUIT tap landing on the deciding frame, is not a LEAVE), then
+/// queued: [`finish_pending_leave`] leaves once the result is filed.
 pub(super) fn online_leave_input(world: &mut World) {
     let online = world.resource::<NetplayConfig>().room_url.is_some();
     let practice = world.resource::<crate::bot::PracticeMode>().0;
@@ -645,7 +689,64 @@ pub(super) fn online_leave_input(world: &mut World) {
     if !(esc || tapped) {
         return;
     }
-    crate::netplay::leave_online_match(world);
+    let now = world.resource::<Time<Real>>().elapsed_secs();
+    if !world.resource::<MatchOverSince>().settled(now)
+        || world.resource::<PendingLeave>().0.is_some()
+    {
+        return;
+    }
+    world.resource_mut::<PendingLeave>().0 = Some(now + LEAVE_FILING_WAIT_SECS);
+    tracing::info!(target: "two_top::net", "leave asked — waiting for the result to be filed");
+}
+
+/// Is the result filed, so a LEAVE can go? Our own result settled, and on a
+/// scored match the signed pair written (or no signature to wait for). Pure.
+pub fn filing_done(settled: bool, awaiting_peer_sig: bool) -> bool {
+    settled && !awaiting_peer_sig
+}
+
+/// `PostUpdate` (after everything that books a result in `Update`): carry
+/// out a queued LEAVE once the result is filed, or at the deadline. At the
+/// deadline a session that has not settled is ended here, booked on its
+/// confirmed frame (`netplay::conclude_session`), and the leave waits one
+/// more frame for that booking to land.
+pub(super) fn finish_pending_leave(world: &mut World) {
+    let Some(deadline) = world.resource::<PendingLeave>().0 else {
+        return;
+    };
+    if *world.resource::<State<AppScreen>>().get() != AppScreen::InMatch {
+        world.resource_mut::<PendingLeave>().0 = None;
+        return;
+    }
+    let now = world.resource::<Time<Real>>().elapsed_secs();
+    let settled = world.resource::<crate::attest::MatchOverSettled>().settled;
+    let awaiting = world
+        .resource::<crate::attest::AttestState>()
+        .awaiting_peer_sig();
+    if !filing_done(settled, awaiting) {
+        if now < deadline {
+            return;
+        }
+        if !settled {
+            // Stalled on the peer: end the session on its confirmed frame;
+            // the next frame books it and leaves.
+            let peer = match *world.resource::<net::LobbyState>() {
+                net::LobbyState::Connected { peer_id }
+                | net::LobbyState::Disconnected { peer_id, .. } => Some(peer_id),
+                _ => None,
+            };
+            if let Some(peer_id) = peer {
+                *world.resource_mut::<net::LobbyState>() = net::LobbyState::Forfeited {
+                    peer_id,
+                    conceded: false,
+                };
+                crate::netplay::conclude_session(world);
+                return;
+            }
+        }
+    }
+    world.resource_mut::<PendingLeave>().0 = None;
+    crate::netplay::leave_online_match(world, crate::netplay::Farewell::Close);
     world
         .resource_mut::<NextState<AppScreen>>()
         .set(AppScreen::Title);

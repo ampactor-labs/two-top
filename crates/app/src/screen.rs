@@ -172,7 +172,13 @@ impl Plugin for ScreenPlugin {
             .init_resource::<PendingFindOpponent>()
             .init_resource::<QuitArm>()
             .init_resource::<MatchOverSince>()
+            .init_resource::<PendingLeave>()
             .add_systems(Startup, spawn_overlays)
+            // After everything in `Update` that books a result.
+            .add_systems(
+                PostUpdate,
+                finish_pending_leave.after(crate::netplay::conclude_session),
+            )
             .add_plugins(RollbackClockPlugin)
             .add_systems(OnEnter(AppScreen::InMatch), spawn_match)
             .add_systems(
@@ -181,7 +187,11 @@ impl Plugin for ScreenPlugin {
             )
             .add_systems(
                 Update,
-                quit_button_input.run_if(in_state(AppScreen::InMatch)),
+                // Before the netplay driver: a QUIT this frame is said on
+                // this frame's pump.
+                quit_button_input
+                    .run_if(in_state(AppScreen::InMatch))
+                    .before(crate::netplay::EndingSet),
             )
             .add_systems(
                 Update,
@@ -1088,8 +1098,27 @@ mod tests {
 
     #[test]
     fn summary_with_a_fled_opponent_says_so() {
+        // Won 5-2 on score, then the opponent left the summary: the win was
+        // earned, not handed over by the walk-out.
         let fled = online_summary(true);
-        assert!(fled.contains("the field is yours"), "{fled}");
+        assert!(fled.contains("CURS WINS"), "{fled}");
+        assert!(fled.contains("TAGC LEFT THE TABLE"), "{fled}");
+        assert!(!fled.contains("the field is yours"), "{fled}");
+    }
+
+    #[test]
+    fn a_decided_match_not_yet_confirmed_waits_for_the_opponent() {
+        assert!(waiting_card("TAGC", MatchScore { p0: 5, p1: 2 }).starts_with("WAITING FOR TAGC"));
+    }
+
+    #[test]
+    fn a_leave_waits_for_the_filing() {
+        assert!(!filing_done(false, false), "our own result not settled");
+        assert!(
+            !filing_done(true, true),
+            "the peer's signature still coming"
+        );
+        assert!(filing_done(true, false));
     }
 
     #[test]

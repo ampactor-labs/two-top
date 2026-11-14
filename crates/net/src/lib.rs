@@ -76,6 +76,31 @@ pub struct MatchboxBridge {
     channel: WebRtcChannel,
     /// The socket under the channel has ended; logged once, then quiet.
     link_lost_logged: bool,
+    /// Debug builds only (`TWOTOP_FAULT`): drop this side's outgoing
+    /// checksum reports, so only the OTHER side's ggrs can detect a desync
+    /// this side causes. A one-sided desync on demand, to prove the peer
+    /// that did not detect it still hears of it.
+    #[cfg(debug_assertions)]
+    mute_checksum_reports: bool,
+}
+
+/// The `MessageBody` variant index of a ggrs `ChecksumReport` (declaration
+/// order in ggrs's `network/messages.rs`).
+#[cfg(debug_assertions)]
+const GGRS_CHECKSUM_REPORT: u8 = 6;
+
+/// Is this encoded ggrs message a checksum report? The body is private to
+/// ggrs, so read the wire: bincode's standard config writes the header's
+/// `u16` magic as a varint (one byte below 251, else `251` and two bytes)
+/// and then the body's variant index (one byte). Debug builds only.
+#[cfg(debug_assertions)]
+pub fn is_checksum_report(bytes: &[u8]) -> bool {
+    let tag_at = match bytes.first() {
+        Some(&b) if b < 251 => 1,
+        Some(&251) => 3,
+        _ => return false,
+    };
+    bytes.get(tag_at) == Some(&GGRS_CHECKSUM_REPORT)
 }
 
 impl MatchboxBridge {
@@ -97,7 +122,17 @@ impl MatchboxBridge {
         Self {
             channel,
             link_lost_logged: false,
+            #[cfg(debug_assertions)]
+            mute_checksum_reports: false,
         }
+    }
+
+    /// Debug builds only: stop sending checksum reports
+    /// ([`MatchboxBridge::mute_checksum_reports`]).
+    #[cfg(debug_assertions)]
+    pub fn mute_checksum_reports(mut self) -> Self {
+        self.mute_checksum_reports = true;
+        self
     }
 
     /// Surrender the wrapped channel — useful for tests or for
@@ -407,12 +442,12 @@ impl NonBlockingSocket<NetAddr> for MatchboxBridge {
     /// send is a packet lost on a dead link; the app sees the closed
     /// socket and ends the match (`netplay`'s link-lost check).
     fn send_to(&mut self, msg: &Message, addr: &NetAddr) {
-        if self
-            .channel
-            .try_send(encode_message(msg), addr_to_peer(*addr))
-            .is_err()
-            && !self.link_lost_logged
-        {
+        let packet = encode_message(msg);
+        #[cfg(debug_assertions)]
+        if self.mute_checksum_reports && is_checksum_report(&packet) {
+            return;
+        }
+        if self.channel.try_send(packet, addr_to_peer(*addr)).is_err() && !self.link_lost_logged {
             self.link_lost_logged = true;
             tracing::warn!(target: "two_top::net", "ggrs channel closed under the session — link lost");
         }
@@ -487,8 +522,10 @@ pub enum NetMsg {
     /// THROW input and the in-sim `apply_rematch` restarts the match the
     /// same rollback-correct way it always has.
     RematchWant,
-    /// Clean goodbye: the peer is leaving on purpose. The receiver forfeits
-    /// immediately instead of waiting out the disconnect grace.
+    /// "I quit a live duel": a concession, sent only by QUIT mid-match once
+    /// the duel has begun (the quitter files the loss first). The receiver
+    /// books the win at once instead of waiting out the disconnect grace.
+    /// Every other way of leaving says [`NetMsg::Ended`].
     Bye,
     /// Identity plus result-signing key, sent alongside [`NetMsg::Profile`].
     /// New builds read this; old builds fail to decode the unknown variant,
@@ -498,14 +535,18 @@ pub enum NetMsg {
     /// Our ed25519 signature over [`MatchStatement::encode`] for the match
     /// that just reached the score threshold. Split halves keep the enum
     /// `Copy` (serde's array impls stop at 32).
-    MatchSig { sig: [[u8; 32]; 2] },
+    MatchSig {
+        sig: [[u8; 32]; 2],
+    },
     /// The table this side would play on (`sim::ArenaId::as_u8`). Sent
     /// once, BEFORE the ggrs session exists, the moment the peer connects:
     /// the table no longer rides the room name, so the two sides agree on
     /// it here instead — both adopt the lower peer id's pick, then start
     /// the session. Reliable + ordered, so it always lands ahead of the
     /// peer's `Profile`.
-    Table { arena: u8 },
+    Table {
+        arena: u8,
+    },
     /// "This phone is going away for a moment" — the app is being
     /// backgrounded (a notification-shade peek, a call, a switch to the
     /// chat app) or its tab hidden. Sent on the last update before it
@@ -514,6 +555,39 @@ pub enum NetMsg {
     /// says so on screen. An old build cannot decode it and ignores it,
     /// which is the old behaviour.
     Pausing,
+    /// "This session is over for me", for every ending that is not a
+    /// concession: leaving a decided match's summary, cancelling before
+    /// the duel began, forfeiting a silent peer, or a desync this side
+    /// detected (so both phones void it, not only the one whose checksum
+    /// check fired). Honoured only from the session's peer, and only
+    /// before the receiver's own result has settled; it can only close a
+    /// match unfinished or void it, which silence or a forged checksum
+    /// already could.
+    Ended {
+        reason: EndReason,
+    },
+    /// Round-trip probe in the table handshake; answered with
+    /// [`NetMsg::Pong`] carrying the same `id`.
+    Ping {
+        id: u8,
+    },
+    Pong {
+        id: u8,
+    },
+    /// The input delay this side proposes ([`delay::delay_for_rtt`] of its
+    /// median round trip); both sides play [`delay::agreed`].
+    Delay {
+        frames: u8,
+    },
+}
+
+/// Why a session ended, in a [`NetMsg::Ended`].
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub enum EndReason {
+    /// The sender's ggrs found the two sims disagreeing at `frame`.
+    Desynced { frame: u32 },
+    /// The sender left or gave up on the session.
+    Closed,
 }
 
 /// Encode a side-channel message. Infallible for these types (postcard on
@@ -530,6 +604,48 @@ pub fn encode_net_msg(msg: &NetMsg) -> Packet {
 /// its unknown messages ignored.
 pub fn decode_net_msg(bytes: &[u8]) -> Option<NetMsg> {
     postcard::from_bytes(bytes).ok()
+}
+
+/// Input delay for an online session, from the link it will run over.
+///
+/// A peer's input delay is what spares the OTHER screen rollbacks of that
+/// peer's duelist: an input filed `delay` frames ahead arrives before the
+/// frame it belongs to whenever the one-way trip is shorter than the delay.
+/// Each side measures the round trip in the table handshake
+/// ([`NetMsg::Ping`]), proposes [`delay_for_rtt`], and both play the larger
+/// of the two proposals ([`NetMsg::Delay`]). ggrs fixes the delay when the
+/// session is built and cannot change it after.
+pub mod delay {
+    /// The least delay ever used: the same Wi-Fi.
+    pub const MIN: usize = 2;
+    /// What a session uses when the round trip could not be measured.
+    pub const DEFAULT: usize = 3;
+    /// The most: past it the delay is felt in the hands, and rollback takes
+    /// over the rest.
+    pub const MAX: usize = 4;
+
+    /// The delay a round trip of `rtt_ms` asks for: the one-way trip plus
+    /// 8 ms of jitter, in 60 Hz frames, rounded up and clamped
+    /// (LAN → 2, ~60 ms → 3, ~100 ms → 4).
+    pub fn delay_for_rtt(rtt_ms: u32) -> usize {
+        // ceil((rtt / 2 + 8) / (1000 / 60)) in integers.
+        let frames = (u64::from(rtt_ms) * 30 + 480).div_ceil(1000) as usize;
+        frames.clamp(MIN, MAX)
+    }
+
+    /// The median of the measured round trips (`None`: none came back).
+    pub fn median_rtt(samples: &[u32]) -> Option<u32> {
+        let mut sorted = samples.to_vec();
+        sorted.sort_unstable();
+        sorted.get(sorted.len() / 2).copied()
+    }
+
+    /// The delay both sides play: the larger proposal, so neither side's
+    /// link is under-covered. Clamped, so a hostile proposal cannot ask for
+    /// a sluggish match.
+    pub fn agreed(ours: usize, theirs: usize) -> usize {
+        ours.max(theirs).clamp(MIN, MAX)
+    }
 }
 
 // ---- Signed results (NORTH N2) --------------------------------------------
@@ -801,10 +917,9 @@ pub struct NetSendQueue(pub Vec<NetMsg>);
 ///
 /// Not rolled back. Lobby state is an out-of-band coordination layer
 /// that lives outside the deterministic sim — it doesn't replay or
-/// rollback. The `Forfeited` terminal state hands off to
-/// `sim::MatchState::MatchOver` (which IS rolled back), so the
-/// in-sim view of "match has ended" is the rolled-back source of
-/// truth and the Lobby state is just the trigger that sets it.
+/// rollback. A terminal state (`Forfeited`, `Desynced`) is the trigger:
+/// the app's `netplay::conclude_session` ends the match in the sim,
+/// booking it as it stood on the last confirmed frame.
 ///
 /// `since_frame` / `forfeit_at_frame` use the rolled-back
 /// `FrameCount` from the sim crate so the disconnection countdown
@@ -1008,8 +1123,7 @@ pub const DISCONNECT_AFTER_FRAMES: u32 = 60;
 /// the authority: ggrs's own disconnect timeout
 /// (`app::netplay::GGRS_DISCONNECT_TIMEOUT`) is set at the paused grace
 /// below, a ceiling it only reaches if this one somehow does not fire.
-/// The `Forfeited` transition also sets `sim::MatchState::MatchOver`,
-/// ending the round in the sim layer.
+/// The app ends the match in the sim on the `Forfeited` transition.
 pub const FORFEIT_AFTER_FRAMES: u32 = 540;
 
 /// The same for a peer that said it was going away ([`NetMsg::Pausing`]):
@@ -1074,15 +1188,13 @@ pub fn next_lobby_state_for_silence(
 
 /// `Update`-schedule system: drives the disconnection-grace timer.
 /// Reads [`SilenceClock`] + `LastPeerMessageFrame`. Writes the next
-/// `LobbyState` if a threshold was crossed, and pulses
-/// `sim::MatchState::MatchOver` on a `Forfeited` transition so the
-/// in-sim round flow ends.
+/// `LobbyState` if a threshold was crossed. The sim's state is not
+/// touched: ending the match is `netplay::conclude_session`'s.
 pub fn tick_disconnection_grace(
     frame: Res<SilenceClock>,
     last_msg: Res<LastPeerMessageFrame>,
     paused: Res<PeerPaused>,
     mut lobby: ResMut<LobbyState>,
-    mut match_state: ResMut<sim::MatchState>,
 ) {
     let forfeit_after = forfeit_after(paused.0);
     if let Some(next) = next_lobby_state_for_silence(&lobby, frame.0, last_msg.0, forfeit_after) {
@@ -1097,12 +1209,13 @@ pub fn tick_disconnection_grace(
         );
         *lobby = next;
         if became_forfeit {
+            // The app's `conclude_session` ends the match: it books it as
+            // it stood on the last confirmed frame.
             tracing::error!(
                 target: "two_top::net::peer",
                 frame = frame.0,
                 "peer silence exceeded forfeit threshold — match forfeited",
             );
-            *match_state = sim::MatchState::abandoned();
         }
     }
 }
@@ -1150,6 +1263,56 @@ impl Plugin for NetPlugin {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(debug_assertions)]
+    #[test]
+    fn a_checksum_report_is_known_by_its_wire_tag() {
+        // A one-byte magic, then the variant.
+        assert!(is_checksum_report(&[42, 6, 0, 0]));
+        assert!(!is_checksum_report(&[42, 2, 0, 0]), "an Input");
+        // A large magic: varint marker 251 and two bytes, then the variant.
+        assert!(is_checksum_report(&[251, 0x34, 0x12, 6, 9]));
+        assert!(!is_checksum_report(&[251, 0x34, 0x12, 7]), "a KeepAlive");
+        assert!(!is_checksum_report(&[]));
+    }
+
+    #[test]
+    fn the_delay_follows_the_round_trip() {
+        use delay::*;
+        assert_eq!(delay_for_rtt(1), MIN, "the same Wi-Fi");
+        assert_eq!(delay_for_rtt(40), 2);
+        assert_eq!(delay_for_rtt(60), 3);
+        assert_eq!(delay_for_rtt(100), 4);
+        assert_eq!(delay_for_rtt(400), MAX, "never past the cap");
+        assert_eq!(median_rtt(&[90, 20, 40]), Some(40));
+        assert_eq!(median_rtt(&[]), None);
+        assert_eq!(agreed(2, 4), 4);
+        assert_eq!(agreed(3, 200), MAX, "a hostile proposal is clamped");
+    }
+
+    /// The side channel's wire bytes are a compatibility surface: the
+    /// variants keep their postcard indices, and `Ended` round-trips.
+    #[test]
+    fn the_side_channel_keeps_its_wire_indices() {
+        assert_eq!(&*encode_net_msg(&NetMsg::Bye), &[2u8][..]);
+        assert_eq!(&*encode_net_msg(&NetMsg::Pausing), &[6u8][..]);
+        assert_eq!(
+            &*encode_net_msg(&NetMsg::Ended {
+                reason: EndReason::Closed
+            }),
+            &[7u8, 1][..]
+        );
+        assert_eq!(&*encode_net_msg(&NetMsg::Ping { id: 2 }), &[8u8, 2][..]);
+        assert_eq!(&*encode_net_msg(&NetMsg::Pong { id: 2 }), &[9u8, 2][..]);
+        assert_eq!(
+            &*encode_net_msg(&NetMsg::Delay { frames: 3 }),
+            &[10u8, 3][..]
+        );
+        for reason in [EndReason::Closed, EndReason::Desynced { frame: 4321 }] {
+            let msg = NetMsg::Ended { reason };
+            assert_eq!(decode_net_msg(&encode_net_msg(&msg)), Some(msg));
+        }
+    }
 
     /// Compile-time check: `MatchboxBridge` must impl
     /// `NonBlockingSocket<sim::NetAddr>` so it can be plugged into a
@@ -1738,8 +1901,11 @@ mod tests {
         );
     }
 
+    /// The silence FSM ends the lobby; the sim's state is the app's to
+    /// book (`netplay::conclude_session`, on the last confirmed frame), so
+    /// net no longer writes it.
     #[test]
-    fn forfeit_transition_triggers_match_over_in_sim() {
+    fn a_silent_forfeit_ends_the_lobby_and_leaves_the_sim_alone() {
         let mut app = App::new();
         app.add_plugins(NetPlugin);
         let peer = dummy_peer();
@@ -1749,23 +1915,20 @@ mod tests {
             peer_id: peer,
             since_frame: 0,
         };
+        let before = *app.world().resource::<sim::MatchState>();
         app.world_mut().resource_mut::<SilenceClock>().0 = FORFEIT_AFTER_FRAMES + 10;
         app.world_mut().resource_mut::<LastPeerMessageFrame>().0 = 0;
 
         app.update();
 
-        assert!(
-            matches!(
-                *app.world().resource::<LobbyState>(),
-                LobbyState::Forfeited { .. }
-            ),
-            "lobby should have forfeited",
-        );
         assert_eq!(
-            *app.world().resource::<sim::MatchState>(),
-            sim::MatchState::abandoned(),
-            "sim::MatchState should be MatchOver after forfeit",
+            *app.world().resource::<LobbyState>(),
+            LobbyState::Forfeited {
+                peer_id: peer,
+                conceded: false
+            },
         );
+        assert_eq!(*app.world().resource::<sim::MatchState>(), before);
     }
 
     /// End-to-end: drive the system through a state transition and

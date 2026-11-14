@@ -37,8 +37,11 @@ unreliable/unordered ggrs input stream, and channel 1 is a **reliable
 side-channel** carrying the small postcard messages that are not sim
 input — the identity handshake (`NetMsg::Profile`: install-id + dialed
 name, which feeds the per-opponent grudge ledger), rematch consent
-(`RematchWant`), and a clean goodbye (`Bye`, so the peer's screen flips
-immediately instead of waiting out the disconnect grace).
+(`RematchWant`), the signed result (`MatchSig`), and the last word: `Bye`
+(QUIT from a duel that has begun: a concession) or `Ended { reason }`
+(every other ending: leaving a summary, cancelling, a silent forfeit, or a
+desync this side detected, so both phones void it). Either flips the
+peer's screen at once instead of waiting out the disconnect grace.
 
 ---
 
@@ -257,7 +260,15 @@ locally — no negotiation round-trip. Player *entities* are spawned
 identically on both sides (same `setup`), so only "which handle reads
 local input" differs; the deterministic sim guarantees the rest.
 
-The ggrs session is built with `input_delay = 3`, desync detection on
+The ggrs session's input delay is measured, not fixed: in the table
+handshake each side sends three `NetMsg::Ping`s 100 ms apart, proposes
+`net::delay::delay_for_rtt(median round trip)` (2 on the same Wi-Fi, 3 at
+~60 ms, 4 at ~100 ms and beyond) in `NetMsg::Delay`, and both build the
+session with the larger proposal (3 if nothing came back within a second;
+the peer's proposal is waited for up to 3 s). The match's "net summary"
+log line carries the delay, the starting round trip and a histogram of
+rollback depths, for retuning the table from real devices. The session
+has desync detection on
 (`interval = 30`, ~2 checks/sec), and ggrs's disconnect timeout at
 20 s, a ceiling: the away grace is net's silence FSM. A peer silent
 without a word is forfeited at **9 s** (`net::FORFEIT_AFTER_FRAMES`); a
@@ -272,18 +283,27 @@ its own sleep against the peer: a frame gap restarts the peer's silence
 on its side. `scripts/pause_smoke.sh` runs both cases on two real peers
 (an announced 14 s pause carries on; `SILENT=1`, the same freeze
 unannounced, is forfeited 9.5 s in). A `DesyncDetected` event logs a loud `ERROR` on
-`target: two_top::net`; a `Disconnected` event (or a `Bye` on the
-side-channel — the clean-leave path) forfeits the match (sets
-`sim::MatchState::MatchOver`).
+`target: two_top::net` and sends `Ended { Desynced }`; a `Disconnected`
+event, the peer's connection closing (read every frame after the
+side-channel pump), a `Bye` or an `Ended` all make the lobby terminal.
+One system ends the match from there, `netplay::conclude_session`: it
+books the match as it stood on bevy_ggrs's last confirmed frame (a
+deciding kill that only existed in prediction is not a result), writes
+`MatchState::abandoned()` unless the match was already decided on a
+confirmed tick, and parks the ggrs session beside its socket so the side
+channel stays open for the signatures and the last word. A session that
+ends before its first GO is confirmed on both phones books nothing and
+re-dials. `scripts/endings_smoke.sh` runs every case on two real peers.
 
-Leaving a live match sends that `Bye` and then keeps the socket **and**
-the ggrs session alive for one more second (`netplay::GOODBYE_LINGER_SECS`)
-before dropping them. matchbox's message loop exits the moment any one
-channel's queue closes, and the session owns channel 0, so dropping it in
-the same frame tore the connection down before the goodbye left: on two
-real peers the quitter booked its loss while the one who stayed heard
-nothing and booked the match unfinished 9 s later. With the linger the
-stayer hears the goodbye within milliseconds and books the concession.
+Leaving sends whatever is still queued (our signature first), then the
+last word, and keeps the socket **and** the ggrs session alive for three
+more seconds (`netplay::GOODBYE_LINGER_SECS`) before dropping them.
+matchbox's message loop exits the moment any one channel's queue closes,
+and the session owns channel 0, so dropping it in the same frame tore the
+connection down before the goodbye left; one second was shorter than one
+SCTP retransmission. LEAVE on a summary waits for the result to be filed
+on both phones (our settle and the peer's signature, at most 3 s) and is
+ignored for the summary's first 1.6 s.
 
 Silence is only measured once the session exists. Before the swap (the
 wait, and the table handshake) the app pins the last-message stamp every
@@ -376,9 +396,9 @@ If either side desyncs visibly, take both `.bmrg.log` files and run
   devices restart together — score back to 0-0, fresh countdown, no
   desync.
 * **Leaving**: online at `MatchOver`, a top-band tap or ESC leaves
-  cleanly — `Bye` on the side-channel (peer's screen flips to
-  `<NAME> FLED` immediately), socket + session torn down, back to
-  Title. Re-tapping FIND OPPONENT opens a fresh socket.
+  cleanly once the result is filed — `Ended` on the side-channel (a
+  scored match on the peer's card reads `<NAME> LEFT THE TABLE`),
+  socket + session torn down, back to Title. Re-tapping FIND OPPONENT opens a fresh socket.
 
 ### Gate 2: brief disconnection blip (the away grace)
 
@@ -408,9 +428,9 @@ If either side desyncs visibly, take both `.bmrg.log` files and run
 * The forfeiting peer, on coming back, sees `MATCH ABANDONED — you
   left the duel` (its own absence is tracked, so the copy doesn't
   gaslight) and records the LOSS.
-* Bonus check: instead of killing connectivity, tap LEAVE on one
-  device — the other flips to `<NAME> FLED` *immediately* (the `Bye`
-  message), no 9 s wait.
+* Bonus check: instead of killing connectivity, QUIT twice on one
+  device mid-match — the other flips to `<NAME> FLED` *immediately* (the
+  `Bye` concession), no 9 s wait.
 
 ---
 

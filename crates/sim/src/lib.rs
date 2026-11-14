@@ -1061,6 +1061,11 @@ pub const ROUND_OVER_FRAMES: u32 = 60 / 2;
 /// (2.5 s) of the boundary's 4.0 s to play.
 pub const MID_MATCH_COUNTDOWN_DIGITS: u8 = 1;
 
+/// The tick a match's opening countdown gives way to the first round
+/// ([`MatchState::opening`]'s three digits). An online duel has begun once
+/// this tick is confirmed on both phones: before it, nothing was at stake.
+pub const OPENING_GO_TICK: u32 = 3 * COUNTDOWN_DIGIT_FRAMES - 1;
+
 /// Total kills required to end the match (`InRound`/`RoundOver` →
 /// `MatchOver`). Cycle 6's simplest scoring rule is "first to 5
 /// kills"; the round timer still rotates state for input-gating and
@@ -1186,6 +1191,13 @@ impl MatchState {
             }
             _ => None,
         }
+    }
+
+    /// The tick the match was decided on, or `None` (not over, or
+    /// abandoned: an ended session has no deciding tick).
+    pub fn decided_at(&self) -> Option<u32> {
+        self.rematch_at()
+            .map(|at| at.saturating_sub(REMATCH_GRACE_FRAMES))
     }
 
     /// True iff a THROW edge on `frame` would start a rematch.

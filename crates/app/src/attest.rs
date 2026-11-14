@@ -55,20 +55,27 @@ impl AttestState {
     pub fn reset_session(&mut self) {
         *self = Self::default();
     }
+
+    /// We signed this match and the signed pair is not on disk yet: the
+    /// peer's signature (or our tape) is still on its way.
+    pub fn awaiting_peer_sig(&self) -> bool {
+        self.statement.is_some() && !self.written
+    }
 }
 
 /// True once the current `MatchOver` can no longer be rolled back. A
 /// deciding kill is predicted like any other tick, so `MatchOver` can
 /// stand for up to the prediction window before a correction un-ends it.
-/// The recorder waits 30 render frames for that (`SAVE_DELAY_FRAMES`); the
-/// ledger and the attestation fired on the raw edge — a phantom decision
-/// wrote the ledger twice and bumped `decided` (the statement's
-/// `match_index`) on one phone only, after which no statement in the
-/// session could ever verify. Exact rather than a delay: settled when the
-/// session's confirmed frame has passed the frame `MatchOver` was first
-/// observed at, or at once when no P2P session exists to roll anything
-/// back (couch, practice, theater — and a forfeit or desync, which froze
-/// the session). The ledger orders after `settle_match_over` too.
+/// Settled exactly when bevy_ggrs's `ConfirmedFrameCount` (written per
+/// request, so it matches what the world has applied) reaches the tick
+/// the match was decided on (`MatchState::decided_at`). Not ggrs's own
+/// `confirmed_frame()`: that advances on every render frame's poll,
+/// before the rollback that applies those inputs has run, so a decision
+/// that only existed in prediction could settle for the frame between the
+/// two. At once when no session can roll anything back (couch, practice,
+/// theater, and a session `netplay::conclude_session` ended, which booked
+/// the confirmed state already). The ledger, the signer and the tape
+/// order after this.
 #[derive(Resource, Default, Debug, Clone, Copy)]
 pub struct MatchOverSettled {
     /// `MatchState::MatchOver` this frame — the raw edge a rollback can
@@ -79,27 +86,32 @@ pub struct MatchOverSettled {
     pub settled: bool,
 }
 
+/// Is a match decided on `decided_at` settled with `confirmed` the
+/// confirmed frame? `None` decided_at (an ended session) is settled. Pure.
+pub fn decision_settled(decided_at: Option<u32>, confirmed: i32) -> bool {
+    decided_at.is_none_or(|d| i64::from(confirmed) >= i64::from(d))
+}
+
 pub fn settle_match_over(
     state: Res<MatchState>,
     session: Option<Res<bevy_ggrs::Session<sim::GgrsCfg>>>,
-    mut observed_at: Local<Option<i32>>,
+    confirmed: Option<Res<bevy_ggrs::ConfirmedFrameCount>>,
     mut settled: ResMut<MatchOverSettled>,
 ) {
     settled.over = state.is_match_over();
     if !settled.over {
-        *observed_at = None;
         settled.settled = false;
         return;
     }
     if settled.settled {
         return;
     }
-    let Some(bevy_ggrs::Session::P2P(s)) = session.as_deref() else {
-        settled.settled = true;
-        return;
+    settled.settled = match session.as_deref() {
+        Some(bevy_ggrs::Session::P2P(_)) => {
+            decision_settled(state.decided_at(), confirmed.map_or(-1, |c| c.0))
+        }
+        _ => true,
     };
-    let at = *observed_at.get_or_insert(s.current_frame());
-    settled.settled = s.confirmed_frame() >= at;
 }
 
 /// On the tick a match is decided on score AND that decision has settled
@@ -325,13 +337,29 @@ impl Plugin for AttestPlugin {
                     verify_peer_sig,
                     write_attestation,
                 )
-                    .chain(),
+                    .chain()
+                    // A session that ended this frame is booked first.
+                    .after(crate::netplay::conclude_session),
             );
     }
 }
 
 #[cfg(test)]
 mod tests {
+
+    /// The settle closes on the tick the match was decided on, read from
+    /// the confirmed frame the world has applied, and not a tick before.
+    #[test]
+    fn a_decision_settles_when_its_tick_is_confirmed() {
+        assert!(!decision_settled(Some(200), 199));
+        assert!(decision_settled(Some(200), 200));
+        assert!(decision_settled(Some(200), 260));
+        assert!(!decision_settled(Some(0), -1), "nothing confirmed yet");
+        assert!(
+            decision_settled(None, -1),
+            "an ended session booked its confirmed state"
+        );
+    }
     use super::*;
     use crate::netplay::{LocalPlayerHandle, NetplayConfig, SessionIds};
     use crate::profile::LocalProfile;
