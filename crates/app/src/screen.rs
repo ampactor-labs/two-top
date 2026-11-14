@@ -223,7 +223,7 @@ fn update_victory_pose(
     score: Res<MatchScore>,
     mut pose: ResMut<VictoryPose>,
 ) {
-    pose.0 = matches!(*state, MatchState::MatchOver).then(|| {
+    pose.0 = state.is_match_over().then(|| {
         if score.p0 >= MATCH_WIN_THRESHOLD {
             0
         } else {
@@ -861,7 +861,7 @@ fn back_to_lobby(
     if netplay.room_url.is_some() && !practice.0 {
         return; // online: the lobby FSM owns teardown
     }
-    if !matches!(*state, MatchState::MatchOver) {
+    if !state.is_match_over() {
         return;
     }
     // Escape (desktop) or the labeled LOBBY strip — the one universal

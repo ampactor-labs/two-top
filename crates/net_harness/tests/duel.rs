@@ -6,7 +6,7 @@ use sim::PlayerInput;
 /// Walk left and right, throwing now and then: enough to move state and
 /// make the peers predict each other wrong.
 fn restless(seed: u32) -> Script {
-    Box::new(move |f| {
+    Box::new(move |f, _| {
         let leg = (f + seed * 37) / 45;
         let stick_x = if leg.is_multiple_of(2) { 90 } else { -90 };
         let stick_y = if (leg / 3).is_multiple_of(2) { 40 } else { -40 };
@@ -62,19 +62,8 @@ fn two_peers_over_a_slow_link_agree() {
             duel.peers[1].confirmed(),
         );
         for peer in &mut duel.peers {
-            let events: Vec<_> = match peer
-                .app
-                .world_mut()
-                .resource_mut::<bevy_ggrs::Session<sim::GgrsCfg>>()
-                .into_inner()
-            {
-                bevy_ggrs::Session::P2P(s) => s.events().collect(),
-                _ => unreachable!(),
-            };
             assert!(
-                !events
-                    .iter()
-                    .any(|e| matches!(e, bevy_ggrs::ggrs::GgrsEvent::DesyncDetected { .. })),
+                !peer.desynced(),
                 "latency {latency_steps}: seat {} saw a desync",
                 peer.seat,
             );

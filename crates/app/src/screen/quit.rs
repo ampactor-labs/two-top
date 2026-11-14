@@ -65,7 +65,7 @@ pub(super) fn quit_button_input(world: &mut World) {
     if world.resource::<crate::theater::TheaterMode>().active() {
         return; // the theater's marquee owns the exit gesture
     }
-    if matches!(*world.resource::<MatchState>(), MatchState::MatchOver) {
+    if world.resource::<MatchState>().is_match_over() {
         // The summary's LEAVE/LOBBY buttons own the endgame; a stale arm
         // must not leak into the next match.
         world.resource_mut::<QuitArm>().0 = None;
@@ -172,9 +172,7 @@ pub(super) fn update_quit_button(
     first_blood: Res<crate::first_blood::FirstBlood>,
     mut q: QuitButtonQuery,
 ) {
-    let shown = *screen.get() == AppScreen::InMatch
-        && !matches!(*state, MatchState::MatchOver)
-        && !theater.active();
+    let shown = *screen.get() == AppScreen::InMatch && !state.is_match_over() && !theater.active();
     let armed = arm.0.is_some();
     // Southpaw mirrors the quit corner to the top-left with the other zones.
     let anchor_x = if southpaw.0 {

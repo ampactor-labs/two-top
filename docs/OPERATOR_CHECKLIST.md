@@ -145,11 +145,14 @@ Arena selection works on the Title screen before connecting.
       Connected).
 
 ### B.4 Rematch over netplay
-- [ ] After a **natural** MatchOver (not a forfeit), a single THROW from either
-      player (desktop: Space; Android: throw gesture) restarts the match on **both**
-      devices in lockstep: score 0-0, fresh countdown, both respawn, arena wiped
-      (boomerangs/pickups/fire-cells despawned, pyres un-shattered, stains cleared).
+- [ ] After a **natural** MatchOver (not a forfeit) and the summary's 1.6 s beat,
+      THROW (desktop: Space; Android: throw gesture, or RUN IT BACK) from **both**
+      players restarts the match on **both** devices in lockstep: score 0-0, fresh countdown, both respawn, arena wiped
+      (boomerangs/pickups/fire-cells despawned, pyres un-shattered, stains cleared),
+      catch streaks cleared, first pickup ~8 s after GO.
       **No `DESYNC`** (rematch reuses the `THROW_DOWN` level signal — no wire change).
+- [ ] A THROW mashed as the deciding fang lands does **not** restart the match:
+      the summary, the tape and the signed result all appear (SIM_VERSION 16).
 - [ ] After a **forfeit**, pressing THROW does **not** rematch (Forfeited is
       terminal; relaunch to play again). Confirms the boundary isn't a bug.
 

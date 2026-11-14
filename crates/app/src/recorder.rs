@@ -164,7 +164,7 @@ fn save_replay_on_match_over(
     mut rec: ResMut<MatchRecorder>,
     mut last_saved: ResMut<LastSavedReplay>,
 ) {
-    if !matches!(*state, MatchState::MatchOver) {
+    if !state.is_match_over() {
         // Leaving MatchOver (rematch / lobby): re-arm for the next decision.
         rec.save_in = None;
         rec.saved = false;

@@ -1102,7 +1102,7 @@ pub fn tick_disconnection_grace(
                 frame = frame.0,
                 "peer silence exceeded forfeit threshold — match forfeited",
             );
-            *match_state = sim::MatchState::MatchOver;
+            *match_state = sim::MatchState::abandoned();
         }
     }
 }
@@ -1763,7 +1763,7 @@ mod tests {
         );
         assert_eq!(
             *app.world().resource::<sim::MatchState>(),
-            sim::MatchState::MatchOver,
+            sim::MatchState::abandoned(),
             "sim::MatchState should be MatchOver after forfeit",
         );
     }

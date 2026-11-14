@@ -126,8 +126,10 @@ impl NonBlockingSocket<NetAddr> for LinkEnd {
     }
 }
 
-/// What a peer presses on each of its own ticks: `(frame) -> input`.
-pub type Script = Box<dyn FnMut(u32) -> PlayerInput + Send + Sync>;
+/// What a peer presses on each of its own ticks: `(frame, what this peer's
+/// screen shows) -> input`. The state is the peer's own, predictions
+/// included — what a player (and the app's input gates) would see.
+pub type Script = Box<dyn FnMut(u32, &sim::MatchState) -> PlayerInput + Send + Sync>;
 
 #[derive(Resource)]
 struct Scripted {
@@ -136,9 +138,13 @@ struct Scripted {
     frame: u32,
 }
 
-fn scripted_input(mut scripted: ResMut<Scripted>, mut commands: Commands) {
+fn scripted_input(
+    mut scripted: ResMut<Scripted>,
+    state: Res<sim::MatchState>,
+    mut commands: Commands,
+) {
     let frame = scripted.frame;
-    let input = (scripted.script)(frame);
+    let input = (scripted.script)(frame, &state);
     scripted.frame += 1;
     let mut map = bevy::platform::collections::HashMap::default();
     map.insert(scripted.handle, input);
@@ -151,6 +157,10 @@ pub struct SessionConfig {
     pub input_delay: usize,
     pub max_prediction: usize,
     pub arena: ArenaId,
+    /// Runs on each peer's world after the table is laid and before the
+    /// session starts: the starting state both peers agree on (a score
+    /// already 4-0, say).
+    pub boot: fn(&mut World),
 }
 
 impl Default for SessionConfig {
@@ -159,6 +169,7 @@ impl Default for SessionConfig {
             input_delay: 3,
             max_prediction: 16,
             arena: ArenaId::Vigil,
+            boot: |_| {},
         }
     }
 }
@@ -192,6 +203,7 @@ impl Peer {
         app.add_plugins(SimPlugin);
         app.insert_resource(sim::SelectedArena(config.arena));
         sim::spawn_match_world_now(app.world_mut(), config.arena);
+        (config.boot)(app.world_mut());
         app.insert_resource(Scripted {
             handle: seat,
             script,
@@ -221,6 +233,22 @@ impl Peer {
 
     pub fn score(&self) -> sim::MatchScore {
         *self.app.world().resource::<sim::MatchScore>()
+    }
+
+    /// Drain this peer's session events: did ggrs's checksum exchange
+    /// report a desync since the last call?
+    pub fn desynced(&mut self) -> bool {
+        match self
+            .app
+            .world_mut()
+            .resource_mut::<Session<GgrsCfg>>()
+            .into_inner()
+        {
+            Session::P2P(s) => s
+                .events()
+                .any(|e| matches!(e, bevy_ggrs::ggrs::GgrsEvent::DesyncDetected { .. })),
+            _ => panic!("not a P2P session"),
+        }
     }
 
     /// The last frame both peers' inputs are known for, as bevy_ggrs last
@@ -300,5 +328,5 @@ impl Duel {
 
 /// A script that presses nothing.
 pub fn idle() -> Script {
-    Box::new(|_| PlayerInput::default())
+    Box::new(|_, _| PlayerInput::default())
 }

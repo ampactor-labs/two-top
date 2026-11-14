@@ -138,8 +138,11 @@ fn drive_autopilot(world: &mut World) {
     let input = match bot_brain::view_for(world, handle, tier, None, seed) {
         Some(view) => world.resource_mut::<AutopilotBrain>().0.decide(view),
         None => {
+            // Nothing to play (a countdown, a summary): leave this device's
+            // own input alone, so a key pressed on the summary (RUN IT BACK
+            // in the two-peer smoke) still reaches the rematch gate.
             world.resource_mut::<AutopilotBrain>().0.forget();
-            PlayerInput::default()
+            return;
         }
     };
     if let Some(mut local) = world.get_resource_mut::<LocalInputs<GgrsCfg>>() {

@@ -194,8 +194,12 @@ fn update_kill_cam(
     mut prev_kills: Local<Option<u32>>,
 ) {
     let now = *state;
-    let in_beat =
-        |s: &MatchState| matches!(s, MatchState::RoundOver { .. } | MatchState::MatchOver);
+    let in_beat = |s: &MatchState| {
+        matches!(
+            s,
+            MatchState::RoundOver { .. } | MatchState::MatchOver { .. }
+        )
+    };
     let in_countdown = |s: &MatchState| matches!(s, MatchState::Countdown { .. });
 
     let entering_beat = in_beat(&now) && !prev.map(|p| in_beat(&p)).unwrap_or(false);

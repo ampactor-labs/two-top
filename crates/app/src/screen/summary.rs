@@ -202,7 +202,7 @@ pub(super) fn update_summary_overlay(
     // Belt and braces with the reset in `despawn_match`: the card is a
     // MATCH screen element, so it checks the screen too. It used to key on
     // MatchState alone and burned itself onto the title and the replay list.
-    if *screen.get() == AppScreen::InMatch && matches!(*state, MatchState::MatchOver) {
+    if *screen.get() == AppScreen::InMatch && state.is_match_over() {
         *vis = Visibility::Visible;
         let opponent_gone = matches!(*lobby, net::LobbyState::Forfeited { .. });
         let desynced = matches!(*lobby, net::LobbyState::Desynced { .. });
@@ -314,7 +314,25 @@ impl MatchOverSince {
         self.0
             .is_some_and(|since| now - since >= REMATCH_LOCKOUT_SECS)
     }
+
+    /// May the decided match be run back now? The one predicate the
+    /// button's ink, the couch tap and the online consent all read: the
+    /// summary's beat has run (presentation, wall clock) AND the sim's own
+    /// grace has passed on `frame` ([`MatchState::rematch_open`]). The beat
+    /// is longer than the grace, so the second only bites when the sim is
+    /// stalled (waiting on a peer) — exactly when a press emitted early
+    /// would spend its edge inside the grace and never restart anything.
+    pub fn rematch_live(&self, now: f32, state: &MatchState, frame: u32) -> bool {
+        self.settled(now) && state.rematch_open(frame)
+    }
 }
+
+// The beat must cover the sim's grace, or the button would light while a
+// press could still be swallowed by it.
+const _: () = assert!(
+    (sim::REMATCH_GRACE_FRAMES as f32) / (sim::TICK_HZ as f32) < REMATCH_LOCKOUT_SECS,
+    "the summary's beat must outlast the sim's rematch grace",
+);
 
 /// Stamp the moment a match is decided; clear it when the match leaves
 /// `MatchOver` (a rematch, or the screen closing).
@@ -323,7 +341,7 @@ pub(super) fn track_match_over(
     state: Res<MatchState>,
     mut since: ResMut<MatchOverSince>,
 ) {
-    if matches!(*state, MatchState::MatchOver) {
+    if state.is_match_over() {
         since.0.get_or_insert(time.elapsed_secs());
     } else {
         since.0 = None;
@@ -346,11 +364,12 @@ pub fn rematch_armed(was_armed: bool, settled: bool, throw_held: bool) -> bool {
 pub fn hold_rematch_until_settled(
     time: Res<Time<Real>>,
     state: Res<MatchState>,
+    frame: Res<sim::FrameCount>,
     since: Res<MatchOverSince>,
     inputs: Option<ResMut<bevy_ggrs::LocalInputs<sim::GgrsCfg>>>,
     mut armed: Local<bool>,
 ) {
-    if !matches!(*state, MatchState::MatchOver) {
+    if !state.is_match_over() {
         *armed = false;
         return;
     }
@@ -361,7 +380,8 @@ pub fn hold_rematch_until_settled(
         .0
         .values()
         .any(|input| input.buttons & sim::PlayerInput::THROW_DOWN != 0);
-    *armed = rematch_armed(*armed, since.settled(time.elapsed_secs()), throw_held);
+    let live = since.rematch_live(time.elapsed_secs(), &state, frame.0);
+    *armed = rematch_armed(*armed, live, throw_held);
     if !*armed {
         for input in inputs.0.values_mut() {
             input.buttons &= !sim::PlayerInput::THROW_DOWN;
@@ -441,6 +461,7 @@ pub(super) type SummaryButtonQuery<'w, 's> = Query<
 pub(super) fn update_summary_buttons(
     screen: Res<State<AppScreen>>,
     state: Res<MatchState>,
+    frame: Res<sim::FrameCount>,
     time: Res<Time<Real>>,
     since: Res<MatchOverSince>,
     netplay: Res<NetplayConfig>,
@@ -453,7 +474,7 @@ pub(super) fn update_summary_buttons(
     mut q: SummaryButtonQuery,
 ) {
     let over = *screen.get() == AppScreen::InMatch
-        && matches!(*state, MatchState::MatchOver)
+        && state.is_match_over()
         // The theater's marquee owns the top strip and a tape needs no
         // rematch button — the summary card alone says TAPE ENDS.
         && !theater.active();
@@ -472,7 +493,7 @@ pub(super) fn update_summary_buttons(
     // stale pre-flight consent must not render it pressed.
     let armed = online && !practice.0 && consent.local && !consent.peer && !opponent_gone;
     // The primary reads as not-yet-pressable through the lockout.
-    let ink = if since.settled(time.elapsed_secs()) {
+    let ink = if since.rematch_live(time.elapsed_secs(), &state, frame.0) {
         render::palette::HOT_BONE
     } else {
         render::palette::HOT_BONE.with_alpha(0.35)
@@ -552,18 +573,19 @@ pub(super) fn summary_buttons_input(
     mut consent: ResMut<net::RematchConsent>,
     mut queue: ResMut<net::NetSendQueue>,
     mut pending: ResMut<PendingUiThrow>,
-    (first_blood, mut find, mut next): (
+    (first_blood, mut find, mut next, frame): (
         Res<crate::first_blood::FirstBlood>,
         ResMut<PendingFindOpponent>,
         ResMut<NextState<AppScreen>>,
+        Res<sim::FrameCount>,
     ),
 ) {
     if *screen.get() != AppScreen::InMatch
-        || !matches!(*state, MatchState::MatchOver)
+        || !state.is_match_over()
         || theater.active()
         // A thumb still on the stick or the dash corner when the match is
         // decided sits right on this button: let the result land first.
-        || !since.settled(time.elapsed_secs())
+        || !since.rematch_live(time.elapsed_secs(), &state, frame.0)
     {
         return;
     }
@@ -605,7 +627,7 @@ pub(super) fn online_leave_input(world: &mut World) {
     if !online || practice || theater {
         return;
     }
-    if !matches!(*world.resource::<MatchState>(), MatchState::MatchOver) {
+    if !world.resource::<MatchState>().is_match_over() {
         return;
     }
     let esc = world

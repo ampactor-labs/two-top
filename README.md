@@ -56,7 +56,7 @@ Decisions that shaped it, with the reasoning in [`MORGAN_NOTES.md`](MORGAN_NOTES
 
 - No `f32`, `f64` or `glam` in `sim`; clippy's `disallowed-types` denies the float types there. Sim collections are `BTreeMap`s, checksums use `bevy_ggrs`'s portable hasher, and gameplay randomness comes from one rolled-back RNG.
 - The wire carries level signals only (stick, aim, buttons held), never press or release events. Presses are derived in the sim by diffing against the rolled-back input history, so a re-simulation cannot lose them.
-- Replays are strictly version-matched: `sim::SIM_VERSION` (15 today) is stamped into every tape and rides the online room name, and any change to the simulation bumps it. There is no migration path; old tapes play on archived tagged builds.
+- Replays are strictly version-matched: `sim::SIM_VERSION` (16 today) is stamped into every tape and rides the online room name, and any change to the simulation bumps it. There is no migration path; old tapes play on archived tagged builds.
 - Online play is peer to peer, and the public APK carries no relay secret. Phones on mobile data usually sit behind carrier NAT (address sharing that blocks direct connections), which needs a TURN relay server to carry the traffic. When a build has the vendor's URL baked in, it fetches short-lived TURN credentials from `ice_vendor` ahead of the match, so the relay works and a leaked credential dies within hours.
 
 ### What is in the game
@@ -137,7 +137,7 @@ The two-phone test over Wi-Fi against mobile data passed once, at an earlier rev
 ## Roadmap
 
 1. Re-run the two-phone cross-carrier match on the current build. It needs two phones on different carriers and a person at each; CI cannot run it.
-2. A two-peer in-process netplay harness, so the netplay mechanisms (forfeit, desync, rematch consent, the side channel) run under a test (`docs/ROLEPLAY_AUDIT.md`, "Next"). It is missing because `crates/net` and `crates/app` have no test directory and the only gate today is two processes on one machine.
+2. Grow the in-process netplay harness (`crates/net_harness`: two real ggrs sessions over a link that delivers late and drops) from the sim's view of the network to the app's: forfeit, desync, rematch consent and the side channel under a test. Today it drives the prediction window and the rematch grace; the app's endings still rely on two processes on one machine.
 3. Surviving a phone call: reconnecting inside the grace window and holding a wake lock. Today an interruption longer than 9 seconds is a forfeit.
 
 ## License

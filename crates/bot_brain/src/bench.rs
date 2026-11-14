@@ -305,7 +305,7 @@ fn play_inner(
             }
         }
         was_in_round = in_round;
-        let finished = matches!(state, MatchState::MatchOver);
+        let finished = state.is_match_over();
         if finished || ticks >= cap {
             let mut mismatched_frames = app.world().resource::<Mismatches>().0.clone();
             mismatched_frames.sort_unstable();

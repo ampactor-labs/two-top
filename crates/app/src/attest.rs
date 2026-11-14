@@ -85,7 +85,7 @@ pub fn settle_match_over(
     mut observed_at: Local<Option<i32>>,
     mut settled: ResMut<MatchOverSettled>,
 ) {
-    settled.over = matches!(*state, MatchState::MatchOver);
+    settled.over = state.is_match_over();
     if !settled.over {
         *observed_at = None;
         settled.settled = false;
@@ -220,7 +220,7 @@ fn verify_peer_sig(
     peer_keys: Res<PeerKeys>,
     mut attest: ResMut<AttestState>,
 ) {
-    if !matches!(*state, MatchState::MatchOver) {
+    if !state.is_match_over() {
         // Anything still parked here is stale (a sig for a match that
         // ended some other way); never let it poison the next match.
         peer_sig.0 = None;
@@ -361,7 +361,7 @@ mod tests {
 
         let mut app = App::new();
         app.add_plugins(AttestPlugin);
-        app.insert_resource(MatchState::MatchOver);
+        app.insert_resource(MatchState::decided(0));
         app.insert_resource(MatchScore { p0: 5, p1: 2 });
         app.insert_resource(sim::SelectedArena(sim::ArenaId::Pit));
         app.insert_resource(NetplayConfig {
@@ -442,7 +442,7 @@ mod tests {
         };
         app.update(); // leaves MatchOver: per-match state clears
         let world = app.world_mut();
-        *world.resource_mut::<MatchState>() = MatchState::MatchOver;
+        *world.resource_mut::<MatchState>() = MatchState::decided(0);
         world.resource_mut::<LastSavedReplay>().0 = Some(tape.clone());
         app.update(); // re-decided (match_index 1), our side signs
         app.world_mut().resource_mut::<PeerSig>().0 = Some([[0u8; 32], [0u8; 32]]);

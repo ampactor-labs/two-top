@@ -482,7 +482,7 @@ fn record_gauntlet_result(
     mut step: ResMut<GauntletStep>,
     mut prev_over: Local<bool>,
 ) {
-    let over = matches!(*state, MatchState::MatchOver);
+    let over = state.is_match_over();
     let entered = over && !*prev_over;
     *prev_over = over;
     if !entered {

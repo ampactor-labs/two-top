@@ -355,7 +355,7 @@ fn update_controls(
     // Only during live play — not the title, the pre-peer waiting room, the
     // match-over summary (the controls were overlapping the win text), or
     // a tape playing in the theater (the tape's thumbs, not yours).
-    let over = matches!(*match_state, sim::MatchState::MatchOver);
+    let over = match_state.is_match_over();
     let live = *screen.get() == AppScreen::InMatch && !awaiting.0 && !over && !theater.active();
     let win = window.0;
     let ready = live && win.x > 0.0 && win.y > 0.0 && rect.half != Vec2::ZERO;

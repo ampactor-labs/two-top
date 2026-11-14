@@ -808,7 +808,7 @@ fn play_match_state_sfx(
 
     let is_countdown = |s: MatchState| matches!(s, MatchState::Countdown { .. });
     let is_roundover = |s: MatchState| matches!(s, MatchState::RoundOver { .. });
-    let is_matchover = |s: MatchState| matches!(s, MatchState::MatchOver);
+    let is_matchover = |s: MatchState| s.is_match_over();
 
     // First observation: the match boots straight into Countdown{3}; toll it.
     let Some(prev_state) = prev_state else {

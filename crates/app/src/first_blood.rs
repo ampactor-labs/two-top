@@ -260,7 +260,7 @@ fn read_lesson(
     let me = crate::bot::BOT_HANDLE ^ 1;
     let mut ev = Events {
         dt: time.delta_secs(),
-        match_over: matches!(*state, MatchState::MatchOver),
+        match_over: state.is_match_over(),
         ..Events::default()
     };
     let live = state.is_in_round();
@@ -330,9 +330,7 @@ fn speak_line(
     time: Res<Time<Real>>,
     mut callout: ResMut<crate::callout::Callout>,
 ) {
-    let showing = fb.active
-        && *screen.get() == AppScreen::InMatch
-        && !matches!(*state, MatchState::MatchOver);
+    let showing = fb.active && *screen.get() == AppScreen::InMatch && !state.is_match_over();
     callout.lesson = showing
         .then(|| crate::lesson::line(fb.lesson.stage, device.0))
         .flatten()

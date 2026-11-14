@@ -327,7 +327,7 @@ fn drive_share(
     }
     let can_share = shareable(
         *screen.get(),
-        matches!(*match_state, MatchState::MatchOver),
+        match_state.is_match_over(),
         theater.active(),
         &saved.0,
         &theater_tape.0,

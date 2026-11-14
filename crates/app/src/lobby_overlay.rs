@@ -94,7 +94,7 @@ fn update_summoning(
     };
     // At MatchOver the summary card owns the screen — it carries the fled /
     // abandoned facts itself, and this text was stacking straight into it.
-    if *screen.get() != AppScreen::InMatch || matches!(*match_state, sim::MatchState::MatchOver) {
+    if *screen.get() != AppScreen::InMatch || match_state.is_match_over() {
         *vis = Visibility::Hidden;
         *stall = None;
         return;

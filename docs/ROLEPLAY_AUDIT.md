@@ -914,7 +914,10 @@ playing over it. Every sink pauses on suspend and resumes on return.
   the devouring and the gauntlet tier were skipped; online, the press
   consented to RUN IT BACK unseen. For 1.6 s, and until the thumb lifts
   once, local THROW no longer reaches the wire, and the summary button
-  dims and ignores taps (`screen::hold_rematch_until_settled`).
+  dims and ignores taps (`screen::hold_rematch_until_settled`). The
+  presses the app cannot see (made before the decision, landing through
+  the input delay and the prediction window) are the sim's since
+  SIM_VERSION 16: `MatchOver { rematch_at_frame }`.
 - **SHARE was also BACK.** Both SHARE targets reached up into the
   top strip every screen reads as BACK. In the theater SHARE started the
   upload and left the tape in one frame; on an online summary its top

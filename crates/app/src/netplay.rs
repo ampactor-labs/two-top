@@ -63,6 +63,15 @@ const ONLINE_INPUT_DELAY: usize = 3;
 /// actually verified.
 const MAX_PREDICTION_FRAMES: usize = 16;
 
+// A THROW pressed just before this phone learned the match was decided
+// lands up to input delay + prediction window − 1 ticks after the decision;
+// the sim's rematch grace must cover it, or that press restarts the match
+// unseen.
+const _: () = assert!(
+    ONLINE_INPUT_DELAY + MAX_PREDICTION_FRAMES <= sim::REMATCH_GRACE_FRAMES as usize,
+    "the sim's rematch grace must cover input delay + prediction window",
+);
+
 /// ggrs desync-detection cadence: exchange a state checksum every N frames.
 /// 30 @ 60 Hz = twice a second — frequent enough to catch a divergence
 /// within a few hundred ms, cheap enough to be free on the wire.
@@ -464,7 +473,7 @@ fn log_link(
     let Session::P2P(session) = &*session else {
         return;
     };
-    if matches!(*state, sim::MatchState::MatchOver) {
+    if state.is_match_over() {
         if !*summarized && summary.samples > 0 {
             tracing::info!(
                 target: "two_top::net::link",
@@ -1061,7 +1070,7 @@ fn end_match_on_link_loss(world: &mut World) -> bool {
         peer_id,
         conceded: false,
     };
-    *world.resource_mut::<sim::MatchState>() = sim::MatchState::MatchOver;
+    *world.resource_mut::<sim::MatchState>() = sim::MatchState::abandoned();
     true
 }
 
@@ -1298,7 +1307,7 @@ fn drain_session_events(world: &mut World) {
             peer_id: addr_to_peer(addr),
             conceded: false,
         };
-        *world.resource_mut::<sim::MatchState>() = sim::MatchState::MatchOver;
+        *world.resource_mut::<sim::MatchState>() = sim::MatchState::abandoned();
     }
     if let Some((addr, frame)) = desynced_at {
         // Terminal, like a forfeit — but nothing here is a shared fact any
@@ -1310,7 +1319,7 @@ fn drain_session_events(world: &mut World) {
             peer_id: addr_to_peer(addr),
             frame,
         };
-        *world.resource_mut::<sim::MatchState>() = sim::MatchState::MatchOver;
+        *world.resource_mut::<sim::MatchState>() = sim::MatchState::abandoned();
     }
 }
 
@@ -1440,7 +1449,7 @@ fn pump_side_channel(world: &mut World) {
                     peer_id: from,
                     conceded: true,
                 };
-                *world.resource_mut::<sim::MatchState>() = sim::MatchState::MatchOver;
+                *world.resource_mut::<sim::MatchState>() = sim::MatchState::abandoned();
             }
         }
     }
@@ -1617,6 +1626,7 @@ pub fn gate_rematch_inputs(
     practice: Res<crate::bot::PracticeMode>,
     theater: Res<crate::theater::TheaterMode>,
     state: Res<sim::MatchState>,
+    frame: Res<sim::FrameCount>,
     local: Res<LocalPlayerHandle>,
     mut consent: ResMut<RematchConsent>,
     mut queue: ResMut<NetSendQueue>,
@@ -1625,7 +1635,7 @@ pub fn gate_rematch_inputs(
     if netplay.room_url.is_none() || practice.0 || theater.active() {
         return;
     }
-    if !matches!(*state, sim::MatchState::MatchOver) {
+    if !state.is_match_over() {
         return;
     }
     let Some(mut inputs) = inputs else {
@@ -1643,9 +1653,11 @@ pub fn gate_rematch_inputs(
         queue.0.push(NetMsg::RematchWant);
         tracing::info!(target: "two_top::net", "rematch consent given — telling the peer");
     }
-    if consent.local && consent.peer {
-        // Both in: emit the real input. The preceding masked frames
-        // guarantee sim sees a rising edge.
+    if consent.local && consent.peer && state.rematch_open(frame.0) {
+        // Both in and the sim's grace over: emit the real input. The
+        // preceding masked frames guarantee sim sees a rising edge, and
+        // waiting out the grace keeps that edge from landing inside it
+        // (where it would be swallowed and, held, never fire again).
         input.buttons |= sim::PlayerInput::THROW_DOWN;
     } else {
         input.buttons &= !sim::PlayerInput::THROW_DOWN;
@@ -1656,7 +1668,7 @@ pub fn gate_rematch_inputs(
 /// covers the restart itself (MatchOver → Countdown) and every other path
 /// out of the screen.
 pub fn reset_rematch_consent(state: Res<sim::MatchState>, mut consent: ResMut<RematchConsent>) {
-    if !matches!(*state, sim::MatchState::MatchOver) && *consent != RematchConsent::default() {
+    if !state.is_match_over() && *consent != RematchConsent::default() {
         *consent = RematchConsent::default();
     }
 }

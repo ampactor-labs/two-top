@@ -183,7 +183,7 @@ Rolled-back resources:
 - `FrameCount(u32)`
 - `InputHistory` — per-player ring buffer; `advance_input_history` pushes the tick's inputs at end of `GgrsSchedule`
 - `SimRng { state: u64 }` — hand-rolled xorshift64*
-- `MatchState` — plain `Resource` enum (data-carrying: `Countdown { digit, expires_at_frame }` / `InRound { expires_at_frame }` / `RoundOver { expires_at_frame }` / `MatchOver`), rolled back via `rollback_resource_with_copy::<MatchState>()`
+- `MatchState` — plain `Resource` enum (data-carrying: `Countdown { digit, expires_at_frame }` / `InRound { expires_at_frame }` / `RoundOver { expires_at_frame }` / `MatchOver { rematch_at_frame }`), rolled back via `rollback_resource_with_copy::<MatchState>()`
 - `MatchScore { p0: u8, p1: u8 }`
 - `BridgeState`, `DoorCooldown` — Crossing/Reliquary arena state
 - `PickupSpawnTimer` — earliest frame the next pickup may appear
@@ -252,7 +252,7 @@ app
 
 1. `snapshot_previous` — copy `PositionF` → `PreviousPositionF`
 2. `tick_respawn` — revive any player whose `Dead.respawn_at_frame` has arrived
-3. `apply_rematch` — a THROW rising edge during `MatchOver` restarts the match (input-driven; see § App Screen Lifecycle and below)
+3. `apply_rematch` — a THROW rising edge once `MatchOver`'s grace has run restarts the match (input-driven; see § App Screen Lifecycle and below)
 4. `tick_match_state` — drive the round/match state machine forward (countdown digits, round/match transitions)
 5. `start_dash` — commit dash on a DASH_DOWN edge
 6. `player_movement` — apply movement input to `VelocityF` and `PositionF`
@@ -270,7 +270,7 @@ app
 
 The inner boomerang/arena cluster is its own nested `.chain()` so the outer chain stays under Bevy's 20-element `.chain()` arity limit. Arena-specific systems are gated with `run_if(arena_is(_))` rather than split into separate schedules.
 
-`apply_rematch` is the one escape from the terminal `MatchOver` state: a THROW rising edge (diffed against the rolled-back `InputHistory`, no wire-format change) from either player resets score to 0-0, returns `MatchState` to the top of the countdown, and wipes the arena. It is input-driven so it resimulates identically under rollback and stays lockstep across netplay peers — never an out-of-band `World` reset.
+`apply_rematch` is the one escape from the terminal `MatchOver` state: a THROW rising edge (diffed against the rolled-back `InputHistory`, no wire-format change) from either player, on or after `rematch_at_frame` (`REMATCH_GRACE_FRAMES` = 30 ticks after the decision), restarts the match as a fresh one shifted in time: score 0-0, `MatchState::opening(frame)`, every per-player component back to its spawn value, the next pickup 8 s off, the arena wiped. The grace covers input delay + prediction window: a press made before a player could see the decision lands up to that deep, and must not restart a match nobody has seen end (the app asserts the bound at compile time). Out-of-band endings write `MatchState::abandoned()`, which never reopens. It is input-driven so it resimulates identically under rollback and stays lockstep across netplay peers — never an out-of-band `World` reset.
 
 `Update` (render, f32 allowed):
 

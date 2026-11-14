@@ -54,7 +54,7 @@ fn devouring_ceremony(
     mut fang: Query<(Entity, &mut DevourFang, &mut Transform, &mut Sprite), Without<Player>>,
     mut prev_over: Local<bool>,
 ) {
-    let over = matches!(*state, MatchState::MatchOver);
+    let over = state.is_match_over();
     let entered = over && !*prev_over;
     *prev_over = over;
 

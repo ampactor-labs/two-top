@@ -93,6 +93,18 @@ fn window_resolution_from_env() -> (u32, u32) {
     parsed.unwrap_or((600, 900))
 }
 
+/// The local-input pipeline in `ReadInputs`. Every source (keyboard, touch,
+/// the bot) writes this device's input first; then the pre-wire shaping
+/// (the summary's rematch hold, the PLAY AGAIN tap, the online consent
+/// gate, tape playback) edits what the sources wrote. A source added
+/// outside `Sources`, or a mask outside `Shape`, could run on the wrong
+/// side of the other and let a masked press reach the wire.
+#[derive(bevy::ecs::schedule::SystemSet, Debug, Clone, PartialEq, Eq, Hash)]
+pub enum LocalInputSet {
+    Sources,
+    Shape,
+}
+
 pub fn run() {
     // Phase 13: install the tracing subscriber FIRST. The guard owns
     // the non-blocking appender's worker thread in release; binding it
@@ -305,11 +317,16 @@ pub fn run() {
     // touch at all, and the browser layered the two. A touch layer fixed
     // on one platform stayed broken on another until someone noticed.
     app.add_plugins(input_desktop::DesktopInputsPlugin);
+    app.configure_sets(
+        bevy_ggrs::prelude::ReadInputs,
+        LocalInputSet::Shape.after(LocalInputSet::Sources),
+    );
     app.add_systems(
         bevy_ggrs::prelude::ReadInputs,
         (mirror_keyboard_for_flip, read_touch_inputs, bot::drive_bot)
             .chain()
-            .after(input_desktop::read_local_desktop_inputs),
+            .after(input_desktop::read_local_desktop_inputs)
+            .in_set(LocalInputSet::Sources),
     );
     app.add_systems(
         Update,
@@ -330,7 +347,7 @@ pub fn run() {
             replay::playback_inputs_system.run_if(resource_exists::<replay::ReplayPlayback>),
         )
             .chain()
-            .after(bot::drive_bot),
+            .in_set(LocalInputSet::Shape),
     );
 
     // Verification capture (opt-in via TWOTOP_CAPTURE): screenshot then exit.
@@ -982,7 +999,7 @@ fn capture_frame(
     use bevy::render::view::screenshot::{Screenshot, save_to_disk};
     // Hold the settle counter at zero until the gate opens (if any), so
     // `settle_frames` is a delay measured from MatchOver, not app start.
-    if cfg.wait_matchover && *frame == 0 && !matches!(*match_state, sim::MatchState::MatchOver) {
+    if cfg.wait_matchover && *frame == 0 && !match_state.is_match_over() {
         return;
     }
     *frame += 1;

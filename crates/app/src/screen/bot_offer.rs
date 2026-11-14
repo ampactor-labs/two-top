@@ -72,7 +72,7 @@ pub(super) fn bot_fallback_input(world: &mut World) {
         return;
     }
     let awaiting = world.resource::<BotOffer>().armed;
-    let fled_summary = matches!(*world.resource::<MatchState>(), MatchState::MatchOver)
+    let fled_summary = world.resource::<MatchState>().is_match_over()
         && world.resource::<net::LobbyState>().is_terminal();
     if !(awaiting || fled_summary) {
         return;

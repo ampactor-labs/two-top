@@ -222,7 +222,7 @@ fn reaching_match_win_threshold_in_round_jumps_to_match_over() {
 
     assert_eq!(
         *app.world().resource::<MatchState>(),
-        MatchState::MatchOver,
+        MatchState::decided(500),
         "p0 at threshold should end the match",
     );
 }
@@ -230,13 +230,13 @@ fn reaching_match_win_threshold_in_round_jumps_to_match_over() {
 #[test]
 fn match_over_is_terminal() {
     let mut app = build_app_with_real_countdown();
-    *app.world_mut().resource_mut::<MatchState>() = MatchState::MatchOver;
+    *app.world_mut().resource_mut::<MatchState>() = MatchState::decided(0);
     for _ in 0..10 {
         app.update();
     }
     assert_eq!(
         match_state(&app),
-        MatchState::MatchOver,
+        MatchState::decided(0),
         "MatchOver must not transition out",
     );
 }
@@ -339,7 +339,7 @@ fn match_state_variants_are_exhaustively_patternable() {
             MatchState::Countdown { .. } => "countdown",
             MatchState::InRound { .. } => "in_round",
             MatchState::RoundOver { .. } => "round_over",
-            MatchState::MatchOver => "match_over",
+            MatchState::MatchOver { .. } => "match_over",
         }
     }
 
@@ -362,5 +362,5 @@ fn match_state_variants_are_exhaustively_patternable() {
         }),
         "round_over"
     );
-    assert_eq!(label(MatchState::MatchOver), "match_over");
+    assert_eq!(label(MatchState::decided(0)), "match_over");
 }

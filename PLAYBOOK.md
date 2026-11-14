@@ -299,9 +299,9 @@ For the second phone, either repeat the ADB install or send that same
 Both phones boot to the Title screen with **"TAP TO FIND OPPONENT"**. Tap the
 arena line under the table to open the roster (seven tables, each with its
 floor and rules) and pick one. The pick does NOT need to match: the room is
-`two-top-v15?next=2` (or `two-top-CURS-v15?next=2` for a private code), and
+`two-top-v16?next=2` (or `two-top-CURS-v16?next=2` for a private code), and
 once two phones pair they agree on one table (the lower peer id's pick) before
-the session starts. The `-v15` is `sim::SIM_VERSION`: two APKs on different
+the session starts. The `-v16` is `sim::SIM_VERSION`: two APKs on different
 sim versions land in different rooms and never pair, which is the only
 version check the live wire has — the waiting screen shows the build and the
 sim version so two people can compare. Then both players tap PLAY.
@@ -313,8 +313,8 @@ sim version so two people can compare. Then both players tap PLAY.
 - Move, throw, recall, kill, respawn — all in lockstep on both screens.
 - Score and match state stay identical on both devices for the full round
   and any subsequent rounds, ending naturally at first-to-5 → match-over.
-- **Rematch:** after match-over, **either** player pressing Throw restarts
-  both devices together (score back to 0-0, fresh countdown, no desync).
+- **Rematch:** after match-over and the summary's beat, both players pressing
+  Throw (RUN IT BACK) restarts both devices together (score back to 0-0, fresh countdown, no desync).
   Note: the couch-only "ESC back to lobby" does not apply online.
 
 ### 4g. Resilience gates (optional, same setup)

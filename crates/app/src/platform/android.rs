@@ -606,7 +606,7 @@ fn back_is_escape(
     let reaches = crate::lifecycle::back_reaches_the_game(
         *screen.get() == AppScreen::InMatch,
         awaiting.0 || theater.active(),
-        matches!(*state, sim::MatchState::MatchOver),
+        state.is_match_over(),
     );
     for event in events.read() {
         if event.key_code != KeyCode::BrowserBack && event.logical_key != Key::BrowserBack {

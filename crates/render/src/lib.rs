@@ -1673,8 +1673,8 @@ pub fn clear_stains_on_match_reset(
     mut commands: Commands,
     stains: Query<Entity, With<FloorStain>>,
 ) {
-    let was_match_over = matches!(*prev, Some(MatchState::MatchOver));
-    let now_post_match_over = !matches!(*state, MatchState::MatchOver);
+    let was_match_over = prev.is_some_and(|s| s.is_match_over());
+    let now_post_match_over = !state.is_match_over();
     if was_match_over && now_post_match_over {
         for entity in &stains {
             commands.entity(entity).despawn();

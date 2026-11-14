@@ -74,3 +74,31 @@ fn a_live_re_simulation_is_deterministic() {
         compute_live_checksum_tsv(&tape)
     );
 }
+
+/// The rematch bug, seen from a tape: the loser's THROW presses in flight at
+/// the decision (input delay + prediction window deep) used to restart the
+/// match inside the tape, so it re-simulated to 0-0 and the signed result
+/// beside it could never verify. Inside the sim's grace they are nothing.
+#[test]
+fn presses_in_flight_after_the_decision_leave_the_result_standing() {
+    let (report, mut inputs) = play_recorded(
+        ArenaId::Anchor,
+        [Seat::Bot { tier: 8 }, Seat::Bot { tier: 3 }],
+        7,
+        300,
+    );
+    assert!(report.finished, "the bench match must be decided");
+    // The longest a press can trail the decision online (input delay 4 +
+    // prediction window 16), with THROW toggling on every tick of it.
+    for tick in 0..20u32 {
+        let mut late = [sim::PlayerInput::default(); 2];
+        for input in &mut late {
+            if tick % 2 == 1 {
+                input.buttons = sim::PlayerInput::THROW_DOWN;
+            }
+        }
+        inputs.push(late);
+    }
+    let score = final_score(&tape(ArenaId::Anchor, inputs));
+    assert_eq!((score.p0, score.p1), report.score);
+}

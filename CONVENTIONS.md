@@ -11,7 +11,7 @@ Hard rules. Violations cause subtle bugs that are expensive to find. The CI and 
 - **No `rand::thread_rng()` or `rand::random()` in sim.** Use the `SimRng` resource (which is rolled back).
 - **No `println!` or `eprintln!`.** Use `tracing` macros (`debug!`, `info!`, `warn!`, `error!`).
 - **System ordering is explicit.** Every sim system uses `.before(...)` / `.after(...)` or is part of a labeled `SystemSet`. Never rely on Bevy's default scheduling.
-- **Match/round state transitions are input-driven; never mutate `MatchState` (or score/arena reset) out-of-band.** Canonical pattern: `sim::apply_rematch` — a `THROW` rising edge (from the rolled-back `InputHistory` via `just_pressed`, never a wire bit) during `MatchOver` flips `MatchOver → Countdown`. A "play again" button writing `*match_state` directly from a UI/app system would desync.
+- **Match/round state transitions are input-driven; never mutate `MatchState` (or score/arena reset) out-of-band.** Canonical pattern: `sim::apply_rematch` — a `THROW` rising edge (from the rolled-back `InputHistory` via `just_pressed`, never a wire bit) once `MatchOver`'s grace has run (`MatchState::rematch_open`, `REMATCH_GRACE_FRAMES` after the decision) flips `MatchOver → Countdown`. A "play again" button writing `*match_state` directly from a UI/app system would desync.
 
 ## Component / Resource Rules
 
@@ -53,7 +53,7 @@ Hard rules. Violations cause subtle bugs that are expensive to find. The CI and 
 ## Replay and Logging
 
 - **Strict version matching for replays.** Don't write migration code. Bump `sim_version` on any sim-affecting change.
-- **Release builds stamp the real `sim::SIM_VERSION`** (currently `15`). The committed canonical demo (`tests/demos/canonical/match_v1.bmrg`) stamps this value and must be regenerated on any bump. Pre-release main carries `replay::DEV_SIM_VERSION = u32::MAX` (tagged "🚧 dev replay" in the viewer). Strict match goes through `replay::decode_for_sim_version`.
+- **Release builds stamp the real `sim::SIM_VERSION`** (currently `16`). The committed canonical demo (`tests/demos/canonical/match_v1.bmrg`) stamps this value and must be regenerated on any bump. Pre-release main carries `replay::DEV_SIM_VERSION = u32::MAX` (tagged "🚧 dev replay" in the viewer). Strict match goes through `replay::decode_for_sim_version`.
 - **`tracing` features pinned in `Cargo.toml`** with `release_max_level_info`.
 - **Performance category is opt-in.** Don't leave `TRACE!` calls active in shipped builds.
 
