@@ -125,4 +125,5 @@ jobs:
           path: |
             target/*-smoke.*
             target/endings-*
+            target/offline-boot.*
           if-no-files-found: ignore

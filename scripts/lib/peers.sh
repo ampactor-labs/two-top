@@ -96,5 +96,14 @@ check_health() {
   if has_log a PANIC || has_log b PANIC; then fail "a peer panicked"; fi
 }
 
-fail() { echo "FAIL: $* (logs in $WORK)"; exit 1; }
+fail() {
+  echo "FAIL: $* (logs in $WORK)"
+  # The last lines of every log, so a CI failure explains itself.
+  for log in "$WORK"/*.log; do
+    [ -f "$log" ] || continue
+    echo "--- tail of $(basename "$log")"
+    sed 's/\x1b\[[0-9;]*m//g' "$log" | grep -v "^ \+at \|^ *[0-9]\+: " | tail -15
+  done
+  exit 1
+}
 pass() { echo "OK: $*"; rm -rf "$WORK"; }
