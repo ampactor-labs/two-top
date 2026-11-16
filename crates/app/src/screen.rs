@@ -467,7 +467,7 @@ pub fn spawn_button_part(
                 ..default()
             },
             ScreenAnchor::new(anchor.x, anchor.y, 0.0, 0.0),
-            Transform::from_xyz(0.0, 0.0, 199.0),
+            Transform::from_xyz(0.0, 0.0, crate::ui::z::MENU - 1.0),
             Visibility::Hidden,
         )),
         BtnRole::Fill => commands.spawn((
@@ -477,7 +477,7 @@ pub fn spawn_button_part(
                 ..default()
             },
             ScreenAnchor::new(anchor.x, anchor.y, 0.0, 0.0),
-            Transform::from_xyz(0.0, 0.0, 199.5),
+            Transform::from_xyz(0.0, 0.0, crate::ui::z::MENU - 0.5),
             Visibility::Hidden,
         )),
         BtnRole::Label => commands.spawn((
@@ -496,7 +496,7 @@ pub fn spawn_button_part(
                 linebreak: bevy::text::LineBreak::NoWrap,
             },
             ScreenAnchor::new(anchor.x, anchor.y, 0.0, 0.0),
-            Transform::from_xyz(0.0, 0.0, 200.0),
+            Transform::from_xyz(0.0, 0.0, crate::ui::z::MENU),
             Visibility::Hidden,
         )),
     };
@@ -534,7 +534,7 @@ fn spawn_overlays(mut commands: Commands) {
         TextColor(render::palette::HOT_BONE),
         TextLayout::new_with_justify(Justify::Center),
         ScreenAnchor::new(0.0, 0.80, 0.0, 0.0),
-        Transform::from_xyz(0.0, 0.0, 200.0),
+        Transform::from_xyz(0.0, 0.0, crate::ui::z::MENU),
         Visibility::Hidden,
     ));
     // The line under the table: the tappable arena name on couch, the
@@ -553,7 +553,7 @@ fn spawn_overlays(mut commands: Commands) {
         TextLayout::new_with_justify(Justify::Center),
         TextBounds::new_horizontal(TITLE_BODY_WIDTH),
         ScreenAnchor::new(0.0, SUBLINE_ANCHOR_Y, 0.0, 0.0),
-        Transform::from_xyz(0.0, 0.0, 200.0),
+        Transform::from_xyz(0.0, 0.0, crate::ui::z::MENU),
         Visibility::Hidden,
     ));
     // The primary: bottom, biggest, and it always names what tapping it
@@ -618,7 +618,7 @@ fn spawn_overlays(mut commands: Commands) {
         // Same fix the summoning overlay needed (lobby_overlay.rs).
         TextBounds::new_horizontal(TITLE_BODY_WIDTH),
         ScreenAnchor::new(0.0, 0.12, 0.0, 0.0),
-        Transform::from_xyz(0.0, 0.0, 200.0),
+        Transform::from_xyz(0.0, 0.0, crate::ui::z::MENU),
         Visibility::Hidden,
     ));
     spawn_summary_buttons(&mut commands);

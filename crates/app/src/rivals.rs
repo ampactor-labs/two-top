@@ -519,6 +519,14 @@ impl Plugin for RivalsPlugin {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_rivals_tap_targets_never_overlap() {
+        for band in [crate::ui::TOP_EXIT, BACK_BAND] {
+            assert!(!crate::ui::overlaps(SHADE_BAND, band), "{band:?}");
+        }
+        assert!(!crate::ui::overlaps(BACK_BAND, crate::ui::TOP_EXIT));
+    }
     use crate::grudge::rival_key;
 
     fn rival(name: &str, wins: u32, losses: u32, last_met: u64) -> RivalRecord {

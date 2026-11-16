@@ -282,7 +282,7 @@ fn spawn_pad(mut commands: Commands, netplay: Res<NetplayConfig>) {
             ),
             TextColor(render::palette::P1_CYAN),
             ScreenAnchor::new(crate::ui::anchor_x(fx), DIAL_ANCHOR_Y, 0.0, 0.0),
-            Transform::from_xyz(0.0, 0.0, 200.0),
+            Transform::from_xyz(0.0, 0.0, crate::ui::z::MENU),
             Visibility::Hidden,
         ));
     }
@@ -507,7 +507,7 @@ fn update_join_qr(
             // inside the QUICK MATCH pill, unscannable at 2.4x — the
             // capture harness caught it).
             ScreenAnchor::new(0.55, 0.30, 0.0, 0.0),
-            Transform::from_xyz(0.0, 0.0, 204.0),
+            Transform::from_xyz(0.0, 0.0, crate::ui::z::MENU + 4.0),
             Visibility::Hidden,
         ));
         commands.spawn((
@@ -526,7 +526,7 @@ fn update_join_qr(
                 linebreak: bevy::text::LineBreak::NoWrap,
             },
             ScreenAnchor::new(0.55, 0.30, 0.0, -(QR_SIDE * 0.5 + 34.0)),
-            Transform::from_xyz(0.0, 0.0, 204.0),
+            Transform::from_xyz(0.0, 0.0, crate::ui::z::MENU + 4.0),
             Visibility::Hidden,
         ));
         return;

@@ -327,7 +327,7 @@ fn enter_replays(
         TextColor(render::palette::HOT_BONE),
         TextLayout::new_with_justify(Justify::Center),
         ScreenAnchor::new(0.0, 0.78, 0.0, 0.0),
-        Transform::from_xyz(0.0, 0.0, 210.0),
+        Transform::from_xyz(0.0, 0.0, crate::ui::z::MENU_TEXT),
     ));
     let sub = if list.0.is_empty() {
         "no tapes yet - every decided match saves one".to_string()
@@ -348,7 +348,7 @@ fn enter_replays(
         TextColor(render::palette::BONE.with_alpha(0.7)),
         TextLayout::new_with_justify(Justify::Center),
         ScreenAnchor::new(0.0, 0.66, 0.0, 0.0),
-        Transform::from_xyz(0.0, 0.0, 210.0),
+        Transform::from_xyz(0.0, 0.0, crate::ui::z::MENU_TEXT),
     ));
     // The refusal notice shares the subline's slot; `update_tape_notice`
     // swaps which of the two speaks.
@@ -367,7 +367,7 @@ fn enter_replays(
         TextLayout::new_with_justify(Justify::Center),
         TextBounds::new_horizontal(1080.0),
         ScreenAnchor::new(0.0, 0.66, 0.0, 0.0),
-        Transform::from_xyz(0.0, 0.0, 210.5),
+        Transform::from_xyz(0.0, 0.0, crate::ui::z::MENU_TEXT + 0.5),
         Visibility::Hidden,
     ));
     for (i, tape) in list.0.iter().enumerate() {
@@ -392,7 +392,7 @@ fn enter_replays(
             TextColor(color),
             TextLayout::new_with_justify(Justify::Center),
             ScreenAnchor::new(0.0, crate::ui::anchor_y(fy), 0.0, 0.0),
-            Transform::from_xyz(0.0, 0.0, 210.0),
+            Transform::from_xyz(0.0, 0.0, crate::ui::z::MENU_TEXT),
         ));
     }
     // Tape trading, stated where the tapes are: a match tape is a small
@@ -415,7 +415,7 @@ fn enter_replays(
             TextColor(render::palette::BONE.with_alpha(0.55)),
             TextLayout::new_with_justify(Justify::Center),
             ScreenAnchor::new(0.0, crate::ui::anchor_y(0.79), 0.0, 0.0),
-            Transform::from_xyz(0.0, 0.0, 210.0),
+            Transform::from_xyz(0.0, 0.0, crate::ui::z::MENU_TEXT),
         ));
         commands.spawn((
             ReplayScreenText,
@@ -431,7 +431,7 @@ fn enter_replays(
             TextLayout::new_with_justify(Justify::Center),
             TextBounds::new_horizontal(1000.0),
             ScreenAnchor::new(0.0, crate::ui::anchor_y(0.825), 0.0, 0.0),
-            Transform::from_xyz(0.0, 0.0, 210.0),
+            Transform::from_xyz(0.0, 0.0, crate::ui::z::MENU_TEXT),
         ));
     }
     // BACK wears the same bordered-box language as every other button.
@@ -444,7 +444,7 @@ fn enter_replays(
             ..default()
         },
         ScreenAnchor::new(0.0, back_anchor_y, 0.0, 0.0),
-        Transform::from_xyz(0.0, 0.0, 209.0),
+        Transform::from_xyz(0.0, 0.0, crate::ui::z::MENU_TEXT - 1.0),
     ));
     commands.spawn((
         ReplayScreenText,
@@ -454,7 +454,7 @@ fn enter_replays(
             ..default()
         },
         ScreenAnchor::new(0.0, back_anchor_y, 0.0, 0.0),
-        Transform::from_xyz(0.0, 0.0, 209.5),
+        Transform::from_xyz(0.0, 0.0, crate::ui::z::MENU_TEXT - 0.5),
     ));
     commands.spawn((
         ReplayScreenText,
@@ -469,7 +469,7 @@ fn enter_replays(
         TextColor(render::palette::HOT_BONE),
         TextLayout::new_with_justify(Justify::Center),
         ScreenAnchor::new(0.0, back_anchor_y, 0.0, 0.0),
-        Transform::from_xyz(0.0, 0.0, 210.0),
+        Transform::from_xyz(0.0, 0.0, crate::ui::z::MENU_TEXT),
     ));
 }
 
@@ -699,7 +699,7 @@ fn spawn_theater_ui(mut commands: Commands, theater: Res<TheaterMode>) {
             ..default()
         },
         ScreenAnchor::new(0.0, exit_y, 0.0, 0.0),
-        Transform::from_xyz(0.0, 0.0, 210.0),
+        Transform::from_xyz(0.0, 0.0, crate::ui::z::MENU_TEXT),
     ));
     commands.spawn((
         TheaterMarquee,
@@ -709,7 +709,7 @@ fn spawn_theater_ui(mut commands: Commands, theater: Res<TheaterMode>) {
             ..default()
         },
         ScreenAnchor::new(0.0, exit_y, 0.0, 0.0),
-        Transform::from_xyz(0.0, 0.0, 210.5),
+        Transform::from_xyz(0.0, 0.0, crate::ui::z::MENU_TEXT + 0.5),
     ));
     commands.spawn((
         TheaterMarquee,
@@ -724,7 +724,7 @@ fn spawn_theater_ui(mut commands: Commands, theater: Res<TheaterMode>) {
         TextColor(render::palette::HOT_BONE),
         TextLayout::new_with_justify(Justify::Center),
         ScreenAnchor::new(0.0, exit_y, 0.0, 0.0),
-        Transform::from_xyz(0.0, 0.0, 211.0),
+        Transform::from_xyz(0.0, 0.0, crate::ui::z::MENU_TEXT + 1.0),
     ));
     // Scrub track + fill (sized per-frame against the live view rect).
     commands.spawn((
@@ -735,7 +735,7 @@ fn spawn_theater_ui(mut commands: Commands, theater: Res<TheaterMode>) {
             custom_size: Some(Vec2::ZERO),
             ..default()
         },
-        Transform::from_xyz(0.0, 0.0, 209.0),
+        Transform::from_xyz(0.0, 0.0, crate::ui::z::MENU_TEXT - 1.0),
     ));
     commands.spawn((
         TheaterMarquee,
@@ -746,7 +746,7 @@ fn spawn_theater_ui(mut commands: Commands, theater: Res<TheaterMode>) {
             ..default()
         },
         bevy::sprite::Anchor::CENTER_LEFT,
-        Transform::from_xyz(0.0, 0.0, 209.5),
+        Transform::from_xyz(0.0, 0.0, crate::ui::z::MENU_TEXT - 0.5),
     ));
     // Speed pips.
     for (i, speed) in SPEED_PRESETS.iter().enumerate() {
@@ -770,7 +770,7 @@ fn spawn_theater_ui(mut commands: Commands, theater: Res<TheaterMode>) {
                 0.0,
                 0.0,
             ),
-            Transform::from_xyz(0.0, 0.0, 210.0),
+            Transform::from_xyz(0.0, 0.0, crate::ui::z::MENU_TEXT),
         ));
     }
 }
@@ -1110,6 +1110,20 @@ impl Plugin for TheaterPlugin {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Playback's tap targets: leave, speed, scrub. None may overlap.
+    #[test]
+    fn the_theaters_tap_targets_never_overlap() {
+        let bands = [EXIT_BAND, SPEED_BAND, SCRUB_BAND];
+        for (i, a) in bands.iter().enumerate() {
+            assert!(a.0 < a.1, "{a:?}");
+            for b in &bands[i + 1..] {
+                assert!(!crate::ui::overlaps(*a, *b), "{a:?} overlaps {b:?}");
+            }
+        }
+        // The list's BACK and its top exit, likewise.
+        assert!(!crate::ui::overlaps(BACK_BAND, EXIT_BAND));
+    }
 
     /// The sequence from the crash reports, which a fresh launch never
     /// reproduces: play a match, leave it, then roll a tape — all in ONE

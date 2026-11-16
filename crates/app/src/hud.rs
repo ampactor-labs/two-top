@@ -113,7 +113,7 @@ fn spawn_hud(
                     ..default()
                 },
                 anchor,
-                Transform::from_xyz(0.0, 0.0, 50.0),
+                Transform::from_xyz(0.0, 0.0, crate::ui::z::HUD),
                 Visibility::Hidden,
             ));
         }
@@ -177,7 +177,7 @@ fn spawn_hud(
             ..default()
         },
         ScreenAnchor::new(0.0, 1.0, 0.0, -(HUD_MARGIN + PIP_SIZE)),
-        Transform::from_xyz(0.0, 0.0, 50.0),
+        Transform::from_xyz(0.0, 0.0, crate::ui::z::HUD),
         Visibility::Hidden,
     ));
 
@@ -203,7 +203,7 @@ fn spawn_hud(
                 ..default()
             },
             ScreenAnchor::new(0.0, 0.0, 0.0, 40.0),
-            Transform::from_xyz(0.0, 40.0, 150.0),
+            Transform::from_xyz(0.0, 40.0, crate::ui::z::COUNTDOWN),
             Visibility::Hidden,
         ));
     }

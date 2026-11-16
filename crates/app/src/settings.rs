@@ -299,7 +299,7 @@ fn spawn_setting_rows(mut commands: Commands) {
         TextColor(render::palette::HOT_BONE),
         TextLayout::new_with_justify(Justify::Center),
         crate::anchor::ScreenAnchor::new(0.0, crate::ui::anchor_y(HEADING_FY), 0.0, 0.0),
-        Transform::from_xyz(0.0, 0.0, 210.0),
+        Transform::from_xyz(0.0, 0.0, crate::ui::z::MENU_TEXT),
         Visibility::Hidden,
     ));
     for (g, (name, _)) in GROUPS.iter().enumerate() {
@@ -321,7 +321,7 @@ fn spawn_setting_rows(mut commands: Commands) {
                 0.0,
                 0.0,
             ),
-            Transform::from_xyz(0.0, 0.0, 210.0),
+            Transform::from_xyz(0.0, 0.0, crate::ui::z::MENU_TEXT),
             Visibility::Hidden,
         ));
     }
@@ -335,7 +335,7 @@ fn spawn_setting_rows(mut commands: Commands) {
                 ..default()
             },
             crate::anchor::ScreenAnchor::new(0.0, anchor_y, 0.0, 0.0),
-            Transform::from_xyz(0.0, 0.0, 208.0),
+            Transform::from_xyz(0.0, 0.0, crate::ui::z::MENU_TEXT - 2.0),
             Visibility::Hidden,
         ));
         commands.spawn((
@@ -346,7 +346,7 @@ fn spawn_setting_rows(mut commands: Commands) {
                 ..default()
             },
             crate::anchor::ScreenAnchor::new(0.0, anchor_y, 0.0, 0.0),
-            Transform::from_xyz(0.0, 0.0, 208.5),
+            Transform::from_xyz(0.0, 0.0, crate::ui::z::MENU_TEXT - 1.5),
             Visibility::Hidden,
         ));
         commands.spawn((
@@ -365,7 +365,7 @@ fn spawn_setting_rows(mut commands: Commands) {
                 linebreak: bevy::text::LineBreak::NoWrap,
             },
             crate::anchor::ScreenAnchor::new(0.0, anchor_y, 0.0, 0.0),
-            Transform::from_xyz(0.0, 0.0, 210.0),
+            Transform::from_xyz(0.0, 0.0, crate::ui::z::MENU_TEXT),
             Visibility::Hidden,
         ));
         for (part, glyph, dx) in [
@@ -385,7 +385,7 @@ fn spawn_setting_rows(mut commands: Commands) {
                 TextColor(render::palette::HOT_BONE),
                 TextLayout::new_with_justify(Justify::Center),
                 crate::anchor::ScreenAnchor::new(0.0, anchor_y, dx, 0.0),
-                Transform::from_xyz(0.0, 0.0, 210.0),
+                Transform::from_xyz(0.0, 0.0, crate::ui::z::MENU_TEXT),
                 Visibility::Hidden,
             ));
         }

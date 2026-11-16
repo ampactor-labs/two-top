@@ -53,7 +53,7 @@ fn spawn_overlay(mut commands: Commands) {
         // Text2d anchors at its bounding-box center, so offset inward by
         // ~half the expected block size from the top-left screen corner.
         ScreenAnchor::new(-1.0, 1.0, 200.0, -60.0),
-        Transform::from_xyz(0.0, 0.0, 100.0),
+        Transform::from_xyz(0.0, 0.0, crate::ui::z::NOTE),
         // Off by default; F3 reveals it. Keeps the live stage uncluttered.
         Visibility::Hidden,
         DebugOverlayText,

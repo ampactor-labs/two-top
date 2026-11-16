@@ -356,7 +356,7 @@ fn spawn_name_ui(mut commands: Commands, netplay: Res<NetplayConfig>) {
         TextColor(render::palette::HOT_BONE),
         TextLayout::new_with_justify(Justify::Center),
         ScreenAnchor::new(0.0, NAME_ANCHOR_Y, 0.0, 0.0),
-        Transform::from_xyz(0.0, 0.0, 201.0),
+        Transform::from_xyz(0.0, 0.0, crate::ui::z::MENU + 1.0),
         Visibility::Hidden,
     ));
     commands.spawn((
@@ -376,7 +376,7 @@ fn spawn_name_ui(mut commands: Commands, netplay: Res<NetplayConfig>) {
             linebreak: bevy::text::LineBreak::NoWrap,
         },
         ScreenAnchor::new(0.0, ENTRY_ANCHOR_Y, 0.0, 0.0),
-        Transform::from_xyz(0.0, 0.0, 201.0),
+        Transform::from_xyz(0.0, 0.0, crate::ui::z::MENU + 1.0),
         Visibility::Hidden,
     ));
     let mut key = |k: GridKey, fx: f32, fy: f32, size: crate::ui::TextRole, color: Color| {
@@ -393,7 +393,7 @@ fn spawn_name_ui(mut commands: Commands, netplay: Res<NetplayConfig>) {
             TextColor(color),
             TextLayout::new_with_justify(Justify::Center),
             ScreenAnchor::new(crate::ui::anchor_x(fx), crate::ui::anchor_y(fy), 0.0, 0.0),
-            Transform::from_xyz(0.0, 0.0, 201.0),
+            Transform::from_xyz(0.0, 0.0, crate::ui::z::MENU + 1.0),
             Visibility::Hidden,
         ));
     };

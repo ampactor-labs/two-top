@@ -137,6 +137,24 @@ mod tests {
     }
 }
 
+// ---- Draw order: the named z layers ----
+
+/// The z layers screen-space things draw on, by name. A visuals pass
+/// reorders the stack here. Things within a layer sit at small offsets
+/// from it (`MENU_TEXT - 0.5` is a menu text's backing).
+pub mod z {
+    /// The in-match HUD: pips, clock, held pickup.
+    pub const HUD: f32 = 50.0;
+    /// The desktop keyboard legend and other match-screen notes.
+    pub const NOTE: f32 = 100.0;
+    /// The round countdown glyphs.
+    pub const COUNTDOWN: f32 = 150.0;
+    /// A menu screen's boxes and plates (over the match).
+    pub const MENU: f32 = 200.0;
+    /// A menu screen's text and the top of the stack.
+    pub const MENU_TEXT: f32 = 210.0;
+}
+
 // ---- Text roles: every text size in one table ----
 
 /// What a piece of text is, and so how big it is drawn. `default_size` is

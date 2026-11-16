@@ -589,7 +589,7 @@ fn setup(
             ..default()
         },
         FullScreenSprite { cover: 1.02 },
-        Transform::from_xyz(0.0, 0.0, 100.0),
+        Transform::from_xyz(0.0, 0.0, crate::ui::z::NOTE),
     ));
 
     // Arena backdrop: the composed moody Bone-Cathedral floor (320x480 px

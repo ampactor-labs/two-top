@@ -239,7 +239,7 @@ fn spawn_notice(mut commands: Commands) {
         TextColor(render::palette::EMBER),
         TextLayout::new_with_justify(Justify::Center),
         ScreenAnchor::new(0.0, NOTICE_ANCHOR_Y, 0.0, 0.0),
-        Transform::from_xyz(0.0, 0.0, 200.0),
+        Transform::from_xyz(0.0, 0.0, crate::ui::z::MENU),
         Visibility::Hidden,
     ));
 }
@@ -336,6 +336,16 @@ impl Plugin for CrashReportPlugin {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The notice sits on the Title: clear of the exit strip and of every
+    /// Title tap target.
+    #[test]
+    fn the_crash_notice_overlaps_no_tap_target() {
+        assert!(!crate::ui::overlaps(NOTICE_BAND, crate::ui::TOP_EXIT));
+        for band in crate::ui::title::ALL {
+            assert!(!crate::ui::overlaps(NOTICE_BAND, band), "{band:?}");
+        }
+    }
 
     #[test]
     fn tails_cut_on_character_boundaries() {

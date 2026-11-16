@@ -68,7 +68,7 @@ fn spawn_intro_card(mut commands: Commands) {
             }),
             TextLayout::new_with_justify(Justify::Center),
             ScreenAnchor::new(0.0, crate::ui::anchor_y(fy), 0.0, 0.0),
-            Transform::from_xyz(0.0, 0.0, 205.0),
+            Transform::from_xyz(0.0, 0.0, crate::ui::z::MENU_TEXT - 5.0),
             Visibility::Hidden,
         ));
     }

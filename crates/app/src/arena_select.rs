@@ -48,7 +48,7 @@ fn enter_roster(mut commands: Commands, asset_server: Res<AssetServer>) {
         TextColor(render::palette::HOT_BONE),
         TextLayout::new_with_justify(Justify::Center),
         ScreenAnchor::new(0.0, crate::ui::anchor_y(0.07), 0.0, 0.0),
-        Transform::from_xyz(0.0, 0.0, 210.0),
+        Transform::from_xyz(0.0, 0.0, crate::ui::z::MENU_TEXT),
     ));
     for (i, &arena) in ALL_ARENAS.iter().enumerate() {
         let ay = row_anchor_y(i);
@@ -62,7 +62,7 @@ fn enter_roster(mut commands: Commands, asset_server: Res<AssetServer>) {
                 ..default()
             },
             ScreenAnchor::new(-0.66, ay, 0.0, 0.0),
-            Transform::from_xyz(0.0, 0.0, 210.0),
+            Transform::from_xyz(0.0, 0.0, crate::ui::z::MENU_TEXT),
         ));
         commands.spawn((
             RosterUi,
@@ -78,7 +78,7 @@ fn enter_roster(mut commands: Commands, asset_server: Res<AssetServer>) {
             TextColor(render::palette::BONE),
             TextLayout::new_with_justify(Justify::Center),
             ScreenAnchor::new(0.10, ay + 0.030, 0.0, 0.0),
-            Transform::from_xyz(0.0, 0.0, 210.0),
+            Transform::from_xyz(0.0, 0.0, crate::ui::z::MENU_TEXT),
         ));
         commands.spawn((
             RosterUi,
@@ -93,7 +93,7 @@ fn enter_roster(mut commands: Commands, asset_server: Res<AssetServer>) {
             TextColor(render::palette::BONE.with_alpha(0.6)),
             TextLayout::new_with_justify(Justify::Center),
             ScreenAnchor::new(0.10, ay - 0.032, 0.0, 0.0),
-            Transform::from_xyz(0.0, 0.0, 210.0),
+            Transform::from_xyz(0.0, 0.0, crate::ui::z::MENU_TEXT),
         ));
     }
     // BACK, in the shared bordered-box language.
@@ -130,7 +130,7 @@ fn enter_roster(mut commands: Commands, asset_server: Res<AssetServer>) {
         TextColor(render::palette::HOT_BONE),
         TextLayout::new_with_justify(Justify::Center),
         ScreenAnchor::new(0.0, back_y, 0.0, 0.0),
-        Transform::from_xyz(0.0, 0.0, 210.0),
+        Transform::from_xyz(0.0, 0.0, crate::ui::z::MENU_TEXT),
     ));
 }
 

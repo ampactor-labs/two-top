@@ -57,7 +57,7 @@ fn spawn_callout(mut commands: Commands) {
             ..default()
         },
         ScreenAnchor::new(0.0, crate::ui::anchor_y(LINE_FY), 0.0, 0.0),
-        Transform::from_xyz(0.0, 0.0, 205.5),
+        Transform::from_xyz(0.0, 0.0, crate::ui::z::MENU_TEXT - 4.5),
         Visibility::Hidden,
     ));
     commands.spawn((
@@ -77,7 +77,7 @@ fn spawn_callout(mut commands: Commands) {
             linebreak: bevy::text::LineBreak::NoWrap,
         },
         ScreenAnchor::new(0.0, crate::ui::anchor_y(LINE_FY), 0.0, 0.0),
-        Transform::from_xyz(0.0, 0.0, 206.0),
+        Transform::from_xyz(0.0, 0.0, crate::ui::z::MENU_TEXT - 4.0),
         Visibility::Hidden,
     ));
 }

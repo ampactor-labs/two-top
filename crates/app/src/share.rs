@@ -276,7 +276,7 @@ fn spawn_share_labels(
             TextColor(render::palette::SPARK),
             TextLayout::new_with_justify(Justify::Center),
             ScreenAnchor::new(crate::ui::anchor_x(fx), crate::ui::anchor_y(fy), 0.0, 0.0),
-            Transform::from_xyz(0.0, 0.0, 205.0),
+            Transform::from_xyz(0.0, 0.0, crate::ui::z::MENU_TEXT - 5.0),
             Visibility::Hidden,
         ));
     }
@@ -488,7 +488,7 @@ fn spawn_overlay(commands: &mut Commands, images: &mut Assets<Image>, url: &str)
             ..default()
         },
         ScreenAnchor::new(0.0, 0.12, 0.0, 0.0),
-        Transform::from_xyz(0.0, 0.0, 210.0),
+        Transform::from_xyz(0.0, 0.0, crate::ui::z::MENU_TEXT),
     ));
     let _ = side;
     commands.spawn((
@@ -504,7 +504,7 @@ fn spawn_overlay(commands: &mut Commands, images: &mut Assets<Image>, url: &str)
         TextColor(render::palette::BONE),
         TextLayout::new_with_justify(Justify::Center),
         ScreenAnchor::new(0.0, -0.62, 0.0, 0.0),
-        Transform::from_xyz(0.0, 0.0, 210.0),
+        Transform::from_xyz(0.0, 0.0, crate::ui::z::MENU_TEXT),
     ));
     commands.spawn((
         ShareOverlayPiece,
@@ -519,7 +519,7 @@ fn spawn_overlay(commands: &mut Commands, images: &mut Assets<Image>, url: &str)
         TextColor(render::palette::COLD_STONE),
         TextLayout::new_with_justify(Justify::Center),
         ScreenAnchor::new(0.0, -0.76, 0.0, 0.0),
-        Transform::from_xyz(0.0, 0.0, 210.0),
+        Transform::from_xyz(0.0, 0.0, crate::ui::z::MENU_TEXT),
     ));
     tracing::info!(target: "two_top::share", %url, "watch link on screen");
 }

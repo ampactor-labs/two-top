@@ -55,7 +55,7 @@ fn spawn_summoning(mut commands: Commands) {
         // phone ("the other / phone" mid-phrase breaks).
         bevy::text::TextBounds::new_horizontal(1080.0),
         ScreenAnchor::new(0.0, 0.25, 0.0, 0.0),
-        Transform::from_xyz(0.0, 0.0, 210.0),
+        Transform::from_xyz(0.0, 0.0, crate::ui::z::MENU_TEXT),
         Visibility::Hidden,
     ));
 }
@@ -237,7 +237,7 @@ fn spawn_overlay(mut commands: Commands) {
         // Top-right corner — keeps it out of the way of the top-left input
         // debug overlay. Pinned to the real screen corner on any aspect.
         ScreenAnchor::new(1.0, 1.0, -160.0, -30.0),
-        Transform::from_xyz(0.0, 0.0, 100.0),
+        Transform::from_xyz(0.0, 0.0, crate::ui::z::NOTE),
         LobbyOverlayText,
     ));
 }
