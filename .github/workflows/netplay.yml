@@ -70,7 +70,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y libasound2-dev libudev-dev xvfb xdotool \
-            mesa-vulkan-drivers libvulkan1 iproute2
+            mesa-vulkan-drivers libvulkan1 libxkbcommon-x11-0 iproute2
       - uses: Swatinem/rust-cache@v2
         if: steps.gate.outputs.run == 'true'
         with:
