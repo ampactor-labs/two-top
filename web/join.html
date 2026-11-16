@@ -81,10 +81,20 @@
           } catch (_) { /* cold start still works without it */ }
           location.href = open.href;
         });
+      } else if (/Windows NT|Macintosh|Linux x86_64|X11/i.test(navigator.userAgent)
+                 && !/iPhone|iPad|Mobile/i.test(navigator.userAgent)) {
+        // A computer: the desktop game registers twotop:// (Windows on
+        // launch, Linux via its .desktop file, macOS in its bundle), so
+        // the link opens it straight onto this table; the browser build
+        // stays one button over for a computer without it.
+        open.href = deep;
+        document.getElementById("help").textContent =
+          "OPEN IN 2-TOP needs the desktop game installed and run once; "
+          + "PLAY IN THE BROWSER needs nothing. the other side shows the same code.";
       } else {
-        // No Android app on this device (an iPhone, a laptop): the browser
-        // build is the way in, so it becomes the main button, and the help
-        // line stops offering an APK this device cannot install.
+        // No app for this device (an iPhone): the browser build is the way
+        // in, so it becomes the main button, and the help line stops
+        // offering an install this device cannot use.
         open.remove();
         web.classList.remove("alt");
         document.getElementById("help").textContent =

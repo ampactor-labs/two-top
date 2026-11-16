@@ -186,10 +186,9 @@ fn apply_launch_join(
     }
 }
 
-/// A warm start: claim a join link from the clipboard when 2-Top regains
-/// focus on the Title. Only Android has one to claim
-/// (`platform::clipboard_join_link`, which says why); everywhere else the
-/// answer is always nothing.
+/// A warm start: claim a join link left for the running game when 2-Top
+/// regains focus on the Title (`platform::pending_join_link`: the join
+/// page's clipboard on Android, a second launch's hand-off on desktop).
 fn claim_clipboard_join(
     mut focus: MessageReader<bevy::window::WindowFocused>,
     screen: Res<State<AppScreen>>,
@@ -206,7 +205,7 @@ fn claim_clipboard_join(
     if !gained || *screen.get() != AppScreen::Title {
         return;
     }
-    if let Some(uri) = crate::platform::clipboard_join_link() {
+    if let Some(uri) = crate::platform::pending_join_link() {
         apply_join(&uri, &mut code, &mut selected, &mut settings);
     }
 }

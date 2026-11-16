@@ -55,7 +55,7 @@ jobs:
       # loads it on X11): the bare runner lacks it and the first smoke run
       # panicked on it, which is how README came to list it.
       - name: System libraries (audio, controllers; Xvfb + lavapipe + xkbcommon for the smoke run)
-        run: sudo apt-get update && sudo apt-get install -y libasound2-dev libudev-dev pkg-config xvfb mesa-vulkan-drivers libxkbcommon-x11-0
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev libudev-dev pkg-config xvfb mesa-vulkan-drivers libxkbcommon-x11-0 desktop-file-utils
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: desktop-linux
@@ -84,7 +84,8 @@ jobs:
           cp target/release/app dist/2-Top/two-top
           cp -r assets dist/2-Top/assets
           rm -rf dist/2-Top/assets/concepts
-          cp packaging/linux/two-top.desktop dist/2-Top/
+          cp packaging/linux/two-top.desktop packaging/linux/install.sh dist/2-Top/
+          desktop-file-validate dist/2-Top/two-top.desktop
           cp web/icon-512.png dist/2-Top/two-top.png
           tar -czf 2-Top-linux-x86_64.tar.gz -C dist 2-Top
           ls -la 2-Top-linux-x86_64.tar.gz

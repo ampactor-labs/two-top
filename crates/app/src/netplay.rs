@@ -556,6 +556,22 @@ fn restore_own_table(mut own: ResMut<OwnTablePick>, mut selected: ResMut<sim::Se
 /// runs in Update once connected.
 pub struct MatchboxPlugin;
 
+/// The netplay facts every build carries, online or not: couch, practice
+/// and the theater have no session, but the recorder, the summary and the
+/// overlay read these all the same (as "no session"). [`MatchboxPlugin`]
+/// is only added online, so they cannot live there: a couch build that
+/// booted without them panicked on its first frame.
+pub struct NetplayStatePlugin;
+
+impl Plugin for NetplayStatePlugin {
+    fn build(&self, app: &mut App) {
+        app.init_resource::<SessionEnding>()
+            .init_resource::<DuelBegan>()
+            .init_resource::<IceStatus>()
+            .init_resource::<SyncWait>();
+    }
+}
+
 impl Plugin for MatchboxPlugin {
     fn build(&self, app: &mut App) {
         #[cfg(debug_assertions)]
@@ -575,7 +591,6 @@ impl Plugin for MatchboxPlugin {
             .init_resource::<OwnTablePick>()
             .init_resource::<IceCache>()
             .add_systems(OnEnter(crate::screen::AppScreen::Title), prefetch_ice)
-            .init_resource::<SyncWait>()
             .init_resource::<Redials>()
             .init_non_send_resource::<DepartingSockets>()
             .add_systems(OnExit(crate::screen::AppScreen::InMatch), restore_own_table)
@@ -583,10 +598,7 @@ impl Plugin for MatchboxPlugin {
                 OnEnter(crate::screen::AppScreen::InMatch),
                 (reset_absence, |mut redials: ResMut<Redials>| redials.0 = 0),
             )
-            .init_resource::<SessionEnding>()
-            .init_resource::<DuelBegan>()
             .init_resource::<SessionLink>()
-            .init_resource::<IceStatus>()
             .init_resource::<RollbackDepths>()
             .add_systems(
                 bevy_ggrs::LoadWorld,

@@ -248,6 +248,12 @@ ureq = { version = "2", default-features = false, features = ["tls", "json"] }
 # branch drops the file half.
 tracing-appender = "0.2"
 
+# Desktop only: the window icon (`platform::desktop::set_window_icon`)
+# needs winit's `Icon`, which bevy_winit does not re-export. The version
+# is the one bevy_winit already locks.
+[target.'cfg(not(any(target_family = "wasm", target_os = "android")))'.dependencies]
+winit = { version = "=0.30.13", default-features = false }
+
 
 # The wasm rite of passage: getrandom must be told a browser is a valid
 # entropy source. Both generations live in the graph — 0.2 (rand/bevy

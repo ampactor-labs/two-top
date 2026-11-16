@@ -117,6 +117,17 @@ pub fn run() {
         "two-top starting",
     );
 
+    // Desktop: a second launch carrying a join link (a `twotop://` link the
+    // browser opened) hands it to the game already running, and exits.
+    #[cfg(not(any(target_os = "android", target_family = "wasm")))]
+    {
+        if platform::desktop::hand_off_to_running_instance(platform::launch_link().as_deref()) {
+            return;
+        }
+        #[cfg(windows)]
+        platform::desktop::register_scheme();
+    }
+
     let netplay = NetplayConfig::from_env_and_args();
     let online = netplay.room_url.is_some();
     // What this device is and can do, asked once; every presentation
@@ -296,6 +307,7 @@ pub fn run() {
         );
 
     app.insert_state(AppScreen::Title);
+    app.add_plugins(netplay::NetplayStatePlugin);
     if online {
         app.add_plugins(MatchboxPlugin);
     }
@@ -332,6 +344,8 @@ pub fn run() {
         Update,
         toggle_fullscreen.run_if(|profile: Res<platform::DeviceProfile>| profile.fullscreen_key),
     );
+    #[cfg(not(any(target_os = "android", target_family = "wasm")))]
+    app.add_systems(Update, platform::desktop::set_window_icon);
     // The nudges watch the local player's DASH presses where inputs are
     // made (a directionless press does nothing the sim could show).
     app.add_systems(

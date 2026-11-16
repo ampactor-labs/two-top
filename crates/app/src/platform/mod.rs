@@ -152,19 +152,24 @@ pub fn launch_link() -> Option<String> {
     }
     #[cfg(not(any(target_os = "android", target_family = "wasm")))]
     {
-        None
+        desktop::launch_link()
     }
 }
 
-/// A join link the join page left on the clipboard for an app that was
-/// already running (Android's warm start). Claimed once, then wiped.
-pub fn clipboard_join_link() -> Option<String> {
+/// A join link left for a game that was already running (a warm start):
+/// on Android the join page's clipboard, on desktop the file a second
+/// launch wrote (`desktop::hand_off_to_running_instance`). Claimed once.
+pub fn pending_join_link() -> Option<String> {
     #[cfg(target_os = "android")]
     {
         android::clipboard_join_link()
     }
+    #[cfg(not(any(target_os = "android", target_family = "wasm")))]
+    {
+        desktop::pending_join_link()
+    }
     // platform-gate-ok: the browser gets its link from the URL, at launch.
-    #[cfg(not(target_os = "android"))]
+    #[cfg(target_family = "wasm")]
     {
         None
     }

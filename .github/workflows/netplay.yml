@@ -22,6 +22,9 @@ on:
       - "crates/app/src/recorder.rs"
       - "crates/app/src/grudge.rs"
       - "crates/app/src/screen/**"
+      - "crates/app/src/lib.rs"
+      - "crates/app/src/lobby_overlay.rs"
+      - "crates/app/src/platform/**"
       - "crates/app/examples/silent_peer.rs"
       - "crates/sim/**"
       - "vendor/**"
@@ -80,6 +83,11 @@ jobs:
       - name: Build
         if: steps.gate.outputs.run == 'true'
         run: cargo build --locked -p app -p replay_sync --example silent_peer
+      # The online smokes never boot a build without a room; couch and
+      # practice once panicked on their first frame for a week unseen.
+      - name: Offline boots (couch, practice, a --join launch)
+        if: steps.gate.outputs.run == 'true' && !matrix.full
+        run: scripts/offline_boot_smoke.sh
       - name: Short scenarios
         if: steps.gate.outputs.run == 'true' && !matrix.full
         run: |

@@ -2,7 +2,8 @@
 Type=Application
 Name=2-Top
 Comment=A one-on-one boomerang duel
-Exec=two-top
+Exec=two-top %u
+MimeType=x-scheme-handler/twotop;
 Icon=two-top
 Terminal=false
 Categories=Game;ActionGame;
