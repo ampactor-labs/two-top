@@ -305,6 +305,16 @@ SCTP retransmission. LEAVE on a summary waits for the result to be filed
 on both phones (our settle and the peer's signature, at most 3 s) and is
 ignored for the summary's first 1.6 s.
 
+A pairing whose WebRTC handshake cannot connect (both phones behind
+carrier NAT with no relay) is never reported by matchbox 0.14: both
+phones simply wait. So a phone that has waited 30 s (plus up to 4 s of
+per-install jitter) in its room dials again with a fresh socket
+(`netplay::redial_waiting`), which frees it to meet whoever comes next,
+and after 15 s the wait says so when this build has no relay ("this
+build can't relay: phones on mobile data won't reach each other"). With
+`iptables -I INPUT -i lo -p udp -j DROP` two local peers reproduce it:
+they pair on signaling (TCP), never connect (UDP), and re-dial.
+
 Silence is only measured once the session exists. Before the swap (the
 wait, and the table handshake) the app pins the last-message stamp every
 frame: a peer that leaves then is matchbox's to report

@@ -371,6 +371,50 @@ fn close_departed_sockets(world: &mut World) {
     }
 }
 
+/// Whether the socket this phone dialed with can relay (has a TURN
+/// server). Without one, two phones behind carrier NAT pair on the room
+/// server and never connect, and matchbox reports nothing: the wait is the
+/// only symptom, so the wait's wording names it (`lobby_overlay`).
+#[derive(Resource, Default, Clone, Copy, Debug)]
+pub struct IceStatus {
+    pub relay: Option<bool>,
+}
+
+/// Seconds a phone waits in an empty room before it dials again with a
+/// fresh socket. A WebRTC handshake that cannot connect is never reported
+/// by matchbox 0.14, and a quick-match room pairs phones two by two: two
+/// phones whose pairing silently failed would wait on each other forever.
+/// A re-dial frees this one to meet whoever comes next.
+pub const WAITING_REDIAL_SECS: f32 = 30.0;
+
+/// Is a re-dial due after `waited` seconds in the room? A per-install
+/// jitter of up to 4 s keeps two stuck phones from re-dialing in lockstep
+/// (and landing in the same dead pairing again). Pure.
+pub fn waiting_redial_due(waited: f32, install_id: u128) -> bool {
+    waited >= WAITING_REDIAL_SECS + (install_id % 5) as f32
+}
+
+/// `Update`: re-dial a phone that has waited too long in its room.
+fn redial_waiting(world: &mut World, mut since: Local<Option<f32>>) {
+    let now = world.resource::<Time<Real>>().elapsed_secs();
+    if !matches!(
+        *world.resource::<LobbyState>(),
+        LobbyState::WaitingForPeer { .. }
+    ) {
+        *since = None;
+        return;
+    }
+    let at = *since.get_or_insert(now);
+    let install = world.resource::<crate::profile::LocalProfile>().install_id;
+    if !waiting_redial_due(now - at, install) {
+        return;
+    }
+    *since = None;
+    tracing::info!(target: "two_top::net", waited_secs = now - at, "nobody came — re-dialing the room with a fresh socket");
+    leave_online_match(world, Farewell::Close);
+    start_matchbox(world);
+}
+
 /// Re-dials made since the match screen was entered.
 #[derive(Resource, Default)]
 struct Redials(u32);
@@ -542,6 +586,7 @@ impl Plugin for MatchboxPlugin {
             .init_resource::<SessionEnding>()
             .init_resource::<DuelBegan>()
             .init_resource::<SessionLink>()
+            .init_resource::<IceStatus>()
             .init_resource::<RollbackDepths>()
             .add_systems(
                 bevy_ggrs::LoadWorld,
@@ -556,6 +601,7 @@ impl Plugin for MatchboxPlugin {
                     announce_going_away.before(drive_netplay),
                     drive_netplay,
                     note_duel_began.before(EndingSet),
+                    redial_waiting.after(drive_netplay),
                     conclude_session
                         .in_set(EndingSet)
                         .after(drive_netplay)
@@ -1079,6 +1125,7 @@ fn open_socket(world: &mut World, url: String, ice: RtcIceServerConfig) {
         parked: None,
     });
     *world.resource_mut::<LobbyState>() = LobbyState::Connecting;
+    world.resource_mut::<IceStatus>().relay = Some(has_turn);
 
     tracing::info!(
         target: "two_top::net",
@@ -2266,6 +2313,17 @@ mod tests {
             d.histogram(),
             format!("1:2 2:1 5:1 {MAX_PREDICTION_FRAMES}:1")
         );
+    }
+
+    #[test]
+    fn a_long_wait_re_dials_with_jitter() {
+        assert!(!waiting_redial_due(29.9, 0));
+        assert!(waiting_redial_due(30.0, 0));
+        assert!(
+            !waiting_redial_due(33.0, 4),
+            "this install waits 4 s longer"
+        );
+        assert!(waiting_redial_due(34.0, 4));
     }
 
     #[test]

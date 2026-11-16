@@ -64,6 +64,18 @@ fn spawn_summoning(mut commands: Commands) {
 /// instead of breathing dots forever.
 const STALL_DIAGNOSIS_SECS: f32 = 15.0;
 
+/// What a long wait for a challenger says. Lead with the mismatch a
+/// player can fix from the seat; then the network. A build without a relay
+/// says the one thing that is certain: phones on mobile data will not
+/// reach each other. Pure.
+pub fn stall_hint(relay: Option<bool>) -> &'static str {
+    if relay == Some(false) {
+        "\n\nif the other phone shows this too:\ncheck both show the same sim number -\nthis build can't relay: phones on\nmobile data won't reach each other,\nput both on the same Wi-Fi"
+    } else {
+        "\n\nif the other phone shows this too:\ncheck both show the same sim number -\nelse try both on Wi-Fi, or both on data"
+    }
+}
+
 /// Seconds a paired session may spend synchronizing in silence.
 const SYNC_WORD_SECS: f32 = 2.0;
 
@@ -81,6 +93,7 @@ fn update_summoning(
     peer_profile: Res<net::PeerProfile>,
     absence: Res<crate::netplay::RecentAbsence>,
     sync: Res<crate::netplay::SyncWait>,
+    ice: Res<crate::netplay::IceStatus>,
     silence: (
         Res<net::SilenceClock>,
         Res<net::LastPeerMessageFrame>,
@@ -144,11 +157,7 @@ fn update_summoning(
             };
             let mut m = format!("AWAITING A CHALLENGER{dots}\n\n{room_line}\n{ask}");
             if since > STALL_DIAGNOSIS_SECS {
-                // Lead with the mismatch a player can fix from the seat;
-                // the network is the second guess, not the first.
-                m.push_str(
-                    "\n\nif the other phone shows this too:\ncheck both show the same sim number -\nelse try both on Wi-Fi, or both on data",
-                );
+                m.push_str(stall_hint(ice.relay));
             }
             Some(m)
         }
@@ -299,5 +308,23 @@ mod tests {
         // The last moment before the forfeit still shows a 1, never a 0.
         assert_eq!(away_secs_left(net::FORFEIT_AFTER_FRAMES - 1, 0, false), 1);
         assert_eq!(away_secs_left(net::FORFEIT_AFTER_FRAMES + 50, 0, false), 1);
+    }
+}
+
+#[cfg(test)]
+mod stall_hint_tests {
+    use super::stall_hint;
+
+    #[test]
+    fn a_build_without_a_relay_says_so() {
+        assert!(stall_hint(Some(false)).contains("can't relay"));
+        assert!(!stall_hint(Some(true)).contains("can't relay"));
+        assert!(!stall_hint(None).contains("can't relay"));
+        for relay in [None, Some(false), Some(true)] {
+            assert!(
+                stall_hint(relay).is_ascii(),
+                "the bundled font is ASCII-only"
+            );
+        }
     }
 }
