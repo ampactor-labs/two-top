@@ -49,17 +49,33 @@ fn main() {
                     socket
                         .channel_mut(1)
                         .send(encode_net_msg(&NetMsg::Table { arena: 0 }), peer);
+                    // The handshake's delay proposal, so the app swaps at
+                    // once instead of waiting out its fallback.
+                    socket.channel_mut(1).send(
+                        encode_net_msg(&NetMsg::Delay {
+                            frames: net::delay::DEFAULT as u8,
+                        }),
+                        peer,
+                    );
                     paired_at = Some(Instant::now());
                 }
                 PeerState::Disconnected => eprintln!("silent_peer: {peer} left"),
             }
         }
-        // Read and drop everything: the app's sync requests go unanswered.
+        // The app's sync requests go unanswered; its handshake pings get
+        // their pongs, so the app builds its session promptly.
         let _ = socket.channel_mut(0).receive();
-        let _ = socket.channel_mut(1).receive();
+        for (from, bytes) in socket.channel_mut(1).receive() {
+            if let Some(NetMsg::Ping { id }) = net::decode_net_msg(&bytes) {
+                socket
+                    .channel_mut(1)
+                    .send(encode_net_msg(&NetMsg::Pong { id }), from);
+            }
+        }
         if let Some(at) = paired_at {
             let waited = at.elapsed();
-            if leave && waited > Duration::from_millis(500) {
+            // After the app's session swap (its handshake takes ~0.3 s).
+            if leave && waited > Duration::from_millis(1500) {
                 eprintln!("silent_peer: leaving");
                 return; // dropping the socket closes the connection
             }

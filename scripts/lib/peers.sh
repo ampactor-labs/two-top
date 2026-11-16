@@ -18,9 +18,12 @@ peers_init() {
   WORK=$(mktemp -d "${TMPDIR_SMOKE:-target}/$1.XXXXXX")
   PORT=$2
   DISPLAY_NUM=$3
-  trap 'kill -CONT $(jobs -p) 2>/dev/null; kill $(jobs -p) 2>/dev/null; wait 2>/dev/null' EXIT
+  PIDS=()
+  trap 'for p in "${PIDS[@]}"; do kill -CONT "$p" 2>/dev/null; kill "$p" 2>/dev/null; done' EXIT
   matchbox_server "127.0.0.1:$PORT" > "$WORK/signal.log" 2>&1 &
+  PIDS+=($!); disown
   Xvfb "$DISPLAY_NUM" -screen 0 1280x1400x24 > /dev/null 2>&1 &
+  PIDS+=($!); disown
   sleep 2
 }
 
@@ -37,10 +40,27 @@ peer_start() {
     exec "$APP"
   ) > "$WORK/$name.log" 2>&1 &
   eval "PID_$name=$!"
+  PIDS+=($!); disown
   sleep 1
 }
 
 pid_of() { eval "echo \$PID_$1"; }
+
+# kill_peer <name> [signal]: e.g. kill_peer b -9, kill_peer b -STOP.
+kill_peer() { kill "${2:--TERM}" "$(pid_of "$1")" 2>/dev/null; }
+
+# press <peer> <key>: hold a key in the peer's window. Without a window
+# manager focus can miss, so callers check the effect and retry.
+press() {
+  local win
+  win=$(DISPLAY=$DISPLAY_NUM xdotool search --sync --onlyvisible --pid "$(pid_of "$1")" 2>/dev/null | head -1)
+  [ -n "$win" ] || return 1
+  DISPLAY=$DISPLAY_NUM xdotool windowraise "$win" windowfocus --sync "$win" \
+    keydown "$2" sleep 0.3 keyup "$2" 2>/dev/null
+}
+
+# room_of <peer>: the room URL the peer dialed (versioned by the app).
+room_of() { strip "$1" | grep -o 'room=ws://[^ ]*' | tail -1 | cut -d= -f2-; }
 strip() { sed 's/\x1b\[[0-9;]*m//g' "$WORK/$1.log"; }
 has_log() { strip "$1" | grep -qE "$2"; }
 

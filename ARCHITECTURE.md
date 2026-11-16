@@ -442,6 +442,8 @@ Three-layer determinism defense:
 
 **Layer 2: Cross-platform replay matrix.** `replay_sync` binary runs `tests/demos/canonical/match_v1.bmrg` headlessly on each platform, dumps per-frame per-component checksum log. Diff job compares all logs against linux-x64 baseline. Platforms: linux-x64, linux-aarch64 (qemu), macos-14 (native ARM), aarch64-linux-android (now `--workspace --exclude app --tests`: build-only, no replay-sync run — see `.github/workflows/determinism.yml`). `app` is excluded on every non-native cross target because its `bevy_audio` → `cpal` → `alsa-sys` and `bevy_winit` → `wgpu` chains need target-side system libs the cross-toolchains don't ship.
 
+**Netplay gate (beside the three layers).** Determinism says two sims agree; it says nothing about whether two phones meet, end a match the same way and file the same result. `.github/workflows/netplay.yml` runs real app processes against a real matchbox room server under Xvfb + lavapipe (`scripts/*_smoke.sh` on `scripts/lib/peers.sh`): on pull requests touching the network, the goodbye, pause, sync-budget and every `endings_smoke.sh` scenario; on main and nightly, a strict full match then LEAVE, and a full match under netem (40 ms ± 10 ms, 1 % loss). In-process, `crates/net_harness` drives two ggrs sessions over a late, lossy link inside `cargo test`.
+
 **Layer 3: Per-component checksum dump for diagnostics.** When the diff job finds a divergence, the log already says which component column differs at which frame. `scripts/diagnose_desync.sh` re-runs `replay_sync --dump-state-at <frame>` on both platforms and prints a side-by-side comparison.
 
 Soak schedule (current; the four-tier ladder below is the eventual target):
