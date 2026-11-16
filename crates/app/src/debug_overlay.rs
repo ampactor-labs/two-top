@@ -42,10 +42,13 @@ impl Plugin for DebugInputOverlayPlugin {
 fn spawn_overlay(mut commands: Commands) {
     commands.spawn((
         Text2d::new(String::new()),
-        TextFont {
-            font_size: 13.0,
-            ..default()
-        },
+        (
+            TextFont {
+                font_size: crate::ui::TextRole::Debug.default_size(),
+                ..default()
+            },
+            crate::ui::TextRole::Debug,
+        ),
         TextColor(render::palette::HIT_WHITE),
         // Text2d anchors at its bounding-box center, so offset inward by
         // ~half the expected block size from the top-left screen corner.

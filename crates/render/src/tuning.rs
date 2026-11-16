@@ -28,6 +28,10 @@ pub struct Tuning {
     pub trail: Trail,
     pub camera: Camera,
     pub haptics: Haptics,
+    /// Text sizes by role name (`app::ui::TextRole`), overriding the
+    /// role's default: `{ "text": { "ScreenTitle": 90 } }`. Empty: every
+    /// role at its default.
+    pub text: std::collections::BTreeMap<String, f32>,
 }
 
 /// Screen shake: trauma in, camera kick out (`ScreenShake`).

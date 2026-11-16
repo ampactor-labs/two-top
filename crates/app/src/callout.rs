@@ -38,8 +38,6 @@ impl Callout {
 /// stakes (0.325) and the countdown glyph at the centre, over the far half
 /// of the floor, clear of both thumbs.
 pub const LINE_FY: f32 = 0.395;
-/// Its size.
-const FONT: f32 = 40.0;
 /// The plate's height per line of text, and its padding (world units).
 const PLATE_LINE_H: f32 = 52.0;
 const PLATE_PAD: f32 = 28.0;
@@ -65,10 +63,13 @@ fn spawn_callout(mut commands: Commands) {
     commands.spawn((
         CalloutText,
         Text2d::new(String::new()),
-        TextFont {
-            font_size: FONT,
-            ..default()
-        },
+        (
+            TextFont {
+                font_size: crate::ui::TextRole::Callout.default_size(),
+                ..default()
+            },
+            crate::ui::TextRole::Callout,
+        ),
         TextColor(render::palette::HOT_BONE),
         // Lines break where the speaker breaks them, never mid-phrase.
         TextLayout {

@@ -289,10 +289,13 @@ fn spawn_setting_rows(mut commands: Commands) {
     commands.spawn((
         SettingsPiece::Heading,
         Text2d::new("SETTINGS"),
-        TextFont {
-            font_size: 84.0,
-            ..default()
-        },
+        (
+            TextFont {
+                font_size: crate::ui::TextRole::ScreenTitle.default_size(),
+                ..default()
+            },
+            crate::ui::TextRole::ScreenTitle,
+        ),
         TextColor(render::palette::HOT_BONE),
         TextLayout::new_with_justify(Justify::Center),
         crate::anchor::ScreenAnchor::new(0.0, crate::ui::anchor_y(HEADING_FY), 0.0, 0.0),
@@ -303,10 +306,13 @@ fn spawn_setting_rows(mut commands: Commands) {
         commands.spawn((
             SettingsPiece::GroupHeader,
             Text2d::new(name.to_string()),
-            TextFont {
-                font_size: 24.0,
-                ..default()
-            },
+            (
+                TextFont {
+                    font_size: crate::ui::TextRole::GroupHeader.default_size(),
+                    ..default()
+                },
+                crate::ui::TextRole::GroupHeader,
+            ),
             TextColor(render::palette::COLD_STONE),
             TextLayout::new_with_justify(Justify::Center),
             crate::anchor::ScreenAnchor::new(
@@ -346,10 +352,13 @@ fn spawn_setting_rows(mut commands: Commands) {
         commands.spawn((
             SettingsPiece::Row(row, RowPart::Label),
             Text2d::new(String::new()),
-            TextFont {
-                font_size: 40.0,
-                ..default()
-            },
+            (
+                TextFont {
+                    font_size: crate::ui::TextRole::SettingLabel.default_size(),
+                    ..default()
+                },
+                crate::ui::TextRole::SettingLabel,
+            ),
             TextColor(render::palette::BONE),
             TextLayout {
                 justify: Justify::Center,
@@ -366,10 +375,13 @@ fn spawn_setting_rows(mut commands: Commands) {
             commands.spawn((
                 SettingsPiece::Row(row, part),
                 Text2d::new(glyph.to_string()),
-                TextFont {
-                    font_size: 46.0,
-                    ..default()
-                },
+                (
+                    TextFont {
+                        font_size: crate::ui::TextRole::SettingValue.default_size(),
+                        ..default()
+                    },
+                    crate::ui::TextRole::SettingValue,
+                ),
                 TextColor(render::palette::HOT_BONE),
                 TextLayout::new_with_justify(Justify::Center),
                 crate::anchor::ScreenAnchor::new(0.0, anchor_y, dx, 0.0),
@@ -385,13 +397,13 @@ fn spawn_setting_rows(mut commands: Commands) {
             SettingsAction::Back,
             BACK_BAND,
             Vec2::new(340.0, 76.0),
-            40.0,
+            crate::ui::TextRole::Back,
         ),
         (
             SettingsAction::HowToPlay,
             HOW_TO_PLAY_BAND,
             Vec2::new(420.0, 64.0),
-            30.0,
+            crate::ui::TextRole::SettingsHowTo,
         ),
     ] {
         for role in [

@@ -346,10 +346,13 @@ fn spawn_name_ui(mut commands: Commands, netplay: Res<NetplayConfig>) {
     commands.spawn((
         TitleName,
         Text2d::new(String::new()),
-        TextFont {
-            font_size: 44.0,
-            ..default()
-        },
+        (
+            TextFont {
+                font_size: crate::ui::TextRole::TitleName.default_size(),
+                ..default()
+            },
+            crate::ui::TextRole::TitleName,
+        ),
         TextColor(render::palette::HOT_BONE),
         TextLayout::new_with_justify(Justify::Center),
         ScreenAnchor::new(0.0, NAME_ANCHOR_Y, 0.0, 0.0),
@@ -359,11 +362,14 @@ fn spawn_name_ui(mut commands: Commands, netplay: Res<NetplayConfig>) {
     commands.spawn((
         EntryLine,
         Text2d::new(String::new()),
-        TextFont {
-            // Sized so a full 12 glyphs still fit the width with margin.
-            font_size: 64.0,
-            ..default()
-        },
+        (
+            TextFont {
+                // Sized so a full 12 glyphs still fit the width with margin.
+                font_size: crate::ui::TextRole::NameEntry.default_size(),
+                ..default()
+            },
+            crate::ui::TextRole::NameEntry,
+        ),
         TextColor(render::palette::HOT_BONE),
         TextLayout {
             justify: Justify::Center,
@@ -373,14 +379,17 @@ fn spawn_name_ui(mut commands: Commands, netplay: Res<NetplayConfig>) {
         Transform::from_xyz(0.0, 0.0, 201.0),
         Visibility::Hidden,
     ));
-    let mut key = |k: GridKey, fx: f32, fy: f32, size: f32, color: Color| {
+    let mut key = |k: GridKey, fx: f32, fy: f32, size: crate::ui::TextRole, color: Color| {
         commands.spawn((
             k,
             Text2d::new(String::new()),
-            TextFont {
-                font_size: size,
-                ..default()
-            },
+            (
+                TextFont {
+                    font_size: size.default_size(),
+                    ..default()
+                },
+                size,
+            ),
             TextColor(color),
             TextLayout::new_with_justify(Justify::Center),
             ScreenAnchor::new(crate::ui::anchor_x(fx), crate::ui::anchor_y(fy), 0.0, 0.0),
@@ -395,31 +404,37 @@ fn spawn_name_ui(mut commands: Commands, netplay: Res<NetplayConfig>) {
                 GridKey::Letter { row, col },
                 fx,
                 fy,
-                46.0,
+                crate::ui::TextRole::NameKey,
                 render::palette::BONE,
             );
         }
     }
-    key(GridKey::Prompt, 0.5, PROMPT_FY, 34.0, render::palette::BONE);
+    key(
+        GridKey::Prompt,
+        0.5,
+        PROMPT_FY,
+        crate::ui::TextRole::NamePrompt,
+        render::palette::BONE,
+    );
     key(
         GridKey::Skip,
         0.5,
         (crate::ui::TOP_EXIT.0 + crate::ui::TOP_EXIT.1) * 0.5,
-        30.0,
+        crate::ui::TextRole::NameSkip,
         render::palette::COLD_STONE,
     );
     key(
         GridKey::Del,
         0.28,
         ACTION_ROW_Y,
-        34.0,
+        crate::ui::TextRole::NameDel,
         render::palette::COLD_STONE,
     );
     key(
         GridKey::Done,
         0.72,
         ACTION_ROW_Y,
-        40.0,
+        crate::ui::TextRole::NameDone,
         render::palette::SPARK,
     );
 }

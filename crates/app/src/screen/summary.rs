@@ -453,7 +453,7 @@ pub(super) fn spawn_summary_buttons(commands: &mut Commands) {
             role,
             Vec2::new(0.0, PLAY_ANCHOR_Y),
             Vec2::new(760.0, 150.0),
-            44.0,
+            crate::ui::TextRole::ButtonPrimary,
             &mut |ec, role| {
                 ec.insert(SummaryButton {
                     action: SummaryAction::Primary,
@@ -468,7 +468,7 @@ pub(super) fn spawn_summary_buttons(commands: &mut Commands) {
             role,
             Vec2::new(0.0, TOP_EXIT_ANCHOR_Y),
             Vec2::new(340.0, 76.0),
-            30.0,
+            crate::ui::TextRole::ButtonExit,
             &mut |ec, role| {
                 ec.insert(SummaryButton {
                     action: SummaryAction::Exit,

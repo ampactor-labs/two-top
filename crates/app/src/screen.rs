@@ -456,7 +456,7 @@ pub fn spawn_button_part(
     role: BtnRole,
     anchor: Vec2,
     fill: Vec2,
-    font: f32,
+    font: crate::ui::TextRole,
     insert_marker: &mut impl FnMut(&mut bevy::ecs::system::EntityCommands, BtnRole),
 ) {
     let mut ec = match role {
@@ -482,10 +482,13 @@ pub fn spawn_button_part(
         )),
         BtnRole::Label => commands.spawn((
             Text2d::new(String::new()),
-            TextFont {
-                font_size: font,
-                ..default()
-            },
+            (
+                TextFont {
+                    font_size: font.default_size(),
+                    ..default()
+                },
+                font,
+            ),
             TextColor(render::palette::HOT_BONE),
             // Never wrap a button label onto two lines — keep it on the box.
             TextLayout {
@@ -506,7 +509,7 @@ fn spawn_title_button(
     action: TitleAction,
     anchor: Vec2,
     fill: Vec2,
-    font: f32,
+    font: crate::ui::TextRole,
 ) {
     for role in [BtnRole::Border, BtnRole::Fill, BtnRole::Label] {
         spawn_button_part(commands, role, anchor, fill, font, &mut |ec, role| {
@@ -521,10 +524,13 @@ fn spawn_overlays(mut commands: Commands) {
     commands.spawn((
         TitleBanner,
         Text2d::new("2-TOP"),
-        TextFont {
-            font_size: 110.0,
-            ..default()
-        },
+        (
+            TextFont {
+                font_size: crate::ui::TextRole::Wordmark.default_size(),
+                ..default()
+            },
+            crate::ui::TextRole::Wordmark,
+        ),
         TextColor(render::palette::HOT_BONE),
         TextLayout::new_with_justify(Justify::Center),
         ScreenAnchor::new(0.0, 0.80, 0.0, 0.0),
@@ -536,10 +542,13 @@ fn spawn_overlays(mut commands: Commands) {
     commands.spawn((
         TitleOverlay,
         Text2d::new(String::new()),
-        TextFont {
-            font_size: 34.0,
-            ..default()
-        },
+        (
+            TextFont {
+                font_size: crate::ui::TextRole::TitleOverlay.default_size(),
+                ..default()
+            },
+            crate::ui::TextRole::TitleOverlay,
+        ),
         TextColor(render::palette::BONE),
         TextLayout::new_with_justify(Justify::Center),
         TextBounds::new_horizontal(TITLE_BODY_WIDTH),
@@ -554,7 +563,7 @@ fn spawn_overlays(mut commands: Commands) {
         TitleAction::Play,
         Vec2::new(0.0, PLAY_ANCHOR_Y),
         Vec2::new(760.0, 150.0),
-        48.0,
+        crate::ui::TextRole::TitlePlay,
     );
     // The secondary row: everything you reach for occasionally, in one
     // line, out of the way of the table and the primary.
@@ -563,28 +572,28 @@ fn spawn_overlays(mut commands: Commands) {
         TitleAction::Practice,
         Vec2::new(-0.72, SECONDARY_ANCHOR_Y),
         Vec2::new(250.0, 92.0),
-        22.0,
+        crate::ui::TextRole::TitleMenu,
     );
     spawn_title_button(
         &mut commands,
         TitleAction::Rivals,
         Vec2::new(-0.24, SECONDARY_ANCHOR_Y),
         Vec2::new(230.0, 92.0),
-        22.0,
+        crate::ui::TextRole::TitleMenu,
     );
     spawn_title_button(
         &mut commands,
         TitleAction::Replays,
         Vec2::new(0.24, SECONDARY_ANCHOR_Y),
         Vec2::new(230.0, 92.0),
-        22.0,
+        crate::ui::TextRole::TitleMenu,
     );
     spawn_title_button(
         &mut commands,
         TitleAction::Settings,
         Vec2::new(0.72, SECONDARY_ANCHOR_Y),
         Vec2::new(240.0, 92.0),
-        22.0,
+        crate::ui::TextRole::TitleMenu,
     );
     // Summary overlay — screen-centered (the kill-cam holds zoomed-in on
     // MatchOver, so a world-parked summary would sit off-center), shown only
@@ -593,12 +602,15 @@ fn spawn_overlays(mut commands: Commands) {
     commands.spawn((
         SummaryOverlay,
         Text2d::new(String::new()),
-        TextFont {
-            // 56, not 72: the card carries full sentences (rivalry line,
-            // replay note) and they must fit the bounds below unwrapped.
-            font_size: 56.0,
-            ..default()
-        },
+        (
+            TextFont {
+                // 56, not 72: the card carries full sentences (rivalry line,
+                // replay note) and they must fit the bounds below unwrapped.
+                font_size: crate::ui::TextRole::SummaryCard.default_size(),
+                ..default()
+            },
+            crate::ui::TextRole::SummaryCard,
+        ),
         TextColor(render::palette::HOT_BONE),
         TextLayout::new_with_justify(Justify::Center),
         // Wide explicit bounds — without them Bevy wraps Text2d at awkward

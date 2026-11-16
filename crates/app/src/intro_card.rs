@@ -47,14 +47,20 @@ pub fn intro_lines(
 }
 
 fn spawn_intro_card(mut commands: Commands) {
-    for (line, fy, size) in [(0usize, 0.26, 56.0), (1usize, 0.325, 32.0)] {
+    for (line, fy, size) in [
+        (0usize, 0.26, crate::ui::TextRole::IntroTitle),
+        (1usize, 0.325, crate::ui::TextRole::IntroSub),
+    ] {
         commands.spawn((
             IntroCardLine(line),
             Text2d::new(String::new()),
-            TextFont {
-                font_size: size,
-                ..default()
-            },
+            (
+                TextFont {
+                    font_size: size.default_size(),
+                    ..default()
+                },
+                size,
+            ),
             TextColor(if line == 0 {
                 render::palette::HOT_BONE
             } else {

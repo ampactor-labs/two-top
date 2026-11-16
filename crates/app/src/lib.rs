@@ -354,6 +354,7 @@ pub fn run() {
     );
     #[cfg(not(any(target_os = "android", target_family = "wasm")))]
     app.add_systems(Update, platform::desktop::set_window_icon);
+    app.add_systems(Update, ui::apply_text_roles);
     // The nudges watch the local player's DASH presses where inputs are
     // made (a directionless press does nothing the sim could show).
     app.add_systems(
@@ -525,10 +526,13 @@ fn setup(
     if profile.shows_keyboard_legend {
         commands.spawn((
             Text2d::new(keyboard_legend(profile.fullscreen_key)),
-            TextFont {
-                font_size: 26.0,
-                ..default()
-            },
+            (
+                TextFont {
+                    font_size: crate::ui::TextRole::KeyLegend.default_size(),
+                    ..default()
+                },
+                crate::ui::TextRole::KeyLegend,
+            ),
             TextColor(render::palette::BONE.with_alpha(0.55)),
             bevy::text::TextBounds::new_horizontal(1080.0),
             anchor::ScreenAnchor::new(0.0, -1.0, 0.0, 90.0),

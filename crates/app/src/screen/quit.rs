@@ -35,7 +35,7 @@ pub(super) fn spawn_quit_button(commands: &mut Commands) {
             role,
             Vec2::new(QUIT_BTN_ANCHOR_X, TOP_EXIT_ANCHOR_Y),
             Vec2::new(190.0, 62.0),
-            24.0,
+            crate::ui::TextRole::ButtonQuit,
             &mut |ec, role| {
                 ec.insert(QuitButton { role });
             },

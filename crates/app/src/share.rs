@@ -266,10 +266,13 @@ fn spawn_share_labels(
         commands.spawn((
             ShareLabel { on_summary },
             Text2d::new(String::new()),
-            TextFont {
-                font_size: 30.0,
-                ..default()
-            },
+            (
+                TextFont {
+                    font_size: crate::ui::TextRole::ShareLabel.default_size(),
+                    ..default()
+                },
+                crate::ui::TextRole::ShareLabel,
+            ),
             TextColor(render::palette::SPARK),
             TextLayout::new_with_justify(Justify::Center),
             ScreenAnchor::new(crate::ui::anchor_x(fx), crate::ui::anchor_y(fy), 0.0, 0.0),
@@ -491,10 +494,13 @@ fn spawn_overlay(commands: &mut Commands, images: &mut Assets<Image>, url: &str)
     commands.spawn((
         ShareOverlayPiece,
         Text2d::new(url.to_string()),
-        TextFont {
-            font_size: 22.0,
-            ..default()
-        },
+        (
+            TextFont {
+                font_size: crate::ui::TextRole::ShareUrl.default_size(),
+                ..default()
+            },
+            crate::ui::TextRole::ShareUrl,
+        ),
         TextColor(render::palette::BONE),
         TextLayout::new_with_justify(Justify::Center),
         ScreenAnchor::new(0.0, -0.62, 0.0, 0.0),
@@ -503,10 +509,13 @@ fn spawn_overlay(commands: &mut Commands, images: &mut Assets<Image>, url: &str)
     commands.spawn((
         ShareOverlayPiece,
         Text2d::new("TAP TO CLOSE"),
-        TextFont {
-            font_size: 20.0,
-            ..default()
-        },
+        (
+            TextFont {
+                font_size: crate::ui::TextRole::ShareDismiss.default_size(),
+                ..default()
+            },
+            crate::ui::TextRole::ShareDismiss,
+        ),
         TextColor(render::palette::COLD_STONE),
         TextLayout::new_with_justify(Justify::Center),
         ScreenAnchor::new(0.0, -0.76, 0.0, 0.0),

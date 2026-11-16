@@ -162,10 +162,13 @@ fn spawn_controls(
     commands.spawn((
         DashLabel,
         Text2d::new("DASH"),
-        TextFont {
-            font_size: 40.0,
-            ..default()
-        },
+        (
+            TextFont {
+                font_size: crate::ui::TextRole::TouchDash.default_size(),
+                ..default()
+            },
+            crate::ui::TextRole::TouchDash,
+        ),
         TextColor(dash_idle()),
         TextLayout::new_with_justify(Justify::Center),
         dash_anchor(false),
@@ -190,10 +193,13 @@ fn spawn_controls(
     commands.spawn((
         TauntLabel,
         Text2d::new("TAUNT"),
-        TextFont {
-            font_size: 24.0,
-            ..default()
-        },
+        (
+            TextFont {
+                font_size: crate::ui::TextRole::TouchTaunt.default_size(),
+                ..default()
+            },
+            crate::ui::TextRole::TouchTaunt,
+        ),
         TextColor(taunt_idle()),
         TextLayout::new_with_justify(Justify::Center),
         taunt_anchor(),
@@ -222,10 +228,13 @@ fn spawn_controls(
         commands.spawn((
             zone,
             Text2d::new(text),
-            TextFont {
-                font_size: 26.0,
-                ..default()
-            },
+            (
+                TextFont {
+                    font_size: crate::ui::TextRole::TouchHint.default_size(),
+                    ..default()
+                },
+                crate::ui::TextRole::TouchHint,
+            ),
             TextColor(render::palette::COLD_STONE.with_alpha(0.55)),
             TextLayout::new_with_justify(Justify::Center),
             ScreenAnchor::new(fx, fy, 0.0, 0.0),

@@ -260,7 +260,7 @@ fn spawn_pad(mut commands: Commands, netplay: Res<NetplayConfig>) {
                 role,
                 Vec2::new(anchor_x, MODE_TOGGLE_ANCHOR_Y),
                 Vec2::new(480.0, 76.0),
-                28.0,
+                crate::ui::TextRole::PillLabel,
                 &mut |ec, role| {
                     ec.insert(ModePill { private, role });
                 },
@@ -273,10 +273,13 @@ fn spawn_pad(mut commands: Commands, netplay: Res<NetplayConfig>) {
         commands.spawn((
             CodeCell(cell),
             Text2d::new(String::new()),
-            TextFont {
-                font_size: 54.0,
-                ..default()
-            },
+            (
+                TextFont {
+                    font_size: crate::ui::TextRole::CodeGlyph.default_size(),
+                    ..default()
+                },
+                crate::ui::TextRole::CodeGlyph,
+            ),
             TextColor(render::palette::P1_CYAN),
             ScreenAnchor::new(crate::ui::anchor_x(fx), DIAL_ANCHOR_Y, 0.0, 0.0),
             Transform::from_xyz(0.0, 0.0, 200.0),
@@ -510,10 +513,13 @@ fn update_join_qr(
         commands.spawn((
             JoinQrCaption,
             Text2d::new(QR_CAPTION.to_string()),
-            TextFont {
-                font_size: 26.0,
-                ..default()
-            },
+            (
+                TextFont {
+                    font_size: crate::ui::TextRole::QrCaption.default_size(),
+                    ..default()
+                },
+                crate::ui::TextRole::QrCaption,
+            ),
             TextColor(render::palette::BONE),
             TextLayout {
                 justify: Justify::Center,

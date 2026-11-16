@@ -42,10 +42,13 @@ fn spawn_summoning(mut commands: Commands) {
     commands.spawn((
         SummoningText,
         Text2d::new(String::new()),
-        TextFont {
-            font_size: 54.0,
-            ..default()
-        },
+        (
+            TextFont {
+                font_size: crate::ui::TextRole::Summoning.default_size(),
+                ..default()
+            },
+            crate::ui::TextRole::Summoning,
+        ),
         TextColor(render::palette::HOT_BONE),
         TextLayout::new_with_justify(Justify::Center),
         // Wide bounds: without them Bevy wraps at awkward widths on the
@@ -220,10 +223,13 @@ fn code_spaced(code: &str) -> String {
 fn spawn_overlay(mut commands: Commands) {
     commands.spawn((
         Text2d::new(String::new()),
-        TextFont {
-            font_size: 13.0,
-            ..default()
-        },
+        (
+            TextFont {
+                font_size: crate::ui::TextRole::Debug.default_size(),
+                ..default()
+            },
+            crate::ui::TextRole::Debug,
+        ),
         // Yellow tint distinguishes lobby state from the cyan-ish
         // input debug overlay so they're trivially separable on
         // screen even before reading the actual text.

@@ -136,3 +136,329 @@ mod tests {
         assert!(!overlaps(BACK, TOP_EXIT));
     }
 }
+
+// ---- Text roles: every text size in one table ----
+
+/// What a piece of text is, and so how big it is drawn. `default_size` is
+/// the one table of every text size in the game (today's values, so the
+/// visuals audit starts from a pixel-identical baseline); `Tuning.text`
+/// overrides any role by name and live-reloads (`TWOTOP_TUNING`), and
+/// [`apply_text_roles`] resizes text already on screen. A role sits beside
+/// its `TextFont` in the spawn bundle.
+#[derive(Component, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TextRole {
+    /// A full screen's title (REPLAYS, SETTINGS).
+    ScreenTitle,
+    /// The line under a screen title.
+    ScreenSubtitle,
+    /// A page heading (THE TABLES, THE RIVALS).
+    PageTitle,
+    /// Every BACK.
+    Back,
+    /// The Title's 2-TOP.
+    Wordmark,
+    /// The player's name on the Title.
+    TitleName,
+    /// The Title's status lines.
+    TitleOverlay,
+    /// The Title's main button.
+    TitlePlay,
+    /// The Title's smaller buttons.
+    TitleMenu,
+    /// The match summary card.
+    SummaryCard,
+    /// A summary's primary button.
+    ButtonPrimary,
+    /// A summary's LEAVE / LOBBY.
+    ButtonExit,
+    /// The in-match QUIT.
+    ButtonQuit,
+    /// The room-mode pills.
+    PillLabel,
+    /// A glyph of the private dial.
+    CodeGlyph,
+    /// The caption under a join QR.
+    QrCaption,
+    /// The name being dialed.
+    NameEntry,
+    /// A letter key of the name pad.
+    NameKey,
+    /// The name pad's prompt.
+    NamePrompt,
+    /// The name pad's SKIP.
+    NameSkip,
+    /// The name pad's DEL.
+    NameDel,
+    /// The name pad's DONE.
+    NameDone,
+    /// A coaching callout plate.
+    Callout,
+    /// The DASH zone label.
+    TouchDash,
+    /// The TAUNT zone label.
+    TouchTaunt,
+    /// A touch-control hint.
+    TouchHint,
+    /// A notice line on a list screen.
+    Notice,
+    /// A list row (a tape).
+    ListRow,
+    /// A list row's detail line.
+    ListDetail,
+    /// A list row's fine print.
+    ListFine,
+    /// The theater's marquee.
+    Marquee,
+    /// An arena's name on the roster.
+    RosterName,
+    /// An arena's rule line.
+    RosterRule,
+    /// The desktop keyboard legend.
+    KeyLegend,
+    /// The SHARE label.
+    ShareLabel,
+    /// A share link under its QR.
+    ShareUrl,
+    /// TAP TO CLOSE.
+    ShareDismiss,
+    /// Developer overlays.
+    Debug,
+    /// A settings group header.
+    GroupHeader,
+    /// A setting's name.
+    SettingLabel,
+    /// A setting's value.
+    SettingValue,
+    /// Settings' HOW TO PLAY.
+    SettingsHowTo,
+    /// The online wait's words.
+    Summoning,
+    /// The crash notice.
+    CrashNotice,
+    /// The intro card's arena name.
+    IntroTitle,
+    /// The intro card's rule line.
+    IntroSub,
+    /// NO RIVALS YET.
+    RivalsEmpty,
+    /// A rival's name in the list.
+    RivalRowName,
+    /// A rival row's standing.
+    RivalRowDetail,
+    /// A rival row's second line.
+    RivalRowSub,
+    /// A rival's name on their page.
+    RivalName,
+    /// A rival's meetings and standing.
+    RivalStanding,
+    /// A fact about a rivalry.
+    RivalFact,
+    /// SPAR THEIR SHADE.
+    RivalShade,
+    /// No tapes of a rivalry.
+    RivalNoTapes,
+    /// A rivalry's tape.
+    RivalTape,
+}
+
+impl TextRole {
+    pub const ALL: [TextRole; 56] = [
+        TextRole::ScreenTitle,
+        TextRole::ScreenSubtitle,
+        TextRole::PageTitle,
+        TextRole::Back,
+        TextRole::Wordmark,
+        TextRole::TitleName,
+        TextRole::TitleOverlay,
+        TextRole::TitlePlay,
+        TextRole::TitleMenu,
+        TextRole::SummaryCard,
+        TextRole::ButtonPrimary,
+        TextRole::ButtonExit,
+        TextRole::ButtonQuit,
+        TextRole::PillLabel,
+        TextRole::CodeGlyph,
+        TextRole::QrCaption,
+        TextRole::NameEntry,
+        TextRole::NameKey,
+        TextRole::NamePrompt,
+        TextRole::NameSkip,
+        TextRole::NameDel,
+        TextRole::NameDone,
+        TextRole::Callout,
+        TextRole::TouchDash,
+        TextRole::TouchTaunt,
+        TextRole::TouchHint,
+        TextRole::Notice,
+        TextRole::ListRow,
+        TextRole::ListDetail,
+        TextRole::ListFine,
+        TextRole::Marquee,
+        TextRole::RosterName,
+        TextRole::RosterRule,
+        TextRole::KeyLegend,
+        TextRole::ShareLabel,
+        TextRole::ShareUrl,
+        TextRole::ShareDismiss,
+        TextRole::Debug,
+        TextRole::GroupHeader,
+        TextRole::SettingLabel,
+        TextRole::SettingValue,
+        TextRole::SettingsHowTo,
+        TextRole::Summoning,
+        TextRole::CrashNotice,
+        TextRole::IntroTitle,
+        TextRole::IntroSub,
+        TextRole::RivalsEmpty,
+        TextRole::RivalRowName,
+        TextRole::RivalRowDetail,
+        TextRole::RivalRowSub,
+        TextRole::RivalName,
+        TextRole::RivalStanding,
+        TextRole::RivalFact,
+        TextRole::RivalShade,
+        TextRole::RivalNoTapes,
+        TextRole::RivalTape,
+    ];
+
+    /// The size this role is drawn at with no tuning override.
+    pub const fn default_size(self) -> f32 {
+        match self {
+            TextRole::ScreenTitle => 84.0,
+            TextRole::ScreenSubtitle => 32.0,
+            TextRole::PageTitle => 72.0,
+            TextRole::Back => 40.0,
+            TextRole::Wordmark => 110.0,
+            TextRole::TitleName => 44.0,
+            TextRole::TitleOverlay => 34.0,
+            TextRole::TitlePlay => 48.0,
+            TextRole::TitleMenu => 22.0,
+            TextRole::SummaryCard => 56.0,
+            TextRole::ButtonPrimary => 44.0,
+            TextRole::ButtonExit => 30.0,
+            TextRole::ButtonQuit => 24.0,
+            TextRole::PillLabel => 28.0,
+            TextRole::CodeGlyph => 54.0,
+            TextRole::QrCaption => 26.0,
+            TextRole::NameEntry => 64.0,
+            TextRole::NameKey => 46.0,
+            TextRole::NamePrompt => 34.0,
+            TextRole::NameSkip => 30.0,
+            TextRole::NameDel => 34.0,
+            TextRole::NameDone => 40.0,
+            TextRole::Callout => 40.0,
+            TextRole::TouchDash => 40.0,
+            TextRole::TouchTaunt => 24.0,
+            TextRole::TouchHint => 26.0,
+            TextRole::Notice => 30.0,
+            TextRole::ListRow => 34.0,
+            TextRole::ListDetail => 24.0,
+            TextRole::ListFine => 18.0,
+            TextRole::Marquee => 34.0,
+            TextRole::RosterName => 44.0,
+            TextRole::RosterRule => 26.0,
+            TextRole::KeyLegend => 26.0,
+            TextRole::ShareLabel => 30.0,
+            TextRole::ShareUrl => 22.0,
+            TextRole::ShareDismiss => 20.0,
+            TextRole::Debug => 13.0,
+            TextRole::GroupHeader => 24.0,
+            TextRole::SettingLabel => 40.0,
+            TextRole::SettingValue => 46.0,
+            TextRole::SettingsHowTo => 30.0,
+            TextRole::Summoning => 54.0,
+            TextRole::CrashNotice => 26.0,
+            TextRole::IntroTitle => 56.0,
+            TextRole::IntroSub => 32.0,
+            TextRole::RivalsEmpty => 34.0,
+            TextRole::RivalRowName => 40.0,
+            TextRole::RivalRowDetail => 24.0,
+            TextRole::RivalRowSub => 34.0,
+            TextRole::RivalName => 64.0,
+            TextRole::RivalStanding => 36.0,
+            TextRole::RivalFact => 28.0,
+            TextRole::RivalShade => 32.0,
+            TextRole::RivalNoTapes => 26.0,
+            TextRole::RivalTape => 28.0,
+        }
+    }
+
+    /// The role's name, as `Tuning.text` keys it (`"ScreenTitle"`).
+    pub fn name(self) -> String {
+        format!("{self:?}")
+    }
+
+    /// The size under `tuning`: its override for this role, else the default.
+    pub fn size(self, tuning: &render::tuning::Tuning) -> f32 {
+        tuning
+            .text
+            .get(&self.name())
+            .copied()
+            .unwrap_or(self.default_size())
+    }
+}
+
+/// Keys of `Tuning.text` that name no [`TextRole`] (a typo in a tuning
+/// file would otherwise change nothing, silently). Pure.
+pub fn unknown_text_roles(tuning: &render::tuning::Tuning) -> Vec<String> {
+    let known: Vec<String> = TextRole::ALL.iter().map(|r| r.name()).collect();
+    tuning
+        .text
+        .keys()
+        .filter(|k| !known.contains(k))
+        .cloned()
+        .collect()
+}
+
+/// `Update`: size text by its role: on spawn, and for everything on screen
+/// whenever `Tuning` changes (a live reload resizes text already shown).
+pub fn apply_text_roles(
+    tuning: Option<Res<render::tuning::Tuning>>,
+    mut q: Query<(Ref<TextRole>, &mut TextFont)>,
+) {
+    let Some(tuning) = tuning else {
+        return;
+    };
+    let all = tuning.is_changed();
+    if all {
+        for key in unknown_text_roles(&tuning) {
+            tracing::warn!(target: "two_top::tuning", key, "tuning names a text role that does not exist");
+        }
+    }
+    for (role, mut font) in &mut q {
+        if !(all || role.is_added()) {
+            continue;
+        }
+        let size = role.size(&tuning);
+        if font.font_size != size {
+            font.font_size = size;
+        }
+    }
+}
+
+#[cfg(test)]
+mod text_role_tests {
+    use super::*;
+
+    #[test]
+    fn every_role_is_listed_once_with_a_size() {
+        let mut names = std::collections::BTreeSet::new();
+        for role in TextRole::ALL {
+            assert!(role.default_size() > 0.0, "{role:?}");
+            assert!(names.insert(role.name()), "{role:?} twice");
+        }
+    }
+
+    #[test]
+    fn a_tuning_override_resizes_one_role_only() {
+        let tuning =
+            render::tuning::Tuning::from_overrides(r#"{ "text": { "ScreenTitle": 90.0 } }"#)
+                .unwrap();
+        assert_eq!(TextRole::ScreenTitle.size(&tuning), 90.0);
+        assert_eq!(TextRole::Back.size(&tuning), TextRole::Back.default_size());
+        assert!(unknown_text_roles(&tuning).is_empty());
+        let typo = render::tuning::Tuning::from_overrides(r#"{ "text": { "ScreenTitel": 90.0 } }"#)
+            .unwrap();
+        assert_eq!(unknown_text_roles(&typo), ["ScreenTitel".to_string()]);
+    }
+}
