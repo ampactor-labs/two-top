@@ -511,7 +511,7 @@ fn replays_input(world: &mut World) {
     // re-rolling forever).
     static AUTOPLAYED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
     if tapped_row.is_none()
-        && std::env::var("TWOTOP_AUTOPLAY_TAPE").is_ok_and(|v| v == "1")
+        && crate::config::Knob::AutoplayTape.is_on()
         && !world.resource::<TapeList>().0.is_empty()
         && !AUTOPLAYED.swap(true, std::sync::atomic::Ordering::Relaxed)
     {

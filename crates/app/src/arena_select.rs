@@ -204,7 +204,7 @@ fn restore_arena_pick(
     settings: Res<crate::settings::Settings>,
     mut selected: ResMut<SelectedArena>,
 ) {
-    let from_env = std::env::var("TWOTOP_ARENA").ok().and_then(|v| {
+    let from_env = crate::config::Knob::Arena.value().and_then(|v| {
         let v = v.trim().to_ascii_lowercase();
         if let Ok(n) = v.parse::<u8>() {
             return Some(ArenaId::from_u8(n));

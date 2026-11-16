@@ -22,7 +22,7 @@ struct Sink(Option<std::fs::File>);
 
 impl Default for Sink {
     fn default() -> Self {
-        let file = std::env::var_os("TWOTOP_STATE_LOG").and_then(|path| {
+        let file = crate::config::Knob::StateLog.value().and_then(|path| {
             std::fs::OpenOptions::new()
                 .create(true)
                 .append(true)
@@ -117,7 +117,7 @@ pub struct StateLogPlugin;
 
 impl Plugin for StateLogPlugin {
     fn build(&self, app: &mut App) {
-        if std::env::var_os("TWOTOP_STATE_LOG").is_none() {
+        if !crate::config::Knob::StateLog.is_set() {
             return;
         }
         app.add_systems(

@@ -29,6 +29,7 @@ mod audio;
 mod bot;
 mod callout;
 mod camera;
+mod config;
 mod crash_report;
 mod dark_beyond;
 mod debug_overlay;
@@ -86,7 +87,7 @@ use touch_controls::TouchControlsPlugin;
 /// to preview a tall-phone aspect). Defaults to the 2:3 portrait that frames
 /// the 1000×1500 cm arena. Android ignores this entirely.
 fn window_resolution_from_env() -> (u32, u32) {
-    let parsed = std::env::var("TWOTOP_WINDOW").ok().and_then(|s| {
+    let parsed = crate::config::Knob::Window.value().and_then(|s| {
         let (w, h) = s.split_once(['x', 'X'])?;
         Some((w.trim().parse().ok()?, h.trim().parse().ok()?))
     });
@@ -128,6 +129,7 @@ pub fn run() {
         platform::desktop::register_scheme();
     }
 
+    config::log_configuration();
     let netplay = NetplayConfig::from_env_and_args();
     let online = netplay.room_url.is_some();
     // What this device is and can do, asked once; every presentation
@@ -983,14 +985,11 @@ struct CaptureConfig {
 }
 
 fn capture_config_from_env() -> Option<CaptureConfig> {
-    let path = std::env::var("TWOTOP_CAPTURE")
-        .ok()
+    let path = crate::config::Knob::Capture
+        .value()
         .filter(|p| !p.is_empty())?;
-    let settle_frames = std::env::var("TWOTOP_CAPTURE_FRAMES")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(90);
-    let wait_matchover = std::env::var("TWOTOP_CAPTURE_ON").is_ok_and(|v| v == "matchover");
+    let settle_frames = crate::config::Knob::CaptureFrames.parse().unwrap_or(90);
+    let wait_matchover = crate::config::Knob::CaptureOn.value().as_deref() == Some("matchover");
     Some(CaptureConfig {
         path,
         settle_frames,

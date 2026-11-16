@@ -689,7 +689,8 @@ fn title_buttons_input(
     // TWOTOP_AUTOSTART=1 skips the gesture; =replays / =settings / =name
     // boot straight into those screens (headless capture verification).
     let auto = *autostart.get_or_insert_with(|| {
-        std::env::var("TWOTOP_AUTOSTART")
+        crate::config::Knob::Autostart
+            .value()
             .map(|v| match v.as_str() {
                 "1" => Some(AppScreen::InMatch),
                 "replays" => Some(AppScreen::Replays),

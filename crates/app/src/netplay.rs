@@ -156,8 +156,8 @@ pub mod fault {
     pub fn desync_at() -> Option<u32> {
         static AT: std::sync::OnceLock<Option<u32>> = std::sync::OnceLock::new();
         *AT.get_or_init(|| {
-            std::env::var("TWOTOP_FAULT")
-                .ok()
+            crate::config::Knob::Fault
+                .value()
                 .and_then(|v| v.strip_prefix("desync@")?.parse().ok())
         })
     }
@@ -239,22 +239,8 @@ impl NetplayConfig {
     pub fn from_env_and_args() -> Self {
         // Runtime env first, then the compile-time bake (the APK path —
         // note it is a URL, never a credential; see `ice_vendor`).
-        let ice_url = std::env::var("TWOTOP_ICE_URL")
-            .ok()
-            .filter(|s| !s.is_empty())
-            .or_else(|| {
-                option_env!("TWOTOP_ICE_URL")
-                    .filter(|s| !s.is_empty())
-                    .map(str::to_string)
-            });
-        let ice_key = std::env::var("TWOTOP_ICE_KEY")
-            .ok()
-            .filter(|s| !s.is_empty())
-            .or_else(|| {
-                option_env!("TWOTOP_ICE_KEY")
-                    .filter(|s| !s.is_empty())
-                    .map(str::to_string)
-            });
+        let ice_url = crate::config::Endpoint::IceUrl.get();
+        let ice_key = crate::config::Endpoint::IceKey.get();
         let mut args = std::env::args().skip(1);
         while let Some(arg) = args.next() {
             if arg == "--room" {
@@ -275,14 +261,7 @@ impl NetplayConfig {
         // Runtime env var first, then the compile-time bake. Empty strings
         // are treated as unset so a stray `TWOTOP_ROOM=` can't force a
         // bogus online boot with a blank URL.
-        let room_url = std::env::var("MATCHBOX_ROOM")
-            .ok()
-            .filter(|s| !s.is_empty())
-            .or_else(|| {
-                option_env!("TWOTOP_ROOM")
-                    .filter(|s| !s.is_empty())
-                    .map(str::to_string)
-            });
+        let room_url = crate::config::Endpoint::Room.get();
         Self {
             room_url,
             ice_url,
@@ -307,20 +286,15 @@ impl NetplayConfig {
 /// The STUN urls stay in the list either way; WebRTC only applies the
 /// credentials to the `turn:` entries.
 fn ice_server_config() -> RtcIceServerConfig {
-    let get = |run: &str, bake: Option<&'static str>| {
-        std::env::var(run)
-            .ok()
-            .filter(|s| !s.is_empty())
-            .or_else(|| bake.filter(|s| !s.is_empty()).map(str::to_string))
-    };
-    let turn_url = get("TWOTOP_TURN_URL", option_env!("TWOTOP_TURN_URL"));
+    use crate::config::Endpoint;
+    let turn_url = Endpoint::TurnUrl.get();
     let mut config = RtcIceServerConfig::default();
     let Some(url) = turn_url else {
         return config;
     };
     config.urls.push(url);
-    config.username = get("TWOTOP_TURN_USER", option_env!("TWOTOP_TURN_USER"));
-    config.credential = get("TWOTOP_TURN_PASS", option_env!("TWOTOP_TURN_PASS"));
+    config.username = Endpoint::TurnUser.get();
+    config.credential = Endpoint::TurnPass.get();
     config
 }
 

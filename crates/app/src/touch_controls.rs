@@ -107,7 +107,7 @@ impl Plugin for TouchControlsPlugin {
             .copied()
             .unwrap_or_else(crate::platform::DeviceProfile::detect)
             .touch_primary;
-        let shown = touch_primary || std::env::var("TWOTOP_SHOW_TOUCH").is_ok_and(|v| v == "1");
+        let shown = touch_primary || crate::config::Knob::ShowTouch.is_on();
         app.insert_resource(TouchControlsShown(shown))
             .init_resource::<HintsUsed>()
             .add_systems(Startup, spawn_controls)

@@ -303,7 +303,7 @@ fn enter_rivals(world: &mut World) {
     // Capture-verification reach (the TWOTOP_AUTOSTART family): land
     // straight on the deepest rivalry's detail so the harness can see
     // the facts stack, the shade band, and the tape rows without input.
-    let detail = std::env::var("TWOTOP_AUTOSTART").is_ok_and(|v| v == "rivalsdetail");
+    let detail = crate::config::Knob::Autostart.value().as_deref() == Some("rivalsdetail");
     *world.resource_mut::<RivalsView>() = if detail {
         ranked(world.resource::<CareerRecord>())
             .first()

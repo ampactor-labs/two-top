@@ -293,7 +293,7 @@ fn notice_input(touches: Res<Touches>, window: Res<WindowSize>, mut notice: ResM
 /// A synthetic notice for laying the banner out without crashing a phone:
 /// `TWOTOP_CRASH_NOTICE=1` on the desktop build.
 fn preview(mut notice: ResMut<CrashNotice>) {
-    if std::env::var("TWOTOP_CRASH_NOTICE").is_ok_and(|v| v == "1") {
+    if crate::config::Knob::CrashNotice.is_on() {
         notice.0 = Some(Evidence {
             token: u64::MAX,
             last_exit: None,

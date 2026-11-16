@@ -82,15 +82,9 @@ pub struct ShareConfig {
 
 impl ShareConfig {
     fn from_env() -> Self {
-        let get = |run: &str, bake: Option<&'static str>| {
-            std::env::var(run)
-                .ok()
-                .filter(|s| !s.is_empty())
-                .or_else(|| bake.filter(|s| !s.is_empty()).map(str::to_string))
-        };
         Self {
-            drop_url: get("TWOTOP_DROP_URL", option_env!("TWOTOP_DROP_URL")),
-            watch_url: get("TWOTOP_WATCH_URL", option_env!("TWOTOP_WATCH_URL")),
+            drop_url: crate::config::Endpoint::DropUrl.get(),
+            watch_url: crate::config::Endpoint::WatchUrl.get(),
         }
     }
 

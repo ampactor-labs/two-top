@@ -75,8 +75,7 @@ impl DeviceProfile {
         Self {
             touch_primary,
             lean_render: touch_primary,
-            core_gpu_only: !web
-                && (android || std::env::var("TWOTOP_LEAN_GPU").is_ok_and(|v| v == "1")),
+            core_gpu_only: !web && (android || crate::config::Knob::LeanGpu.is_on()),
             has_share_sheet: android,
             shows_keyboard_legend: !touch_primary,
             fullscreen_key: desktop,

@@ -136,7 +136,7 @@ pub fn begin(
 /// there: a dev and capture knob, for checking one stage without playing
 /// through the ones before it.
 fn stage_from_env() -> Option<Stage> {
-    let name = std::env::var("TWOTOP_LESSON_STAGE").ok()?;
+    let name = crate::config::Knob::LessonStage.value()?;
     Some(match name.as_str() {
         "move" => Stage::Move,
         "throw" => Stage::Throw,
@@ -191,15 +191,14 @@ fn auto_begin(
         return;
     }
     *decided = true;
-    let env_override = std::env::var("TWOTOP_FIRST_BLOOD")
-        .ok()
+    let env_override = crate::config::Knob::FirstBlood
+        .value()
         .and_then(|v| match v.as_str() {
             "1" => Some(true),
             "0" => Some(false),
             _ => None,
         });
-    let scripted = std::env::var_os("TWOTOP_CAPTURE").is_some()
-        || std::env::var_os("TWOTOP_AUTOSTART").is_some();
+    let scripted = crate::config::Knob::Capture.is_set() || crate::config::Knob::Autostart.is_set();
     let arrived_by_link = crate::platform::launch_link()
         .as_deref()
         .and_then(crate::room_code::parse_join)

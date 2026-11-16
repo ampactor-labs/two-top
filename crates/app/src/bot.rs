@@ -115,11 +115,7 @@ struct AutopilotBrain(bot_brain::Brain);
 /// nobody at either keyboard, and each needs someone playing. Read once.
 fn autopilot_tier() -> Option<u32> {
     static TIER: std::sync::OnceLock<Option<u32>> = std::sync::OnceLock::new();
-    *TIER.get_or_init(|| {
-        std::env::var("TWOTOP_AUTOPILOT")
-            .ok()
-            .and_then(|v| v.parse().ok())
-    })
+    *TIER.get_or_init(|| crate::config::Knob::Autopilot.parse())
 }
 
 fn drive_autopilot(world: &mut World) {
@@ -164,7 +160,7 @@ impl Plugin for BotPlugin {
     fn build(&self, app: &mut App) {
         // TWOTOP_PRACTICE=1 boots straight into practice (pairs with
         // TWOTOP_AUTOSTART for headless capture verification of the bot).
-        let boot_practice = std::env::var("TWOTOP_PRACTICE").is_ok_and(|v| v == "1");
+        let boot_practice = crate::config::Knob::Practice.is_on();
         app.insert_resource(PracticeMode(boot_practice));
         app.init_resource::<ShadeStyle>();
         app.init_resource::<BotBrain>();

@@ -59,7 +59,7 @@ pub struct TuningReloadPlugin;
 
 impl Plugin for TuningReloadPlugin {
     fn build(&self, app: &mut App) {
-        if let Some(path) = std::env::var_os("TWOTOP_TUNING_DUMP") {
+        if let Some(path) = crate::config::Knob::TuningDump.value() {
             match serde_json::to_string_pretty(&Tuning::default()) {
                 Ok(text) => match std::fs::write(&path, text) {
                     Ok(()) => {
@@ -74,7 +74,10 @@ impl Plugin for TuningReloadPlugin {
                 }
             }
         }
-        let Some(path) = std::env::var_os("TWOTOP_TUNING").map(std::path::PathBuf::from) else {
+        let Some(path) = crate::config::Knob::Tuning
+            .value()
+            .map(std::path::PathBuf::from)
+        else {
             return;
         };
         tracing::info!(target: "two_top::tuning", path = %path.display(), "watching the tuning file");

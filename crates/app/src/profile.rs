@@ -452,7 +452,7 @@ fn open_name_entry_on_first_boot(
     if *done
         || profile.named
         || netplay.room_url.is_none()
-        || std::env::var_os("TWOTOP_AUTOSTART").is_some()
+        || crate::config::Knob::Autostart.is_set()
     {
         return;
     }
