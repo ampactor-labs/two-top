@@ -45,7 +45,6 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
-  VK_ICD_FILENAMES: /usr/share/vulkan/icd.d/lvp_icd.json
 
 jobs:
   smokes:
@@ -76,6 +75,9 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y libasound2-dev libudev-dev xvfb xdotool \
             mesa-vulkan-drivers libvulkan1 libxkbcommon-x11-0 iproute2
+          # lavapipe's manifest is lvp_icd.json on newer Mesa and
+          # lvp_icd.x86_64.json on 22.04: point the loader at whichever exists.
+          echo "VK_ICD_FILENAMES=$(ls /usr/share/vulkan/icd.d/lvp_icd*.json | head -1)" >> "$GITHUB_ENV"
       - uses: Swatinem/rust-cache@v2
         if: steps.gate.outputs.run == 'true'
         with:
