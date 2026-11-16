@@ -66,6 +66,9 @@ The `sim` crate has zero `bevy_render` dependency. The `render` crate depends on
 
 The `app` crate is split into focused modules (`crates/app/src/`):
 
+- `lib.rs` — `run()`, `setup` and the plugin wiring, nothing else.
+- `config` — every way to configure a build from outside it: the `TWOTOP_*` development knobs (`Knob`, name + doc line each) and the servers (`Endpoint`: runtime variable over the compile-time bake). A test fails on any knob read outside it.
+- `presentation/` — what the sim looks like beyond `render`'s own systems: `actors` (depth projection, pose, spawn-guard blink, atlas frames), `floor`, `fangs`, `scrims`, `diorama`. `keys` — the touch/keyboard input sources. `capture` — the `TWOTOP_CAPTURE` verification screenshot.
 - `audio` — `GameAudioPlugin`: synthesized WAV cues + two music beds (cosmetic; see § Audio).
 - `camera` — `CameraFollowPlugin`: base lean + kill-cam zoom + screen-shake rig.
 - `haptics` — Android JNI `Vibrator` (Settings-gated; no-op off-Android).

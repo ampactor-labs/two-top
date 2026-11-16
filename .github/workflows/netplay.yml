@@ -38,6 +38,11 @@ on:
     - cron: "17 7 * * *"
   workflow_dispatch:
 
+# A newer push supersedes a pull request's run (each builds for ~11 min).
+concurrency:
+  group: netplay-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 env:
   CARGO_TERM_COLOR: always
   VK_ICD_FILENAMES: /usr/share/vulkan/icd.d/lvp_icd.json
