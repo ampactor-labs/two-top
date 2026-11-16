@@ -42,10 +42,9 @@ jobs:
             runs-on: ubuntu-latest
             pkg-args: --workspace --exclude app --exclude ice_vendor
             replay-sync: true
-          - target: aarch64-apple-darwin
-            runs-on: macos-14
-            pkg-args: --workspace --exclude app --exclude ice_vendor
-            replay-sync: true
+          # The macOS lanes (Apple silicon and Intel) live in
+          # determinism-macos.yml, scoped to the paths that can change their
+          # answer: macOS minutes bill at 10x Linux.
           # Windows: the desktop app ships here (desktop.yml), and a Windows
           # player online against a phone is only safe if the two sims
           # agree. Sim crates only, like the other non-Linux lanes.
@@ -135,10 +134,9 @@ jobs:
     name: cross-platform TSV diff
     needs: determinism
     # Run whenever the matrix finishes, and compare the TSVs that exist: a
-    # lane that produced none (a failure, or a runner that never started —
-    # the macOS lanes are cancelled at their first second while macOS
-    # runners are unavailable to this repo) is red in its own job, and was
-    # skipping this, the comparison of all the others, with it.
+    # lane that produced none (a failure, or a runner that never started)
+    # is red in its own job, and must not skip this, the comparison of all
+    # the others, with it.
     if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
     steps:
