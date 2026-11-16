@@ -11,6 +11,11 @@
 //!     the final 5 s (the wordless "hurry" cue).
 //!   * **Countdown** — the big 3·2·1 glyphs at round start, a brief GO on the
 //!     first round frame.
+//!   * **Held pickup** — under the outer end of each pip row (clear of the
+//!     centred round clock on the narrowest phone), the pickup that player carries
+//!     (its cell of the pickup sheet, ringed in `render::modifier_color`),
+//!     hidden when empty, popping in when it changes. The fang showed the
+//!     modifier only once thrown; the opponent's pickup was invisible.
 //!
 //! Render-only: reads sim resources, never writes them. Every element is
 //! pinned to the *screen* via [`ScreenAnchor`], so the HUD hugs the real
@@ -29,8 +34,20 @@ const HUD_MARGIN: f32 = 70.0;
 const TIMER_WIDTH: f32 = 520.0;
 const TIMER_HEIGHT: f32 = 14.0;
 const COUNTDOWN_SIZE: f32 = 220.0;
+/// The held-pickup icon: its size, its gap under the pip row, and its pop.
+const HELD_SIZE: f32 = 54.0;
+const HELD_GAP: f32 = 22.0;
+const HELD_POP_SECS: f32 = 0.25;
+const HELD_POP_SCALE: f32 = 1.6;
 /// Frames a "GO" glyph flashes at the top of a fresh round.
 const GO_FLASH_FRAMES: u32 = 24;
+
+/// One player's held-pickup icon (the cell) and its ring.
+#[derive(Component)]
+struct HeldIcon {
+    player: u8,
+    ring: bool,
+}
 
 #[derive(Component)]
 struct ScorePip {
@@ -50,7 +67,12 @@ impl Plugin for HudPlugin {
     fn build(&self, app: &mut App) {
         app.add_systems(Startup, spawn_hud).add_systems(
             Update,
-            (update_score_pips, update_countdown, update_timer_bar),
+            (
+                update_score_pips,
+                update_countdown,
+                update_timer_bar,
+                update_held_icons,
+            ),
         );
     }
 }
@@ -92,6 +114,55 @@ fn spawn_hud(
                 },
                 anchor,
                 Transform::from_xyz(0.0, 0.0, 50.0),
+                Visibility::Hidden,
+            ));
+        }
+    }
+
+    // Held pickup — one cell of the pickup sheet past each pip row, on a
+    // ring in the modifier's colour.
+    let held_layout = atlases.add(TextureAtlasLayout::from_grid(
+        UVec2::splat(24),
+        7,
+        1,
+        None,
+        None,
+    ));
+    let held_img = asset_server.load("sprites/pickups/pickup_sheet.png");
+    let ring_img = asset_server.load("sprites/fx/charge_ring.png");
+    for player in 0..2u8 {
+        let along = HUD_MARGIN + (HELD_SIZE - PIP_SIZE) / 2.0;
+        let down = -(HUD_MARGIN + PIP_SIZE / 2.0 + HELD_GAP + HELD_SIZE / 2.0);
+        let anchor = || {
+            if player == 0 {
+                ScreenAnchor::new(-1.0, 1.0, along, down)
+            } else {
+                ScreenAnchor::new(1.0, 1.0, -along, down)
+            }
+        };
+        for ring in [true, false] {
+            let sprite = if ring {
+                Sprite {
+                    image: ring_img.clone(),
+                    custom_size: Some(Vec2::splat(HELD_SIZE * 1.35)),
+                    ..default()
+                }
+            } else {
+                Sprite {
+                    image: held_img.clone(),
+                    texture_atlas: Some(TextureAtlas {
+                        layout: held_layout.clone(),
+                        index: 0,
+                    }),
+                    custom_size: Some(Vec2::splat(HELD_SIZE)),
+                    ..default()
+                }
+            };
+            commands.spawn((
+                HeldIcon { player, ring },
+                sprite,
+                anchor(),
+                Transform::from_xyz(0.0, 0.0, if ring { 50.0 } else { 51.0 }),
                 Visibility::Hidden,
             ));
         }
@@ -343,5 +414,96 @@ mod tests {
         );
         assert_eq!(countdown_cells(AppScreen::InMatch, true, three, 0), None);
         assert_eq!(countdown_cells(AppScreen::Title, false, three, 0), None);
+    }
+}
+
+/// The icon's scale `left` seconds into a pop: oversized on arrival,
+/// settling to rest. Pure.
+fn held_pop_scale(left: f32) -> f32 {
+    let t = (left / HELD_POP_SECS).clamp(0.0, 1.0);
+    1.0 + (HELD_POP_SCALE - 1.0) * t * t
+}
+
+/// Per-player: what was held last frame, and the live pop.
+#[derive(Default)]
+struct HeldPops {
+    prev: [Option<sim::PickupKind>; 2],
+    left: [f32; 2],
+}
+
+fn update_held_icons(
+    screen: Res<State<AppScreen>>,
+    awaiting: Res<AwaitingPeer>,
+    time: Res<Time<Real>>,
+    players: Query<(&sim::Player, &sim::HeldModifier)>,
+    mut pops: Local<HeldPops>,
+    mut q: Query<(&HeldIcon, &mut Sprite, &mut Transform, &mut Visibility)>,
+) {
+    let in_match = *screen.get() == AppScreen::InMatch && !awaiting.0;
+    let mut held = [None; 2];
+    for (player, modifier) in &players {
+        if player.handle < 2 {
+            held[player.handle] = modifier.0;
+        }
+    }
+    let HeldPops { prev, left } = &mut *pops;
+    for ((now, prev), left) in held.iter().zip(prev.iter_mut()).zip(left.iter_mut()) {
+        if now != prev && now.is_some() {
+            *left = HELD_POP_SECS;
+        }
+        *prev = *now;
+        *left = (*left - time.delta_secs()).max(0.0);
+    }
+    for (icon, mut sprite, mut transform, mut vis) in &mut q {
+        let p = icon.player as usize;
+        let Some(kind) = held[p].filter(|_| in_match) else {
+            *vis = Visibility::Hidden;
+            continue;
+        };
+        *vis = Visibility::Visible;
+        transform.scale = Vec3::splat(held_pop_scale(pops.left[p]));
+        if icon.ring {
+            sprite.color = render::modifier_color(Some(kind)).with_alpha(0.6);
+        } else if let Some(atlas) = sprite.texture_atlas.as_mut() {
+            atlas.index = kind.as_u8() as usize;
+        }
+    }
+}
+
+#[cfg(test)]
+mod held_icon_tests {
+    use super::*;
+
+    #[test]
+    fn every_pickup_has_a_cell_and_a_colour_of_its_own() {
+        let kinds = [
+            sim::PickupKind::Fire,
+            sim::PickupKind::Heavy,
+            sim::PickupKind::Bouncy,
+            sim::PickupKind::Curve,
+            sim::PickupKind::Multishot,
+            sim::PickupKind::Phantom,
+            sim::PickupKind::Swap,
+        ];
+        let mut cells = std::collections::BTreeSet::new();
+        let mut colours = Vec::new();
+        for kind in kinds {
+            assert!(cells.insert(kind.as_u8()), "{kind:?} shares a cell");
+            assert!(kind.as_u8() < 7, "{kind:?} is past the 7-cell sheet");
+            let c = render::modifier_color(Some(kind)).to_srgba();
+            assert!(
+                c != Color::WHITE.to_srgba(),
+                "{kind:?} reads as a plain fang"
+            );
+            assert!(!colours.contains(&c), "{kind:?} shares a colour");
+            colours.push(c);
+        }
+    }
+
+    #[test]
+    fn the_pop_lands_big_and_settles() {
+        assert_eq!(held_pop_scale(HELD_POP_SECS), HELD_POP_SCALE);
+        assert_eq!(held_pop_scale(0.0), 1.0);
+        assert!(held_pop_scale(HELD_POP_SECS / 2.0) < HELD_POP_SCALE);
     }
 }

@@ -422,10 +422,11 @@ impl Plugin for RenderSyncPlugin {
     }
 }
 
-/// Per-kind tint for a boomerang sprite so a modified throw reads at a
-/// glance (matches the pickup-icon colors). `None` → no tint (white
-/// multiplier keeps the bone fang's own color).
-fn boomerang_tint(modifier: Option<sim::PickupKind>) -> Color {
+/// The one colour of each modifier, everywhere it shows: the fang that
+/// carries it, the halo under a floor pickup, and the held-pickup icon on
+/// the HUD. A visuals pass retunes a modifier's colour here and all three
+/// follow, on every build. `None` (a plain fang) is white.
+pub fn modifier_color(modifier: Option<sim::PickupKind>) -> Color {
     use sim::PickupKind::*;
     match modifier {
         None => Color::WHITE,
@@ -459,7 +460,7 @@ pub fn tint_boomerangs_by_modifier(
     mut q: Query<(&sim::Boomerang, &sim::BoomerangMods, &mut Sprite)>,
 ) {
     for (boom, mods, mut sprite) in &mut q {
-        let base = boomerang_tint(mods.modifier);
+        let base = modifier_color(mods.modifier);
         sprite.color = match boom.state {
             sim::BoomerangState::Loose => {
                 let pulse = 0.55 + 0.18 * (time.elapsed_secs() * 4.5).sin();
@@ -760,7 +761,7 @@ pub fn ensure_pickup_visuals(
             },
             Sprite {
                 image: ring.clone(),
-                color: boomerang_tint(Some(pickup.kind)).with_alpha(0.5),
+                color: modifier_color(Some(pickup.kind)).with_alpha(0.5),
                 custom_size: Some(Vec2::splat(aura_size)),
                 ..default()
             },
@@ -769,7 +770,7 @@ pub fn ensure_pickup_visuals(
     }
 }
 
-/// The per-kind halo under a floor pickup. `boomerang_tint` gives it the
+/// The per-kind halo under a floor pickup. `modifier_color` gives it the
 /// exact color the empowered fang will fly with, so the floor telegraphs
 /// the effect in the same language the weapon speaks. Self-cleans when its
 /// pickup despawns (collected / expired / rolled back), like ground shadows.
@@ -812,7 +813,7 @@ pub fn sync_pickup_auras(
         let base = if matches!(aura.kind, Swap) && pulse < 0.0 {
             palette::P0_BLOOD
         } else {
-            boomerang_tint(Some(aura.kind))
+            modifier_color(Some(aura.kind))
         };
         sprite.color = base.with_alpha(alpha * (0.7 + 0.3 * pulse.abs()));
         sprite.custom_size = Some(Vec2::splat(aura.base_size * (1.0 + wobble * pulse)));
@@ -1785,7 +1786,7 @@ pub fn trail_tint(
     if returning {
         palette::RECALL_BLUE
     } else if modifier.is_some() {
-        boomerang_tint(modifier)
+        modifier_color(modifier)
     } else if owner_handle == 0 {
         palette::BLOOD_DARK
     } else {
