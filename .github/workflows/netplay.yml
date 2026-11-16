@@ -87,7 +87,11 @@ jobs:
           tool: matchbox_server@0.14.0
       - name: Build
         if: steps.gate.outputs.run == 'true'
-        run: cargo build --locked -p app -p replay_sync --example silent_peer
+        # Two builds: naming --example limits cargo to that target, so one
+        # command would skip the app and replay_sync binaries.
+        run: |
+          cargo build --locked -p app -p replay_sync --bins
+          cargo build --locked -p app --example silent_peer
       # The online smokes never boot a build without a room; couch and
       # practice once panicked on their first frame for a week unseen.
       - name: Offline boots (couch, practice, a --join launch)
