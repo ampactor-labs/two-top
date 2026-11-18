@@ -292,8 +292,15 @@ fn dash_active() -> Color {
 /// Screen px (top-left origin, y-down) to world, through the same visible
 /// rect the anchor pass computed this frame.
 fn screen_to_world(p: Vec2, win: Vec2, rect: &ViewRect) -> Vec2 {
-    let frac = Vec2::new(p.x / crate::ui::anchor_x(win.x), 1.0 - p.y / win.y * 2.0);
-    rect.center + rect.half * frac
+    rect.center + rect.half * screen_to_anchor(p, win)
+}
+
+/// Screen px (top-left origin, y-down) to anchor fractions (-1..1, y-up).
+fn screen_to_anchor(p: Vec2, win: Vec2) -> Vec2 {
+    Vec2::new(
+        crate::ui::anchor_x(p.x / win.x),
+        crate::ui::anchor_y(p.y / win.y),
+    )
 }
 
 /// The control layer's read-side context, bundled so `update_controls`
@@ -594,5 +601,24 @@ fn update_controls(
         } else {
             Visibility::Hidden
         };
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The stick rings sit under the thumb: corners and centre map to the
+    /// anchor frame's corners and centre.
+    #[test]
+    fn screen_points_map_to_their_anchor() {
+        let win = Vec2::new(720.0, 1280.0);
+        assert_eq!(screen_to_anchor(Vec2::ZERO, win), Vec2::new(-1.0, 1.0));
+        assert_eq!(screen_to_anchor(win, win), Vec2::new(1.0, -1.0));
+        assert_eq!(screen_to_anchor(win / 2.0, win), Vec2::ZERO);
+        assert_eq!(
+            screen_to_anchor(Vec2::new(540.0, 320.0), win),
+            Vec2::new(0.5, 0.5)
+        );
     }
 }

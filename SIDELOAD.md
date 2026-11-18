@@ -2,7 +2,7 @@
 
 How to put 2-Top on a physical Android device for testing. This is the dev-time install path — cheap, fast, and intentionally minimal. Store packaging (Play Store, signing, ProGuard, R8 minification) is a later concern.
 
-> **Status:** Phases 0–18 complete, v1.0.0-rc1. A sideloaded build now launches the *full* game: it boots into the Title/arena-picker screen and plays full matches — movement, dash, boomerang throw/recall, pickups, audio, and Android haptics. Online is opt-in via `--room`/`MATCHBOX_ROOM` (see `SIGNALING.md`).
+> **Status:** Phases 0–18 complete, v1.0.0-rc1. A sideloaded build now launches the *full* game: it boots into the Title/arena-picker screen and plays full matches — movement, dash, boomerang throw/recall, pickups, audio, and Android haptics. Online is opt-in via `--room`/`TWOTOP_ROOM` (see `SIGNALING.md`).
 
 ## Prerequisites (one-time)
 

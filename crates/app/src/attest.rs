@@ -13,8 +13,6 @@
 //!
 //! Forfeits stay ledger-only: each client's lobby FSM observes the
 //! walk-away at its own frame, so there is no shared statement to sign.
-//! Against a legacy build (no `Profile2`) nothing here fires and the
-//! grudge ledger records the match exactly as before.
 
 use bevy::prelude::*;
 use net::{MatchStatement, NetMsg, NetSendQueue, PeerKeys, PeerProfile, PeerSig, SeatStatement};
@@ -117,7 +115,7 @@ pub fn settle_match_over(
 /// On the tick a match is decided on score AND that decision has settled
 /// (`MatchOverSettled`): build the canonical statement, sign it, send the
 /// signature. Same guards as the grudge ledger's recorder, plus the
-/// threshold and the Profile2 handshake.
+/// threshold and the profile handshake.
 #[allow(clippy::too_many_arguments)]
 fn sign_decided_match(
     score: Res<MatchScore>,
@@ -168,7 +166,7 @@ fn sign_decided_match(
         // REJECTED by the peer, desynchronizing `match_index` for good.
         return;
     }
-    if score.p0 < MATCH_WIN_THRESHOLD && score.p1 < MATCH_WIN_THRESHOLD {
+    if score.winner().is_none() {
         // A forfeit, not a scored win: no shared deciding moment to sign.
         return;
     }
@@ -178,10 +176,10 @@ fn sign_decided_match(
         peer.0,
         peer_keys.0,
         profile.signing_key_bytes(),
-        profile.as_data2(),
+        profile.as_keyed(),
     ) else {
-        // Legacy peer (no Profile2) or a broken local key: the ledger
-        // still records; the result just stays unsigned.
+        // The peer's profile never arrived, or a broken local key: the
+        // ledger still records; the result just stays unsigned.
         return;
     };
     let (our_score, their_score) = if handle == 0 {

@@ -395,7 +395,7 @@ pub struct Replay {
 pub struct ReplayHeader {
     pub magic: [u8; 4],            // b"BMRG"
     pub format_version: u16,
-    pub sim_version: u32,           // sim::SIM_VERSION (1 for v1.0.0-rc1; u32::MAX only on un-tagged dev builds via DEV_SIM_VERSION)
+    pub sim_version: u32,           // sim::SIM_VERSION, always the real one
     pub seed: u64,
     pub num_players: u8,
     pub frame_rate: u8,
@@ -420,7 +420,7 @@ same function. `replay_sync` then re-simulates in one of two named setups:
   cross-platform lane and golden TSV uses — both duelists at the origin, rounds that never end
   (`InfiniteRoundPlugin`), input delay 2.
 
-Strict version matching: replays only load if `sim_version` matches binary. Old replays viewed via archived git-tagged binaries. The committed canonical demo (`tests/demos/canonical/match_v1.bmrg`) stamps the real `sim::SIM_VERSION` (via `replay_sync::canonical_replay`) and must be regenerated on any `SIM_VERSION` bump; the in-process struct-fed test/fuzz replays keep using `DEV_SIM_VERSION` (`u32::MAX`) since they never strict-decode.
+Strict version matching: replays only load if `sim_version` matches binary. Old replays viewed via archived git-tagged binaries. The committed canonical demo (`tests/demos/canonical/match_v1.bmrg`) stamps the real `sim::SIM_VERSION` (via `replay_sync::canonical_replay`) and must be regenerated on any `SIM_VERSION` bump. Test and fuzz replays stamp it too: there is no dev sentinel.
 
 ## Logging
 

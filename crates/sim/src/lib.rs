@@ -1041,6 +1041,20 @@ pub struct MatchScore {
     pub p1: u8,
 }
 
+impl MatchScore {
+    /// The seat whose kills reached [`MATCH_WIN_THRESHOLD`], if either did.
+    /// One-hit kills mean at most one side can reach it on a tick.
+    pub fn winner(&self) -> Option<u8> {
+        if self.p0 >= MATCH_WIN_THRESHOLD {
+            Some(0)
+        } else if self.p1 >= MATCH_WIN_THRESHOLD {
+            Some(1)
+        } else {
+            None
+        }
+    }
+}
+
 /// Frames per countdown digit (3, 2, 1) — 60 = 1 s @ 60 Hz.
 pub const COUNTDOWN_DIGIT_FRAMES: u32 = 60;
 

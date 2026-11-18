@@ -8,8 +8,8 @@ use bevy_ggrs::prelude::*;
 use core::time::Duration;
 use fixed_math::Vec2F;
 use replay::{
-    DEV_SIM_VERSION, FORMAT_VERSION, MAGIC, RecordPlugin, RecordedInputs, Replay, ReplayHeader,
-    ReplayPlayback, ReplayPlaybackPlugin, decode, encode,
+    FORMAT_VERSION, MAGIC, RecordPlugin, RecordedInputs, Replay, ReplayHeader, ReplayPlayback,
+    ReplayPlaybackPlugin, decode, encode,
 };
 use sim::{
     DefaultInputsPlugin, GgrsCfg, Player, PlayerInput, PositionF, SimPlugin, SynthesizedInputs,
@@ -92,7 +92,7 @@ fn record_then_playback_reproduces_end_state() {
         header: ReplayHeader {
             magic: MAGIC,
             format_version: FORMAT_VERSION,
-            sim_version: DEV_SIM_VERSION,
+            sim_version: sim::SIM_VERSION,
             seed: 0,
             num_players: 2,
             frame_rate: 60,

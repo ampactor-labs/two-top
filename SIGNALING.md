@@ -209,7 +209,7 @@ constant — the live matchbox driver landed in `crates/app/src/netplay.rs`
 (M4). On **Android** there is no argv and no settable process env on a
 tapped-icon launch, so the APK additionally reads a **compile-time**
 `TWOTOP_ROOM` value baked at build time (precedence:
-`--room` > `MATCHBOX_ROOM` > compiled `TWOTOP_ROOM`). Online play is
+`--room` > runtime `TWOTOP_ROOM` > compiled `TWOTOP_ROOM`). Online play is
 opt-in; the default build (none of the three set) is unchanged (local
 SyncTest couch-versus).
 
@@ -232,15 +232,15 @@ still seeds the pick for desktop automation.
    # Desktop:
    cargo run -p app -- --room ws://<host>:3536/two-top?next=2
    # or, equivalently:
-   MATCHBOX_ROOM=ws://<host>:3536/two-top?next=2 cargo run -p app
+   TWOTOP_ROOM=ws://<host>:3536/two-top?next=2 cargo run -p app
 
    # Android (room URL baked in at build time):
    TWOTOP_ROOM=ws://<host>:3536/two-top?next=2 \
      cargo apk run -p app --lib --target aarch64-linux-android
    ```
 
-   `--room <url>` takes precedence over `MATCHBOX_ROOM`, which takes
-   precedence over the compiled-in `TWOTOP_ROOM`. Absent all three,
+   `--room <url>` takes precedence over `TWOTOP_ROOM`, which takes
+   precedence over the value compiled in under the same name. Absent all three,
    the build runs the local SyncTest session (no network). For a full
    device-by-device test walkthrough see [`PLAYBOOK.md`](./PLAYBOOK.md).
 3. On the Title screen, tap the lower half or press Start. The lobby overlay

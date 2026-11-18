@@ -16,7 +16,7 @@ for mode in couch practice join; do
     practice) extra=(TWOTOP_PRACTICE=1 TWOTOP_AUTOSTART=1) ;;
     join) args=(--join CURS-pit) ;;
   esac
-  env -u MATCHBOX_ROOM DISPLAY="$DISPLAY_NUM" HOME="$H" XDG_CONFIG_HOME="$H/.config" \
+  env -u TWOTOP_ROOM DISPLAY="$DISPLAY_NUM" HOME="$H" XDG_CONFIG_HOME="$H/.config" \
     XDG_DATA_HOME="$H/.local/share" "${extra[@]}" timeout 20 "$APP" "${args[@]}" > "$WORK/$mode.log" 2>&1
   code=$?
   [ "$code" = 124 ] || fail "$mode exited early ($code)"

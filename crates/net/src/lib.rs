@@ -481,6 +481,13 @@ impl NonBlockingSocket<NetAddr> for MatchboxBridge {
 /// short enough to render on a phone HUD without wrapping.
 pub const NAME_MAX: usize = 12;
 
+/// The wire generation of everything `net` sends that the sim does not
+/// see (the side channel, the handshake). Bump it on any such change; it
+/// rides the room name beside `sim::SIM_VERSION`, so two builds that
+/// cannot talk never meet. 2: one keyed `Profile` (the unkeyed one and
+/// `Profile2` are gone).
+pub const NET_PROTOCOL: u32 = 2;
+
 /// Tail padding for names shorter than [`NAME_MAX`]. A fixed array keeps
 /// `ProfileData` `Copy`, allocation-free, and bounded BY CONSTRUCTION — a
 /// hostile peer cannot hand us a 10 MB name, because there is nowhere to
@@ -515,8 +522,9 @@ pub struct ProfileData {
 /// matchbox's ggrs reference codec byte-for-byte).
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub enum NetMsg {
-    /// Identity handshake, sent once right after the P2P session swap.
-    Profile(ProfileData),
+    /// Identity handshake, sent once right after the P2P session swap:
+    /// install-id, name and the result-signing pubkey.
+    Profile(KeyedProfile),
     /// "I want to run it back." The receiving client surfaces it on the
     /// summary; when both sides have consented, each client emits its own
     /// THROW input and the in-sim `apply_rematch` restarts the match the
@@ -527,11 +535,6 @@ pub enum NetMsg {
     /// books the win at once instead of waiting out the disconnect grace.
     /// Every other way of leaving says [`NetMsg::Ended`].
     Bye,
-    /// Identity plus result-signing key, sent alongside [`NetMsg::Profile`].
-    /// New builds read this; old builds fail to decode the unknown variant,
-    /// ignore the message, and still get the legacy `Profile` — a mixed
-    /// pairing degrades to unsigned results instead of breaking.
-    Profile2(ProfileData2),
     /// Our ed25519 signature over [`MatchStatement::encode`] for the match
     /// that just reached the score threshold. Split halves keep the enum
     /// `Copy` (serde's array impls stop at 32).
@@ -652,7 +655,7 @@ pub mod delay {
 //
 // The install-id travels in the open on the side channel, so it identifies
 // but cannot prove. An ed25519 keypair minted beside it can: pubkeys ride
-// `Profile2`, and when a match is decided ON SCORE both peers sign one
+// `NetMsg::Profile`, and when a match is decided ON SCORE both peers sign one
 // canonical statement and swap signatures. The result becomes an artifact
 // anyone can check — re-run the tape, rebuild the statement, verify both
 // signatures (`replay_sync --attest`). Forfeits stay ledger-only: each
@@ -661,7 +664,7 @@ pub mod delay {
 
 /// A peer's shareable identity plus its result-signing pubkey.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
-pub struct ProfileData2 {
+pub struct KeyedProfile {
     pub install_id: u128,
     pub name: [u8; NAME_MAX],
     /// ed25519 verifying key. The matching signing key never leaves the
@@ -669,7 +672,7 @@ pub struct ProfileData2 {
     pub pubkey: [u8; 32],
 }
 
-impl ProfileData2 {
+impl KeyedProfile {
     /// The identity half, for everything that already speaks `ProfileData`.
     pub fn profile(&self) -> ProfileData {
         ProfileData {
@@ -809,7 +812,7 @@ pub fn sign_statement(stmt: &MatchStatement, signing_key: &[u8; 32]) -> [[u8; 32
     halves
 }
 
-/// The verifying key for a raw signing key — what `Profile2` carries.
+/// The verifying key for a raw signing key — what `NetMsg::Profile` carries.
 pub fn pubkey_for(signing_key: &[u8; 32]) -> [u8; 32] {
     use ed25519_dalek::SigningKey;
     SigningKey::from_bytes(signing_key)
@@ -873,8 +876,8 @@ impl Attestation {
     }
 }
 
-/// The connected peer's result-signing pubkey, once its `Profile2`
-/// arrives. `None` against a legacy build — results then stay unsigned.
+/// The connected peer's result-signing pubkey, once its `NetMsg::Profile`
+/// arrives.
 /// Cleared on session teardown.
 #[derive(Resource, Default, Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PeerKeys(pub Option<[u8; 32]>);
@@ -1405,9 +1408,10 @@ mod tests {
     #[test]
     fn net_msgs_round_trip_through_postcard() {
         let msgs = [
-            NetMsg::Profile(ProfileData {
+            NetMsg::Profile(KeyedProfile {
                 install_id: 0xdead_beef_cafe_f00d_1122_3344_5566_7788,
                 name: crate::name_slots(&[2, 6, 0, 4]),
+                pubkey: [7; 32],
             }),
             NetMsg::RematchWant,
             NetMsg::Bye,
@@ -1532,10 +1536,10 @@ mod tests {
     }
 
     #[test]
-    fn profile2_and_matchsig_ride_the_side_channel() {
+    fn keyed_profile_and_matchsig_ride_the_side_channel() {
         let key = [10u8; 32];
         let msgs = [
-            NetMsg::Profile2(ProfileData2 {
+            NetMsg::Profile(KeyedProfile {
                 install_id: 0xfeed,
                 name: crate::name_slots(&[2, 6, 0, 4]),
                 pubkey: pubkey_for(&key),

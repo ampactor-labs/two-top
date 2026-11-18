@@ -35,8 +35,8 @@ pub struct RivalRecord {
     pub wins: u32,
     pub losses: u32,
     /// Wins whose result carries a completed dual-signed attestation
-    /// (NORTH N2). A subset of `wins`: unsigned wins still count — a
-    /// legacy peer's build simply can't sign.
+    /// (NORTH N2). A subset of `wins`: unsigned wins still count (a peer
+    /// that never sent its profile, or a signature that failed).
     pub attested_wins: u32,
     /// When this rivalry last met (unix seconds; 0 for pre-N4 rows).
     pub last_met_unix: u64,

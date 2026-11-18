@@ -6,10 +6,6 @@ use sim::{GgrsCfg, PlayerInput};
 
 pub const MAGIC: [u8; 4] = *b"BMRG";
 pub const FORMAT_VERSION: u16 = 1;
-/// Sentinel sim_version for non-release builds. ARCHITECTURE.md: dev replays
-/// surface as "🚧 dev replay" in the viewer; release replays carry a real
-/// sim_version that must match the executing binary's version exactly.
-pub const DEV_SIM_VERSION: u32 = u32::MAX;
 
 /// A frame's worth of inputs for a 1v1 match.
 pub type FrameInputs = [PlayerInput; 2];
@@ -124,10 +120,7 @@ pub fn decode(bytes: &[u8]) -> Result<Replay, ReplayError> {
 /// matches binary. Old replays are viewed via archived git-tagged binaries —
 /// no migration code lives in the codec.
 ///
-/// Both sides will normally pass `sim::SIM_VERSION`. A binary built from
-/// main carries `u32::MAX` (the dev sentinel); release tags carry a real
-/// version. A dev replay loaded into a release binary, or vice versa, is
-/// rejected here.
+/// Both sides normally pass `sim::SIM_VERSION`.
 pub fn decode_for_sim_version(bytes: &[u8], expected: u32) -> Result<Replay, ReplayError> {
     let replay = decode(bytes)?;
     if replay.header.sim_version != expected {

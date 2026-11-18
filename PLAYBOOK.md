@@ -299,12 +299,12 @@ For the second phone, either repeat the ADB install or send that same
 Both phones boot to the Title screen with **"TAP TO FIND OPPONENT"**. Tap the
 arena line under the table to open the roster (seven tables, each with its
 floor and rules) and pick one. The pick does NOT need to match: the room is
-`two-top-v16?next=2` (or `two-top-CURS-v16?next=2` for a private code), and
-once two phones pair they agree on one table (the lower peer id's pick) before
-the session starts. The `-v16` is `sim::SIM_VERSION`: two APKs on different
-sim versions land in different rooms and never pair, which is the only
-version check the live wire has — the waiting screen shows the build and the
-sim version so two people can compare. Then both players tap PLAY.
+`two-top-v16p2?next=2` (or `two-top-CURS-v16p2?next=2` for a private code),
+and once two phones pair they agree on one table (the lower peer id's pick)
+before the session starts. The `-v16p2` is the epoch: `sim::SIM_VERSION` and
+`net::NET_PROTOCOL`. Two APKs on different generations land in different rooms
+and never pair, which is the only version check the live wire has — the
+waiting screen shows the build and the epoch so two people can compare. Then both players tap PLAY.
 
 ### 4f. What to verify (Phase 12, Gate 1)
 
@@ -614,7 +614,7 @@ stick on the right half, throw on the left, dash bottom-LEFT.
 ## Known gaps (so you don't chase non-bugs)
 
 - **No in-app way to enter a room URL.** The lobby overlay is read-only.
-  Desktop uses `--room`/`MATCHBOX_ROOM`; the phone uses the compile-time
+  Desktop uses `--room`/`TWOTOP_ROOM`; the phone uses the compile-time
   `TWOTOP_ROOM` bake (Rung 4d). An in-app lobby text field is future work.
   (Private ROOMS within the baked server are in — the glyph pad above.)
 - **STUN-only traversal fails behind carrier NAT.** For Rung 5

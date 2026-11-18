@@ -1,6 +1,6 @@
 use replay::{
-    DEV_SIM_VERSION, FORMAT_VERSION, MAGIC, Replay, ReplayError, ReplayHeader, decode,
-    decode_for_sim_version, encode,
+    FORMAT_VERSION, MAGIC, Replay, ReplayError, ReplayHeader, decode, decode_for_sim_version,
+    encode,
 };
 use sim::PlayerInput;
 
@@ -9,7 +9,7 @@ fn sample_replay() -> Replay {
         header: ReplayHeader {
             magic: MAGIC,
             format_version: FORMAT_VERSION,
-            sim_version: DEV_SIM_VERSION,
+            sim_version: sim::SIM_VERSION,
             seed: 0xDEAD_BEEF_DEAD_BEEF,
             num_players: 2,
             frame_rate: 60,

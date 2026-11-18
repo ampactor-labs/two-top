@@ -1,7 +1,7 @@
 //! Phase 12 / M4: live Matchbox WebRTC netplay driver.
 //!
 //! Online play is opt-in: pass `--room <url>` on the desktop binary (or
-//! set `MATCHBOX_ROOM`). The Android APK, launched from a tapped icon with
+//! set `TWOTOP_ROOM`). The Android APK, launched from a tapped icon with
 //! no argv and no settable process env, instead reads a **compile-time**
 //! `TWOTOP_ROOM` baked at build time (`TWOTOP_ROOM=<url> cargo apk run ...`).
 //! Absent all three ⇒ the local `SyncTestSession` couch-versus build is
@@ -107,7 +107,7 @@ const GGRS_CHANNEL: usize = 0;
 /// The reliable side-channel (identity, rematch consent, goodbye).
 const SIDE_CHANNEL: usize = 1;
 
-/// Resolved at startup from `--room`/`MATCHBOX_ROOM`. `None` ⇒ local
+/// Resolved at startup from `--room`/`TWOTOP_ROOM`. `None` ⇒ local
 /// SyncTest mode (the driver systems no-op / aren't added).
 #[derive(Resource, Clone, Debug, Default)]
 pub struct NetplayConfig {
@@ -219,7 +219,7 @@ pub fn ending_outcome(
 
 impl NetplayConfig {
     /// Read the room URL, in precedence order: the `--room <url>` CLI flag,
-    /// then the `MATCHBOX_ROOM` runtime env var, then a `TWOTOP_ROOM` value
+    /// then the `TWOTOP_ROOM` runtime env var, then the same name's value
     /// baked in at **compile time**. Returns an all-`None` config (local
     /// couch-versus) when none are set.
     ///
@@ -235,7 +235,7 @@ impl NetplayConfig {
     /// ```
     ///
     /// Desktop builds left without `TWOTOP_ROOM` at compile time and without
-    /// `--room`/`MATCHBOX_ROOM` at runtime behave exactly as before.
+    /// `--room`/`TWOTOP_ROOM` at runtime behave exactly as before.
     pub fn from_env_and_args() -> Self {
         // Runtime env first, then the compile-time bake (the APK path —
         // note it is a URL, never a credential; see `ice_vendor`).
@@ -1534,15 +1534,15 @@ fn perform_swap(world: &mut World, peer_id: PeerId, agreed: Agreed) {
 
     // Open the duel with the identity handshake: install-id + name on the
     // reliable channel. The peer's grudge ledger files this match under it.
-    // Profile2 rides along with the signing pubkey — an old build ignores
-    // the unknown variant and still gets the legacy Profile.
+    // The signing pubkey rides with it, so a score-decided match can be
+    // signed by both sides.
     world.resource_mut::<SessionIds>().0 = Some((our_id.0.as_u128(), peer_id.0.as_u128()));
-    let profile = world.resource::<crate::profile::LocalProfile>().as_data();
-    let profile2 = world.resource::<crate::profile::LocalProfile>().as_data2();
-    let mut queue = world.resource_mut::<NetSendQueue>();
-    queue.0.push(NetMsg::Profile(profile));
-    if let Some(data2) = profile2 {
-        queue.0.push(NetMsg::Profile2(data2));
+    match world.resource::<crate::profile::LocalProfile>().as_keyed() {
+        Some(keyed) => world
+            .resource_mut::<NetSendQueue>()
+            .0
+            .push(NetMsg::Profile(keyed)),
+        None => tracing::error!(target: "two_top::net", "no signing key — identity not sent"),
     }
 
     tracing::info!(
@@ -1791,7 +1791,6 @@ fn pump_side_channel(world: &mut World) {
         };
         let claimed = match &msg {
             NetMsg::Profile(p) => Some(p.install_id),
-            NetMsg::Profile2(d) => Some(d.install_id),
             _ => None,
         };
         let known = world.resource::<PeerProfile>().0.map(|p| p.install_id);
@@ -1807,24 +1806,15 @@ fn pump_side_channel(world: &mut World) {
             }
         }
         match msg {
-            NetMsg::Profile(profile) => {
+            NetMsg::Profile(keyed) => {
                 tracing::info!(
                     target: "two_top::net",
-                    install_id = format_args!("{:032x}", profile.install_id),
+                    install_id = format_args!("{:032x}", keyed.install_id),
                     "peer profile received",
                 );
-                world.resource_mut::<PeerProfile>().0 = Some(profile);
-                reseed_our_table(world, profile.install_id);
-            }
-            NetMsg::Profile2(data2) => {
-                tracing::info!(
-                    target: "two_top::net",
-                    install_id = format_args!("{:032x}", data2.install_id),
-                    "peer profile2 received — results can be signed",
-                );
-                world.resource_mut::<PeerProfile>().0 = Some(data2.profile());
-                world.resource_mut::<PeerKeys>().0 = Some(data2.pubkey);
-                reseed_our_table(world, data2.install_id);
+                world.resource_mut::<PeerProfile>().0 = Some(keyed.profile());
+                world.resource_mut::<PeerKeys>().0 = Some(keyed.pubkey);
+                reseed_our_table(world, keyed.install_id);
             }
             NetMsg::MatchSig { sig } => {
                 world.resource_mut::<PeerSig>().0 = Some(sig);
@@ -1926,7 +1916,7 @@ pub enum SideChannelVerdict {
 }
 
 /// `known` is the install-id already on file for this session (if any),
-/// `claimed` the one this message asserts (Profile / Profile2 only).
+/// `claimed` the one this message asserts (Profile only).
 pub fn side_channel_verdict(
     from: PeerId,
     lobby_peer: Option<PeerId>,

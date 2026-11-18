@@ -35,7 +35,7 @@ peer_start() {
   (
     export DISPLAY=$DISPLAY_NUM HOME="$WORK/$name" XDG_CONFIG_HOME="$WORK/$name/.config" \
       XDG_DATA_HOME="$WORK/$name/.local/share"
-    export MATCHBOX_ROOM="ws://127.0.0.1:$PORT/two-top?next=2" TWOTOP_AUTOSTART=1 TWOTOP_WINDOW=270x585
+    export TWOTOP_ROOM="ws://127.0.0.1:$PORT/two-top?next=2" TWOTOP_AUTOSTART=1 TWOTOP_WINDOW=270x585
     for kv in "$@"; do export "${kv?}"; done
     exec "$APP"
   ) > "$WORK/$name.log" 2>&1 &

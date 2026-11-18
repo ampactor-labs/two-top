@@ -127,7 +127,7 @@ The two-phone test over Wi-Fi against mobile data passed once, at an earlier rev
 
 - The deployed browser build has no online mode: the Pages build bakes no signaling room, so FIND OPPONENT never appears there. Nobody has played an online match from a browser build, and as of the last audit pass nobody had opened the page on a real iPhone (`docs/ROLEPLAY_AUDIT.md`, "Still unverified"); its browser-specific fixes have been verified only by the build gates and the checksum probe, with no one testing them on a phone.
 - There is no native iOS app. The desktop builds are unsigned (one OS prompt on first launch, above).
-- There is no in-app way to enter a room URL. Desktop uses `--room` or `MATCHBOX_ROOM`; the APK bakes `TWOTOP_ROOM` at build time.
+- There is no in-app way to enter a room URL. Desktop uses `--room` or `TWOTOP_ROOM`; the APK bakes `TWOTOP_ROOM` at build time.
 - The public APK relays through TURN only if the credential vendor's URL was baked at build time. Without it, two phones behind carrier NAT find each other through the signaling server and then never connect (`SIGNALING.md`).
 - A phone call still forfeits the match after 9 seconds of silence, with no reconnect and no wake lock.
 - One ggrs assertion on the wire's `start_frame` remains reachable by a hostile peer mid-match; closing it needs a change in ggrs itself.

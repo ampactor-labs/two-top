@@ -9,7 +9,7 @@
 //! tapes, they must come back to the score they were played to.
 
 use bot_brain::bench::{Seat, play_recorded};
-use replay::{DEV_SIM_VERSION, FORMAT_VERSION, MAGIC, Replay, ReplayHeader};
+use replay::{FORMAT_VERSION, MAGIC, Replay, ReplayHeader};
 use replay_sync::{compute_live_checksum_tsv, final_score};
 use sim::ArenaId;
 
@@ -18,7 +18,7 @@ fn tape(arena: ArenaId, inputs: Vec<[sim::PlayerInput; 2]>) -> Replay {
         header: ReplayHeader {
             magic: MAGIC,
             format_version: FORMAT_VERSION,
-            sim_version: DEV_SIM_VERSION,
+            sim_version: sim::SIM_VERSION,
             seed: 0,
             num_players: 2,
             frame_rate: 60,

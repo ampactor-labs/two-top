@@ -233,13 +233,11 @@ fn update_victory_pose(
     score: Res<MatchScore>,
     mut pose: ResMut<VictoryPose>,
 ) {
-    pose.0 = state.is_match_over().then(|| {
-        if score.p0 >= MATCH_WIN_THRESHOLD {
-            0
-        } else {
-            1
-        }
-    });
+    pose.0 = state
+        .is_match_over()
+        .then(|| score.winner())
+        .flatten()
+        .map(usize::from);
 }
 
 /// `OnExit(InMatch)`: practice is a per-entry choice, not a sticky mode.

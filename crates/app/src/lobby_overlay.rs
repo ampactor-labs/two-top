@@ -129,19 +129,19 @@ fn update_summoning(
     let dots = [".", "..", "...", ".."][(now * 2.0) as usize % 4];
     // The table no longer splits rooms (the pair agrees on one after
     // pairing), so the line names what actually must match: the code, and
-    // the sim version — that is the segment in the room name, so a phone
+    // the epoch (sim and wire generations) — that is the segment in the room name, so a phone
     // on another sim generation sits in a room this one never sees. The
     // build number rides along because it is what people can read off an
     // APK, but two builds on the same sim pair fine.
     let build = env!("CARGO_PKG_VERSION");
-    let sim_v = sim::SIM_VERSION;
+    let epoch = crate::room_code::epoch();
     let room_line = if room.custom {
         format!(
-            "room {}\nbuild {build} / sim v{sim_v}",
+            "room {}\nbuild {build} / {epoch}",
             code_spaced(&room.code_string())
         )
     } else {
-        format!("quick match\nbuild {build} / sim v{sim_v}")
+        format!("quick match\nbuild {build} / {epoch}")
     };
     let challenger = crate::profile::peer_name(peer_profile.0);
     let msg = match &*state {

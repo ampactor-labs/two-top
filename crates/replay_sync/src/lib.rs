@@ -166,12 +166,9 @@ pub fn canonical_replay() -> Replay {
         header: ReplayHeader {
             magic: MAGIC,
             format_version: FORMAT_VERSION,
-            // The committed demo is the one replay that's encoded to a file and
-            // strict-decoded across binaries (replay_sync/replay_viewer check it
-            // against `sim::SIM_VERSION`), so it must carry the *real* version,
-            // not the `DEV_SIM_VERSION` sentinel the in-process struct-fed test
-            // replays use. Bumping `SIM_VERSION` therefore requires regenerating
-            // this demo (`gen_canonical --write`).
+            // Strict-decoded across binaries against `sim::SIM_VERSION`:
+            // bumping it requires regenerating this demo
+            // (`gen_canonical --write`).
             sim_version: sim::SIM_VERSION,
             seed: 0,
             num_players: 2,
@@ -466,7 +463,7 @@ pub fn verify_attestation(replay: &Replay, attestation: &net::Attestation) -> Re
             ));
         }
     }
-    if score.p0 < sim::MATCH_WIN_THRESHOLD && score.p1 < sim::MATCH_WIN_THRESHOLD {
+    if score.winner().is_none() {
         return Err("tape never reaches the score threshold — not a signable match".to_string());
     }
     Ok(())

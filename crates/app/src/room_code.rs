@@ -2,7 +2,7 @@
 //!
 //! Online, the title carries a two-state toggle — QUICK MATCH or PRIVATE —
 //! sitting directly on top of the button it changes. QUICK MATCH is the
-//! public room (the base `--room`/`MATCHBOX_ROOM`/`TWOTOP_ROOM` URL, where
+//! public room (the base `--room`/`TWOTOP_ROOM` URL, where
 //! strangers pair on `?next=2`) and the button below reads FIND OPPONENT.
 //! PRIVATE unfolds a four-glyph dial and the button relabels itself to
 //! `DUEL AT C-U-R-S`: both phones dial the same code, both press, and only
@@ -79,27 +79,32 @@ impl RoomCode {
     /// id's pick wins). It used to ride the name, which split a phone on
     /// the Pit and a fresh install on the Anchor into two rooms that
     /// never saw each other: "we both tapped play and nothing happened."
-    /// The sim version still rides the name: two APKs sideloaded a week
-    /// apart on different `SIM_VERSION`s land in different rooms instead
-    /// of pairing, diverging, and each recording its own winner.
+    /// The [`epoch`] still rides the name: two APKs sideloaded a week
+    /// apart on different sim or wire generations land in different rooms
+    /// instead of pairing, diverging, and each recording its own winner.
     pub fn room_url(&self) -> Option<String> {
         let base = self.base_url.as_ref()?;
         let code = self.custom.then(|| self.code_string());
-        Some(room_url_with_parts(base, code.as_deref(), sim::SIM_VERSION))
+        Some(room_url_with_parts(base, code.as_deref(), &epoch()))
     }
 }
 
-/// Append the (optional) code and the sim version to the room *name*,
+/// What must match for two builds to share a room: the sim generation and
+/// the wire generation, as `v<SIM>p<NET>`.
+pub fn epoch() -> String {
+    format!("v{}p{}", sim::SIM_VERSION, net::NET_PROTOCOL)
+}
+
+/// Append the (optional) code and the epoch to the room *name*,
 /// preserving any query string: `ws://host/two-top?next=2` + `CURS` +
-/// `15` → `ws://host/two-top-CURS-v15?next=2`. Pure for testing. The
-/// version segment is what keeps mismatched builds apart — the live wire
-/// has no other version check (the handshake carries identity and keys
-/// only), and a desync between two builds is otherwise a log line nobody
-/// reads.
-pub fn room_url_with_parts(base: &str, code: Option<&str>, sim_version: u32) -> String {
+/// `v16p2` → `ws://host/two-top-CURS-v16p2?next=2`. Pure for testing. The
+/// epoch is what keeps mismatched builds apart — the live wire has no
+/// other version check, and a desync between two builds is otherwise a
+/// log line nobody reads.
+pub fn room_url_with_parts(base: &str, code: Option<&str>, epoch: &str) -> String {
     let suffix = match code {
-        Some(c) => format!("-{c}-v{sim_version}"),
-        None => format!("-v{sim_version}"),
+        Some(c) => format!("-{c}-{epoch}"),
+        None => format!("-{epoch}"),
     };
     match base.split_once('?') {
         Some((path, query)) => format!("{path}{suffix}?{query}"),
@@ -617,12 +622,12 @@ mod tests {
     #[test]
     fn code_suffixes_the_room_name_not_the_query() {
         assert_eq!(
-            room_url_with_parts("ws://h:3536/two-top?next=2", Some("CURS"), 7),
-            "ws://h:3536/two-top-CURS-v7?next=2"
+            room_url_with_parts("ws://h:3536/two-top?next=2", Some("CURS"), "v7p2"),
+            "ws://h:3536/two-top-CURS-v7p2?next=2"
         );
         assert_eq!(
-            room_url_with_parts("ws://h/two-top", None, 7),
-            "ws://h/two-top-v7"
+            room_url_with_parts("ws://h/two-top", None, "v7p2"),
+            "ws://h/two-top-v7p2"
         );
     }
 
@@ -630,11 +635,12 @@ mod tests {
     fn different_sim_versions_never_share_a_room() {
         // The whole point: a stale sideload and a fresh one, same code,
         // must land in two rooms rather than one desync.
-        let a = room_url_with_parts("ws://h/two-top?next=2", Some("CURS"), 13);
-        let b = room_url_with_parts("ws://h/two-top?next=2", Some("CURS"), 14);
+        let a = room_url_with_parts("ws://h/two-top?next=2", Some("CURS"), "v13p2");
+        let b = room_url_with_parts("ws://h/two-top?next=2", Some("CURS"), "v14p2");
+        let c = room_url_with_parts("ws://h/two-top?next=2", Some("CURS"), "v14p3");
         assert_ne!(a, b);
-        assert!(a.ends_with("-v13?next=2"));
-        assert!(b.ends_with("-v14?next=2"));
+        assert_ne!(b, c);
+        assert!(a.ends_with("-v13p2?next=2"));
     }
 
     #[test]
@@ -659,7 +665,7 @@ mod tests {
         };
         assert_eq!(
             code.room_url(),
-            Some(format!("ws://h/two-top-v{}?next=2", sim::SIM_VERSION))
+            Some(format!("ws://h/two-top-{}?next=2", epoch()))
         );
     }
 
@@ -672,7 +678,7 @@ mod tests {
         };
         assert_eq!(
             code.room_url(),
-            Some(format!("ws://h/two-top-CURS-v{}?next=2", sim::SIM_VERSION))
+            Some(format!("ws://h/two-top-CURS-{}?next=2", epoch()))
         );
     }
 

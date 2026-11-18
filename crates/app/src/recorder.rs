@@ -27,10 +27,7 @@
 use bevy::prelude::*;
 use bevy_ggrs::{GgrsSchedule, PlayerInputs};
 use replay::{FORMAT_VERSION, MAGIC, Replay, ReplayHeader, encode};
-use sim::{
-    FrameCount, GgrsCfg, MATCH_WIN_THRESHOLD, MatchScore, MatchState, PlayerInput, SelectedArena,
-    TICK_HZ,
-};
+use sim::{FrameCount, GgrsCfg, MatchScore, MatchState, PlayerInput, SelectedArena, TICK_HZ};
 use std::path::PathBuf;
 
 /// A tick-0 write against a tape longer than this is a fresh session (new
@@ -239,10 +236,8 @@ fn save_replay_on_match_over(
             // the automated Rung 2 smoke's tape filename).
             // A silent drop crowns nobody (`winner: None`) — the same
             // verdict the ledger reaches in `grudge::match_outcome`.
-            let winner: Option<u8> = if score.p0 >= MATCH_WIN_THRESHOLD {
-                Some(0)
-            } else if score.p1 >= MATCH_WIN_THRESHOLD {
-                Some(1)
+            let winner: Option<u8> = if let Some(seat) = score.winner() {
+                Some(seat)
             } else {
                 let forfeit = crate::grudge::forfeit_kind(&lobby);
                 let local_handle = local.0.unwrap_or(0);

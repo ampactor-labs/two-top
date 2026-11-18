@@ -181,8 +181,7 @@ impl Endpoint {
     /// The runtime variable, and the value baked at compile time.
     pub fn spec(self) -> (&'static str, Option<&'static str>) {
         match self {
-            // The room's runtime name predates the TWOTOP_ prefix.
-            Endpoint::Room => ("MATCHBOX_ROOM", option_env!("TWOTOP_ROOM")),
+            Endpoint::Room => ("TWOTOP_ROOM", option_env!("TWOTOP_ROOM")),
             Endpoint::IceUrl => ("TWOTOP_ICE_URL", option_env!("TWOTOP_ICE_URL")),
             Endpoint::IceKey => ("TWOTOP_ICE_KEY", option_env!("TWOTOP_ICE_KEY")),
             Endpoint::TurnUrl => ("TWOTOP_TURN_URL", option_env!("TWOTOP_TURN_URL")),
@@ -281,8 +280,7 @@ mod tests {
                 let text = std::fs::read_to_string(&path).unwrap();
                 for (i, line) in text.lines().enumerate() {
                     let code = line.split("//").next().unwrap_or("");
-                    if code.contains("env::var")
-                        && (code.contains("\"TWOTOP_") || code.contains("\"MATCHBOX_ROOM\""))
+                    if code.contains("env::var") && code.contains("\"TWOTOP_")
                         || code.contains("option_env!(\"TWOTOP_")
                     {
                         stray.push(format!("{}:{}: {}", path.display(), i + 1, line.trim()));

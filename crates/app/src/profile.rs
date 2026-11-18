@@ -118,7 +118,7 @@ pub struct LocalProfile {
     pub named: bool,
     /// The result-signing key (NORTH N2): 64 hex chars = 32 bytes of
     /// ed25519 seed, minted beside the install-id and never sent anywhere.
-    /// The pubkey derived from it rides `NetMsg::Profile2`, and a match
+    /// The pubkey derived from it rides `NetMsg::Profile`, and a match
     /// decided on score gets dual-signed with it. Hex keeps the file
     /// greppable and hand-editable like everything else here; a value
     /// that doesn't parse reads as absent and is reminted, which touches
@@ -127,13 +127,6 @@ pub struct LocalProfile {
 }
 
 impl LocalProfile {
-    pub fn as_data(&self) -> ProfileData {
-        ProfileData {
-            install_id: self.install_id,
-            name: slots_from_name(&self.name),
-        }
-    }
-
     pub fn name_string(&self) -> String {
         self.name.clone()
     }
@@ -143,12 +136,11 @@ impl LocalProfile {
         net::from_hex32(&self.signing_key)
     }
 
-    /// Identity plus pubkey for the `Profile2` handshake. `None` only
-    /// before `ensure_signing_key` has run or after a hand edit broke the
-    /// hex — callers then simply don't send a Profile2, and the pairing
-    /// degrades to unsigned results like any legacy build.
-    pub fn as_data2(&self) -> Option<net::ProfileData2> {
-        Some(net::ProfileData2 {
+    /// Identity plus pubkey for the `NetMsg::Profile` handshake. `None`
+    /// only before `ensure_signing_key` has run or after a hand edit broke
+    /// the hex (boot re-mints it).
+    pub fn as_keyed(&self) -> Option<net::KeyedProfile> {
+        Some(net::KeyedProfile {
             install_id: self.install_id,
             name: slots_from_name(&self.name),
             pubkey: net::pubkey_for(&self.signing_key_bytes()?),
@@ -818,7 +810,7 @@ mod tests {
         let key = profile.signing_key_bytes().expect("valid 32 bytes");
         assert!(!ensure_signing_key(&mut profile), "second boot keeps it");
         assert_eq!(profile.signing_key_bytes(), Some(key));
-        let data2 = profile.as_data2().expect("pubkey derivable");
+        let data2 = profile.as_keyed().expect("pubkey derivable");
         assert_eq!(data2.pubkey, net::pubkey_for(&key));
         assert_eq!(data2.install_id, 7);
         // An older build's file predates the field: serde defaults it

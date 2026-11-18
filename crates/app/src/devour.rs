@@ -12,7 +12,7 @@
 
 use bevy::prelude::*;
 use render::{EffectAssets, LastKillPos, ScreenShake};
-use sim::{MATCH_WIN_THRESHOLD, MatchScore, MatchState, Player};
+use sim::{MatchScore, MatchState, Player};
 
 /// Seconds the fang holds at the kill spot before flying (lets the kill-cam
 /// finish its punch-in so the whole ceremony is on-camera).
@@ -59,11 +59,9 @@ fn devouring_ceremony(
     *prev_over = over;
 
     if entered && fang.is_empty() {
-        let winner = if score.p0 >= MATCH_WIN_THRESHOLD {
-            0
-        } else {
-            1
-        };
+        // MatchOver is only ever the sim's score decision, so a winner
+        // exists; a forfeit never reaches this ceremony.
+        let winner = score.winner().unwrap_or(0) as usize;
         commands.spawn((
             DevourFang {
                 t: -DEVOUR_HOLD,

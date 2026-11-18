@@ -26,7 +26,7 @@
 #
 # For a peer that pairs and never syncs (the sync budget and re-dial),
 # start one app the same way and point `cargo run -p app --example
-# silent_peer -- ws://127.0.0.1:$PORT/two-top-v<SIM_VERSION>?next=2 silent`
+# silent_peer -- ws://127.0.0.1:$PORT/two-top-v<SIM>p<NET>?next=2 silent`
 # at the room the app logs.
 set -u
 APP=${1:-target/debug/app}
