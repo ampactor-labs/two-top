@@ -1293,23 +1293,28 @@ mod tests {
         assert_eq!(agreed(3, 200), MAX, "a hostile proposal is clamped");
     }
 
-    /// The side channel's wire bytes are a compatibility surface: the
-    /// variants keep their postcard indices, and `Ended` round-trips.
+    /// The side channel's wire bytes are pinned: changing a variant's
+    /// postcard index means bumping `NET_PROTOCOL` (which splits rooms)
+    /// and updating this table in the same commit.
     #[test]
     fn the_side_channel_keeps_its_wire_indices() {
+        assert_eq!(
+            NET_PROTOCOL, 2,
+            "re-pin the indices below for the new protocol"
+        );
         assert_eq!(&*encode_net_msg(&NetMsg::Bye), &[2u8][..]);
-        assert_eq!(&*encode_net_msg(&NetMsg::Pausing), &[6u8][..]);
+        assert_eq!(&*encode_net_msg(&NetMsg::Pausing), &[5u8][..]);
         assert_eq!(
             &*encode_net_msg(&NetMsg::Ended {
                 reason: EndReason::Closed
             }),
-            &[7u8, 1][..]
+            &[6u8, 1][..]
         );
-        assert_eq!(&*encode_net_msg(&NetMsg::Ping { id: 2 }), &[8u8, 2][..]);
-        assert_eq!(&*encode_net_msg(&NetMsg::Pong { id: 2 }), &[9u8, 2][..]);
+        assert_eq!(&*encode_net_msg(&NetMsg::Ping { id: 2 }), &[7u8, 2][..]);
+        assert_eq!(&*encode_net_msg(&NetMsg::Pong { id: 2 }), &[8u8, 2][..]);
         assert_eq!(
             &*encode_net_msg(&NetMsg::Delay { frames: 3 }),
-            &[10u8, 3][..]
+            &[9u8, 3][..]
         );
         for reason in [EndReason::Closed, EndReason::Desynced { frame: 4321 }] {
             let msg = NetMsg::Ended { reason };
