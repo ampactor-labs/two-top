@@ -1,7 +1,7 @@
 //! Phase 12 / M4: live Matchbox WebRTC netplay driver.
 //!
 //! Online play is opt-in: pass `--room <url>` on the desktop binary (or
-//! set `MATCHBOX_ROOM`). The Android APK, launched from a tapped icon with
+//! set `TWOTOP_ROOM`). The Android APK, launched from a tapped icon with
 //! no argv and no settable process env, instead reads a **compile-time**
 //! `TWOTOP_ROOM` baked at build time (`TWOTOP_ROOM=<url> cargo apk run ...`).
 //! Absent all three ⇒ the local `SyncTestSession` couch-versus build is
@@ -44,14 +44,6 @@ use net::{
 };
 use sim::GgrsCfg;
 
-/// Online input delay (frames). 3 hides a few frames of network jitter
-/// behind local prediction; every frame here is one more frame of
-/// prediction headroom bought for 16.7 ms of feel (the couch build runs 0
-/// because there's no network to hide). The budget: touch sample ≤ 1
-/// frame + this + interpolation ≤ 1 frame ≈ 83 ms online before the
-/// panel, against a freeze the moment the window fills.
-const ONLINE_INPUT_DELAY: usize = 3;
-
 /// How far ahead of the last confirmed remote input the session may run.
 /// ggrs's default is 8, which is a LAN number: at a cellular 300 ms RTT a
 /// remote input for frame N cannot arrive before our N+9, so the session
@@ -63,27 +55,59 @@ const ONLINE_INPUT_DELAY: usize = 3;
 /// actually verified.
 const MAX_PREDICTION_FRAMES: usize = 16;
 
+// A THROW pressed just before this phone learned the match was decided
+// lands up to input delay + prediction window − 1 ticks after the decision;
+// the sim's rematch grace must cover it, or that press restarts the match
+// unseen.
+const _: () = assert!(
+    net::delay::MAX + MAX_PREDICTION_FRAMES <= sim::REMATCH_GRACE_FRAMES as usize,
+    "the sim's rematch grace must cover input delay + prediction window",
+);
+
 /// ggrs desync-detection cadence: exchange a state checksum every N frames.
 /// 30 @ 60 Hz = twice a second — frequent enough to catch a divergence
 /// within a few hundred ms, cheap enough to be free on the wire.
 const DESYNC_CHECK_INTERVAL: u32 = 30;
 
-/// Drop the peer (and forfeit) after this much silence. 9 s — long enough
-/// that a phone surviving a notification-shade peek or a short call banner
-/// comes back into a live match (ggrs replays the missed ticks), short
-/// enough that a genuinely gone opponent doesn't hold the field hostage.
-/// The OPPONENT AWAY overlay covers the wait (net's silence FSM flips the
-/// lobby to `Disconnected` after ~1 s once the driver stops pinning the
-/// silence timer). net::FORFEIT_AFTER_FRAMES (10 s) is the fallback gate
-/// just behind this.
-const DISCONNECT_TIMEOUT: Duration = Duration::from_secs(9);
+/// ggrs's own disconnect timeout: a ceiling, not the rule. The rule is net's
+/// silence FSM: a peer silent for 9 s without a word is forfeited
+/// (`net::FORFEIT_AFTER_FRAMES`), one that said it was going away gets 20 s
+/// (`net::PAUSED_FORFEIT_AFTER_FRAMES`, [`NetMsg::Pausing`]), and the OPPONENT
+/// AWAY overlay counts down the wait. ggrs knows nothing of a pause, so its
+/// timeout sits at the longer grace: at 9 s it would end a match the FSM is
+/// still holding open. A phone that comes back in time rejoins the live
+/// match (ggrs replays the missed ticks).
+const GGRS_DISCONNECT_TIMEOUT: Duration = Duration::from_secs(20);
+
+/// The grace a peer gets without a word, in seconds: how long our own
+/// freeze must last before the other phone could have forfeited us.
+const QUIET_GRACE_SECS: f32 = net::FORFEIT_AFTER_FRAMES as f32 / sim::TICK_HZ as f32;
+
+/// A frame gap at least this long means this phone itself was away (asleep
+/// in the background, a hidden tab): the silence in it is ours, not the
+/// peer's, and is not held against them.
+const OWN_GAP_SECS: f32 = 0.5;
+
+/// Seconds a fresh session may spend synchronizing before the peer counts
+/// as unreachable. ggrs retries its sync handshake forever (its
+/// `Synchronizing` state has no timeout of its own), so a peer that
+/// vanished between pairing and the first frame left the player at a
+/// frozen board with no word on screen, and QUIT filed a loss for a duel
+/// that never began. A healthy sync takes five round trips: well under a
+/// second even on a slow link.
+const SYNC_BUDGET_SECS: f32 = 12.0;
+
+/// Times a failed sync re-dials the room on its own before the player is
+/// told ([`LobbyState::PeerUnreachable`]). One: a peer who simply left is
+/// replaced by the next challenger, and a pair that fails twice is told.
+const MAX_REDIALS: u32 = 1;
 
 /// The matchbox channel ggrs owns (unreliable + unordered).
 const GGRS_CHANNEL: usize = 0;
 /// The reliable side-channel (identity, rematch consent, goodbye).
 const SIDE_CHANNEL: usize = 1;
 
-/// Resolved at startup from `--room`/`MATCHBOX_ROOM`. `None` ⇒ local
+/// Resolved at startup from `--room`/`TWOTOP_ROOM`. `None` ⇒ local
 /// SyncTest mode (the driver systems no-op / aren't added).
 #[derive(Resource, Clone, Debug, Default)]
 pub struct NetplayConfig {
@@ -118,9 +142,84 @@ pub struct LocalPlayerHandle(pub Option<usize>);
 #[derive(Resource, Clone, Copy, Debug, Default)]
 pub struct SessionIds(pub Option<(u128, u128)>);
 
+/// Debug builds only: `TWOTOP_FAULT=desync@<tick>` makes this phone's sim
+/// disagree with its peer's from `<tick>` on (one duelist nudged by one
+/// fixed-point bit on every simulation of that tick) and mutes its outgoing
+/// checksum reports, so only this side's ggrs detects the desync. The other
+/// phone must still void the match: it hears of it over the side channel
+/// ([`NetMsg::Ended`]). Absent from release builds.
+#[cfg(debug_assertions)]
+pub mod fault {
+    use bevy::prelude::*;
+
+    /// The tick of `TWOTOP_FAULT=desync@<tick>`, read once.
+    pub fn desync_at() -> Option<u32> {
+        static AT: std::sync::OnceLock<Option<u32>> = std::sync::OnceLock::new();
+        *AT.get_or_init(|| {
+            crate::config::Knob::Fault
+                .value()
+                .and_then(|v| v.strip_prefix("desync@")?.parse().ok())
+        })
+    }
+
+    /// `GgrsSchedule`, after the sim chain: on the fault tick (every
+    /// simulation of it, rollbacks included, so this side stays consistent
+    /// with itself), nudge duelist 0.
+    pub fn nudge(frame: Res<sim::FrameCount>, mut q: Query<(&sim::Player, &mut sim::PositionF)>) {
+        let Some(at) = desync_at() else {
+            return;
+        };
+        if frame.0 != at {
+            return;
+        }
+        for (player, mut pos) in &mut q {
+            if player.handle == 0 {
+                pos.0.x = fixed_math::Fix::from_bits(pos.0.x.to_bits() + 1);
+            }
+        }
+    }
+}
+
+/// How a live session ended, captured once by [`conclude_session`] on the
+/// frame the lobby went terminal: the last frame both phones' inputs were
+/// known for, and the score as it stood after that frame. Everything the
+/// match books (ledger, tape, summary) reads this, never the predicted
+/// ticks past it: a deciding kill that only ever existed in prediction is
+/// not a result.
+#[derive(Resource, Default, Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SessionEnding(pub Option<Ending>);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Ending {
+    /// bevy_ggrs's confirmed frame when the session ended (`-1`: none).
+    pub confirmed: i32,
+    /// The score after the confirmed frame.
+    pub score: sim::MatchScore,
+}
+
+/// What a session's ending leaves standing. A match decided on a confirmed
+/// tick stays decided whatever happens after (a peer leaving the summary
+/// takes nothing back); anything else is booked as it stood on the last
+/// confirmed frame. `confirmed_score` is the score after that frame. Pure.
+pub fn ending_outcome(
+    state: sim::MatchState,
+    score: sim::MatchScore,
+    confirmed: i32,
+    confirmed_score: sim::MatchScore,
+) -> (sim::MatchState, sim::MatchScore) {
+    let decided_on_confirmed = state
+        .decided_at()
+        .is_some_and(|d| i64::from(d) <= i64::from(confirmed));
+    if decided_on_confirmed {
+        (state, score)
+    } else {
+        (sim::MatchState::abandoned(), confirmed_score)
+    }
+}
+
 impl NetplayConfig {
     /// Read the room URL, in precedence order: the `--room <url>` CLI flag,
-    /// then the `MATCHBOX_ROOM` runtime env var, then a `TWOTOP_ROOM` value
+    /// then the `TWOTOP_ROOM` runtime env var, then the same name's value
     /// baked in at **compile time**. Returns an all-`None` config (local
     /// couch-versus) when none are set.
     ///
@@ -136,26 +235,12 @@ impl NetplayConfig {
     /// ```
     ///
     /// Desktop builds left without `TWOTOP_ROOM` at compile time and without
-    /// `--room`/`MATCHBOX_ROOM` at runtime behave exactly as before.
+    /// `--room`/`TWOTOP_ROOM` at runtime behave exactly as before.
     pub fn from_env_and_args() -> Self {
         // Runtime env first, then the compile-time bake (the APK path —
         // note it is a URL, never a credential; see `ice_vendor`).
-        let ice_url = std::env::var("TWOTOP_ICE_URL")
-            .ok()
-            .filter(|s| !s.is_empty())
-            .or_else(|| {
-                option_env!("TWOTOP_ICE_URL")
-                    .filter(|s| !s.is_empty())
-                    .map(str::to_string)
-            });
-        let ice_key = std::env::var("TWOTOP_ICE_KEY")
-            .ok()
-            .filter(|s| !s.is_empty())
-            .or_else(|| {
-                option_env!("TWOTOP_ICE_KEY")
-                    .filter(|s| !s.is_empty())
-                    .map(str::to_string)
-            });
+        let ice_url = crate::config::Endpoint::IceUrl.get();
+        let ice_key = crate::config::Endpoint::IceKey.get();
         let mut args = std::env::args().skip(1);
         while let Some(arg) = args.next() {
             if arg == "--room" {
@@ -176,14 +261,7 @@ impl NetplayConfig {
         // Runtime env var first, then the compile-time bake. Empty strings
         // are treated as unset so a stray `TWOTOP_ROOM=` can't force a
         // bogus online boot with a blank URL.
-        let room_url = std::env::var("MATCHBOX_ROOM")
-            .ok()
-            .filter(|s| !s.is_empty())
-            .or_else(|| {
-                option_env!("TWOTOP_ROOM")
-                    .filter(|s| !s.is_empty())
-                    .map(str::to_string)
-            });
+        let room_url = crate::config::Endpoint::Room.get();
         Self {
             room_url,
             ice_url,
@@ -208,21 +286,154 @@ impl NetplayConfig {
 /// The STUN urls stay in the list either way; WebRTC only applies the
 /// credentials to the `turn:` entries.
 fn ice_server_config() -> RtcIceServerConfig {
-    let get = |run: &str, bake: Option<&'static str>| {
-        std::env::var(run)
-            .ok()
-            .filter(|s| !s.is_empty())
-            .or_else(|| bake.filter(|s| !s.is_empty()).map(str::to_string))
-    };
-    let turn_url = get("TWOTOP_TURN_URL", option_env!("TWOTOP_TURN_URL"));
+    use crate::config::Endpoint;
+    let turn_url = Endpoint::TurnUrl.get();
     let mut config = RtcIceServerConfig::default();
     let Some(url) = turn_url else {
         return config;
     };
     config.urls.push(url);
-    config.username = get("TWOTOP_TURN_USER", option_env!("TWOTOP_TURN_USER"));
-    config.credential = get("TWOTOP_TURN_PASS", option_env!("TWOTOP_TURN_PASS"));
+    config.username = Endpoint::TurnUser.get();
+    config.credential = Endpoint::TurnPass.get();
     config
+}
+
+/// A fresh P2P session that has not synchronized yet. `since` is when it
+/// was built (real seconds), `None` once ggrs reports the peer
+/// synchronized and while there is no session at all. Until then no duel
+/// is underway: nothing is at stake, the far seat stays empty, and one
+/// QUIT tap cancels.
+#[derive(Resource, Default, Clone, Copy, Debug)]
+pub struct SyncWait {
+    pub since: Option<f32>,
+    /// The peer said goodbye, or its connection closed, before the sync.
+    peer_gone: bool,
+}
+
+impl SyncWait {
+    pub fn waiting(&self) -> bool {
+        self.since.is_some()
+    }
+}
+
+/// How long a left session's socket stays open to carry the last word.
+/// It used to be 1 s, shorter than one SCTP retransmission (webrtc-sctp's
+/// RTO floor is 1 s): a goodbye whose first packet was lost died with the
+/// socket. Three seconds also lets the room server tell the peer we left.
+const GOODBYE_LINGER_SECS: f32 = 3.0;
+
+/// A match already left, kept whole until its deadline so the goodbye
+/// queued on its socket is delivered. Nothing reads it. The session rides
+/// along because it owns the ggrs channel: matchbox's message loop exits
+/// as soon as any one channel's queue closes ("Outgoing message queue
+/// closed, message not sent"), so dropping the session alone tore the
+/// connection down under the goodbye.
+struct Departing {
+    _socket: WebRtcSocket,
+    _session: Option<Session<GgrsCfg>>,
+    until: f32,
+}
+
+#[derive(Default)]
+struct DepartingSockets(Vec<Departing>);
+
+fn close_departed_sockets(world: &mut World) {
+    let now = world.resource::<Time<Real>>().elapsed_secs();
+    let mut departing = world.non_send_resource_mut::<DepartingSockets>();
+    if !departing.0.is_empty() {
+        departing.0.retain(|d| now < d.until);
+    }
+}
+
+/// Whether the socket this phone dialed with can relay (has a TURN
+/// server). Without one, two phones behind carrier NAT pair on the room
+/// server and never connect, and matchbox reports nothing: the wait is the
+/// only symptom, so the wait's wording names it (`lobby_overlay`).
+#[derive(Resource, Default, Clone, Copy, Debug)]
+pub struct IceStatus {
+    pub relay: Option<bool>,
+}
+
+/// Seconds a phone waits in an empty room before it dials again with a
+/// fresh socket. A WebRTC handshake that cannot connect is never reported
+/// by matchbox 0.14, and a quick-match room pairs phones two by two: two
+/// phones whose pairing silently failed would wait on each other forever.
+/// A re-dial frees this one to meet whoever comes next.
+pub const WAITING_REDIAL_SECS: f32 = 30.0;
+
+/// Is a re-dial due after `waited` seconds in the room? A per-install
+/// jitter of up to 4 s keeps two stuck phones from re-dialing in lockstep
+/// (and landing in the same dead pairing again). Pure.
+pub fn waiting_redial_due(waited: f32, install_id: u128) -> bool {
+    waited >= WAITING_REDIAL_SECS + (install_id % 5) as f32
+}
+
+/// `Update`: re-dial a phone that has waited too long in its room.
+fn redial_waiting(world: &mut World, mut since: Local<Option<f32>>) {
+    let now = world.resource::<Time<Real>>().elapsed_secs();
+    if !matches!(
+        *world.resource::<LobbyState>(),
+        LobbyState::WaitingForPeer { .. }
+    ) {
+        *since = None;
+        return;
+    }
+    let at = *since.get_or_insert(now);
+    let install = world.resource::<crate::profile::LocalProfile>().install_id;
+    if !waiting_redial_due(now - at, install) {
+        return;
+    }
+    *since = None;
+    tracing::info!(target: "two_top::net", waited_secs = now - at, "nobody came — re-dialing the room with a fresh socket");
+    leave_online_match(world, Farewell::Close);
+    start_matchbox(world);
+}
+
+/// Re-dials made since the match screen was entered.
+#[derive(Resource, Default)]
+struct Redials(u32);
+
+/// Whether an online duel has begun: a round has started on frames both
+/// phones have confirmed ([`sim::OPENING_GO_TICK`]). Leaving one is a
+/// loss; before it nothing is at stake, and an ending books nothing and
+/// re-dials. This replaced "our own sync finished", which the two phones
+/// reach at different moments: one could book a forfeit the other never
+/// saw begin.
+pub fn duel_began(world: &World) -> bool {
+    world.resource::<DuelBegan>().0
+}
+
+/// Latched by [`note_duel_began`]; cleared by [`leave_online_match`].
+#[derive(Resource, Default)]
+pub struct DuelBegan(pub bool);
+
+fn note_duel_began(
+    session: Option<Res<Session<GgrsCfg>>>,
+    confirmed: Option<Res<bevy_ggrs::ConfirmedFrameCount>>,
+    mut began: ResMut<DuelBegan>,
+) {
+    if began.0 || !matches!(session.as_deref(), Some(Session::P2P(_))) {
+        return;
+    }
+    if confirmed.is_some_and(|c| c.0 >= sim::OPENING_GO_TICK as i32) {
+        began.0 = true;
+        tracing::info!(target: "two_top::net", "the duel began: the first GO is confirmed on both phones");
+    }
+}
+
+/// The systems that end a session, in order: everything that can make the
+/// lobby terminal runs before [`conclude_session`]; anything that books the
+/// result (`attest`, the ledger, the recorder) runs after.
+#[derive(bevy::ecs::schedule::SystemSet, Debug, Clone, PartialEq, Eq, Hash)]
+pub struct EndingSet;
+
+/// How this side leaves a session ([`leave_online_match`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Farewell {
+    /// QUIT from a duel that has begun: a concession ([`NetMsg::Bye`]).
+    Concede,
+    /// Everything else ([`NetMsg::Ended`] `Closed`).
+    Close,
 }
 
 /// Holds the live socket between lobby ticks. Kept as a **non-send**
@@ -245,6 +456,12 @@ struct MatchboxDriver {
     /// belong to the session (the peer swapped first and already sent its
     /// `Profile`). [`pump_side_channel`] reads these before anything new.
     backlog: Vec<(PeerId, Box<[u8]>)>,
+    /// The ggrs session of a match that has ended ([`conclude_session`]):
+    /// out of the world so nothing advances or rolls it back, but alive,
+    /// because it owns the ggrs channel and matchbox ends the whole
+    /// connection (the side channel with it) the moment one channel is
+    /// dropped. Leaving drops it with the socket.
+    parked: Option<Session<GgrsCfg>>,
 }
 
 /// Which table to play, agreed BEFORE the ggrs session starts: each side
@@ -255,8 +472,33 @@ struct MatchboxDriver {
 struct TableHandshake {
     /// The peer this handshake is with; a different peer starts it over.
     peer: Option<PeerId>,
+    /// When it started (`Time<Real>` seconds).
+    began: f32,
     sent: bool,
     theirs: Option<sim::ArenaId>,
+    /// When each of our pings went out, by id.
+    pinged_at: Vec<f32>,
+    /// Round trips measured so far, ms.
+    rtts_ms: Vec<u32>,
+    /// The delay we proposed (sent once).
+    our_delay: Option<usize>,
+    their_delay: Option<usize>,
+}
+
+/// Pings per handshake, and the gap between them.
+const HANDSHAKE_PINGS: usize = 3;
+const PING_GAP_SECS: f32 = 0.1;
+/// Propose a delay from what came back by then, even if not every ping did.
+const DELAY_PROBE_SECS: f32 = 1.0;
+/// Swap without the peer's proposal after this long (logged), at our own.
+const HANDSHAKE_FALLBACK_SECS: f32 = 3.0;
+
+/// What the table handshake agreed: the table and the input delay.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Agreed {
+    table: sim::ArenaId,
+    delay: usize,
+    rtt_ms: Option<u32>,
 }
 
 /// The table both peers play: the lower peer id's pick. Pure for tests.
@@ -288,8 +530,29 @@ fn restore_own_table(mut own: ResMut<OwnTablePick>, mut selected: ResMut<sim::Se
 /// runs in Update once connected.
 pub struct MatchboxPlugin;
 
+/// The netplay facts every build carries, online or not: couch, practice
+/// and the theater have no session, but the recorder, the summary and the
+/// overlay read these all the same (as "no session"). [`MatchboxPlugin`]
+/// is only added online, so they cannot live there: a couch build that
+/// booted without them panicked on its first frame.
+pub struct NetplayStatePlugin;
+
+impl Plugin for NetplayStatePlugin {
+    fn build(&self, app: &mut App) {
+        app.init_resource::<SessionEnding>()
+            .init_resource::<DuelBegan>()
+            .init_resource::<IceStatus>()
+            .init_resource::<SyncWait>();
+    }
+}
+
 impl Plugin for MatchboxPlugin {
     fn build(&self, app: &mut App) {
+        #[cfg(debug_assertions)]
+        app.add_systems(
+            bevy_ggrs::GgrsSchedule,
+            fault::nudge.after(sim::advance_input_history),
+        );
         app.add_systems(OnEnter(crate::screen::AppScreen::InMatch), start_matchbox)
             .add_systems(
                 OnExit(crate::screen::AppScreen::InMatch),
@@ -300,19 +563,196 @@ impl Plugin for MatchboxPlugin {
                 },
             )
             .init_resource::<OwnTablePick>()
+            .init_resource::<IceCache>()
+            .add_systems(OnEnter(crate::screen::AppScreen::Title), prefetch_ice)
+            .init_resource::<Redials>()
+            .init_non_send_resource::<DepartingSockets>()
             .add_systems(OnExit(crate::screen::AppScreen::InMatch), restore_own_table)
-            .add_systems(OnEnter(crate::screen::AppScreen::InMatch), reset_absence)
-            .add_systems(PostUpdate, freeze_terminal_session)
+            .add_systems(
+                OnEnter(crate::screen::AppScreen::InMatch),
+                (reset_absence, |mut redials: ResMut<Redials>| redials.0 = 0),
+            )
+            .init_resource::<SessionLink>()
+            .init_resource::<RollbackDepths>()
+            .add_systems(
+                bevy_ggrs::LoadWorld,
+                note_rollback.before(bevy_ggrs::LoadWorldSystems::EntityResurrect),
+            )
+            .add_systems(PostUpdate, conclude_session)
             .add_systems(
                 Update,
                 (
+                    finish_prefetch,
                     finish_ice_fetch,
+                    announce_going_away.before(drive_netplay),
                     drive_netplay,
-                    track_absence,
+                    note_duel_began.before(EndingSet),
+                    redial_waiting.after(drive_netplay),
+                    conclude_session
+                        .in_set(EndingSet)
+                        .after(drive_netplay)
+                        .after(net::tick_disconnection_grace),
+                    close_departed_sockets,
+                    track_absence
+                        .after(net::advance_silence_clock)
+                        .before(net::tick_disconnection_grace),
                     reset_rematch_consent,
+                    log_link,
                 ),
             );
     }
+}
+
+/// How often a live session's link goes into the log.
+const LINK_LOG_EVERY_SECS: f32 = 5.0;
+
+/// One match's link, as ggrs measured it, summed for its closing line.
+#[derive(Default, Debug, Clone, PartialEq)]
+struct LinkSummary {
+    samples: u32,
+    ping_sum_ms: u128,
+    ping_max_ms: u128,
+    behind_max: i32,
+    kbps_max: usize,
+}
+
+impl LinkSummary {
+    fn add(&mut self, ping_ms: u128, local_frames_behind: i32, kbps_sent: usize) {
+        self.samples += 1;
+        self.ping_sum_ms += ping_ms;
+        self.ping_max_ms = self.ping_max_ms.max(ping_ms);
+        self.behind_max = self.behind_max.max(local_frames_behind.abs());
+        self.kbps_max = self.kbps_max.max(kbps_sent);
+    }
+
+    fn mean_ping_ms(&self) -> u128 {
+        self.ping_sum_ms / u128::from(self.samples.max(1))
+    }
+}
+
+/// The session's link as the handshake measured it, for the summary line.
+#[derive(Resource, Default, Clone, Copy, Debug)]
+pub struct SessionLink {
+    pub input_delay: usize,
+    pub start_rtt_ms: Option<u32>,
+}
+
+/// How deep this match's rollbacks went: `by_depth[d]` counts rollbacks of
+/// `d` frames (the last slot holds anything deeper). The numbers a retune
+/// of [`net::delay`] needs from real devices.
+#[derive(Resource, Default, Clone, Debug)]
+pub struct RollbackDepths {
+    pub by_depth: [u32; MAX_PREDICTION_FRAMES + 1],
+}
+
+impl RollbackDepths {
+    pub fn record(&mut self, depth: i32) {
+        let slot = usize::try_from(depth)
+            .unwrap_or(0)
+            .min(MAX_PREDICTION_FRAMES);
+        self.by_depth[slot] += 1;
+    }
+    pub fn count(&self) -> u32 {
+        self.by_depth.iter().sum()
+    }
+    pub fn max(&self) -> usize {
+        self.by_depth.iter().rposition(|&n| n > 0).unwrap_or(0)
+    }
+    /// `depth:count` pairs for the non-empty slots, e.g. `1:40 2:12 5:1`.
+    pub fn histogram(&self) -> String {
+        self.by_depth
+            .iter()
+            .enumerate()
+            .filter(|(_, n)| **n > 0)
+            .map(|(d, n)| format!("{d}:{n}"))
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+}
+
+/// `LoadWorld`, before the snapshot is restored: a rollback from the frame
+/// the world is on back to the frame being loaded.
+fn note_rollback(
+    frame: Res<sim::FrameCount>,
+    target: Res<bevy_ggrs::RollbackFrameCount>,
+    mut depths: ResMut<RollbackDepths>,
+) {
+    depths.record(frame.0 as i32 - target.0);
+}
+
+/// The link, in the log: every few seconds of a live online session, the
+/// round trip, frames behind and bandwidth ggrs measures, and once at the
+/// end of the match a one-line summary of all of it. The log carried none
+/// of it — `network_stats()` was never called, the prediction stalls
+/// logged at debug (compiled out of release) — so a report of "it felt
+/// laggy" or a dropped match came with nothing to read. The summary rides
+/// in the crash report's log tail like everything else.
+#[allow(clippy::too_many_arguments)]
+fn log_link(
+    time: Res<Time<Real>>,
+    local: Res<LocalPlayerHandle>,
+    state: Res<sim::MatchState>,
+    session: Option<Res<Session<GgrsCfg>>>,
+    link: Res<SessionLink>,
+    mut depths: ResMut<RollbackDepths>,
+    mut summary: Local<LinkSummary>,
+    mut next_sample: Local<f32>,
+    mut summarized: Local<bool>,
+) {
+    let now = time.elapsed_secs();
+    let (Some(session), Some(local)) = (session, local.0) else {
+        *summary = LinkSummary::default();
+        *summarized = false;
+        *depths = RollbackDepths::default();
+        return;
+    };
+    let Session::P2P(session) = &*session else {
+        return;
+    };
+    if state.is_match_over() {
+        if !*summarized && summary.samples > 0 {
+            tracing::info!(
+                target: "two_top::net::link",
+                input_delay = link.input_delay,
+                start_rtt_ms = ?link.start_rtt_ms,
+                samples = summary.samples,
+                mean_ping_ms = summary.mean_ping_ms(),
+                max_ping_ms = summary.ping_max_ms,
+                max_frames_behind = summary.behind_max,
+                max_kbps = summary.kbps_max,
+                rollbacks = depths.count(),
+                max_rollback = depths.max(),
+                rollback_depths = %depths.histogram(),
+                "net summary",
+            );
+        }
+        *summarized = true;
+        return;
+    }
+    if *summarized {
+        // A rematch: a new match, a new summary.
+        *summary = LinkSummary::default();
+        *summarized = false;
+        *depths = RollbackDepths::default();
+    }
+    if now < *next_sample {
+        return;
+    }
+    *next_sample = now + LINK_LOG_EVERY_SECS;
+    // Not synchronized yet (or the peer is gone): nothing measured.
+    let Ok(stats) = session.network_stats(1 - local) else {
+        return;
+    };
+    summary.add(stats.ping, stats.local_frames_behind, stats.kbps_sent);
+    tracing::info!(
+        target: "two_top::net::link",
+        ping_ms = stats.ping,
+        local_frames_behind = stats.local_frames_behind,
+        remote_frames_behind = stats.remote_frames_behind,
+        kbps_sent = stats.kbps_sent,
+        send_queue = stats.send_queue_len,
+        "link",
+    );
 }
 
 /// Seconds the credential fetch may hold up the connection before we fall
@@ -327,9 +767,58 @@ const ICE_FETCH_TIMEOUT_SECS: f32 = 2.5;
 /// `Sync` and resources must be both.
 #[derive(Resource)]
 struct PendingIce {
-    rx: std::sync::Mutex<std::sync::mpsc::Receiver<Option<RtcIceServerConfig>>>,
+    rx: std::sync::Mutex<IceReceiver>,
     started_at: f32,
 }
+
+type IceReceiver = std::sync::mpsc::Receiver<Option<IceAnswer>>;
+
+/// A vendor answer: the ICE config and how long its credential lives.
+#[derive(Clone, Debug)]
+struct IceAnswer {
+    config: RtcIceServerConfig,
+    ttl_secs: u64,
+}
+
+/// A relay answer fetched ahead of a match, kept until half its credential
+/// is spent: `(config, good until, real seconds)`. With it a match opens
+/// its socket at once instead of spending up to [`ICE_FETCH_TIMEOUT_SECS`]
+/// on the fetch first, and a slow vendor or a cold mobile connection no
+/// longer decides whether this duel gets a relay.
+#[derive(Resource, Default)]
+struct IceCache(Option<(RtcIceServerConfig, f32)>);
+
+impl IceCache {
+    fn fresh(&self, now: f32) -> Option<RtcIceServerConfig> {
+        self.0
+            .as_ref()
+            .filter(|(_, until)| now < *until)
+            .map(|(config, _)| config.clone())
+    }
+
+    /// Keep `answer` if it carries a relay. A STUN-only answer (a vendor
+    /// with no relay, or one still minting its first credential) is used
+    /// for the match at hand and never kept: kept, it would stand between
+    /// this phone and the relay for hours.
+    fn store(&mut self, answer: &IceAnswer, now: f32) {
+        let relays = answer.config.urls.iter().any(|u| u.starts_with("turn"));
+        if relays && answer.ttl_secs > 0 {
+            self.0 = Some((answer.config.clone(), now + answer.ttl_secs as f32 / 2.0));
+        }
+    }
+}
+
+/// A fetch started ahead of the match (when the title comes up), not yet
+/// landed. A match entered meanwhile adopts it instead of starting another.
+#[derive(Resource)]
+struct PrefetchIce {
+    rx: std::sync::Mutex<IceReceiver>,
+    started_at: f32,
+}
+
+/// A prefetch that has not answered in this long is abandoned; the match
+/// fetches for itself.
+const PREFETCH_GIVE_UP_SECS: f32 = 15.0;
 
 /// The vendor's `GET /ice` contract — field names in lockstep with
 /// `ice_vendor::IceResponse`.
@@ -338,6 +827,8 @@ struct IceResponse {
     urls: Vec<String>,
     username: Option<String>,
     credential: Option<String>,
+    #[serde(default)]
+    ttl_secs: u64,
 }
 
 /// Parse a vendor response body into matchbox's ICE config. `None` for
@@ -355,12 +846,37 @@ pub(crate) fn parse_ice_response(body: &str) -> Option<RtcIceServerConfig> {
     })
 }
 
-/// Blocking fetch of the vendor's ICE config (runs on the IO task pool —
-/// never the main thread). Tight timeout: the fallback exists. The
+/// [`parse_ice_response`], with the credential's lifetime.
+fn parse_ice_answer(body: &str) -> Option<IceAnswer> {
+    let ttl_secs = serde_json::from_str::<IceResponse>(body).ok()?.ttl_secs;
+    Some(IceAnswer {
+        config: parse_ice_response(body)?,
+        ttl_secs,
+    })
+}
+
+/// Start a vendor fetch off the main thread: a thread of its own natively,
+/// the page's `fetch` in a browser. The answer lands in the receiver.
+fn spawn_ice_fetch(ice_url: String, ice_key: Option<String>) -> IceReceiver {
+    let (tx, rx) = std::sync::mpsc::channel();
+    #[cfg(not(target_family = "wasm"))]
+    crate::platform::off_main_thread("twotop-ice", move || {
+        let _ = tx.send(fetch_ice(&ice_url, ice_key.as_deref()));
+    });
+    #[cfg(target_family = "wasm")]
+    wasm_bindgen_futures::spawn_local(async move {
+        let _ = tx.send(fetch_ice_web(ice_url, ice_key).await);
+    });
+    rx
+}
+
+/// Blocking fetch of the vendor's ICE config (runs on its own thread via
+/// `crate::platform::off_main_thread` — never the main one). Tight timeout: the
+/// fallback exists. The
 /// browser's twin is [`fetch_ice_web`]; both feed the same channel that
 /// [`finish_ice_fetch`] polls, so the socket-open path is identical.
 #[cfg(not(target_family = "wasm"))]
-fn fetch_ice(url: &str, app_key: Option<&str>) -> Option<RtcIceServerConfig> {
+fn fetch_ice(url: &str, app_key: Option<&str>) -> Option<IceAnswer> {
     let mut request = ureq::get(url).timeout(Duration::from_secs(2));
     if let Some(key) = app_key {
         request = request.set("X-App-Key", key);
@@ -373,7 +889,7 @@ fn fetch_ice(url: &str, app_key: Option<&str>) -> Option<RtcIceServerConfig> {
         })
         .ok()?;
     let body = response.into_string().ok()?;
-    let config = parse_ice_response(&body);
+    let config = parse_ice_answer(&body);
     if config.is_none() {
         tracing::warn!(target: "two_top::net", "ice vendor response unusable — falling back");
     }
@@ -389,7 +905,7 @@ fn fetch_ice(url: &str, app_key: Option<&str>) -> Option<RtcIceServerConfig> {
 /// [`ICE_FETCH_TIMEOUT_SECS`] budget is what bounds this request (a
 /// `fetch` has no timeout of its own — the deadline lives in the poller).
 #[cfg(target_family = "wasm")]
-async fn fetch_ice_web(url: String, app_key: Option<String>) -> Option<RtcIceServerConfig> {
+async fn fetch_ice_web(url: String, app_key: Option<String>) -> Option<IceAnswer> {
     use wasm_bindgen::JsCast;
 
     let init = web_sys::RequestInit::new();
@@ -419,11 +935,59 @@ async fn fetch_ice_web(url: String, app_key: Option<String>) -> Option<RtcIceSer
         .await
         .ok()?
         .as_string()?;
-    let config = parse_ice_response(&body);
+    let config = parse_ice_answer(&body);
     if config.is_none() {
         tracing::warn!(target: "two_top::net", "ice vendor response unusable — falling back");
     }
     config
+}
+
+/// `OnEnter(Title)`: fetch ICE ahead of the next match when there is no
+/// fresh relay answer kept and no fetch already out.
+fn prefetch_ice(world: &mut World) {
+    let config = world.resource::<NetplayConfig>();
+    let (Some(_), Some(ice_url)) = (config.room_url.as_ref(), config.ice_url.clone()) else {
+        return;
+    };
+    let ice_key = config.ice_key.clone();
+    let now = world.resource::<Time<Real>>().elapsed_secs();
+    if world.resource::<IceCache>().fresh(now).is_some()
+        || world.contains_resource::<PrefetchIce>()
+        || world.contains_resource::<PendingIce>()
+    {
+        return;
+    }
+    tracing::info!(target: "two_top::net", "fetching ice ahead of the match");
+    world.insert_resource(PrefetchIce {
+        rx: std::sync::Mutex::new(spawn_ice_fetch(ice_url, ice_key)),
+        started_at: now,
+    });
+}
+
+/// Land a prefetch in the [`IceCache`], or give it up.
+fn finish_prefetch(world: &mut World) {
+    let Some(prefetch) = world.get_resource::<PrefetchIce>() else {
+        return;
+    };
+    let now = world.resource::<Time<Real>>().elapsed_secs();
+    let polled = prefetch
+        .rx
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .try_recv();
+    let landed = match polled {
+        Ok(answer) => answer,
+        Err(std::sync::mpsc::TryRecvError::Empty)
+            if now - prefetch.started_at < PREFETCH_GIVE_UP_SECS =>
+        {
+            return;
+        }
+        Err(_) => None,
+    };
+    world.remove_resource::<PrefetchIce>();
+    if let Some(answer) = landed {
+        world.resource_mut::<IceCache>().store(&answer, now);
+    }
 }
 
 /// Startup: build the socket + spawn its message loop. Runs after Bevy's
@@ -447,25 +1011,21 @@ fn start_matchbox(world: &mut World) {
     };
 
     if let Some(ice_url) = config.ice_url {
-        let ice_key = config.ice_key;
-        let (tx, rx) = std::sync::mpsc::channel();
-        // Native: a blocking request on the IO pool. Browser: the page's
-        // own `fetch`, driven by the JS event loop. Both hand the same
-        // `Option<RtcIceServerConfig>` to the same receiver below.
-        #[cfg(not(target_family = "wasm"))]
-        bevy::tasks::IoTaskPool::get()
-            .spawn(async move {
-                let _ = tx.send(fetch_ice(&ice_url, ice_key.as_deref()));
-            })
-            .detach();
-        #[cfg(target_family = "wasm")]
-        wasm_bindgen_futures::spawn_local(async move {
-            let _ = tx.send(fetch_ice_web(ice_url, ice_key).await);
-        });
-        let started_at = world.resource::<Time<Real>>().elapsed_secs();
+        let now = world.resource::<Time<Real>>().elapsed_secs();
+        if let Some(cached) = world.resource::<IceCache>().fresh(now) {
+            tracing::info!(target: "two_top::net", "ice config fetched ahead — no wait");
+            open_socket(world, url, cached);
+            return;
+        }
+        // A prefetch still in flight becomes this match's fetch, its
+        // budget counted from now; otherwise fetch afresh.
+        let rx = match world.remove_resource::<PrefetchIce>() {
+            Some(prefetch) => prefetch.rx.into_inner().unwrap_or_else(|e| e.into_inner()),
+            None => spawn_ice_fetch(ice_url, config.ice_key),
+        };
         world.insert_resource(PendingIce {
             rx: std::sync::Mutex::new(rx),
-            started_at,
+            started_at: now,
         });
         // SUMMONING goes up now; the socket follows within the timeout.
         *world.resource_mut::<LobbyState>() = LobbyState::Connecting;
@@ -511,7 +1071,10 @@ fn finish_ice_fetch(world: &mut World) {
         return;
     };
     let fetched = result.is_some();
-    let ice = result.unwrap_or_else(ice_server_config);
+    if let Some(answer) = &result {
+        world.resource_mut::<IceCache>().store(answer, now);
+    }
+    let ice = result.map_or_else(ice_server_config, |answer| answer.config);
     tracing::info!(target: "two_top::net", fetched, "ice config resolved");
     open_socket(world, url, ice);
 }
@@ -545,8 +1108,10 @@ fn open_socket(world: &mut World, url: String, ice: RtcIceServerConfig) {
         interrupted: false,
         table: TableHandshake::default(),
         backlog: Vec::new(),
+        parked: None,
     });
     *world.resource_mut::<LobbyState>() = LobbyState::Connecting;
+    world.resource_mut::<IceStatus>().relay = Some(has_turn);
 
     tracing::info!(
         target: "two_top::net",
@@ -571,12 +1136,25 @@ fn drive_netplay(world: &mut World) {
         // reliable side-channel, and keep the silence timer fresh only
         // while ggrs reports a healthy link — during an interruption the
         // timer ages honestly and net's silence FSM raises OPPONENT AWAY.
+        if end_match_on_link_loss(world) {
+            return;
+        }
         drain_session_events(world);
         pump_side_channel(world);
+        watch_peer_link(world);
+        watch_sync(world);
         return;
     }
 
     // --- Pre-swap: drive the lobby from socket peer-state ---
+    // No session yet, so no silence to measure: a peer that has not begun
+    // sending frames is matchbox's to report (`PeerState::Disconnected`
+    // below), not the grace timer's. The timer ages on real time
+    // (`net::SilenceClock`), so an unpinned stamp read every second spent
+    // waiting in the room as silence, and a pairing after a minute's wait
+    // went straight to a forfeit in the table handshake.
+    let now = world.resource::<net::SilenceClock>().0;
+    world.resource_mut::<LastPeerMessageFrame>().0 = now;
     // `try_`, not `update_peers`: once the signaling loop dies (server
     // unreachable after matchbox's built-in retries), the plain call
     // unwraps the closed channel and ABORTS the app — a phone with no
@@ -642,37 +1220,173 @@ fn drive_netplay(world: &mut World) {
     // edge into `Connected` into a `PendingP2PSwap`; agree on the table
     // with that peer, then swap.
     if let Some(peer_id) = world.resource::<PendingP2PSwap>().0
-        && let Some(theirs) = exchange_table(world, peer_id)
+        && let Some(agreed) = exchange_table(world, peer_id)
     {
-        perform_swap(world, peer_id, theirs);
+        perform_swap(world, peer_id, agreed);
     }
 }
 
-/// One tick of the table handshake: send our pick once, read the peer's.
-/// `Some(their pick)` once it has arrived. Anything else the peer sent on
-/// the side channel meanwhile is kept for the session, never dropped.
-fn exchange_table(world: &mut World, peer_id: PeerId) -> Option<sim::ArenaId> {
+/// Post-swap, after the side-channel pump (so a goodbye that arrived in
+/// the same frame is read first and wins): the session peer's connection
+/// closing is the fastest word that it has gone. During the sync wait it
+/// marks the peer gone ([`watch_sync`] re-dials); in a live duel it ends
+/// the match at once as a silent drop, instead of after the silence FSM's
+/// 9 s. A dead signaling socket is [`end_match_on_link_loss`]'s.
+fn watch_peer_link(world: &mut World) {
+    let peer = match *world.resource::<LobbyState>() {
+        LobbyState::Connected { peer_id } | LobbyState::Disconnected { peer_id, .. } => peer_id,
+        _ => return,
+    };
+    let closed = world
+        .non_send_resource_mut::<MatchboxDriver>()
+        .socket
+        .try_update_peers()
+        .is_ok_and(|updates| {
+            updates
+                .iter()
+                .any(|(id, state)| *id == peer && matches!(state, PeerState::Disconnected))
+        });
+    if !closed {
+        return;
+    }
+    if world.resource::<SyncWait>().waiting() {
+        world.resource_mut::<SyncWait>().peer_gone = true;
+        return;
+    }
+    tracing::warn!(target: "two_top::net", peer = %peer, "the peer's connection closed — ending the match");
+    *world.resource_mut::<LobbyState>() = LobbyState::Forfeited {
+        peer_id: peer,
+        conceded: false,
+    };
+}
+
+/// A session still synchronizing: give up on it when the peer has gone
+/// (its goodbye, or its connection closing) or the budget runs out.
+fn watch_sync(world: &mut World) {
+    let wait = *world.resource::<SyncWait>();
+    let Some(since) = wait.since else {
+        return;
+    };
+    let waited = world.resource::<Time<Real>>().elapsed_secs() - since;
+    // Its goodbye, or its connection closing ([`watch_peer_link`]).
+    let gone = wait.peer_gone;
+    if !gone && waited < SYNC_BUDGET_SECS {
+        return;
+    }
+    tracing::warn!(
+        target: "two_top::net",
+        gone,
+        waited_secs = waited,
+        "session never synchronized — giving up on this peer",
+    );
+    sync_failed(world);
+}
+
+/// Fold a session that never synchronized and go back to the room: once
+/// on its own, then [`LobbyState::PeerUnreachable`]. Nothing is recorded.
+fn sync_failed(world: &mut World) {
+    leave_online_match(world, Farewell::Close);
+    // Back at this player's own table, at the near edge, as before pairing.
+    if let Some(own) = world.resource_mut::<OwnTablePick>().0.take() {
+        world.resource_mut::<sim::SelectedArena>().0 = own;
+    }
+    if let Err(e) = world.run_system_cached(crate::screen::rebuild_match) {
+        tracing::error!(target: "two_top::net", error = %e, "could not relay the table");
+    }
+    let redials = world.resource::<Redials>().0;
+    if redials < MAX_REDIALS {
+        world.resource_mut::<Redials>().0 += 1;
+        tracing::info!(target: "two_top::net", attempt = redials + 1, "re-dialing the room");
+        start_matchbox(world);
+    } else {
+        tracing::warn!(target: "two_top::net", "challenger unreachable after a re-dial — telling the player");
+        *world.resource_mut::<LobbyState>() = LobbyState::PeerUnreachable;
+    }
+}
+
+/// The socket under a live match has ended. matchbox runs signaling and
+/// the data channels as one future, and it has no reconnect: the room
+/// server restarting, or this phone moving from Wi-Fi to cellular, ends
+/// all of it, and the match with it. That used to be a crash (every send
+/// on the dead channel panicked); it is a dropped connection now, said at
+/// once instead of after ggrs's 9 s timeout, and scored the way any
+/// silent drop is — unfinished, nobody's win (`grudge::match_outcome`).
+/// `true` when the match was just ended here.
+fn end_match_on_link_loss(world: &mut World) -> bool {
+    let closed = world
+        .get_non_send_resource::<MatchboxDriver>()
+        .is_some_and(|driver| driver.socket.any_channel_closed());
+    if !closed {
+        return false;
+    }
+    let peer_id = match *world.resource::<LobbyState>() {
+        LobbyState::Connected { peer_id } | LobbyState::Disconnected { peer_id, .. } => peer_id,
+        // Already over (a forfeit, a desync, a goodbye): the socket ending
+        // after that is the teardown, not news.
+        _ => return false,
+    };
+    tracing::error!(
+        target: "two_top::net",
+        peer = %peer_id,
+        "connection lost: the socket ended under a live match",
+    );
+    *world.resource_mut::<LobbyState>() = LobbyState::Forfeited {
+        peer_id,
+        conceded: false,
+    };
+    true
+}
+
+/// One tick of the table handshake: send our table pick once and three
+/// round-trip pings, answer the peer's pings, propose an input delay from
+/// the median round trip ([`net::delay`]), and read the peer's pick and
+/// proposal. `Some` once both are in (or, missing only the peer's delay,
+/// after [`HANDSHAKE_FALLBACK_SECS`]). Anything else the peer sent on the
+/// side channel meanwhile is kept for the session, never dropped.
+fn exchange_table(world: &mut World, peer_id: PeerId) -> Option<Agreed> {
     let ours = world.resource::<sim::SelectedArena>().0;
+    let now = world.resource::<Time<Real>>().elapsed_secs();
     let mut driver = world.non_send_resource_mut::<MatchboxDriver>();
     let driver = &mut *driver;
     if driver.table.peer != Some(peer_id) {
         driver.table = TableHandshake {
             peer: Some(peer_id),
+            began: now,
             ..default()
         };
         driver.backlog.clear();
     }
+    // `try_send`: a dead socket is caught by the next `try_update_peers`
+    // (`SummonFailed`), never by a panic here.
+    let send = |driver: &mut MatchboxDriver, msg: NetMsg| {
+        let _ = driver
+            .socket
+            .channel_mut(SIDE_CHANNEL)
+            .try_send(encode_net_msg(&msg), peer_id);
+    };
     if !driver.table.sent {
-        driver.socket.channel_mut(SIDE_CHANNEL).send(
-            encode_net_msg(&NetMsg::Table {
+        send(
+            driver,
+            NetMsg::Table {
                 arena: ours.as_u8(),
-            }),
-            peer_id,
+            },
         );
         driver.table.sent = true;
         tracing::info!(target: "two_top::net", arena = ours.as_u8(), "table pick sent");
     }
-    for (from, bytes) in driver.socket.channel_mut(SIDE_CHANNEL).receive() {
+    let pings = driver.table.pinged_at.len();
+    if pings < HANDSHAKE_PINGS
+        && driver
+            .table
+            .pinged_at
+            .last()
+            .is_none_or(|&at| now - at >= PING_GAP_SECS)
+    {
+        send(driver, NetMsg::Ping { id: pings as u8 });
+        driver.table.pinged_at.push(now);
+    }
+    let inbound: Vec<_> = driver.socket.channel_mut(SIDE_CHANNEL).receive();
+    for (from, bytes) in inbound {
         if from != peer_id {
             continue;
         }
@@ -681,16 +1395,59 @@ fn exchange_table(world: &mut World, peer_id: PeerId) -> Option<sim::ArenaId> {
                 tracing::info!(target: "two_top::net", arena, "peer's table pick received");
                 driver.table.theirs = Some(sim::ArenaId::from_u8(arena));
             }
+            Some(NetMsg::Ping { id }) => send(driver, NetMsg::Pong { id }),
+            Some(NetMsg::Pong { id }) => {
+                if let Some(&at) = driver.table.pinged_at.get(usize::from(id)) {
+                    driver
+                        .table
+                        .rtts_ms
+                        .push(((now - at) * 1000.0).round() as u32);
+                }
+            }
+            Some(NetMsg::Delay { frames }) if driver.table.their_delay.is_none() => {
+                driver.table.their_delay = Some(usize::from(frames));
+            }
             _ => driver.backlog.push((from, bytes)),
         }
     }
-    driver.table.theirs
+    let rtt = net::delay::median_rtt(&driver.table.rtts_ms);
+    if driver.table.our_delay.is_none()
+        && (driver.table.rtts_ms.len() >= HANDSHAKE_PINGS
+            || now - driver.table.began >= DELAY_PROBE_SECS)
+    {
+        let delay = rtt.map_or(net::delay::DEFAULT, net::delay::delay_for_rtt);
+        send(
+            driver,
+            NetMsg::Delay {
+                frames: delay as u8,
+            },
+        );
+        driver.table.our_delay = Some(delay);
+        tracing::info!(target: "two_top::net", rtt_ms = ?rtt, samples = driver.table.rtts_ms.len(), delay, "input delay proposed");
+    }
+    let (Some(table), Some(our_delay)) = (driver.table.theirs, driver.table.our_delay) else {
+        return None;
+    };
+    let delay = match driver.table.their_delay {
+        Some(theirs) => net::delay::agreed(our_delay, theirs),
+        None if now - driver.table.began >= HANDSHAKE_FALLBACK_SECS => {
+            tracing::warn!(target: "two_top::net", delay = our_delay, "peer proposed no input delay — playing our own");
+            our_delay
+        }
+        None => return None,
+    };
+    Some(Agreed {
+        table,
+        delay,
+        rtt_ms: rtt,
+    })
 }
 
 /// Build the `P2PSession` and install it as the live `Session`, replacing
 /// the (absent) pre-connect session. Idempotent-ish: bails if our own
 /// `PeerId` isn't assigned yet (retried next frame).
-fn perform_swap(world: &mut World, peer_id: PeerId, their_table: sim::ArenaId) {
+fn perform_swap(world: &mut World, peer_id: PeerId, agreed: Agreed) {
+    let their_table = agreed.table;
     let Some(our_id) = world.non_send_resource_mut::<MatchboxDriver>().socket.id() else {
         return; // id not assigned yet; retry next tick
     };
@@ -707,15 +1464,23 @@ fn perform_swap(world: &mut World, peer_id: PeerId, their_table: sim::ArenaId) {
             .take_channel(GGRS_CHANNEL)
             .expect("unreliable channel 0 is present until taken exactly once");
         driver.channel_taken = true;
-        MatchboxBridge::new(channel)
+        let bridge = MatchboxBridge::new(channel);
+        #[cfg(debug_assertions)]
+        let bridge = if fault::desync_at().is_some() {
+            tracing::warn!(target: "two_top::net", "TWOTOP_FAULT: this side's checksum reports are muted");
+            bridge.mute_checksum_reports()
+        } else {
+            bridge
+        };
+        bridge
     };
 
     let mut sb = SessionBuilder::<GgrsCfg>::new()
         .with_num_players(2)
         .expect("2 players")
-        .with_input_delay(ONLINE_INPUT_DELAY)
+        .with_input_delay(agreed.delay)
         .with_max_prediction_window(MAX_PREDICTION_FRAMES)
-        .with_disconnect_timeout(DISCONNECT_TIMEOUT)
+        .with_disconnect_timeout(GGRS_DISCONNECT_TIMEOUT)
         .with_desync_detection_mode(DesyncDetection::On {
             interval: DESYNC_CHECK_INTERVAL,
         });
@@ -738,9 +1503,9 @@ fn perform_swap(world: &mut World, peer_id: PeerId, their_table: sim::ArenaId) {
     }
     tracing::info!(
         target: "two_top::net",
-        table = crate::room_code::arena_room_tag(table),
-        ours = crate::room_code::arena_room_tag(ours),
-        theirs = crate::room_code::arena_room_tag(their_table),
+        table = render::arena::info(table).room_tag,
+        ours = render::arena::info(ours).room_tag,
+        theirs = render::arena::info(their_table).room_tag,
         "table agreed",
     );
     if let Err(e) = world.run_system_cached(crate::screen::rebuild_match) {
@@ -748,26 +1513,36 @@ fn perform_swap(world: &mut World, peer_id: PeerId, their_table: sim::ArenaId) {
     }
 
     world.insert_resource(Session::P2P(session));
+    *world.resource_mut::<SessionLink>() = SessionLink {
+        input_delay: agreed.delay,
+        start_rtt_ms: agreed.rtt_ms,
+    };
     world.resource_mut::<PendingP2PSwap>().0 = None;
+    let built_at = world.resource::<Time<Real>>().elapsed_secs();
+    *world.resource_mut::<SyncWait>() = SyncWait {
+        since: Some(built_at),
+        peer_gone: false,
+    };
+    world.resource_mut::<net::PeerPaused>().0 = false;
     // Record which player is us, so "your-action" feedback (haptics, summary
     // banner) can distinguish local from remote.
     world.resource_mut::<LocalPlayerHandle>().0 = Some(local_handle);
     // Pin the silence timer to "now" so net's grace timer never spuriously
     // forfeits a healthy session — real disconnects come via ggrs events.
-    let frame = world.resource::<sim::FrameCount>().0;
-    world.resource_mut::<LastPeerMessageFrame>().0 = frame;
+    let now = world.resource::<net::SilenceClock>().0;
+    world.resource_mut::<LastPeerMessageFrame>().0 = now;
 
     // Open the duel with the identity handshake: install-id + name on the
     // reliable channel. The peer's grudge ledger files this match under it.
-    // Profile2 rides along with the signing pubkey — an old build ignores
-    // the unknown variant and still gets the legacy Profile.
+    // The signing pubkey rides with it, so a score-decided match can be
+    // signed by both sides.
     world.resource_mut::<SessionIds>().0 = Some((our_id.0.as_u128(), peer_id.0.as_u128()));
-    let profile = world.resource::<crate::profile::LocalProfile>().as_data();
-    let profile2 = world.resource::<crate::profile::LocalProfile>().as_data2();
-    let mut queue = world.resource_mut::<NetSendQueue>();
-    queue.0.push(NetMsg::Profile(profile));
-    if let Some(data2) = profile2 {
-        queue.0.push(NetMsg::Profile2(data2));
+    match world.resource::<crate::profile::LocalProfile>().as_keyed() {
+        Some(keyed) => world
+            .resource_mut::<NetSendQueue>()
+            .0
+            .push(NetMsg::Profile(keyed)),
+        None => tracing::error!(target: "two_top::net", "no signing key — identity not sent"),
     }
 
     tracing::info!(
@@ -776,7 +1551,8 @@ fn perform_swap(world: &mut World, peer_id: PeerId, their_table: sim::ArenaId) {
         remote_handle,
         our_id = %our_id,
         peer_id = %peer_id,
-        input_delay = ONLINE_INPUT_DELAY,
+        input_delay = agreed.delay,
+        rtt_ms = ?agreed.rtt_ms,
         desync_interval = DESYNC_CHECK_INTERVAL,
         "swapped to P2P session",
     );
@@ -790,6 +1566,7 @@ fn drain_session_events(world: &mut World) {
     let mut forfeited_peer = None;
     let mut desynced_at: Option<(sim::NetAddr, u32)> = None;
     let mut interruption_edge: Option<bool> = None;
+    let mut synchronized = false;
     {
         // Absent once a terminal lobby state froze it (`freeze_terminal_session`).
         let Some(mut session) = world.get_resource_mut::<Session<GgrsCfg>>() else {
@@ -803,6 +1580,7 @@ fn drain_session_events(world: &mut World) {
                     }
                     GgrsEvent::Synchronized { addr } => {
                         tracing::info!(target: "two_top::net", ?addr, "peer synchronized");
+                        synchronized = true;
                     }
                     GgrsEvent::NetworkInterrupted {
                         addr,
@@ -846,8 +1624,14 @@ fn drain_session_events(world: &mut World) {
         }
     }
 
+    if synchronized {
+        *world.resource_mut::<SyncWait>() = SyncWait::default();
+    }
     if let Some(interrupted) = interruption_edge {
         world.non_send_resource_mut::<MatchboxDriver>().interrupted = interrupted;
+        if !interrupted {
+            world.resource_mut::<net::PeerPaused>().0 = false;
+        }
     }
 
     // Healthy session: keep silence ~0 so net's grace timer stays quiet.
@@ -855,8 +1639,8 @@ fn drain_session_events(world: &mut World) {
     // flips the lobby to `Disconnected` (the OPPONENT AWAY overlay) after
     // ~1 s and recovers it the moment pinning resumes.
     if !world.non_send_resource::<MatchboxDriver>().interrupted {
-        let frame = world.resource::<sim::FrameCount>().0;
-        world.resource_mut::<LastPeerMessageFrame>().0 = frame;
+        let now = world.resource::<net::SilenceClock>().0;
+        world.resource_mut::<LastPeerMessageFrame>().0 = now;
     }
 
     if let Some(addr) = forfeited_peer {
@@ -865,68 +1649,128 @@ fn drain_session_events(world: &mut World) {
             peer_id: addr_to_peer(addr),
             conceded: false,
         };
-        *world.resource_mut::<sim::MatchState>() = sim::MatchState::MatchOver;
     }
     if let Some((addr, frame)) = desynced_at {
         // Terminal, like a forfeit — but nothing here is a shared fact any
         // more. The summary says so; the ledger, the attestation and the
         // recorder all skip a desynced match, and the rematch gate refuses
-        // to run it back on a corrupt session. Same out-of-band `MatchOver`
-        // as the forfeit; `freeze_terminal_session` is what makes it stick.
+        // to run it back on a corrupt session. `conclude_session` ends it.
         *world.resource_mut::<LobbyState>() = LobbyState::Desynced {
             peer_id: addr_to_peer(addr),
             frame,
         };
-        *world.resource_mut::<sim::MatchState>() = sim::MatchState::MatchOver;
+        // ggrs told this side; the reliable channel tells the other, so both
+        // phones void the match (its own check may never fire).
+        world.resource_mut::<NetSendQueue>().0.push(NetMsg::Ended {
+            reason: net::EndReason::Desynced { frame },
+        });
     }
 }
 
-/// Once the lobby is terminal (forfeit, goodbye, desync), drop the ggrs
-/// `Session`. The paths that end such a match write
-/// `sim::MatchState::MatchOver` from outside `GgrsSchedule`, which
-/// CONVENTIONS forbids for a reason: on the goodbye path the session is
-/// still alive with the peer's trailing inputs in flight, and the next
-/// rollback restores the snapshot's `MatchState` — the summary vanishes,
-/// the match resumes against a frozen opponent, and the result is
-/// recorded twice when the disconnect timeout ends it again. No session,
-/// no rollback: the write stands. `PostUpdate`, so it lands in the same
-/// frame as the write, before the next `PreUpdate` can advance ggrs.
-/// bevy_ggrs tolerates the absence (the Title runs sessionless; its
-/// sessionless branch resets `LocalPlayers` and the rollback frame
-/// counters, the same state `leave_online_match` already leaves the
-/// summary in), and `leave_online_match` removing it again is a no-op.
-fn freeze_terminal_session(world: &mut World) {
+/// The one place a live session ends. On the first frame the lobby is
+/// terminal (a forfeit, a goodbye, a desync, a lost link):
+///
+/// * capture [`SessionEnding`] from bevy_ggrs's `ConfirmedFrameCount`,
+///   which matches what the world has applied, and the recorder's
+///   per-tick score trail;
+/// * book the match as it stood on that confirmed frame
+///   ([`ending_outcome`]): `MatchState::abandoned()` and the confirmed
+///   score, unless the match was already decided on a confirmed tick.
+///   This is the app's only out-of-band write to the sim's state, and it
+///   sticks because
+/// * the ggrs session leaves the world (no rollback can restore the
+///   snapshot under the write) and is parked beside its socket, so the
+///   side channel stays open for the last word and the signatures.
+///
+/// `Update`, after everything that can end a session; an idempotent copy
+/// runs in `PostUpdate` for anything later in the frame.
+pub fn conclude_session(world: &mut World) {
     if !world.resource::<LobbyState>().is_terminal() {
         return;
     }
-    if world.remove_resource::<Session<GgrsCfg>>().is_some() {
-        tracing::info!(
+    if world.contains_resource::<Session<GgrsCfg>>() && !duel_began(world) {
+        // Over before the first GO was confirmed on both phones: no duel
+        // took place. Book nothing; find the next challenger.
+        tracing::warn!(
             target: "two_top::net",
             lobby = ?*world.resource::<LobbyState>(),
-            "terminal lobby state — ggrs session dropped so MatchOver cannot roll back",
+            "session ended before the duel began — nothing booked, re-dialing",
         );
+        sync_failed(world);
+        return;
     }
+    let Some(session) = world.remove_resource::<Session<GgrsCfg>>() else {
+        return; // already concluded (or never began)
+    };
+    let confirmed = world
+        .get_resource::<bevy_ggrs::ConfirmedFrameCount>()
+        .map_or(-1, |c| c.0);
+    let confirmed_score = world
+        .resource::<crate::recorder::MatchRecorder>()
+        .score_after(confirmed);
+    let lobby = world.resource::<LobbyState>().clone();
+    let (state, score) = if matches!(lobby, LobbyState::Desynced { .. }) {
+        // Nothing about a desynced match is shared; it books nothing.
+        (sim::MatchState::abandoned(), confirmed_score)
+    } else {
+        ending_outcome(
+            *world.resource::<sim::MatchState>(),
+            *world.resource::<sim::MatchScore>(),
+            confirmed,
+            confirmed_score,
+        )
+    };
+    *world.resource_mut::<sim::MatchState>() = state;
+    *world.resource_mut::<sim::MatchScore>() = score;
+    world.resource_mut::<SessionEnding>().0 = Some(Ending {
+        confirmed,
+        score: confirmed_score,
+    });
+    if let Some(mut driver) = world.get_non_send_resource_mut::<MatchboxDriver>() {
+        driver.parked = Some(session);
+    }
+    // Tell the peer, unless it told us (a goodbye, its own ending) or this
+    // side's desync report already went out. Harmless if it already knows.
+    if matches!(
+        lobby,
+        LobbyState::Forfeited {
+            conceded: false,
+            ..
+        }
+    ) {
+        world.resource_mut::<NetSendQueue>().0.push(NetMsg::Ended {
+            reason: net::EndReason::Closed,
+        });
+    }
+    tracing::info!(
+        target: "two_top::net",
+        ?lobby,
+        confirmed,
+        p0 = score.p0,
+        p1 = score.p1,
+        decided = state.decided_at().is_some(),
+        "session concluded on its confirmed frame",
+    );
 }
 
 /// Pump the reliable side-channel: drain the app's outbound queue to the
 /// peer, then handle inbound identity / rematch / goodbye messages.
 fn pump_side_channel(world: &mut World) {
     // The peer to address: whichever the lobby currently holds.
-    let peer = match world.resource::<LobbyState>() {
-        LobbyState::Connected { peer_id } => Some(*peer_id),
-        LobbyState::Disconnected { peer_id, .. } => Some(*peer_id),
-        _ => None,
-    };
+    // The peer to address: the session's, even once the match has ended
+    // (its signature, our last word).
+    let peer = session_peer(world.resource::<LobbyState>());
 
     let outbound: Vec<NetMsg> = std::mem::take(&mut world.resource_mut::<NetSendQueue>().0);
     let inbound: Vec<(PeerId, Box<[u8]>)> = {
         let mut driver = world.non_send_resource_mut::<MatchboxDriver>();
         if let Some(peer) = peer {
             for msg in &outbound {
-                driver
+                // A closed socket is `end_match_on_link_loss`'s to report.
+                let _ = driver
                     .socket
                     .channel_mut(SIDE_CHANNEL)
-                    .send(encode_net_msg(msg), peer);
+                    .try_send(encode_net_msg(msg), peer);
             }
         } else if !outbound.is_empty() {
             tracing::debug!(
@@ -947,7 +1791,6 @@ fn pump_side_channel(world: &mut World) {
         };
         let claimed = match &msg {
             NetMsg::Profile(p) => Some(p.install_id),
-            NetMsg::Profile2(d) => Some(d.install_id),
             _ => None,
         };
         let known = world.resource::<PeerProfile>().0.map(|p| p.install_id);
@@ -963,24 +1806,15 @@ fn pump_side_channel(world: &mut World) {
             }
         }
         match msg {
-            NetMsg::Profile(profile) => {
+            NetMsg::Profile(keyed) => {
                 tracing::info!(
                     target: "two_top::net",
-                    install_id = format_args!("{:032x}", profile.install_id),
+                    install_id = format_args!("{:032x}", keyed.install_id),
                     "peer profile received",
                 );
-                world.resource_mut::<PeerProfile>().0 = Some(profile);
-                reseed_our_table(world, profile.install_id);
-            }
-            NetMsg::Profile2(data2) => {
-                tracing::info!(
-                    target: "two_top::net",
-                    install_id = format_args!("{:032x}", data2.install_id),
-                    "peer profile2 received — results can be signed",
-                );
-                world.resource_mut::<PeerProfile>().0 = Some(data2.profile());
-                world.resource_mut::<PeerKeys>().0 = Some(data2.pubkey);
-                reseed_our_table(world, data2.install_id);
+                world.resource_mut::<PeerProfile>().0 = Some(keyed.profile());
+                world.resource_mut::<PeerKeys>().0 = Some(keyed.pubkey);
+                reseed_our_table(world, keyed.install_id);
             }
             NetMsg::MatchSig { sig } => {
                 world.resource_mut::<PeerSig>().0 = Some(sig);
@@ -988,18 +1822,81 @@ fn pump_side_channel(world: &mut World) {
             NetMsg::RematchWant => {
                 world.resource_mut::<RematchConsent>().peer = true;
             }
-            // Handshake leftovers (a duplicate) — the table is settled.
-            NetMsg::Table { .. } => {}
+            // Handshake leftovers (a duplicate, a late probe) — settled.
+            NetMsg::Table { .. } | NetMsg::Pong { .. } | NetMsg::Delay { .. } => {}
+            NetMsg::Ping { id } => {
+                world
+                    .resource_mut::<NetSendQueue>()
+                    .0
+                    .push(NetMsg::Pong { id });
+            }
+            NetMsg::Pausing => {
+                tracing::info!(target: "two_top::net", "peer is going away for a moment — holding the match longer");
+                world.resource_mut::<net::PeerPaused>().0 = true;
+            }
+            // Gone before the first frame: no duel, nobody's concession.
+            // `watch_sync` looks for the next challenger.
+            NetMsg::Bye if world.resource::<SyncWait>().waiting() => {
+                tracing::info!(target: "two_top::net", ?from, "peer left before the session synchronized");
+                world.resource_mut::<SyncWait>().peer_gone = true;
+            }
+            NetMsg::Bye if world.resource::<LobbyState>().is_terminal() => {}
             NetMsg::Bye => {
                 tracing::info!(target: "two_top::net", ?from, "peer said goodbye — forfeit without the grace wait");
                 *world.resource_mut::<LobbyState>() = LobbyState::Forfeited {
                     peer_id: from,
                     conceded: true,
                 };
-                *world.resource_mut::<sim::MatchState>() = sim::MatchState::MatchOver;
+            }
+            NetMsg::Ended { .. } if world.resource::<SyncWait>().waiting() => {
+                tracing::info!(target: "two_top::net", ?from, "peer gave up before the session synchronized");
+                world.resource_mut::<SyncWait>().peer_gone = true;
+            }
+            NetMsg::Ended { reason } => {
+                let settled = world.resource::<crate::attest::MatchOverSettled>().settled;
+                let next = lobby_after_ended(world.resource::<LobbyState>(), from, reason, settled);
+                tracing::info!(target: "two_top::net", ?from, ?reason, honoured = next.is_some(), "peer ended the session");
+                if let Some(next) = next {
+                    *world.resource_mut::<LobbyState>() = next;
+                }
             }
         }
     }
+}
+
+/// The peer a session is (or was) with.
+fn session_peer(lobby: &LobbyState) -> Option<PeerId> {
+    match *lobby {
+        LobbyState::Connected { peer_id }
+        | LobbyState::Disconnected { peer_id, .. }
+        | LobbyState::Forfeited { peer_id, .. }
+        | LobbyState::Desynced { peer_id, .. } => Some(peer_id),
+        _ => None,
+    }
+}
+
+/// What a peer's [`NetMsg::Ended`] does to our lobby, if anything. Only
+/// before our own result settled, and never over an ending we already
+/// reached: it can close a match unfinished or void it, nothing else. Pure.
+pub fn lobby_after_ended(
+    lobby: &LobbyState,
+    from: PeerId,
+    reason: net::EndReason,
+    settled: bool,
+) -> Option<LobbyState> {
+    if lobby.is_terminal() || settled {
+        return None;
+    }
+    Some(match reason {
+        net::EndReason::Desynced { frame } => LobbyState::Desynced {
+            peer_id: from,
+            frame,
+        },
+        net::EndReason::Closed => LobbyState::Forfeited {
+            peer_id: from,
+            conceded: false,
+        },
+    })
 }
 
 /// What to do with a side-channel message. Pure for testing.
@@ -1019,7 +1916,7 @@ pub enum SideChannelVerdict {
 }
 
 /// `known` is the install-id already on file for this session (if any),
-/// `claimed` the one this message asserts (Profile / Profile2 only).
+/// `claimed` the one this message asserts (Profile only).
 pub fn side_channel_verdict(
     from: PeerId,
     lobby_peer: Option<PeerId>,
@@ -1084,16 +1981,69 @@ impl RecentAbsence {
 /// notification shade fires; either could convict this phone of walking
 /// out of a match the OPPONENT then abandoned.
 pub fn freeze_is_absence(delta_secs: f32) -> bool {
-    delta_secs >= DISCONNECT_TIMEOUT.as_secs_f32()
+    delta_secs >= QUIET_GRACE_SECS
 }
 
 /// Track absences: main-loop freezes long enough to have forfeited us on
 /// the other phone. `Time<Real>`, not `Virtual` — the virtual clock clamps
 /// a resume-after-suspend to 250 ms and would never see one.
-pub fn track_absence(time: Res<Time<Real>>, mut absence: ResMut<RecentAbsence>) {
-    if freeze_is_absence(time.delta_secs()) {
+///
+/// Any gap at all ([`OWN_GAP_SECS`]) also restarts the peer's silence:
+/// while this phone slept nothing was read, so the silence in that gap is
+/// ours. Unstamped, the FSM forfeited the opponent on the first frame back
+/// from a long pause, while that opponent was still holding the match
+/// open for us. Runs between net's clock advance and its grace tick.
+pub fn track_absence(
+    time: Res<Time<Real>>,
+    clock: Res<net::SilenceClock>,
+    mut absence: ResMut<RecentAbsence>,
+    mut last_heard: ResMut<LastPeerMessageFrame>,
+) {
+    let gap = time.delta_secs();
+    if gap >= OWN_GAP_SECS {
+        last_heard.0 = clock.0;
+    }
+    if freeze_is_absence(gap) {
         absence.0 = Some(time.elapsed_secs());
     }
+}
+
+/// `Update`, before the driver pumps the side channel: when this phone is
+/// about to go away (backgrounded, or its tab hidden) in the middle of a
+/// duel, tell the peer, so it holds the match open for the longer grace.
+/// The app gets one last update before it sleeps (`WillSuspend`), and the
+/// driver's pump in that update sends the message.
+#[allow(clippy::too_many_arguments)]
+fn announce_going_away(
+    mut lifecycle: MessageReader<bevy::window::AppLifecycle>,
+    mut occluded: MessageReader<bevy::window::WindowOccluded>,
+    lobby: Res<LobbyState>,
+    local: Res<LocalPlayerHandle>,
+    sync: Res<SyncWait>,
+    mut queue: ResMut<NetSendQueue>,
+    mut away: Local<bool>,
+) {
+    use bevy::window::AppLifecycle;
+    let mut going = None;
+    for state in lifecycle.read() {
+        match state {
+            AppLifecycle::WillSuspend | AppLifecycle::Suspended => going = Some(true),
+            AppLifecycle::WillResume | AppLifecycle::Running => going = Some(false),
+            AppLifecycle::Idle => {}
+        }
+    }
+    for e in occluded.read() {
+        going = Some(e.occluded);
+    }
+    let Some(going) = going else {
+        return;
+    };
+    let duel = local.0.is_some() && !sync.waiting() && lobby.is_in_match();
+    if going && !*away && duel {
+        tracing::info!(target: "two_top::net", "going away mid-duel — telling the peer");
+        queue.0.push(NetMsg::Pausing);
+    }
+    *away = going;
 }
 
 /// A fresh match starts with a clean slate: an absence taken on the Title
@@ -1120,6 +2070,7 @@ pub fn gate_rematch_inputs(
     practice: Res<crate::bot::PracticeMode>,
     theater: Res<crate::theater::TheaterMode>,
     state: Res<sim::MatchState>,
+    frame: Res<sim::FrameCount>,
     local: Res<LocalPlayerHandle>,
     mut consent: ResMut<RematchConsent>,
     mut queue: ResMut<NetSendQueue>,
@@ -1128,7 +2079,7 @@ pub fn gate_rematch_inputs(
     if netplay.room_url.is_none() || practice.0 || theater.active() {
         return;
     }
-    if !matches!(*state, sim::MatchState::MatchOver) {
+    if !state.is_match_over() {
         return;
     }
     let Some(mut inputs) = inputs else {
@@ -1146,9 +2097,11 @@ pub fn gate_rematch_inputs(
         queue.0.push(NetMsg::RematchWant);
         tracing::info!(target: "two_top::net", "rematch consent given — telling the peer");
     }
-    if consent.local && consent.peer {
-        // Both in: emit the real input. The preceding masked frames
-        // guarantee sim sees a rising edge.
+    if consent.local && consent.peer && state.rematch_open(frame.0) {
+        // Both in and the sim's grace over: emit the real input. The
+        // preceding masked frames guarantee sim sees a rising edge, and
+        // waiting out the grace keeps that edge from landing inside it
+        // (where it would be swallowed and, held, never fire again).
         input.buttons |= sim::PlayerInput::THROW_DOWN;
     } else {
         input.buttons &= !sim::PlayerInput::THROW_DOWN;
@@ -1159,7 +2112,7 @@ pub fn gate_rematch_inputs(
 /// covers the restart itself (MatchOver → Countdown) and every other path
 /// out of the screen.
 pub fn reset_rematch_consent(state: Res<sim::MatchState>, mut consent: ResMut<RematchConsent>) {
-    if !matches!(*state, sim::MatchState::MatchOver) && *consent != RematchConsent::default() {
+    if !state.is_match_over() && *consent != RematchConsent::default() {
         *consent = RematchConsent::default();
     }
 }
@@ -1168,34 +2121,62 @@ pub fn reset_rematch_consent(state: Res<sim::MatchState>, mut consent: ResMut<Re
 /// screen flips to OPPONENT LEFT immediately instead of waiting out the
 /// grace), drop the socket + session, and reset every per-match netplay
 /// resource. The caller flips `AppScreen` back to Title.
-pub fn leave_online_match(world: &mut World) {
-    // Best-effort goodbye straight into the channel — the send queue won't
-    // get another pump after the driver is removed.
-    let peer = match world.resource::<LobbyState>() {
-        LobbyState::Connected { peer_id } => Some(*peer_id),
-        LobbyState::Disconnected { peer_id, .. } => Some(*peer_id),
-        _ => None,
+pub fn leave_online_match(world: &mut World, farewell: Farewell) {
+    let peer = session_peer(world.resource::<LobbyState>());
+    let word = match farewell {
+        Farewell::Concede => NetMsg::Bye,
+        Farewell::Close => NetMsg::Ended {
+            reason: net::EndReason::Closed,
+        },
     };
-    // The removal is unconditional (dropping the socket ends the message
-    // loop); the goodbye rides out only when a peer is still addressable.
+    // Whatever is still queued goes first (our signature above all: the
+    // side channel is ordered), then the last word. Both ride a socket kept
+    // open a few seconds to carry them, with its session: the session owns
+    // the ggrs channel, and matchbox ends the whole connection the moment
+    // any one channel of the socket is dropped.
+    let mut outbound = std::mem::take(&mut world.resource_mut::<NetSendQueue>().0);
+    outbound.push(word);
+    let live = world.remove_resource::<Session<GgrsCfg>>();
     let mut driver = world.remove_non_send_resource::<MatchboxDriver>();
-    if let Some(driver) = driver.as_mut()
+    let session = live.or_else(|| driver.as_mut().and_then(|d| d.parked.take()));
+    if let Some(mut driver) = driver
         && let Some(peer) = peer
         && driver.channel_taken
     {
-        driver
-            .socket
-            .channel_mut(SIDE_CHANNEL)
-            .send(encode_net_msg(&NetMsg::Bye), peer);
+        let mut sent = 0;
+        for msg in &outbound {
+            // Best effort: leaving over a link that already died must not
+            // crash on the way out.
+            if driver
+                .socket
+                .channel_mut(SIDE_CHANNEL)
+                .try_send(encode_net_msg(msg), peer)
+                .is_ok()
+            {
+                sent += 1;
+            }
+        }
+        tracing::info!(target: "two_top::net", ?farewell, sent, "leaving — last word sent");
+        let until = world.resource::<Time<Real>>().elapsed_secs() + GOODBYE_LINGER_SECS;
+        world
+            .non_send_resource_mut::<DepartingSockets>()
+            .0
+            .push(Departing {
+                _socket: driver.socket,
+                _session: session,
+                until,
+            });
     }
-    drop(driver);
-    world.remove_resource::<Session<GgrsCfg>>();
     *world.resource_mut::<LobbyState>() = LobbyState::Idle;
     world.resource_mut::<PendingP2PSwap>().0 = None;
+    *world.resource_mut::<SyncWait>() = SyncWait::default();
+    world.resource_mut::<net::PeerPaused>().0 = false;
     world.resource_mut::<PeerProfile>().0 = None;
     world.resource_mut::<PeerKeys>().0 = None;
     world.resource_mut::<PeerSig>().0 = None;
     world.resource_mut::<SessionIds>().0 = None;
+    world.resource_mut::<SessionEnding>().0 = None;
+    world.resource_mut::<DuelBegan>().0 = false;
     world
         .resource_mut::<crate::attest::AttestState>()
         .reset_session();
@@ -1217,6 +2198,111 @@ mod tests {
     use super::*;
 
     #[test]
+    fn the_link_summary_keeps_the_worst_and_the_mean() {
+        let mut sum = LinkSummary::default();
+        assert_eq!(sum.mean_ping_ms(), 0, "no samples, no division by zero");
+        sum.add(40, 1, 12);
+        sum.add(80, -3, 9);
+        sum.add(60, 2, 15);
+        assert_eq!(sum.samples, 3);
+        assert_eq!(sum.mean_ping_ms(), 60);
+        assert_eq!(sum.ping_max_ms, 80);
+        assert_eq!(sum.behind_max, 3, "behind either way counts");
+        assert_eq!(sum.kbps_max, 15);
+    }
+
+    /// A session that ends books what stood on its last confirmed frame:
+    /// a decision on a confirmed tick stands; one that only existed in
+    /// prediction (16 ticks past the confirmed frame) does not, and the
+    /// score falls back to the confirmed one.
+    #[test]
+    fn an_ending_books_the_confirmed_state() {
+        let five_one = sim::MatchScore { p0: 5, p1: 1 };
+        let four_one = sim::MatchScore { p0: 4, p1: 1 };
+        // Decided on 200, confirmed through 210: the result stands.
+        assert_eq!(
+            ending_outcome(sim::MatchState::decided(200), five_one, 210, five_one),
+            (sim::MatchState::decided(200), five_one)
+        );
+        // Decided on 200 in prediction, confirmed only through 190.
+        assert_eq!(
+            ending_outcome(sim::MatchState::decided(200), five_one, 190, four_one),
+            (sim::MatchState::abandoned(), four_one)
+        );
+        // Mid-round: a predicted kill past the confirmed frame is dropped.
+        let live = sim::MatchState::InRound {
+            expires_at_frame: 900,
+        };
+        assert_eq!(
+            ending_outcome(live, five_one, 300, four_one),
+            (sim::MatchState::abandoned(), four_one)
+        );
+    }
+
+    /// A peer's `Ended` can close a live match unfinished or void it, and
+    /// nothing else: never over our own settled result, never over an
+    /// ending we already reached.
+    #[test]
+    fn a_peers_ending_only_closes_or_voids_an_unsettled_match() {
+        let peer = PeerId(uuid_from(2));
+        let live = LobbyState::Connected { peer_id: peer };
+        let closed = net::EndReason::Closed;
+        let desync = net::EndReason::Desynced { frame: 640 };
+        assert_eq!(
+            lobby_after_ended(&live, peer, closed, false),
+            Some(LobbyState::Forfeited {
+                peer_id: peer,
+                conceded: false
+            })
+        );
+        assert_eq!(
+            lobby_after_ended(&live, peer, desync, false),
+            Some(LobbyState::Desynced {
+                peer_id: peer,
+                frame: 640
+            })
+        );
+        // Our result already settled: their leaving takes nothing back.
+        assert_eq!(lobby_after_ended(&live, peer, desync, true), None);
+        assert_eq!(lobby_after_ended(&live, peer, closed, true), None);
+        // Already over (their goodbye, our own forfeit): nothing changes.
+        let over = LobbyState::Forfeited {
+            peer_id: peer,
+            conceded: true,
+        };
+        assert_eq!(lobby_after_ended(&over, peer, desync, false), None);
+    }
+
+    #[test]
+    fn rollback_depths_keep_a_histogram() {
+        let mut d = RollbackDepths::default();
+        for depth in [1, 1, 2, 5, 40] {
+            d.record(depth);
+        }
+        assert_eq!(d.count(), 5);
+        assert_eq!(
+            d.max(),
+            MAX_PREDICTION_FRAMES,
+            "deeper than the window: the last slot"
+        );
+        assert_eq!(
+            d.histogram(),
+            format!("1:2 2:1 5:1 {MAX_PREDICTION_FRAMES}:1")
+        );
+    }
+
+    #[test]
+    fn a_long_wait_re_dials_with_jitter() {
+        assert!(!waiting_redial_due(29.9, 0));
+        assert!(waiting_redial_due(30.0, 0));
+        assert!(
+            !waiting_redial_due(33.0, 4),
+            "this install waits 4 s longer"
+        );
+        assert!(waiting_redial_due(34.0, 4));
+    }
+
+    #[test]
     fn both_peers_agree_on_the_lower_ids_table() {
         let low = PeerId(uuid_from(1));
         let high = PeerId(uuid_from(2));
@@ -1227,6 +2313,46 @@ mod tests {
         assert_eq!(agreed_table(high, low, forest, pit), pit);
         // Same pick on both sides is simply that table.
         assert_eq!(agreed_table(high, low, pit, pit), pit);
+    }
+
+    /// Regression: the grace timer ages on real time, and nothing stamped
+    /// the peer's last message before the session existed, so a player who
+    /// had waited in the room was forfeited the frame a peer paired (seen
+    /// on a real local room: Connected → Disconnected → Forfeited in 15 ms
+    /// after a minute's wait).
+    #[test]
+    fn a_pairing_after_a_long_wait_is_not_read_as_silence() {
+        let mut world = World::new();
+        let (socket, message_loop) = WebRtcSocketBuilder::new("ws://127.0.0.1:1/room")
+            .add_channel(ChannelConfig::unreliable())
+            .add_channel(ChannelConfig::reliable())
+            .build();
+        world.insert_non_send_resource(MatchboxDriver {
+            socket,
+            channel_taken: false,
+            interrupted: false,
+            table: TableHandshake::default(),
+            backlog: Vec::new(),
+            parked: None,
+        });
+        let peer = PeerId(uuid_from(2));
+        world.insert_resource(LobbyState::Connected { peer_id: peer });
+        world.insert_resource(PendingP2PSwap::default());
+        world.insert_resource(net::SilenceClock(60 * 60)); // a minute in the room
+        world.insert_resource(LastPeerMessageFrame(0));
+        world.insert_resource(net::PeerPaused::default());
+        world.insert_resource(sim::MatchState::default());
+
+        drive_netplay(&mut world);
+        world
+            .run_system_cached(net::tick_disconnection_grace)
+            .unwrap();
+        assert_eq!(
+            *world.resource::<LobbyState>(),
+            LobbyState::Connected { peer_id: peer },
+            "a table handshake is not a silent peer",
+        );
+        drop(message_loop); // held so the socket reads as open
     }
 
     fn uuid_from(n: u128) -> uuid::Uuid {
@@ -1274,8 +2400,35 @@ mod tests {
     fn only_a_freeze_the_peer_would_time_out_counts_as_absence() {
         assert!(!freeze_is_absence(0.016));
         assert!(!freeze_is_absence(2.1), "a thermal hitch is not a walk-out");
-        assert!(freeze_is_absence(DISCONNECT_TIMEOUT.as_secs_f32()));
+        assert!(freeze_is_absence(QUIET_GRACE_SECS));
+        assert!((QUIET_GRACE_SECS - 9.0).abs() < 1e-3);
         assert!(freeze_is_absence(30.0));
+    }
+
+    #[test]
+    fn only_a_relay_answer_is_kept_and_only_for_half_its_life() {
+        let relay = parse_ice_answer(
+            r#"{"urls":["stun:s:19302","turn:t:3478"],"username":"u","credential":"c","ttl_secs":3600}"#,
+        )
+        .expect("a relay answer parses");
+        assert_eq!(relay.ttl_secs, 3600);
+        let mut cache = IceCache::default();
+        cache.store(&relay, 100.0);
+        assert!(cache.fresh(100.0 + 1799.0).is_some());
+        assert!(
+            cache.fresh(100.0 + 1800.0).is_none(),
+            "half spent: fetch again"
+        );
+
+        // A STUN-only answer is used, never kept: kept, it would hide the
+        // relay for hours.
+        let stun_only = parse_ice_answer(
+            r#"{"urls":["stun:s:19302"],"username":null,"credential":null,"ttl_secs":3600}"#,
+        )
+        .unwrap();
+        let mut cache = IceCache::default();
+        cache.store(&stun_only, 0.0);
+        assert!(cache.fresh(1.0).is_none());
     }
 
     #[test]

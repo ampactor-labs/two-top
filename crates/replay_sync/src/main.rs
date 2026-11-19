@@ -39,8 +39,11 @@ fn main() -> ExitCode {
         (None, None) => {
             eprintln!(
                 "usage: replay_sync (--demo <path.bmrg> | --fuzz <seed>) \
-                 [--output <path.tsv>] [--dump-state-at <frame>] \
-                 [--emit-bmrg <path>]"
+                 [--live] [--output <path.tsv>] [--dump-state-at <frame>] \
+                 [--emit-bmrg <path>] [--attest <path.attest.json>]\n\
+                 --live re-simulates a recorded match under the rules it was \
+                 played by; without it --demo runs the determinism probe \
+                 (the canonical demo and the cross-platform lanes)"
             );
             return ExitCode::from(2);
         }
@@ -119,6 +122,9 @@ fn main() -> ExitCode {
                 return ExitCode::FAILURE;
             }
         }
+    } else if args.iter().any(|a| a == "--live") {
+        // A tape the game recorded: the real round flow and spawn points.
+        replay_sync::compute_live_checksum_tsv(&replay)
     } else {
         compute_checksum_tsv(&replay)
     };

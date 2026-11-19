@@ -127,7 +127,17 @@ pub fn tick_duration() -> core::time::Duration {
 /// stops at 0.45 so it can no longer shrink past the respawn points; and
 /// the boundary costs 1.5 s instead of 4.0 s (half the `RoundOver` beat,
 /// one countdown digit mid-match). No new state, no wire change.
-pub const SIM_VERSION: u32 = 15;
+///
+/// `16` = a decided match stays decided. `MatchState::MatchOver` carries
+/// `rematch_at_frame`, and [`apply_rematch`] honours a THROW edge only
+/// [`REMATCH_GRACE_FRAMES`] after the decision: a press made before a player
+/// could see the decision lands up to input delay + prediction window ticks
+/// later, and used to restart the match unseen (no summary, no tape, no
+/// signed result). A rematch is now a fresh match shifted in time: the catch
+/// streak, OOB timer and throw state reset, the first pickup is 8 s off
+/// again, and the countdown is [`MatchState::opening`] (one tick shorter
+/// than before, as long as a fresh match's).
+pub const SIM_VERSION: u32 = 16;
 
 // ---- Components ----
 
@@ -1031,6 +1041,20 @@ pub struct MatchScore {
     pub p1: u8,
 }
 
+impl MatchScore {
+    /// The seat whose kills reached [`MATCH_WIN_THRESHOLD`], if either did.
+    /// One-hit kills mean at most one side can reach it on a tick.
+    pub fn winner(&self) -> Option<u8> {
+        if self.p0 >= MATCH_WIN_THRESHOLD {
+            Some(0)
+        } else if self.p1 >= MATCH_WIN_THRESHOLD {
+            Some(1)
+        } else {
+            None
+        }
+    }
+}
+
 /// Frames per countdown digit (3, 2, 1) — 60 = 1 s @ 60 Hz.
 pub const COUNTDOWN_DIGIT_FRAMES: u32 = 60;
 
@@ -1050,6 +1074,11 @@ pub const ROUND_OVER_FRAMES: u32 = 60 / 2;
 /// Together with the halved [`ROUND_OVER_FRAMES`] this returns 150 frames
 /// (2.5 s) of the boundary's 4.0 s to play.
 pub const MID_MATCH_COUNTDOWN_DIGITS: u8 = 1;
+
+/// The tick a match's opening countdown gives way to the first round
+/// ([`MatchState::opening`]'s three digits). An online duel has begun once
+/// this tick is confirmed on both phones: before it, nothing was at stake.
+pub const OPENING_GO_TICK: u32 = 3 * COUNTDOWN_DIGIT_FRAMES - 1;
 
 /// Total kills required to end the match (`InRound`/`RoundOver` →
 /// `MatchOver`). Cycle 6's simplest scoring rule is "first to 5
@@ -1087,9 +1116,23 @@ pub enum MatchState {
     /// Post-round beat before the next round starts.
     /// `expires_at_frame` is the tick the next `Countdown` begins.
     RoundOver { expires_at_frame: u32 },
-    /// Match decided. Terminal state — no further transitions.
-    MatchOver,
+    /// Match decided. Terminal in [`tick_match_state`]; the one escape is
+    /// [`apply_rematch`], which honours a THROW edge only from
+    /// `rematch_at_frame` on ([`REMATCH_GRACE_FRAMES`] after the decision),
+    /// so a press made before the player could see the decision — still in
+    /// flight through the input delay and the prediction window — can never
+    /// restart the match. `u32::MAX` ([`MatchState::abandoned`]) never
+    /// reopens: an ended session's last state.
+    MatchOver { rematch_at_frame: u32 },
 }
+
+/// Ticks after the decision before a THROW edge may start a rematch
+/// (30 = 0.5 s). Sized to the network, not to feel: a press made just
+/// before a peer learned of the decision lands up to *input delay +
+/// prediction window − 1* ticks after it (4 + 16 − 1 today; the app
+/// asserts the bound at compile time). The summary's own wall-clock beat
+/// (longer) is presentation and stays in the app.
+pub const REMATCH_GRACE_FRAMES: u32 = 30;
 
 impl Default for MatchState {
     fn default() -> Self {
@@ -1101,10 +1144,7 @@ impl Default for MatchState {
         // visibly shows for ticks 0..=59 (60 ticks = 1 s) and the
         // pattern composes cleanly with the post-init transitions
         // which always set `expires = frame.0 + COUNTDOWN_DIGIT_FRAMES`.
-        MatchState::Countdown {
-            digit: 3,
-            expires_at_frame: COUNTDOWN_DIGIT_FRAMES - 1,
-        }
+        MatchState::opening(0)
     }
 }
 
@@ -1125,6 +1165,58 @@ impl MatchState {
         MatchState::InRound {
             expires_at_frame: u32::MAX,
         }
+    }
+
+    /// The top of a match's opening countdown when the match begins on
+    /// `frame`. A fresh match is `opening(0)`; a rematch is `opening` of the
+    /// tick it fires on, so a rematch is the fresh match shifted in time.
+    pub fn opening(frame: u32) -> Self {
+        MatchState::Countdown {
+            digit: 3,
+            expires_at_frame: frame + COUNTDOWN_DIGIT_FRAMES - 1,
+        }
+    }
+
+    /// The match decided on `frame`.
+    pub fn decided(frame: u32) -> Self {
+        MatchState::MatchOver {
+            rematch_at_frame: frame.saturating_add(REMATCH_GRACE_FRAMES),
+        }
+    }
+
+    /// A match that ended out of band (the session closed): over, and a
+    /// rematch can never fire.
+    pub fn abandoned() -> Self {
+        MatchState::MatchOver {
+            rematch_at_frame: u32::MAX,
+        }
+    }
+
+    /// True once the match is decided or abandoned.
+    pub fn is_match_over(&self) -> bool {
+        matches!(self, MatchState::MatchOver { .. })
+    }
+
+    /// The tick a rematch may first fire, or `None` (not over, or abandoned).
+    pub fn rematch_at(&self) -> Option<u32> {
+        match *self {
+            MatchState::MatchOver { rematch_at_frame } if rematch_at_frame != u32::MAX => {
+                Some(rematch_at_frame)
+            }
+            _ => None,
+        }
+    }
+
+    /// The tick the match was decided on, or `None` (not over, or
+    /// abandoned: an ended session has no deciding tick).
+    pub fn decided_at(&self) -> Option<u32> {
+        self.rematch_at()
+            .map(|at| at.saturating_sub(REMATCH_GRACE_FRAMES))
+    }
+
+    /// True iff a THROW edge on `frame` would start a rematch.
+    pub fn rematch_open(&self, frame: u32) -> bool {
+        self.rematch_at().is_some_and(|at| frame >= at)
     }
 }
 
@@ -2066,6 +2158,15 @@ pub fn throw_boomerangs(
         .iter()
         .map(|(p, _, pos, ..)| (p.handle, pos.0))
         .collect();
+    // Spawns are queued and issued in handle order after the loop, never
+    // in query order: bevy_ggrs mixes each rollback entity's registration
+    // index into the frame checksum, registration follows spawn order, and
+    // a rollback restore can reorder this query's table on one peer and not
+    // the other. Two fangs thrown on one frame registered in opposite
+    // orders on the two phones — same state, different checksums — and the
+    // match ended as a desync (`tests/spawn_order.rs`).
+    let mut thrown: std::collections::BTreeMap<usize, ThrownFangs> =
+        std::collections::BTreeMap::new();
     for (
         player,
         dead,
@@ -2162,10 +2263,48 @@ pub fn throw_boomerangs(
             charged_reach(power)
         };
         empowered.0 = false;
+        thrown.insert(
+            player.handle,
+            ThrownFangs {
+                origin: pos.0,
+                velocity,
+                reach,
+                modifier,
+            },
+        );
+        // Phase 15: kick the throw animation. Reset to frame 0 so the
+        // 6-frame wind-up plays from the start. `advance_animation`
+        // will keep it ticking until is_finished(), then the
+        // observable-state path in that system snaps back to Idle.
+        anim.anim_id = AnimState::THROW;
+        anim.ticks = 0;
+    }
+    for (handle, throw) in thrown {
+        throw.spawn(&mut commands, handle, frame.0);
+    }
+}
+
+/// One player's release, queued by [`throw_boomerangs`] so every throw of
+/// a frame spawns in handle order.
+struct ThrownFangs {
+    origin: Vec2F,
+    velocity: Vec2F,
+    reach: Fix,
+    modifier: Option<PickupKind>,
+}
+
+impl ThrownFangs {
+    fn spawn(self, commands: &mut Commands, owner_handle: usize, frame: u32) {
+        let ThrownFangs {
+            origin,
+            velocity,
+            reach,
+            modifier,
+        } = self;
         // The primary (recallable, catchable) fang flies straight.
         commands.spawn((
             Boomerang {
-                owner_handle: player.handle,
+                owner_handle,
                 state: BoomerangState::Flying,
             },
             BoomerangMods {
@@ -2174,10 +2313,10 @@ pub fn throw_boomerangs(
                 despawn_at_frame: None,
                 wall_bounces: 0,
             },
-            ThrowOrigin(pos.0),
+            ThrowOrigin(origin),
             ThrowReach(reach),
-            PositionF(pos.0),
-            PreviousPositionF(pos.0),
+            PositionF(origin),
+            PreviousPositionF(origin),
             VelocityF(velocity),
         ));
         // Multishot adds two fire-and-forget side-fangs at ±15°. They share
@@ -2185,11 +2324,11 @@ pub fn throw_boomerangs(
         // `is_secondary` so recall/catch ignore them and a wall hit (or the
         // lifetime backstop) despawns them.
         if matches!(modifier, Some(PickupKind::Multishot)) {
-            let expire = frame.0 + MULTISHOT_SECONDARY_LIFETIME_FRAMES;
+            let expire = frame + MULTISHOT_SECONDARY_LIFETIME_FRAMES;
             for theta in [MULTISHOT_FAN_RAD, -MULTISHOT_FAN_RAD] {
                 commands.spawn((
                     Boomerang {
-                        owner_handle: player.handle,
+                        owner_handle,
                         state: BoomerangState::Flying,
                     },
                     BoomerangMods {
@@ -2198,18 +2337,12 @@ pub fn throw_boomerangs(
                         despawn_at_frame: Some(expire),
                         wall_bounces: 0,
                     },
-                    PositionF(pos.0),
-                    PreviousPositionF(pos.0),
+                    PositionF(origin),
+                    PreviousPositionF(origin),
                     VelocityF(velocity.rotate(theta)),
                 ));
             }
         }
-        // Phase 15: kick the throw animation. Reset to frame 0 so the
-        // 6-frame wind-up plays from the start. `advance_animation`
-        // will keep it ticking until is_finished(), then the
-        // observable-state path in that system snaps back to Idle.
-        anim.anim_id = AnimState::THROW;
-        anim.ticks = 0;
     }
 }
 
@@ -2468,18 +2601,25 @@ pub fn drop_fire_trail(
     if !frame.0.is_multiple_of(FIRE_TRAIL_INTERVAL_TICKS) {
         return;
     }
-    for (boom, mods, pos) in &boomerangs {
-        if matches!(boom.state, BoomerangState::Flying)
-            && matches!(mods.modifier, Some(PickupKind::Fire))
-        {
-            commands.spawn((
-                FireTrailCell {
-                    owner_handle: boom.owner_handle,
-                    expires_at_frame: frame.0 + FIRE_TRAIL_LIFETIME_FRAMES,
-                },
-                PositionF(pos.0),
-            ));
-        }
+    // In a fixed order, never the query's (see `throw_boomerangs`): a Fire
+    // multishot drops three cells on one frame.
+    let mut cells: Vec<(usize, i32, i32)> = boomerangs
+        .iter()
+        .filter(|(boom, mods, _)| {
+            matches!(boom.state, BoomerangState::Flying)
+                && matches!(mods.modifier, Some(PickupKind::Fire))
+        })
+        .map(|(boom, _, pos)| (boom.owner_handle, pos.0.x.to_bits(), pos.0.y.to_bits()))
+        .collect();
+    cells.sort_unstable();
+    for (owner_handle, x, y) in cells {
+        commands.spawn((
+            FireTrailCell {
+                owner_handle,
+                expires_at_frame: frame.0 + FIRE_TRAIL_LIFETIME_FRAMES,
+            },
+            PositionF(Vec2F::new(Fix::from_bits(x), Fix::from_bits(y))),
+        ));
     }
 }
 
@@ -2956,6 +3096,81 @@ pub fn respawn_position(handle: usize) -> Vec2F {
     }
 }
 
+/// What [`spawn_match_world`] laid on the table: every entity the
+/// simulation reads, so a caller can dress them (sprites, shadows) without
+/// spawning a second copy.
+#[derive(Debug, Clone)]
+pub struct MatchWorld {
+    /// The duelists, in handle order.
+    pub duelists: [Entity; 2],
+    /// The four boundary walls.
+    pub walls: Vec<Entity>,
+    /// The arena's cover, with each block's geometry.
+    pub obstacles: Vec<(Entity, Wall)>,
+    /// The arena's pyres.
+    pub pyres: Vec<(Entity, BonePyre)>,
+    /// The arena's trees.
+    pub trees: Vec<(Entity, BoneTree)>,
+}
+
+/// Lay a match on the table: the one place that decides what a match
+/// starts with and in which order. Duelists at [`respawn_position`] in
+/// handle order, then [`arena_walls`], [`arena_obstacles_for`],
+/// [`arena_pyres_for`], [`arena_trees_for`].
+///
+/// Every builder calls this: the game (which then adds sprites to the
+/// entities it returns), the replay verifier, the bot bench and the
+/// SyncTest probe. Order is load-bearing: bevy_ggrs mixes each rollback
+/// entity's registration index into the checksum, so two builders that
+/// spawned the same table in a different order would disagree from frame
+/// 0. And a second copy is how `replay_sync` came to re-simulate real
+/// tapes from the wrong spawn points, so no signed result could verify.
+pub fn spawn_match_world(commands: &mut Commands, arena: ArenaId) -> MatchWorld {
+    let duelists = [0usize, 1].map(|handle| {
+        let spawn = respawn_position(handle);
+        commands
+            .spawn((
+                Player { handle },
+                PositionF(spawn),
+                PreviousPositionF(spawn),
+                VelocityF(Vec2F::ZERO),
+            ))
+            .id()
+    });
+    let walls = arena_walls()
+        .into_iter()
+        .map(|wall| commands.spawn(wall).id())
+        .collect();
+    let obstacles = arena_obstacles_for(arena)
+        .into_iter()
+        .map(|wall| (commands.spawn(wall).id(), wall))
+        .collect();
+    let pyres = arena_pyres_for(arena)
+        .into_iter()
+        .map(|pyre| (commands.spawn(pyre).id(), pyre))
+        .collect();
+    let trees = arena_trees_for(arena)
+        .into_iter()
+        .map(|tree| (commands.spawn(tree).id(), tree))
+        .collect();
+    MatchWorld {
+        duelists,
+        walls,
+        obstacles,
+        pyres,
+        trees,
+    }
+}
+
+/// [`spawn_match_world`] straight into a `World` (headless builders), with
+/// the spawns applied before it returns.
+pub fn spawn_match_world_now(world: &mut World, arena: ArenaId) -> MatchWorld {
+    let mut queue = bevy::ecs::world::CommandQueue::default();
+    let laid = spawn_match_world(&mut Commands::new(&mut queue, world), arena);
+    queue.apply(world);
+    laid
+}
+
 /// `GgrsSchedule` system: revive any player whose `Dead.respawn_at_frame`
 /// has elapsed. Runs after `snapshot_previous` so we can use
 /// `snap_position` to collapse `PositionF`/`PreviousPositionF` to the
@@ -3036,7 +3251,7 @@ pub fn tick_respawn(frame: Res<FrameCount>, mut q: PlayerStateQuery) {
 ///   - `RoundOver` at expiry: flip back to top of `Countdown` for the
 ///     next round (unless threshold was reached during the beat,
 ///     in which case `MatchOver`).
-///   - `MatchOver`: terminal.
+///   - `MatchOver`: terminal (see [`apply_rematch`] for the one escape).
 pub fn tick_match_state(
     frame: Res<FrameCount>,
     score: Res<MatchScore>,
@@ -3065,7 +3280,7 @@ pub fn tick_match_state(
         }
         MatchState::InRound { expires_at_frame } => {
             if match_won {
-                MatchState::MatchOver
+                MatchState::decided(frame.0)
             } else if frame.0 >= expires_at_frame {
                 MatchState::RoundOver {
                     expires_at_frame: frame.0 + ROUND_OVER_FRAMES,
@@ -3076,7 +3291,7 @@ pub fn tick_match_state(
         }
         MatchState::RoundOver { expires_at_frame } => {
             if match_won {
-                MatchState::MatchOver
+                MatchState::decided(frame.0)
             } else if frame.0 >= expires_at_frame {
                 MatchState::Countdown {
                     digit: MID_MATCH_COUNTDOWN_DIGITS,
@@ -3086,17 +3301,25 @@ pub fn tick_match_state(
                 *state
             }
         }
-        MatchState::MatchOver => MatchState::MatchOver,
+        over @ MatchState::MatchOver { .. } => over,
     };
 }
 
 /// `GgrsSchedule` system: deterministic "play again". `MatchOver` is terminal
 /// in [`tick_match_state`]; this is the one escape — a THROW rising edge from
-/// *either* player while `MatchOver` restarts the match: score back to 0-0,
-/// state back to the top of the countdown, and the arena wiped to a clean
-/// slate (players respawned to their symmetric spawns with all per-player
-/// state cleared; every in-flight boomerang, floor pickup, and fire cell
-/// despawned; pyres un-shattered; bridge and door cooldowns cleared).
+/// *either* player once the rematch is open ([`MatchState::rematch_open`],
+/// [`REMATCH_GRACE_FRAMES`] after the decision) restarts the match as a fresh
+/// match shifted in time: score back to 0-0, state to
+/// [`MatchState::opening`], and the arena wiped to a clean slate (players
+/// respawned to their symmetric spawns with every per-player component back
+/// to its spawn value — the catch streak included; every in-flight
+/// boomerang, floor pickup, and fire cell despawned; pyres un-shattered;
+/// trees regrown; bridge and door cooldowns cleared; the next pickup
+/// [`PICKUP_MIN_INTERVAL_FRAMES`] away, as at a fresh GO).
+///
+/// The grace is what stops a press made before the player could see the
+/// decision — still in flight through the input delay and, online, the
+/// prediction window — from restarting a decided match unseen.
 ///
 /// Input-driven on purpose: it resimulates identically under rollback and
 /// stays lockstep across netplay peers, exactly like every other gameplay
@@ -3122,6 +3345,14 @@ type RematchPlayerQuery<'w, 's> = Query<
         &'static mut Empowered,
         &'static mut HeldModifier,
         &'static mut AnimState,
+        (
+            &'static mut OobTimer,
+            &'static mut ThrowCapacity,
+            &'static mut ThrowCharge,
+            &'static mut CatchStreak,
+            &'static mut Taunt,
+            &'static mut SpawnGuard,
+        ),
     ),
 >;
 
@@ -3134,6 +3365,7 @@ pub fn apply_rematch(
     mut score: ResMut<MatchScore>,
     mut bridge: ResMut<BridgeState>,
     mut door: ResMut<DoorCooldown>,
+    mut pickup_timer: ResMut<PickupSpawnTimer>,
     mut commands: Commands,
     mut players: RematchPlayerQuery,
     boomerangs: Query<Entity, With<Boomerang>>,
@@ -3142,7 +3374,7 @@ pub fn apply_rematch(
     mut pyres: Query<&mut BonePyre>,
     mut trees: Query<&mut BoneTree>,
 ) {
-    if !matches!(*state, MatchState::MatchOver) {
+    if !state.rematch_open(frame.0) {
         return;
     }
 
@@ -3173,6 +3405,7 @@ pub fn apply_rematch(
         mut emp,
         mut held,
         mut anim,
+        (mut oob, mut capacity, mut charge, mut streak, mut taunt, mut guard),
     ) in &mut players
     {
         snap_position(&mut pos, &mut prev, respawn_position(player.handle));
@@ -3184,6 +3417,13 @@ pub fn apply_rematch(
         *held = HeldModifier(None);
         anim.anim_id = AnimState::IDLE;
         anim.ticks = 0;
+        // The rest of a fresh spawn: nothing carries into the new match.
+        *oob = OobTimer::default();
+        *capacity = ThrowCapacity::default();
+        *charge = ThrowCharge::default();
+        *streak = CatchStreak::default();
+        *taunt = Taunt::default();
+        *guard = SpawnGuard::default();
     }
 
     // Arena entities: wipe to a fresh slate.
@@ -3212,12 +3452,11 @@ pub fn apply_rematch(
     *bridge = BridgeState::default();
     *door = DoorCooldown::default();
 
-    // Fresh match: score reset, top of the countdown.
+    // Fresh match: score reset, top of the countdown, first pickup as far
+    // off as a fresh match's.
     *score = MatchScore::default();
-    *state = MatchState::Countdown {
-        digit: 3,
-        expires_at_frame: frame.0 + COUNTDOWN_DIGIT_FRAMES,
-    };
+    *state = MatchState::opening(frame.0);
+    pickup_timer.next_at_frame = frame.0 + PICKUP_MIN_INTERVAL_FRAMES;
 }
 
 pub fn record_last_tick_time(time: Res<Time<Real>>, mut last: ResMut<LastSimTickTime>) {

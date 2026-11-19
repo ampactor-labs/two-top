@@ -66,6 +66,10 @@ The `sim` crate has zero `bevy_render` dependency. The `render` crate depends on
 
 The `app` crate is split into focused modules (`crates/app/src/`):
 
+- `lib.rs` — `run()`, `setup` and the plugin wiring, nothing else.
+- `ui` — the layout kit and the visuals audit's tables: tap bands (with overlap tests per screen), `TextRole` (every text size, one table, overridable live through `Tuning.text`), `z` (the named draw layers). `render::modifier_color` is the one colour table for pickups.
+- `config` — every way to configure a build from outside it: the `TWOTOP_*` development knobs (`Knob`, name + doc line each) and the servers (`Endpoint`: runtime variable over the compile-time bake). A test fails on any knob read outside it.
+- `presentation/` — what the sim looks like beyond `render`'s own systems: `actors` (depth projection, pose, spawn-guard blink, atlas frames), `floor`, `fangs`, `scrims`, `diorama`. `keys` — the touch/keyboard input sources. `capture` — the `TWOTOP_CAPTURE` verification screenshot.
 - `audio` — `GameAudioPlugin`: synthesized WAV cues + two music beds (cosmetic; see § Audio).
 - `camera` — `CameraFollowPlugin`: base lean + kill-cam zoom + screen-shake rig.
 - `haptics` — Android JNI `Vibrator` (Settings-gated; no-op off-Android).
@@ -183,7 +187,7 @@ Rolled-back resources:
 - `FrameCount(u32)`
 - `InputHistory` — per-player ring buffer; `advance_input_history` pushes the tick's inputs at end of `GgrsSchedule`
 - `SimRng { state: u64 }` — hand-rolled xorshift64*
-- `MatchState` — plain `Resource` enum (data-carrying: `Countdown { digit, expires_at_frame }` / `InRound { expires_at_frame }` / `RoundOver { expires_at_frame }` / `MatchOver`), rolled back via `rollback_resource_with_copy::<MatchState>()`
+- `MatchState` — plain `Resource` enum (data-carrying: `Countdown { digit, expires_at_frame }` / `InRound { expires_at_frame }` / `RoundOver { expires_at_frame }` / `MatchOver { rematch_at_frame }`), rolled back via `rollback_resource_with_copy::<MatchState>()`
 - `MatchScore { p0: u8, p1: u8 }`
 - `BridgeState`, `DoorCooldown` — Crossing/Reliquary arena state
 - `PickupSpawnTimer` — earliest frame the next pickup may appear
@@ -252,7 +256,7 @@ app
 
 1. `snapshot_previous` — copy `PositionF` → `PreviousPositionF`
 2. `tick_respawn` — revive any player whose `Dead.respawn_at_frame` has arrived
-3. `apply_rematch` — a THROW rising edge during `MatchOver` restarts the match (input-driven; see § App Screen Lifecycle and below)
+3. `apply_rematch` — a THROW rising edge once `MatchOver`'s grace has run restarts the match (input-driven; see § App Screen Lifecycle and below)
 4. `tick_match_state` — drive the round/match state machine forward (countdown digits, round/match transitions)
 5. `start_dash` — commit dash on a DASH_DOWN edge
 6. `player_movement` — apply movement input to `VelocityF` and `PositionF`
@@ -270,7 +274,7 @@ app
 
 The inner boomerang/arena cluster is its own nested `.chain()` so the outer chain stays under Bevy's 20-element `.chain()` arity limit. Arena-specific systems are gated with `run_if(arena_is(_))` rather than split into separate schedules.
 
-`apply_rematch` is the one escape from the terminal `MatchOver` state: a THROW rising edge (diffed against the rolled-back `InputHistory`, no wire-format change) from either player resets score to 0-0, returns `MatchState` to the top of the countdown, and wipes the arena. It is input-driven so it resimulates identically under rollback and stays lockstep across netplay peers — never an out-of-band `World` reset.
+`apply_rematch` is the one escape from the terminal `MatchOver` state: a THROW rising edge (diffed against the rolled-back `InputHistory`, no wire-format change) from either player, on or after `rematch_at_frame` (`REMATCH_GRACE_FRAMES` = 30 ticks after the decision), restarts the match as a fresh one shifted in time: score 0-0, `MatchState::opening(frame)`, every per-player component back to its spawn value, the next pickup 8 s off, the arena wiped. The grace covers input delay + prediction window: a press made before a player could see the decision lands up to that deep, and must not restart a match nobody has seen end (the app asserts the bound at compile time). Out-of-band endings write `MatchState::abandoned()`, which never reopens. It is input-driven so it resimulates identically under rollback and stays lockstep across netplay peers — never an out-of-band `World` reset.
 
 `Update` (render, f32 allowed):
 
@@ -314,10 +318,10 @@ pub enum AppScreen { #[default] Title, InMatch, Replays }
 ```
 
 - **`Title`** — session-less. With no ggrs `Session` inserted, bevy_ggrs idles `GgrsSchedule` and the sim sits at frame 0. The title carries the arena picker (couch), the NAME and room-code glyph pads (online), the settings rows, and the PLAY / PRACTICE / REPLAYS buttons.
-- **`InMatch`** — `OnEnter(InMatch)` spawns the two players, arena walls, and the selected arena's props, then inserts the right session: theater → a playback session (`check_distance: 0`, `input_delay: 0`), couch/practice → a fresh `SyncTestSession`, online → none (the matchbox driver inserts the P2P session on connect). `OnExit(InMatch)` despawns every match/arena/play-spawned entity and removes the `Session<GgrsCfg>` so bevy_ggrs idles the sim back at frame 0.
+- **`InMatch`** — `OnEnter(InMatch)` lays the table with `sim::spawn_match_world` and dresses it (sprites, shadows, cover, props), then inserts the right session: theater → a playback session (`check_distance: 0`, `input_delay: 0`), couch/practice → a fresh `SyncTestSession`, online → none (the matchbox driver inserts the P2P session on connect). `OnExit(InMatch)` despawns every match/arena/play-spawned entity and removes the `Session<GgrsCfg>` so bevy_ggrs idles the sim back at frame 0.
 - **`Replays`** — the saved-tape list (`theater` module). Picking a tape re-enters `InMatch` with the theater flag up, so playback wears the entire live presentation; the tape's inputs drive the sim via `replay::playback_inputs_system`, which runs after every platform input source and replaces the `LocalInputs` map wholesale.
 
-Online also boots to `Title`. With a room URL configured, the primary button reads FIND OPPONENT; pressing it enters `InMatch`, starts the matchbox connection, and `perform_swap` inserts the P2P session once the peer connects. Right after the swap the local `NetMsg::Profile` (install-id + name) goes out on the **reliable side-channel** (matchbox channel 1; ggrs owns unreliable channel 0) — the channel that also carries rematch consent (`RematchWant`) and the clean goodbye (`Bye`). Side-channel messages never enter the sim: they change what a client shows and when it emits its own inputs, never how a tick resolves. The ONLINE rematch is consent-gated pre-wire (`netplay::gate_rematch_inputs`): a `MatchOver` THROW press becomes consent and is masked off the wire until both sides are in, then the real input is emitted and `sim::apply_rematch` restarts the match exactly as always.
+Online also boots to `Title`. With a room URL configured, the primary button reads FIND OPPONENT; pressing it enters `InMatch`, starts the matchbox connection, and `perform_swap` inserts the P2P session once the peer connects. Right after the swap the local `NetMsg::Profile` (install-id + name) goes out on the **reliable side-channel** (matchbox channel 1; ggrs owns unreliable channel 0) — the channel that also carries rematch consent (`RematchWant`), the signed result (`MatchSig`) and the last word (`Bye` for a concession, `Ended { reason }` for every other ending). Every ending goes through one system, `netplay::conclude_session`: it books the match as it stood on the last confirmed frame and is the app's only out-of-band write to `MatchState`. One settle point, `attest::MatchOverSettled` (settled when bevy_ggrs's `ConfirmedFrameCount` reaches `MatchState::decided_at`), gates the ledger, the signature and the tape; tapes hold confirmed ticks only, so both phones' tapes of one match are the same bytes. Side-channel messages never enter the sim: they change what a client shows and when it emits its own inputs, never how a tick resolves. The ONLINE rematch is consent-gated pre-wire (`netplay::gate_rematch_inputs`): a `MatchOver` THROW press becomes consent and is masked off the wire until both sides are in, then the real input is emitted and `sim::apply_rematch` restarts the match exactly as always.
 
 ## Settings
 
@@ -391,7 +395,7 @@ pub struct Replay {
 pub struct ReplayHeader {
     pub magic: [u8; 4],            // b"BMRG"
     pub format_version: u16,
-    pub sim_version: u32,           // sim::SIM_VERSION (1 for v1.0.0-rc1; u32::MAX only on un-tagged dev builds via DEV_SIM_VERSION)
+    pub sim_version: u32,           // sim::SIM_VERSION, always the real one
     pub seed: u64,
     pub num_players: u8,
     pub frame_rate: u8,
@@ -403,7 +407,20 @@ pub struct ReplayHeader {
 }
 ```
 
-Strict version matching: replays only load if `sim_version` matches binary. Old replays viewed via archived git-tagged binaries. The committed canonical demo (`tests/demos/canonical/match_v1.bmrg`) stamps the real `sim::SIM_VERSION` (via `replay_sync::canonical_replay`) and must be regenerated on any `SIM_VERSION` bump; the in-process struct-fed test/fuzz replays keep using `DEV_SIM_VERSION` (`u32::MAX`) since they never strict-decode.
+**One table, two re-simulation setups.** `sim::spawn_match_world(commands, arena)` is the one
+place that decides what a match starts with and in which order: duelists at
+`respawn_position(handle)`, then the walls, the arena's cover, pyres and trees. The game dresses
+the entities it returns; `replay_sync`, `replay_viewer`, the bot bench and `sync_test` call the
+same function. `replay_sync` then re-simulates in one of two named setups:
+
+- **Live** (`build_live_app`, `replay_sync --live`, `--attest`): a recorded match exactly as it
+  was played — real round flow, real spawn points, inputs applied on the tick they were consumed
+  (input delay 0). Signed results are checked against this.
+- **Probe** (`build_probe_app`, the default `--demo` and `--fuzz`): the determinism probe every
+  cross-platform lane and golden TSV uses — both duelists at the origin, rounds that never end
+  (`InfiniteRoundPlugin`), input delay 2.
+
+Strict version matching: replays only load if `sim_version` matches binary. Old replays viewed via archived git-tagged binaries. The committed canonical demo (`tests/demos/canonical/match_v1.bmrg`) stamps the real `sim::SIM_VERSION` (via `replay_sync::canonical_replay`) and must be regenerated on any `SIM_VERSION` bump. Test and fuzz replays stamp it too: there is no dev sentinel.
 
 ## Logging
 
@@ -427,7 +444,9 @@ Three-layer determinism defense:
 
 **Layer 1: SyncTestSession.** Single-machine. Runs every CI job via `cargo nextest run --workspace --locked` in `ci.yml`, which executes `crates/sim/tests/determinism.rs::determinism_locked_600_frame_synctest` — a 600-frame SyncTest with `check_distance: 16` (the live session's prediction window), `input_delay: 2`. Catches intra-machine non-determinism. (The live app + `replay_sync` use `check_distance: 2` to keep the per-frame resimulation cost down; the test bumps it to 7 for stricter coverage.)
 
-**Layer 2: Cross-platform replay matrix.** `replay_sync` binary runs `tests/demos/canonical/match_v1.bmrg` headlessly on each platform, dumps per-frame per-component checksum log. Diff job compares all logs against linux-x64 baseline. Platforms: linux-x64, linux-aarch64 (qemu), macos-14 (native ARM), aarch64-linux-android (now `--workspace --exclude app --tests`: build-only, no replay-sync run — see `.github/workflows/determinism.yml`). `app` is excluded on every non-native cross target because its `bevy_audio` → `cpal` → `alsa-sys` and `bevy_winit` → `wgpu` chains need target-side system libs the cross-toolchains don't ship.
+**Layer 2: Cross-platform replay matrix.** `replay_sync` binary runs `tests/demos/canonical/match_v1.bmrg` headlessly on each platform, dumps per-frame per-component checksum log. Diff job compares all logs against linux-x64 baseline. Platforms: linux-x64, linux-aarch64 (qemu), macos-14 (native ARM) and macos-15-intel (both in `determinism-macos.yml`, on main and on PRs touching the sim, its math, the replay tools, vendored crates, the lockfile or the toolchain, each checked against the committed golden TSV), aarch64-linux-android (now `--workspace --exclude app --tests`: build-only, no replay-sync run — see `.github/workflows/determinism.yml`). `app` is excluded on every non-native cross target because its `bevy_audio` → `cpal` → `alsa-sys` and `bevy_winit` → `wgpu` chains need target-side system libs the cross-toolchains don't ship.
+
+**Netplay gate (beside the three layers).** Determinism says two sims agree; it says nothing about whether two phones meet, end a match the same way and file the same result. `.github/workflows/netplay.yml` runs real app processes against a real matchbox room server under Xvfb + lavapipe (`scripts/*_smoke.sh` on `scripts/lib/peers.sh`): on pull requests touching the network, the goodbye, pause, sync-budget and every `endings_smoke.sh` scenario; on main and nightly, a strict full match then LEAVE, and a full match under netem (40 ms ± 10 ms, 1 % loss). In-process, `crates/net_harness` drives two ggrs sessions over a late, lossy link inside `cargo test`.
 
 **Layer 3: Per-component checksum dump for diagnostics.** When the diff job finds a divergence, the log already says which component column differs at which frame. `scripts/diagnose_desync.sh` re-runs `replay_sync --dump-state-at <frame>` on both platforms and prints a side-by-side comparison.
 

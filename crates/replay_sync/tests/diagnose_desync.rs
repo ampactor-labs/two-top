@@ -3,6 +3,11 @@
 //! divergent frame and column. Exit code conveys the result so CI can
 //! gate on it directly.
 
+// These run scripts/diagnose_desync.sh through bash. On the Windows lane
+// `bash` is WSL's launcher with no Linux installed; the script is a
+// Unix operator tool, covered on the Linux and macOS lanes.
+#![cfg(not(windows))]
+
 use std::path::PathBuf;
 use std::process::Command;
 

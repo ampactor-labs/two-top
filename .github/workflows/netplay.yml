@@ -1,0 +1,135 @@
+name: Netplay
+
+# Two real app processes, a real matchbox room server, nobody at either
+# keyboard (scripts/*_smoke.sh on scripts/lib/peers.sh). Rendering runs on
+# Mesa's software Vulkan (lavapipe) under Xvfb, so a full match takes
+# minutes of wall time: pull requests that touch the network get the
+# short scenarios; main and the nightly run get full matches, including
+# one over a slow, lossy link.
+#
+# Failures keep their work dir (logs, homes, tapes) and upload it.
+# A full match may be retried once, only for a timeout (two bots can orbit
+# without a kill); a desync or any failed assertion is never retried.
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - "crates/net/**"
+      - "crates/net_harness/**"
+      - "crates/app/src/netplay.rs"
+      - "crates/app/src/attest.rs"
+      - "crates/app/src/recorder.rs"
+      - "crates/app/src/grudge.rs"
+      - "crates/app/src/screen/**"
+      - "crates/app/src/lib.rs"
+      - "crates/app/src/lobby_overlay.rs"
+      - "crates/app/src/platform/**"
+      - "crates/app/examples/silent_peer.rs"
+      - "crates/sim/**"
+      - "vendor/**"
+      - "scripts/*_smoke.sh"
+      - "scripts/lib/peers.sh"
+      - "Cargo.lock"
+      - ".github/workflows/netplay.yml"
+  push:
+    branches: [main]
+  schedule:
+    - cron: "17 7 * * *"
+  workflow_dispatch:
+
+# A newer push supersedes a pull request's run (each builds for ~11 min).
+concurrency:
+  group: netplay-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  smokes:
+    name: ${{ matrix.name }}
+    runs-on: ubuntu-22.04
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: endings (goodbye, pause, sync budget, endings)
+            full: false
+          - name: full match (open ground, plain and under netem)
+            full: true
+    steps:
+      - uses: actions/checkout@v5
+      - name: Skip full matches on pull requests
+        id: gate
+        run: |
+          if [ "${{ matrix.full }}" = true ] && [ "${{ github.event_name }}" = pull_request ]; then
+            echo "run=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Install system packages
+        if: steps.gate.outputs.run == 'true'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libasound2-dev libudev-dev xvfb xdotool \
+            mesa-vulkan-drivers libvulkan1 libxkbcommon-x11-0 iproute2
+          # lavapipe's manifest is lvp_icd.json on newer Mesa and
+          # lvp_icd.x86_64.json on 22.04: point the loader at whichever exists.
+          echo "VK_ICD_FILENAMES=$(ls /usr/share/vulkan/icd.d/lvp_icd*.json | head -1)" >> "$GITHUB_ENV"
+      - uses: Swatinem/rust-cache@v2
+        if: steps.gate.outputs.run == 'true'
+        with:
+          shared-key: netplay
+      - name: Install matchbox_server
+        if: steps.gate.outputs.run == 'true'
+        uses: taiki-e/install-action@v2
+        with:
+          tool: matchbox_server@0.14.0
+      - name: Build
+        if: steps.gate.outputs.run == 'true'
+        # Two builds: naming --example limits cargo to that target, so one
+        # command would skip the app and replay_sync binaries.
+        run: |
+          cargo build --locked -p app -p replay_sync --bins
+          cargo build --locked -p app --example silent_peer
+      # The online smokes never boot a build without a room; couch and
+      # practice once panicked on their first frame for a week unseen.
+      - name: Offline boots (couch, practice, a --join launch)
+        if: steps.gate.outputs.run == 'true' && !matrix.full
+        run: scripts/offline_boot_smoke.sh
+      - name: Short scenarios
+        if: steps.gate.outputs.run == 'true' && !matrix.full
+        run: |
+          set -e
+          scripts/goodbye_smoke.sh
+          scripts/pause_smoke.sh
+          SILENT=1 scripts/pause_smoke.sh
+          scripts/sync_budget_smoke.sh
+          MODE=leave scripts/sync_budget_smoke.sh
+          for s in desync kill early freeze; do scripts/endings_smoke.sh "$s"; done
+      - name: Full match, then LEAVE
+        if: steps.gate.outputs.run == 'true' && matrix.full
+        run: |
+          set -e
+          full() { ARENA=vigil TIMEOUT=600 scripts/two_peer_smoke.sh > full.out 2>&1; s=$?; cat full.out; return $s; }
+          # One retry, only for a timeout.
+          full || { grep -q "no finished match" full.out && full; }
+          scripts/endings_smoke.sh leave
+      - name: Full match over a slow, lossy link (40 ms ± 10 ms, 1 % loss)
+        if: steps.gate.outputs.run == 'true' && matrix.full
+        run: |
+          sudo tc qdisc add dev lo root netem delay 40ms 10ms loss 1%
+          ARENA=vigil TIMEOUT=900 scripts/two_peer_smoke.sh
+          grep -h "net summary" target/two-peer-smoke.*/*.log 2>/dev/null || true
+      - name: Upload kept work dirs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: netplay-${{ strategy.job-index }}
+          path: |
+            target/*-smoke.*
+            target/endings-*
+            target/offline-boot.*
+          if-no-files-found: ignore

@@ -1,0 +1,17 @@
+[package]
+name = "net_harness"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+publish.workspace = true
+rust-version.workspace = true
+
+# Two in-process peers joined by in-memory sockets that deliver packets
+# late (and can drop them). A test tool, never a dependency of the game:
+# localhost real peers never mispredict (their latency is below the input
+# delay), so only this can drive a match into the prediction window.
+[dependencies]
+bevy = { version = "=0.18.1", default-features = false, features = ["std"] }
+bevy_ggrs = "=0.21"
+net = { path = "../net" }
+sim = { path = "../sim" }

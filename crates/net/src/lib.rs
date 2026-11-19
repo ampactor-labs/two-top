@@ -74,6 +74,33 @@ pub fn addr_to_peer(addr: NetAddr) -> PeerId {
 /// reference impl; we mirror the warning for parity).
 pub struct MatchboxBridge {
     channel: WebRtcChannel,
+    /// The socket under the channel has ended; logged once, then quiet.
+    link_lost_logged: bool,
+    /// Debug builds only (`TWOTOP_FAULT`): drop this side's outgoing
+    /// checksum reports, so only the OTHER side's ggrs can detect a desync
+    /// this side causes. A one-sided desync on demand, to prove the peer
+    /// that did not detect it still hears of it.
+    #[cfg(debug_assertions)]
+    mute_checksum_reports: bool,
+}
+
+/// The `MessageBody` variant index of a ggrs `ChecksumReport` (declaration
+/// order in ggrs's `network/messages.rs`).
+#[cfg(debug_assertions)]
+const GGRS_CHECKSUM_REPORT: u8 = 6;
+
+/// Is this encoded ggrs message a checksum report? The body is private to
+/// ggrs, so read the wire: bincode's standard config writes the header's
+/// `u16` magic as a varint (one byte below 251, else `251` and two bytes)
+/// and then the body's variant index (one byte). Debug builds only.
+#[cfg(debug_assertions)]
+pub fn is_checksum_report(bytes: &[u8]) -> bool {
+    let tag_at = match bytes.first() {
+        Some(&b) if b < 251 => 1,
+        Some(&251) => 3,
+        _ => return false,
+    };
+    bytes.get(tag_at) == Some(&GGRS_CHECKSUM_REPORT)
 }
 
 impl MatchboxBridge {
@@ -92,7 +119,20 @@ impl MatchboxBridge {
                  channel config.",
             );
         }
-        Self { channel }
+        Self {
+            channel,
+            link_lost_logged: false,
+            #[cfg(debug_assertions)]
+            mute_checksum_reports: false,
+        }
+    }
+
+    /// Debug builds only: stop sending checksum reports
+    /// ([`MatchboxBridge::mute_checksum_reports`]).
+    #[cfg(debug_assertions)]
+    pub fn mute_checksum_reports(mut self) -> Self {
+        self.mute_checksum_reports = true;
+        self
     }
 
     /// Surrender the wrapped channel — useful for tests or for
@@ -136,11 +176,11 @@ pub fn encode_message(msg: &Message) -> Packet {
 // decoder runs, so the guard is the first — and only — caller that ever
 // hands it something it cannot survive.
 //
-// Still open upstream, and not closable at this boundary: protocol.rs also
-// `assert!(last_recv_frame + 1 >= body.start_frame)` on the wire's own
-// `start_frame`. Checking that needs ggrs's private receive bookkeeping,
-// so a hostile peer can still trip it mid-match. The honest fix is a
-// warn-and-drop in ggrs itself.
+// Not closable at this boundary: protocol.rs also `assert!`ed
+// `last_recv_frame + 1 >= body.start_frame` on the wire's own `start_frame`,
+// which needs ggrs's private receive bookkeeping to check. That one is
+// fixed in ggrs itself: the vendored copy (vendor/README.md) drops such a
+// packet with a warning (`an_input_that_skips_ahead_is_dropped_not_fatal`).
 
 /// One player's input on the wire, as ggrs sizes it: the bincode-1 fixint
 /// encoding of `sim::PlayerInput`, four one-byte fields. `size_of` is
@@ -152,6 +192,10 @@ const INPUT_BYTES_PER_PLAYER: usize = std::mem::size_of::<sim::PlayerInput>();
 /// phone, and ggrs sizes a frame as `bytes_per_player × handles.len()` on
 /// both ends, so this is the one number the guard must agree with it on.
 const PLAYERS_PER_PEER: usize = 1;
+
+/// Players in a session: what ggrs sizes its connection-status table by,
+/// and the length it indexes a remote Input's list up to. 2-Top is a duel.
+const SESSION_PLAYERS: usize = 2;
 
 /// The exact frame width an honest peer sends, every frame.
 const INPUT_FRAME_BYTES: usize = INPUT_BYTES_PER_PLAYER * PLAYERS_PER_PEER;
@@ -336,6 +380,14 @@ fn refuse_reason(bytes: &[u8]) -> Option<&'static str> {
         return None;
     };
     match wire.body {
+        // ggrs reads one connection status per player out of the body
+        // (`body.peer_connect_status[i]`, unchecked) unless the peer is
+        // asking to disconnect: a shorter list was an index panic.
+        WireBody::Input(input)
+            if !input.disconnect_requested && input.peer_connect_status.len() < SESSION_PLAYERS =>
+        {
+            Some("connection status list shorter than the player count")
+        }
         WireBody::Input(input) => input_stream_frames(&input).err(),
         _ => None,
     }
@@ -381,8 +433,24 @@ pub fn decode_packet(message: (PeerId, Packet)) -> Option<(NetAddr, Message)> {
 }
 
 impl NonBlockingSocket<NetAddr> for MatchboxBridge {
+    /// Never panics. matchbox's `WebRtcChannel::send` does (`"Send
+    /// failed"`) once the socket's future has ended — and it ends for the
+    /// whole socket, data channels included, the moment the signaling
+    /// websocket closes after pairing: the room server redeploying, or a
+    /// phone moving from Wi-Fi to cellular. ggrs sends every frame, so
+    /// every match in progress used to crash on the next frame. A failed
+    /// send is a packet lost on a dead link; the app sees the closed
+    /// socket and ends the match (`netplay`'s link-lost check).
     fn send_to(&mut self, msg: &Message, addr: &NetAddr) {
-        self.channel.send(encode_message(msg), addr_to_peer(*addr));
+        let packet = encode_message(msg);
+        #[cfg(debug_assertions)]
+        if self.mute_checksum_reports && is_checksum_report(&packet) {
+            return;
+        }
+        if self.channel.try_send(packet, addr_to_peer(*addr)).is_err() && !self.link_lost_logged {
+            self.link_lost_logged = true;
+            tracing::warn!(target: "two_top::net", "ggrs channel closed under the session — link lost");
+        }
     }
 
     fn receive_all_messages(&mut self) -> Vec<(NetAddr, Message)> {
@@ -412,6 +480,13 @@ impl NonBlockingSocket<NetAddr> for MatchboxBridge {
 /// platform's limit — long enough to be a name people actually own,
 /// short enough to render on a phone HUD without wrapping.
 pub const NAME_MAX: usize = 12;
+
+/// The wire generation of everything `net` sends that the sim does not
+/// see (the side channel, the handshake). Bump it on any such change; it
+/// rides the room name beside `sim::SIM_VERSION`, so two builds that
+/// cannot talk never meet. 2: one keyed `Profile` (the unkeyed one and
+/// `Profile2` are gone).
+pub const NET_PROTOCOL: u32 = 2;
 
 /// Tail padding for names shorter than [`NAME_MAX`]. A fixed array keeps
 /// `ProfileData` `Copy`, allocation-free, and bounded BY CONSTRUCTION — a
@@ -447,32 +522,75 @@ pub struct ProfileData {
 /// matchbox's ggrs reference codec byte-for-byte).
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub enum NetMsg {
-    /// Identity handshake, sent once right after the P2P session swap.
-    Profile(ProfileData),
+    /// Identity handshake, sent once right after the P2P session swap:
+    /// install-id, name and the result-signing pubkey.
+    Profile(KeyedProfile),
     /// "I want to run it back." The receiving client surfaces it on the
     /// summary; when both sides have consented, each client emits its own
     /// THROW input and the in-sim `apply_rematch` restarts the match the
     /// same rollback-correct way it always has.
     RematchWant,
-    /// Clean goodbye: the peer is leaving on purpose. The receiver forfeits
-    /// immediately instead of waiting out the disconnect grace.
+    /// "I quit a live duel": a concession, sent only by QUIT mid-match once
+    /// the duel has begun (the quitter files the loss first). The receiver
+    /// books the win at once instead of waiting out the disconnect grace.
+    /// Every other way of leaving says [`NetMsg::Ended`].
     Bye,
-    /// Identity plus result-signing key, sent alongside [`NetMsg::Profile`].
-    /// New builds read this; old builds fail to decode the unknown variant,
-    /// ignore the message, and still get the legacy `Profile` — a mixed
-    /// pairing degrades to unsigned results instead of breaking.
-    Profile2(ProfileData2),
     /// Our ed25519 signature over [`MatchStatement::encode`] for the match
     /// that just reached the score threshold. Split halves keep the enum
     /// `Copy` (serde's array impls stop at 32).
-    MatchSig { sig: [[u8; 32]; 2] },
+    MatchSig {
+        sig: [[u8; 32]; 2],
+    },
     /// The table this side would play on (`sim::ArenaId::as_u8`). Sent
     /// once, BEFORE the ggrs session exists, the moment the peer connects:
     /// the table no longer rides the room name, so the two sides agree on
     /// it here instead — both adopt the lower peer id's pick, then start
     /// the session. Reliable + ordered, so it always lands ahead of the
     /// peer's `Profile`.
-    Table { arena: u8 },
+    Table {
+        arena: u8,
+    },
+    /// "This phone is going away for a moment" — the app is being
+    /// backgrounded (a notification-shade peek, a call, a switch to the
+    /// chat app) or its tab hidden. Sent on the last update before it
+    /// sleeps. The receiver gives it [`PAUSED_FORFEIT_AFTER_FRAMES`] of
+    /// silence instead of [`FORFEIT_AFTER_FRAMES`] before forfeiting, and
+    /// says so on screen. An old build cannot decode it and ignores it,
+    /// which is the old behaviour.
+    Pausing,
+    /// "This session is over for me", for every ending that is not a
+    /// concession: leaving a decided match's summary, cancelling before
+    /// the duel began, forfeiting a silent peer, or a desync this side
+    /// detected (so both phones void it, not only the one whose checksum
+    /// check fired). Honoured only from the session's peer, and only
+    /// before the receiver's own result has settled; it can only close a
+    /// match unfinished or void it, which silence or a forged checksum
+    /// already could.
+    Ended {
+        reason: EndReason,
+    },
+    /// Round-trip probe in the table handshake; answered with
+    /// [`NetMsg::Pong`] carrying the same `id`.
+    Ping {
+        id: u8,
+    },
+    Pong {
+        id: u8,
+    },
+    /// The input delay this side proposes ([`delay::delay_for_rtt`] of its
+    /// median round trip); both sides play [`delay::agreed`].
+    Delay {
+        frames: u8,
+    },
+}
+
+/// Why a session ended, in a [`NetMsg::Ended`].
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub enum EndReason {
+    /// The sender's ggrs found the two sims disagreeing at `frame`.
+    Desynced { frame: u32 },
+    /// The sender left or gave up on the session.
+    Closed,
 }
 
 /// Encode a side-channel message. Infallible for these types (postcard on
@@ -491,11 +609,53 @@ pub fn decode_net_msg(bytes: &[u8]) -> Option<NetMsg> {
     postcard::from_bytes(bytes).ok()
 }
 
+/// Input delay for an online session, from the link it will run over.
+///
+/// A peer's input delay is what spares the OTHER screen rollbacks of that
+/// peer's duelist: an input filed `delay` frames ahead arrives before the
+/// frame it belongs to whenever the one-way trip is shorter than the delay.
+/// Each side measures the round trip in the table handshake
+/// ([`NetMsg::Ping`]), proposes [`delay_for_rtt`], and both play the larger
+/// of the two proposals ([`NetMsg::Delay`]). ggrs fixes the delay when the
+/// session is built and cannot change it after.
+pub mod delay {
+    /// The least delay ever used: the same Wi-Fi.
+    pub const MIN: usize = 2;
+    /// What a session uses when the round trip could not be measured.
+    pub const DEFAULT: usize = 3;
+    /// The most: past it the delay is felt in the hands, and rollback takes
+    /// over the rest.
+    pub const MAX: usize = 4;
+
+    /// The delay a round trip of `rtt_ms` asks for: the one-way trip plus
+    /// 8 ms of jitter, in 60 Hz frames, rounded up and clamped
+    /// (LAN → 2, ~60 ms → 3, ~100 ms → 4).
+    pub fn delay_for_rtt(rtt_ms: u32) -> usize {
+        // ceil((rtt / 2 + 8) / (1000 / 60)) in integers.
+        let frames = (u64::from(rtt_ms) * 30 + 480).div_ceil(1000) as usize;
+        frames.clamp(MIN, MAX)
+    }
+
+    /// The median of the measured round trips (`None`: none came back).
+    pub fn median_rtt(samples: &[u32]) -> Option<u32> {
+        let mut sorted = samples.to_vec();
+        sorted.sort_unstable();
+        sorted.get(sorted.len() / 2).copied()
+    }
+
+    /// The delay both sides play: the larger proposal, so neither side's
+    /// link is under-covered. Clamped, so a hostile proposal cannot ask for
+    /// a sluggish match.
+    pub fn agreed(ours: usize, theirs: usize) -> usize {
+        ours.max(theirs).clamp(MIN, MAX)
+    }
+}
+
 // ---- Signed results (NORTH N2) --------------------------------------------
 //
 // The install-id travels in the open on the side channel, so it identifies
 // but cannot prove. An ed25519 keypair minted beside it can: pubkeys ride
-// `Profile2`, and when a match is decided ON SCORE both peers sign one
+// `NetMsg::Profile`, and when a match is decided ON SCORE both peers sign one
 // canonical statement and swap signatures. The result becomes an artifact
 // anyone can check — re-run the tape, rebuild the statement, verify both
 // signatures (`replay_sync --attest`). Forfeits stay ledger-only: each
@@ -504,7 +664,7 @@ pub fn decode_net_msg(bytes: &[u8]) -> Option<NetMsg> {
 
 /// A peer's shareable identity plus its result-signing pubkey.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
-pub struct ProfileData2 {
+pub struct KeyedProfile {
     pub install_id: u128,
     pub name: [u8; NAME_MAX],
     /// ed25519 verifying key. The matching signing key never leaves the
@@ -512,7 +672,7 @@ pub struct ProfileData2 {
     pub pubkey: [u8; 32],
 }
 
-impl ProfileData2 {
+impl KeyedProfile {
     /// The identity half, for everything that already speaks `ProfileData`.
     pub fn profile(&self) -> ProfileData {
         ProfileData {
@@ -652,7 +812,7 @@ pub fn sign_statement(stmt: &MatchStatement, signing_key: &[u8; 32]) -> [[u8; 32
     halves
 }
 
-/// The verifying key for a raw signing key — what `Profile2` carries.
+/// The verifying key for a raw signing key — what `NetMsg::Profile` carries.
 pub fn pubkey_for(signing_key: &[u8; 32]) -> [u8; 32] {
     use ed25519_dalek::SigningKey;
     SigningKey::from_bytes(signing_key)
@@ -716,8 +876,8 @@ impl Attestation {
     }
 }
 
-/// The connected peer's result-signing pubkey, once its `Profile2`
-/// arrives. `None` against a legacy build — results then stay unsigned.
+/// The connected peer's result-signing pubkey, once its `NetMsg::Profile`
+/// arrives.
 /// Cleared on session teardown.
 #[derive(Resource, Default, Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PeerKeys(pub Option<[u8; 32]>);
@@ -760,10 +920,9 @@ pub struct NetSendQueue(pub Vec<NetMsg>);
 ///
 /// Not rolled back. Lobby state is an out-of-band coordination layer
 /// that lives outside the deterministic sim — it doesn't replay or
-/// rollback. The `Forfeited` terminal state hands off to
-/// `sim::MatchState::MatchOver` (which IS rolled back), so the
-/// in-sim view of "match has ended" is the rolled-back source of
-/// truth and the Lobby state is just the trigger that sets it.
+/// rollback. A terminal state (`Forfeited`, `Desynced`) is the trigger:
+/// the app's `netplay::conclude_session` ends the match in the sim,
+/// booking it as it stood on the last confirmed frame.
 ///
 /// `since_frame` / `forfeit_at_frame` use the rolled-back
 /// `FrameCount` from the sim crate so the disconnection countdown
@@ -807,6 +966,12 @@ pub enum LobbyState {
     /// player is told, and CANCEL / PLAY THE BOT are the exits. Replaces
     /// a fall-back to `Idle`, which rendered nothing at all.
     SummonFailed,
+    /// Paired, but the session never synchronized: the peer vanished
+    /// between pairing and the first frame, or packets never got through,
+    /// twice (the app re-dials once on its own first). Nothing was at
+    /// stake and nothing is recorded; the player is told, and CANCEL /
+    /// PLAY THE BOT are the exits, as for [`LobbyState::SummonFailed`].
+    PeerUnreachable,
 }
 
 impl LobbyState {
@@ -925,21 +1090,65 @@ pub fn detect_peer_connection_edge(
 #[derive(Resource, Default, Clone, Copy, Debug)]
 pub struct LastPeerMessageFrame(pub u32);
 
+/// The clock the silence FSM ages on: real time since boot, counted in
+/// 60 Hz ticks, so every `*_AFTER_FRAMES` threshold keeps its meaning.
+/// [`LastPeerMessageFrame`] is stamped from it.
+///
+/// It was the sim's `FrameCount`, and that clock stops exactly when it is
+/// needed: a P2P session stops advancing frames once the peer's inputs stop
+/// arriving (ggrs holds at its prediction window), so silence never aged
+/// past the 16 frames of that window, the lobby never reached
+/// `Disconnected`, OPPONENT AWAY could never show, and the healthy side
+/// stared at a frozen board until ggrs's own timeout. Disconnection is
+/// observed locally on each phone either way; nothing here is simulated.
+/// Monotonic: it only ever moves forward (a test can set it ahead).
+#[derive(Resource, Default, Clone, Copy, Debug)]
+pub struct SilenceClock(pub u32);
+
+/// `Update`, before the grace timer: advance [`SilenceClock`] to now.
+/// No time plugin (a bare test app): the clock holds still.
+pub fn advance_silence_clock(time: Option<Res<Time<Real>>>, mut clock: ResMut<SilenceClock>) {
+    let Some(time) = time else {
+        return;
+    };
+    let now = (time.elapsed_secs_f64() * f64::from(sim::TICK_HZ as u32)) as u32;
+    clock.0 = clock.0.max(now);
+}
+
 /// Frames of peer silence that trigger `Connected -> Disconnected`.
 /// 60 = 1 s @ 60 Hz. Short enough that the UI can surface a
 /// reconnect spinner immediately on a real disconnect; long enough
 /// that ordinary packet jitter doesn't cause spurious flickers.
 pub const DISCONNECT_AFTER_FRAMES: u32 = 60;
 
-/// Frames of peer silence that trigger `Disconnected -> Forfeited`.
-/// 600 = 10 s @ 60 Hz — the grace window that lets a phone survive a
-/// notification-shade peek or a short call screen without losing the
-/// match. ggrs's own disconnect (9 s, `app::netplay::DISCONNECT_TIMEOUT`)
-/// is the authoritative trigger and fires just before this; the silence
-/// FSM here is the fallback for the pre-swap window and for anything
-/// ggrs misses. The `Forfeited` transition also sets
-/// `sim::MatchState::MatchOver`, ending the round in the sim layer.
-pub const FORFEIT_AFTER_FRAMES: u32 = 600;
+/// Frames of peer silence that trigger `Disconnected -> Forfeited`, for a
+/// peer that went quiet without a word. 540 = 9 s @ 60 Hz. This FSM is
+/// the authority: ggrs's own disconnect timeout
+/// (`app::netplay::GGRS_DISCONNECT_TIMEOUT`) is set at the paused grace
+/// below, a ceiling it only reaches if this one somehow does not fire.
+/// The app ends the match in the sim on the `Forfeited` transition.
+pub const FORFEIT_AFTER_FRAMES: u32 = 540;
+
+/// The same for a peer that said it was going away ([`NetMsg::Pausing`]):
+/// 1200 = 20 s, long enough for a notification-shade peek, a short call
+/// or a trip to the chat app to send the room code, without losing the
+/// match.
+pub const PAUSED_FORFEIT_AFTER_FRAMES: u32 = 1200;
+
+/// Silence the FSM forfeits a peer at.
+pub fn forfeit_after(peer_paused: bool) -> u32 {
+    if peer_paused {
+        PAUSED_FORFEIT_AFTER_FRAMES
+    } else {
+        FORFEIT_AFTER_FRAMES
+    }
+}
+
+/// The peer said it was going away ([`NetMsg::Pausing`]) and has not been
+/// heard from since. Cleared when its traffic resumes and when a session
+/// starts or ends.
+#[derive(Resource, Default, Clone, Copy, Debug)]
+pub struct PeerPaused(pub bool);
 
 /// Pure helper: given the current lobby state, the current frame,
 /// and the last-message frame, return the next lobby state if a
@@ -948,7 +1157,7 @@ pub const FORFEIT_AFTER_FRAMES: u32 = 600;
 /// Transitions:
 ///   - `Connected` after `DISCONNECT_AFTER_FRAMES` of silence ->
 ///     `Disconnected`.
-///   - `Disconnected` after `FORFEIT_AFTER_FRAMES` of silence ->
+///   - `Disconnected` after `forfeit_after` of silence ->
 ///     `Forfeited` (terminal).
 ///   - `Disconnected` whose elapsed silence dropped below the
 ///     disconnect threshold -> `Connected` (reconnect happened).
@@ -957,6 +1166,7 @@ pub fn next_lobby_state_for_silence(
     curr: &LobbyState,
     frame: u32,
     last_msg: u32,
+    forfeit_after: u32,
 ) -> Option<LobbyState> {
     let elapsed = frame.saturating_sub(last_msg);
     match curr {
@@ -966,7 +1176,7 @@ pub fn next_lobby_state_for_silence(
                 since_frame: last_msg,
             })
         }
-        LobbyState::Disconnected { peer_id, .. } if elapsed >= FORFEIT_AFTER_FRAMES => {
+        LobbyState::Disconnected { peer_id, .. } if elapsed >= forfeit_after => {
             Some(LobbyState::Forfeited {
                 peer_id: *peer_id,
                 conceded: false,
@@ -980,18 +1190,17 @@ pub fn next_lobby_state_for_silence(
 }
 
 /// `Update`-schedule system: drives the disconnection-grace timer.
-/// Reads `FrameCount` (post-tick value, since Update runs after
-/// `GgrsSchedule`) + `LastPeerMessageFrame`. Writes the next
-/// `LobbyState` if a threshold was crossed, and pulses
-/// `sim::MatchState::MatchOver` on a `Forfeited` transition so the
-/// in-sim round flow ends.
+/// Reads [`SilenceClock`] + `LastPeerMessageFrame`. Writes the next
+/// `LobbyState` if a threshold was crossed. The sim's state is not
+/// touched: ending the match is `netplay::conclude_session`'s.
 pub fn tick_disconnection_grace(
-    frame: Res<sim::FrameCount>,
+    frame: Res<SilenceClock>,
     last_msg: Res<LastPeerMessageFrame>,
+    paused: Res<PeerPaused>,
     mut lobby: ResMut<LobbyState>,
-    mut match_state: ResMut<sim::MatchState>,
 ) {
-    if let Some(next) = next_lobby_state_for_silence(&lobby, frame.0, last_msg.0) {
+    let forfeit_after = forfeit_after(paused.0);
+    if let Some(next) = next_lobby_state_for_silence(&lobby, frame.0, last_msg.0, forfeit_after) {
         let became_forfeit = matches!(next, LobbyState::Forfeited { .. });
         tracing::warn!(
             target: "two_top::net::peer",
@@ -1003,12 +1212,13 @@ pub fn tick_disconnection_grace(
         );
         *lobby = next;
         if became_forfeit {
+            // The app's `conclude_session` ends the match: it books it as
+            // it stood on the last confirmed frame.
             tracing::error!(
                 target: "two_top::net::peer",
                 frame = frame.0,
                 "peer silence exceeded forfeit threshold — match forfeited",
             );
-            *match_state = sim::MatchState::MatchOver;
         }
     }
 }
@@ -1036,6 +1246,8 @@ impl Plugin for NetPlugin {
             .init_resource::<LobbyState>()
             .init_resource::<PendingP2PSwap>()
             .init_resource::<LastPeerMessageFrame>()
+            .init_resource::<SilenceClock>()
+            .init_resource::<PeerPaused>()
             .init_resource::<PeerProfile>()
             .init_resource::<PeerKeys>()
             .init_resource::<PeerSig>()
@@ -1043,7 +1255,10 @@ impl Plugin for NetPlugin {
             .init_resource::<NetSendQueue>()
             .add_systems(
                 Update,
-                (detect_peer_connection_edge, tick_disconnection_grace),
+                (
+                    detect_peer_connection_edge,
+                    (advance_silence_clock, tick_disconnection_grace).chain(),
+                ),
             );
     }
 }
@@ -1051,6 +1266,61 @@ impl Plugin for NetPlugin {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(debug_assertions)]
+    #[test]
+    fn a_checksum_report_is_known_by_its_wire_tag() {
+        // A one-byte magic, then the variant.
+        assert!(is_checksum_report(&[42, 6, 0, 0]));
+        assert!(!is_checksum_report(&[42, 2, 0, 0]), "an Input");
+        // A large magic: varint marker 251 and two bytes, then the variant.
+        assert!(is_checksum_report(&[251, 0x34, 0x12, 6, 9]));
+        assert!(!is_checksum_report(&[251, 0x34, 0x12, 7]), "a KeepAlive");
+        assert!(!is_checksum_report(&[]));
+    }
+
+    #[test]
+    fn the_delay_follows_the_round_trip() {
+        use delay::*;
+        assert_eq!(delay_for_rtt(1), MIN, "the same Wi-Fi");
+        assert_eq!(delay_for_rtt(40), 2);
+        assert_eq!(delay_for_rtt(60), 3);
+        assert_eq!(delay_for_rtt(100), 4);
+        assert_eq!(delay_for_rtt(400), MAX, "never past the cap");
+        assert_eq!(median_rtt(&[90, 20, 40]), Some(40));
+        assert_eq!(median_rtt(&[]), None);
+        assert_eq!(agreed(2, 4), 4);
+        assert_eq!(agreed(3, 200), MAX, "a hostile proposal is clamped");
+    }
+
+    /// The side channel's wire bytes are pinned: changing a variant's
+    /// postcard index means bumping `NET_PROTOCOL` (which splits rooms)
+    /// and updating this table in the same commit.
+    #[test]
+    fn the_side_channel_keeps_its_wire_indices() {
+        assert_eq!(
+            NET_PROTOCOL, 2,
+            "re-pin the indices below for the new protocol"
+        );
+        assert_eq!(&*encode_net_msg(&NetMsg::Bye), &[2u8][..]);
+        assert_eq!(&*encode_net_msg(&NetMsg::Pausing), &[5u8][..]);
+        assert_eq!(
+            &*encode_net_msg(&NetMsg::Ended {
+                reason: EndReason::Closed
+            }),
+            &[6u8, 1][..]
+        );
+        assert_eq!(&*encode_net_msg(&NetMsg::Ping { id: 2 }), &[7u8, 2][..]);
+        assert_eq!(&*encode_net_msg(&NetMsg::Pong { id: 2 }), &[8u8, 2][..]);
+        assert_eq!(
+            &*encode_net_msg(&NetMsg::Delay { frames: 3 }),
+            &[9u8, 3][..]
+        );
+        for reason in [EndReason::Closed, EndReason::Desynced { frame: 4321 }] {
+            let msg = NetMsg::Ended { reason };
+            assert_eq!(decode_net_msg(&encode_net_msg(&msg)), Some(msg));
+        }
+    }
 
     /// Compile-time check: `MatchboxBridge` must impl
     /// `NonBlockingSocket<sim::NetAddr>` so it can be plugged into a
@@ -1066,6 +1336,45 @@ mod tests {
     fn matchbox_bridge_impls_non_blocking_socket() {
         fn assert_impl<T: NonBlockingSocket<NetAddr>>() {}
         assert_impl::<MatchboxBridge>();
+    }
+
+    /// The link-lost crash: once the socket's future is gone (the room
+    /// server restarted, the phone changed networks), matchbox's `send`
+    /// panics. The bridge must keep accepting sends as lost packets, and
+    /// the closure must be visible to the app through `any_channel_closed`
+    /// on what remains of the socket.
+    // Not on Android: it builds a real matchbox socket, which links
+    // webrtc's interface enumeration (`getifaddrs`, API 24+), and the
+    // determinism lane links Android test binaries against API 21. The
+    // app itself ships at a level that has it; the bridge logic is the same
+    // on every target and runs here on the others.
+    // platform-gate-ok: a native test; the browser never runs net's tests.
+    #[cfg(not(target_os = "android"))]
+    #[test]
+    fn a_bridge_over_a_dead_socket_drops_packets_instead_of_panicking() {
+        let (mut socket, message_loop) =
+            matchbox_socket::WebRtcSocketBuilder::new("ws://127.0.0.1:1/room")
+                .add_channel(ChannelConfig::unreliable())
+                .add_channel(ChannelConfig::reliable())
+                .build();
+        let mut channel = socket.take_channel(0).expect("channel 0");
+        assert!(!socket.any_channel_closed(), "a fresh socket is open");
+        // The socket's future ending is what drops its receivers.
+        drop(message_loop);
+        assert!(
+            socket.any_channel_closed(),
+            "the side channel reports the loss"
+        );
+        // A ggrs `Message` cannot be built outside ggrs, so the bridge's
+        // send path is exercised through the call it now makes: `try_send`
+        // answers Err where matchbox's `send` panicked with "Send failed".
+        assert!(
+            channel
+                .try_send(vec![1u8, 2, 3].into_boxed_slice(), addr_to_peer(NetAddr(7)))
+                .is_err()
+        );
+        let mut bridge = MatchboxBridge::new(channel);
+        assert!(bridge.receive_all_messages().is_empty());
     }
 
     /// The `PeerId` ↔ `NetAddr` bijection must round-trip losslessly
@@ -1104,9 +1413,10 @@ mod tests {
     #[test]
     fn net_msgs_round_trip_through_postcard() {
         let msgs = [
-            NetMsg::Profile(ProfileData {
+            NetMsg::Profile(KeyedProfile {
                 install_id: 0xdead_beef_cafe_f00d_1122_3344_5566_7788,
                 name: crate::name_slots(&[2, 6, 0, 4]),
+                pubkey: [7; 32],
             }),
             NetMsg::RematchWant,
             NetMsg::Bye,
@@ -1231,10 +1541,10 @@ mod tests {
     }
 
     #[test]
-    fn profile2_and_matchsig_ride_the_side_channel() {
+    fn keyed_profile_and_matchsig_ride_the_side_channel() {
         let key = [10u8; 32];
         let msgs = [
-            NetMsg::Profile2(ProfileData2 {
+            NetMsg::Profile(KeyedProfile {
                 install_id: 0xfeed,
                 name: crate::name_slots(&[2, 6, 0, 4]),
                 pubkey: pubkey_for(&key),
@@ -1312,6 +1622,7 @@ mod tests {
             .is_in_match()
         );
         assert!(!LobbyState::SummonFailed.is_in_match());
+        assert!(!LobbyState::PeerUnreachable.is_in_match());
     }
 
     #[test]
@@ -1335,6 +1646,7 @@ mod tests {
             LobbyState::Idle,
             LobbyState::Connecting,
             LobbyState::SummonFailed,
+            LobbyState::PeerUnreachable,
             LobbyState::WaitingForPeer { our_id: peer },
             LobbyState::Connected { peer_id: peer },
             LobbyState::Disconnected {
@@ -1448,7 +1760,12 @@ mod tests {
         let peer = dummy_peer();
         // Frame 50, last msg at 49 — only 1 frame of silence.
         assert_eq!(
-            next_lobby_state_for_silence(&LobbyState::Connected { peer_id: peer }, 50, 49),
+            next_lobby_state_for_silence(
+                &LobbyState::Connected { peer_id: peer },
+                50,
+                49,
+                FORFEIT_AFTER_FRAMES
+            ),
             None,
         );
     }
@@ -1459,11 +1776,41 @@ mod tests {
         let last_msg = 100;
         let now = last_msg + DISCONNECT_AFTER_FRAMES;
         assert_eq!(
-            next_lobby_state_for_silence(&LobbyState::Connected { peer_id: peer }, now, last_msg),
+            next_lobby_state_for_silence(
+                &LobbyState::Connected { peer_id: peer },
+                now,
+                last_msg,
+                FORFEIT_AFTER_FRAMES
+            ),
             Some(LobbyState::Disconnected {
                 peer_id: peer,
                 since_frame: last_msg,
             }),
+        );
+    }
+
+    /// The AWAY overlay could never show: the grace timer aged on the sim's
+    /// frame clock, which a P2P session stops advancing once the peer's
+    /// inputs stop arriving. On the silence clock, a peer silent for a
+    /// second of real time reads as away, whatever the frame count does.
+    #[test]
+    fn silence_ages_while_the_sim_frame_stands_still() {
+        let mut app = App::new();
+        app.add_plugins(NetPlugin);
+        let peer = dummy_peer();
+        *app.world_mut().resource_mut::<LobbyState>() = LobbyState::Connected { peer_id: peer };
+        // The sim froze a few frames past the last message (its prediction
+        // window), so a frame clock reads no silence; real time moves on.
+        app.world_mut().resource_mut::<sim::FrameCount>().0 = 10;
+        app.world_mut().resource_mut::<LastPeerMessageFrame>().0 = 0;
+        app.world_mut().resource_mut::<SilenceClock>().0 = DISCONNECT_AFTER_FRAMES + 1;
+        app.update();
+        assert!(
+            matches!(
+                *app.world().resource::<LobbyState>(),
+                LobbyState::Disconnected { .. }
+            ),
+            "a second of real silence is away"
         );
     }
 
@@ -1479,13 +1826,50 @@ mod tests {
                     since_frame: last_msg
                 },
                 now,
-                last_msg
+                last_msg,
+                FORFEIT_AFTER_FRAMES,
             ),
             Some(LobbyState::Forfeited {
                 peer_id: peer,
                 conceded: false,
             }),
         );
+    }
+
+    /// A peer that said it was going away is not forfeited at the quiet
+    /// threshold; it is at the paused one.
+    #[test]
+    fn a_paused_peer_gets_the_longer_grace() {
+        let peer = dummy_peer();
+        let away = LobbyState::Disconnected {
+            peer_id: peer,
+            since_frame: 0,
+        };
+        let quiet = forfeit_after(false);
+        let paused = forfeit_after(true);
+        assert!(paused > quiet);
+        assert_eq!(next_lobby_state_for_silence(&away, quiet, 0, paused), None);
+        assert_eq!(
+            next_lobby_state_for_silence(&away, paused, 0, paused),
+            Some(LobbyState::Forfeited {
+                peer_id: peer,
+                conceded: false,
+            }),
+        );
+
+        let mut app = App::new();
+        app.add_plugins(NetPlugin);
+        *app.world_mut().resource_mut::<LobbyState>() = away.clone();
+        app.world_mut().resource_mut::<PeerPaused>().0 = true;
+        app.world_mut().resource_mut::<SilenceClock>().0 = FORFEIT_AFTER_FRAMES + 10;
+        app.update();
+        assert_eq!(*app.world().resource::<LobbyState>(), away, "still waiting");
+        app.world_mut().resource_mut::<SilenceClock>().0 = PAUSED_FORFEIT_AFTER_FRAMES;
+        app.update();
+        assert!(matches!(
+            *app.world().resource::<LobbyState>(),
+            LobbyState::Forfeited { .. }
+        ));
     }
 
     #[test]
@@ -1501,7 +1885,8 @@ mod tests {
                     since_frame: 800
                 },
                 now,
-                last_msg
+                last_msg,
+                FORFEIT_AFTER_FRAMES,
             ),
             Some(LobbyState::Connected { peer_id: peer }),
         );
@@ -1518,14 +1903,18 @@ mod tests {
                     conceded: false,
                 },
                 10_000,
-                0
+                0,
+                FORFEIT_AFTER_FRAMES,
             ),
             None,
         );
     }
 
+    /// The silence FSM ends the lobby; the sim's state is the app's to
+    /// book (`netplay::conclude_session`, on the last confirmed frame), so
+    /// net no longer writes it.
     #[test]
-    fn forfeit_transition_triggers_match_over_in_sim() {
+    fn a_silent_forfeit_ends_the_lobby_and_leaves_the_sim_alone() {
         let mut app = App::new();
         app.add_plugins(NetPlugin);
         let peer = dummy_peer();
@@ -1535,23 +1924,20 @@ mod tests {
             peer_id: peer,
             since_frame: 0,
         };
-        app.world_mut().resource_mut::<sim::FrameCount>().0 = FORFEIT_AFTER_FRAMES + 10;
+        let before = *app.world().resource::<sim::MatchState>();
+        app.world_mut().resource_mut::<SilenceClock>().0 = FORFEIT_AFTER_FRAMES + 10;
         app.world_mut().resource_mut::<LastPeerMessageFrame>().0 = 0;
 
         app.update();
 
-        assert!(
-            matches!(
-                *app.world().resource::<LobbyState>(),
-                LobbyState::Forfeited { .. }
-            ),
-            "lobby should have forfeited",
-        );
         assert_eq!(
-            *app.world().resource::<sim::MatchState>(),
-            sim::MatchState::MatchOver,
-            "sim::MatchState should be MatchOver after forfeit",
+            *app.world().resource::<LobbyState>(),
+            LobbyState::Forfeited {
+                peer_id: peer,
+                conceded: false
+            },
         );
+        assert_eq!(*app.world().resource::<sim::MatchState>(), before);
     }
 
     /// End-to-end: drive the system through a state transition and
@@ -1628,6 +2014,60 @@ mod input_stream_tests {
                 bytes: bitfield_rle::encode(delta),
             }),
         }
+    }
+
+    /// A real `P2PSession` fed one honest Input and then one whose start
+    /// frame skips past what it has received. ggrs 0.12 `assert!`ed on
+    /// that (`protocol.rs`, `on_input`) — one packet from a stranger in the
+    /// public room took the whole app down. The vendored ggrs drops it.
+    #[test]
+    fn an_input_that_skips_ahead_is_dropped_not_fatal() {
+        use ggrs::{NonBlockingSocket, PlayerType, SessionBuilder};
+        struct Inject(Vec<(sim::NetAddr, Message)>);
+        impl NonBlockingSocket<sim::NetAddr> for Inject {
+            fn send_to(&mut self, _: &Message, _: &sim::NetAddr) {}
+            fn receive_all_messages(&mut self) -> Vec<(sim::NetAddr, Message)> {
+                std::mem::take(&mut self.0)
+            }
+        }
+        let peer = PeerId(Uuid::from_u128(1));
+        let honest = input_message(&[vec![0; 4]]);
+        let mut skips_ahead = input_message(&[vec![0; 4]]);
+        if let WireBody::Input(input) = &mut skips_ahead.body {
+            input.start_frame = 100;
+        }
+        let inbound = [honest, skips_ahead]
+            .iter()
+            .map(|m| decode_packet((peer, packet(m))).expect("well-formed, so the guard passes it"))
+            .collect();
+        let mut session = SessionBuilder::<sim::GgrsCfg>::new()
+            .with_num_players(2)
+            .unwrap()
+            .add_player(PlayerType::Local, 0)
+            .unwrap()
+            .add_player(PlayerType::Remote(peer_to_addr(peer)), 1)
+            .unwrap()
+            .start_p2p_session(Inject(inbound))
+            .unwrap();
+        session.poll_remote_clients();
+    }
+
+    /// ggrs indexes the remote's connection-status list once per player,
+    /// unchecked: a short one was an index panic, so the guard refuses it.
+    #[test]
+    fn a_short_connection_status_list_is_refused() {
+        let peer = PeerId(Uuid::from_u128(1));
+        let mut short = input_message(&[vec![0; 4]]);
+        if let WireBody::Input(input) = &mut short.body {
+            input.peer_connect_status.truncate(1);
+        }
+        assert!(decode_packet((peer, packet(&short))).is_none());
+        // Asking to disconnect, ggrs reads no list: nothing to refuse.
+        if let WireBody::Input(input) = &mut short.body {
+            input.disconnect_requested = true;
+        }
+        assert!(decode_packet((peer, packet(&short))).is_some());
+        assert!(decode_packet((peer, packet(&input_message(&[vec![0; 4]])))).is_some());
     }
 
     #[test]

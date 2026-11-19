@@ -27,17 +27,8 @@
 use bevy::prelude::*;
 use bevy_ggrs::{GgrsSchedule, PlayerInputs};
 use replay::{FORMAT_VERSION, MAGIC, Replay, ReplayHeader, encode};
-use sim::{
-    FrameCount, GgrsCfg, MATCH_WIN_THRESHOLD, MatchScore, MatchState, PlayerInput, SelectedArena,
-    TICK_HZ,
-};
+use sim::{FrameCount, GgrsCfg, MatchScore, MatchState, PlayerInput, SelectedArena, TICK_HZ};
 use std::path::PathBuf;
-
-/// Render-frames to wait after `MatchOver` before writing the file. The
-/// tape already holds the deciding kill the moment it lands; the delay
-/// lets the last few PREDICTED online ticks get resim-corrected (rollback
-/// overwrites their tape slots) before the bytes are frozen.
-const SAVE_DELAY_FRAMES: u8 = 30;
 
 /// A tick-0 write against a tape longer than this is a fresh session (new
 /// match from the title / an online re-pair), never a rollback — ggrs can
@@ -50,8 +41,11 @@ const SESSION_RESTART_SLACK: usize = 32;
 #[derive(Resource, Default)]
 pub struct MatchRecorder {
     frames: Vec<replay::FrameInputs>,
-    /// Countdown to the post-`MatchOver` write (None = not pending).
-    save_in: Option<u8>,
+    /// The score after each tick, beside its inputs: the same last-write-
+    /// wins convergence, so the slot of a confirmed tick holds the
+    /// confirmed score (what a session that ends books,
+    /// `netplay::conclude_session`).
+    scores: Vec<MatchScore>,
     /// Latch so one MatchOver writes exactly one file.
     saved: bool,
 }
@@ -60,6 +54,38 @@ impl MatchRecorder {
     fn reset(&mut self) {
         *self = Self::default();
     }
+
+    /// The score after tick `tick` (`-1`, or a tick not recorded: 0-0).
+    pub fn score_after(&self, tick: i32) -> MatchScore {
+        usize::try_from(tick)
+            .ok()
+            .and_then(|t| self.scores.get(t).copied())
+            .unwrap_or_default()
+    }
+}
+
+/// How many ticks of the tape are fact, and so go in the file. A decided
+/// match: through its deciding tick (both phones' tapes then hold the same
+/// ticks, byte for byte). A session that ended otherwise: through the last
+/// confirmed tick. A desync: none. A local match (couch, practice) that
+/// was neither: all of it. Pure.
+pub fn tape_ticks(
+    state: MatchState,
+    ending: Option<crate::netplay::Ending>,
+    desynced: bool,
+    recorded: usize,
+) -> usize {
+    if desynced {
+        return 0;
+    }
+    let ticks = if let Some(decided) = state.decided_at() {
+        decided as usize + 1
+    } else if let Some(ending) = ending {
+        usize::try_from(ending.confirmed + 1).unwrap_or(0)
+    } else {
+        recorded
+    };
+    ticks.min(recorded)
 }
 
 /// Where the replay of the last decided match landed (the summary screen
@@ -74,6 +100,7 @@ pub struct LastSavedReplay(pub Option<PathBuf>);
 pub fn capture_tick_inputs(
     frame: Res<FrameCount>,
     inputs: Res<PlayerInputs<GgrsCfg>>,
+    score: Res<MatchScore>,
     theater: Res<crate::theater::TheaterMode>,
     mut rec: ResMut<MatchRecorder>,
 ) {
@@ -95,9 +122,16 @@ pub fn capture_tick_inputs(
         rec.reset();
     }
     let pair = [inputs[0].0, inputs[1].0];
+    let score = *score;
     match t.cmp(&rec.frames.len()) {
-        std::cmp::Ordering::Less => rec.frames[t] = pair,
-        std::cmp::Ordering::Equal => rec.frames.push(pair),
+        std::cmp::Ordering::Less => {
+            rec.frames[t] = pair;
+            rec.scores[t] = score;
+        }
+        std::cmp::Ordering::Equal => {
+            rec.frames.push(pair);
+            rec.scores.push(score);
+        }
         std::cmp::Ordering::Greater => {
             // Unreachable by construction (the schedule runs every tick from
             // 0) — but a tape must never be silently holey, so pad loudly.
@@ -109,6 +143,9 @@ pub fn capture_tick_inputs(
             );
             rec.frames.resize(t, [PlayerInput::default(); 2]);
             rec.frames.push(pair);
+            let last = rec.scores.last().copied().unwrap_or_default();
+            rec.scores.resize(t, last);
+            rec.scores.push(score);
         }
     }
 }
@@ -144,8 +181,9 @@ fn header_names(
     names
 }
 
-/// On the tick a match is decided, arm a short delay (to let the harvest
-/// catch up past the deciding kill), then write the tape as a `.bmrg`.
+/// Once the match's ending can no longer roll back
+/// (`attest::MatchOverSettled`), write the ticks that are fact
+/// ([`tape_ticks`]) as a `.bmrg`.
 #[allow(clippy::too_many_arguments)]
 fn save_replay_on_match_over(
     state: Res<MatchState>,
@@ -160,32 +198,36 @@ fn save_replay_on_match_over(
     lobby: Res<net::LobbyState>,
     absence: Res<crate::netplay::RecentAbsence>,
     time: Res<Time<Real>>,
+    (settled, ending): (
+        Res<crate::attest::MatchOverSettled>,
+        Res<crate::netplay::SessionEnding>,
+    ),
     mut record: ResMut<crate::grudge::CareerRecord>,
     mut rec: ResMut<MatchRecorder>,
     mut last_saved: ResMut<LastSavedReplay>,
 ) {
-    if !matches!(*state, MatchState::MatchOver) {
+    if !state.is_match_over() {
         // Leaving MatchOver (rematch / lobby): re-arm for the next decision.
-        rec.save_in = None;
         rec.saved = false;
         return;
     }
-    if rec.saved || rec.frames.is_empty() {
+    if rec.saved || !settled.settled {
         return;
     }
-    if matches!(*lobby, net::LobbyState::Desynced { .. }) {
-        // Two phones that stopped agreeing recorded two different matches;
-        // a tape that re-simulates to one of them is not a record of
-        // anything both players saw. No tape, no share, no rival ring.
+    let desynced = matches!(*lobby, net::LobbyState::Desynced { .. });
+    let ticks = tape_ticks(*state, ending.0, desynced, rec.frames.len());
+    if ticks == 0 {
+        // A desync (two phones that stopped agreeing recorded two
+        // different matches: a tape of one is a record of nothing both
+        // players saw), or a session that ended before a single tick was
+        // confirmed. No tape, no share, no rival ring.
         rec.saved = true;
-        tracing::warn!(target: "two_top::recorder", "match desynced — no tape written");
+        tracing::warn!(target: "two_top::recorder", desynced, "nothing confirmed to keep — no tape written");
         return;
     }
-    match rec.save_in {
-        None => rec.save_in = Some(SAVE_DELAY_FRAMES),
-        Some(0) => {
+    {
+        {
             rec.saved = true;
-            rec.save_in = None;
             // Threshold first; on a forfeit (nobody reached it) the tape
             // is the SURVIVOR's recording, so the walkover goes to
             // whichever seat stayed — the same honesty the grudge ledger
@@ -194,10 +236,8 @@ fn save_replay_on_match_over(
             // the automated Rung 2 smoke's tape filename).
             // A silent drop crowns nobody (`winner: None`) — the same
             // verdict the ledger reaches in `grudge::match_outcome`.
-            let winner: Option<u8> = if score.p0 >= MATCH_WIN_THRESHOLD {
-                Some(0)
-            } else if score.p1 >= MATCH_WIN_THRESHOLD {
-                Some(1)
+            let winner: Option<u8> = if let Some(seat) = score.winner() {
+                Some(seat)
             } else {
                 let forfeit = crate::grudge::forfeit_kind(&lobby);
                 let local_handle = local.0.unwrap_or(0);
@@ -228,7 +268,7 @@ fn save_replay_on_match_over(
                     seed: 0,
                     num_players: 2,
                     frame_rate: TICK_HZ as u8,
-                    frame_count: rec.frames.len() as u32,
+                    frame_count: ticks as u32,
                     recorded_at,
                     winner,
                     player_handles: header_names(
@@ -241,7 +281,7 @@ fn save_replay_on_match_over(
                     ),
                     arena_id: selected.0.as_u8(),
                 },
-                inputs: rec.frames.clone(),
+                inputs: rec.frames[..ticks].to_vec(),
             };
             last_saved.0 = write_replay(&replay, recorded_at, winner);
             // A live duel's tape lands on the rival's ring too, so the
@@ -253,7 +293,6 @@ fn save_replay_on_match_over(
                 crate::grudge::note_rival_tape(&mut record, peer, name.to_string());
             }
         }
-        Some(ref mut n) => *n -= 1,
     }
 }
 
@@ -322,7 +361,10 @@ impl Plugin for MatchRecorderPlugin {
                 GgrsSchedule,
                 capture_tick_inputs.after(sim::advance_input_history),
             )
-            .add_systems(Update, save_replay_on_match_over);
+            .add_systems(
+                Update,
+                save_replay_on_match_over.after(crate::attest::settle_match_over),
+            );
     }
 }
 
@@ -343,12 +385,62 @@ mod tests {
     fn recorder_reset_clears_everything() {
         let mut rec = MatchRecorder {
             frames: vec![[PlayerInput::default(); 2]],
-            save_in: Some(3),
+            scores: vec![MatchScore { p0: 1, p1: 0 }],
             saved: true,
         };
         rec.reset();
-        assert!(rec.frames.is_empty());
-        assert!(!rec.saved && rec.save_in.is_none());
+        assert!(rec.frames.is_empty() && rec.scores.is_empty());
+        assert!(!rec.saved);
+    }
+
+    #[test]
+    fn the_score_trail_answers_for_confirmed_ticks_only() {
+        let rec = MatchRecorder {
+            frames: vec![[PlayerInput::default(); 2]; 3],
+            scores: vec![
+                MatchScore::default(),
+                MatchScore { p0: 1, p1: 0 },
+                MatchScore { p0: 2, p1: 0 },
+            ],
+            saved: false,
+        };
+        assert_eq!(
+            rec.score_after(-1),
+            MatchScore::default(),
+            "nothing confirmed"
+        );
+        assert_eq!(rec.score_after(1), MatchScore { p0: 1, p1: 0 });
+        assert_eq!(rec.score_after(9), MatchScore::default(), "never recorded");
+    }
+
+    /// The tape holds what is fact: through the deciding tick, through the
+    /// last confirmed tick of a session that ended, nothing of a desync.
+    #[test]
+    fn a_tape_keeps_only_the_ticks_that_are_fact() {
+        use crate::netplay::Ending;
+        let ended = |confirmed| {
+            Some(Ending {
+                confirmed,
+                score: MatchScore::default(),
+            })
+        };
+        // Decided on tick 200, recorded 216 (16 predicted past it).
+        assert_eq!(tape_ticks(MatchState::decided(200), None, false, 216), 201);
+        // The session ended later; the decision still stands.
+        assert_eq!(
+            tape_ticks(MatchState::decided(200), ended(210), false, 216),
+            201
+        );
+        // Ended undecided: through the confirmed tick.
+        assert_eq!(
+            tape_ticks(MatchState::abandoned(), ended(150), false, 166),
+            151
+        );
+        assert_eq!(tape_ticks(MatchState::abandoned(), ended(-1), false, 10), 0);
+        // A desync keeps nothing.
+        assert_eq!(tape_ticks(MatchState::decided(200), None, true, 216), 0);
+        // Local, never ended out of band: everything recorded.
+        assert_eq!(tape_ticks(MatchState::abandoned(), None, false, 99), 99);
     }
 
     /// Drive a real SyncTest session (rollback ACTIVE — check_distance 2

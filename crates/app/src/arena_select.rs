@@ -19,45 +19,7 @@ use crate::screen::AppScreen;
 const LIST_TOP: f32 = 0.14;
 const LIST_PITCH: f32 = 0.085;
 /// The BACK band at the bottom — same gesture as every menu.
-const BACK_BAND: (f32, f32) = (0.86, 0.96);
-
-pub fn arena_title(id: ArenaId) -> &'static str {
-    match id {
-        ArenaId::Anchor => "ANCHOR",
-        ArenaId::Crossing => "CROSSING",
-        ArenaId::Reliquary => "RELIQUARY",
-        ArenaId::Pit => "THE PIT",
-        ArenaId::Vigil => "THE VIGIL",
-        ArenaId::Gallery => "THE GALLERY",
-        ArenaId::Forest => "THE FOREST",
-    }
-}
-
-/// One line of the rules that make the arena itself — the roster is where
-/// a player learns the roster's verbs, so the tags say mechanics, not mood.
-pub fn arena_rule(id: ArenaId) -> &'static str {
-    match id {
-        ArenaId::Anchor => "four crates - one pyre",
-        ArenaId::Crossing => "a moat between you - ring a sigil to bridge it",
-        ArenaId::Reliquary => "doors teleport - pyres chain",
-        ArenaId::Pit => "walls ricochet - nothing falls",
-        ArenaId::Vigil => "no storm - open ground",
-        ArenaId::Gallery => "corridors of angles",
-        ArenaId::Forest => "the grove burns",
-    }
-}
-
-fn floor_asset(id: ArenaId) -> &'static str {
-    match id {
-        ArenaId::Anchor => "arenas/anchor_floor.png",
-        ArenaId::Crossing => "arenas/crossing_floor.png",
-        ArenaId::Reliquary => "arenas/reliquary_floor.png",
-        ArenaId::Pit => "arenas/pit_floor.png",
-        ArenaId::Vigil => "arenas/vigil_floor.png",
-        ArenaId::Gallery => "arenas/gallery_floor.png",
-        ArenaId::Forest => "arenas/forest_floor.png",
-    }
-}
+const BACK_BAND: crate::ui::Band = crate::ui::BACK;
 
 /// Everything this screen spawns, for one-query teardown.
 #[derive(Component)]
@@ -69,21 +31,24 @@ struct RosterRowName(ArenaId);
 
 fn row_anchor_y(i: usize) -> f32 {
     let fy = LIST_TOP + (i as f32 + 0.5) * LIST_PITCH;
-    1.0 - 2.0 * fy
+    crate::ui::anchor_y(fy)
 }
 
 fn enter_roster(mut commands: Commands, asset_server: Res<AssetServer>) {
     commands.spawn((
         RosterUi,
         Text2d::new("THE TABLES"),
-        TextFont {
-            font_size: 72.0,
-            ..default()
-        },
+        (
+            TextFont {
+                font_size: crate::ui::TextRole::PageTitle.default_size(),
+                ..default()
+            },
+            crate::ui::TextRole::PageTitle,
+        ),
         TextColor(render::palette::HOT_BONE),
         TextLayout::new_with_justify(Justify::Center),
-        ScreenAnchor::new(0.0, 1.0 - 2.0 * 0.07, 0.0, 0.0),
-        Transform::from_xyz(0.0, 0.0, 210.0),
+        ScreenAnchor::new(0.0, crate::ui::anchor_y(0.07), 0.0, 0.0),
+        Transform::from_xyz(0.0, 0.0, crate::ui::z::MENU_TEXT),
     ));
     for (i, &arena) in ALL_ARENAS.iter().enumerate() {
         let ay = row_anchor_y(i);
@@ -92,41 +57,47 @@ fn enter_roster(mut commands: Commands, asset_server: Res<AssetServer>) {
         commands.spawn((
             RosterUi,
             Sprite {
-                image: asset_server.load(floor_asset(arena)),
+                image: asset_server.load(render::arena::info(arena).floor),
                 custom_size: Some(Vec2::new(58.0, 87.0)),
                 ..default()
             },
             ScreenAnchor::new(-0.66, ay, 0.0, 0.0),
-            Transform::from_xyz(0.0, 0.0, 210.0),
+            Transform::from_xyz(0.0, 0.0, crate::ui::z::MENU_TEXT),
         ));
         commands.spawn((
             RosterUi,
             RosterRowName(arena),
-            Text2d::new(arena_title(arena)),
-            TextFont {
-                font_size: 44.0,
-                ..default()
-            },
+            Text2d::new(render::arena::info(arena).title),
+            (
+                TextFont {
+                    font_size: crate::ui::TextRole::RosterName.default_size(),
+                    ..default()
+                },
+                crate::ui::TextRole::RosterName,
+            ),
             TextColor(render::palette::BONE),
             TextLayout::new_with_justify(Justify::Center),
             ScreenAnchor::new(0.10, ay + 0.030, 0.0, 0.0),
-            Transform::from_xyz(0.0, 0.0, 210.0),
+            Transform::from_xyz(0.0, 0.0, crate::ui::z::MENU_TEXT),
         ));
         commands.spawn((
             RosterUi,
-            Text2d::new(arena_rule(arena)),
-            TextFont {
-                font_size: 26.0,
-                ..default()
-            },
+            Text2d::new(render::arena::info(arena).rule),
+            (
+                TextFont {
+                    font_size: crate::ui::TextRole::RosterRule.default_size(),
+                    ..default()
+                },
+                crate::ui::TextRole::RosterRule,
+            ),
             TextColor(render::palette::BONE.with_alpha(0.6)),
             TextLayout::new_with_justify(Justify::Center),
             ScreenAnchor::new(0.10, ay - 0.032, 0.0, 0.0),
-            Transform::from_xyz(0.0, 0.0, 210.0),
+            Transform::from_xyz(0.0, 0.0, crate::ui::z::MENU_TEXT),
         ));
     }
     // BACK, in the shared bordered-box language.
-    let back_y = 1.0 - (BACK_BAND.0 + BACK_BAND.1);
+    let back_y = crate::ui::band_anchor_y(BACK_BAND);
     for (role, size, z) in [
         (0, Vec2::new(362.0, 98.0), 209.0),
         (1, Vec2::new(340.0, 76.0), 209.5),
@@ -149,14 +120,17 @@ fn enter_roster(mut commands: Commands, asset_server: Res<AssetServer>) {
     commands.spawn((
         RosterUi,
         Text2d::new("BACK"),
-        TextFont {
-            font_size: 40.0,
-            ..default()
-        },
+        (
+            TextFont {
+                font_size: crate::ui::TextRole::Back.default_size(),
+                ..default()
+            },
+            crate::ui::TextRole::Back,
+        ),
         TextColor(render::palette::HOT_BONE),
         TextLayout::new_with_justify(Justify::Center),
         ScreenAnchor::new(0.0, back_y, 0.0, 0.0),
-        Transform::from_xyz(0.0, 0.0, 210.0),
+        Transform::from_xyz(0.0, 0.0, crate::ui::z::MENU_TEXT),
     ));
 }
 
@@ -212,7 +186,7 @@ fn roster_input(
     if win.y > 0.0 {
         for t in touches.iter_just_pressed() {
             let fy = t.position().y / win.y;
-            if in_band(fy, BACK_BAND) {
+            if crate::ui::in_band(fy, BACK_BAND) {
                 next.set(AppScreen::Title);
                 return;
             }
@@ -236,25 +210,23 @@ fn roster_input(
     }
 }
 
-fn in_band(y_down: f32, band: (f32, f32)) -> bool {
-    y_down >= band.0 && y_down < band.1
-}
-
 /// Startup: restore the persisted pick (TWOTOP_ARENA overrides for capture
 /// verification — a name or a wire id).
 fn restore_arena_pick(
     settings: Res<crate::settings::Settings>,
     mut selected: ResMut<SelectedArena>,
 ) {
-    let from_env = std::env::var("TWOTOP_ARENA").ok().and_then(|v| {
+    let from_env = crate::config::Knob::Arena.value().and_then(|v| {
         let v = v.trim().to_ascii_lowercase();
         if let Ok(n) = v.parse::<u8>() {
             return Some(ArenaId::from_u8(n));
         }
-        ALL_ARENAS
-            .iter()
-            .copied()
-            .find(|a| arena_title(*a).to_ascii_lowercase().contains(&v))
+        ALL_ARENAS.iter().copied().find(|a| {
+            render::arena::info(*a)
+                .title
+                .to_ascii_lowercase()
+                .contains(&v)
+        })
     });
     selected.0 = from_env.unwrap_or_else(|| ArenaId::from_u8(settings.arena));
 }
@@ -276,24 +248,6 @@ impl Plugin for ArenaSelectPlugin {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn every_arena_has_a_row_worth_of_copy() {
-        for &a in sim::ALL_ARENAS.iter() {
-            assert!(!arena_title(a).is_empty());
-            assert!(
-                arena_rule(a).len() < 48,
-                "rule tag for {:?} must fit one phone row",
-                a
-            );
-            assert!(
-                arena_rule(a)
-                    .chars()
-                    .all(|c| c.is_ascii() && c != '\u{2014}'),
-                "ASCII only — the bundled font renders tofu otherwise"
-            );
-        }
-    }
 
     #[test]
     fn rows_map_taps_back_to_arenas() {

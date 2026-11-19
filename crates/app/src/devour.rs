@@ -12,7 +12,7 @@
 
 use bevy::prelude::*;
 use render::{EffectAssets, LastKillPos, ScreenShake};
-use sim::{MATCH_WIN_THRESHOLD, MatchScore, MatchState, Player};
+use sim::{MatchScore, MatchState, Player};
 
 /// Seconds the fang holds at the kill spot before flying (lets the kill-cam
 /// finish its punch-in so the whole ceremony is on-camera).
@@ -21,8 +21,6 @@ const DEVOUR_HOLD: f32 = 0.7;
 const DEVOUR_FLIGHT: f32 = 0.9;
 /// Spin during flight (rad/sec) — the fang tumbles home one last time.
 const DEVOUR_SPIN: f32 = 9.0;
-/// Shake kick when the jaws close.
-const TRAUMA_DEVOUR: f32 = 0.45;
 
 /// The ceremonial fang. `t` runs from `-DEVOUR_HOLD` (waiting) through
 /// `0..DEVOUR_FLIGHT` (flying); the bite fires at the end.
@@ -51,20 +49,19 @@ fn devouring_ceremony(
     asset_server: Res<AssetServer>,
     assets: Option<Res<EffectAssets>>,
     mut shake: ResMut<ScreenShake>,
+    tuning: Res<render::tuning::Tuning>,
     players: Query<(&Player, &Transform), Without<DevourFang>>,
     mut fang: Query<(Entity, &mut DevourFang, &mut Transform, &mut Sprite), Without<Player>>,
     mut prev_over: Local<bool>,
 ) {
-    let over = matches!(*state, MatchState::MatchOver);
+    let over = state.is_match_over();
     let entered = over && !*prev_over;
     *prev_over = over;
 
     if entered && fang.is_empty() {
-        let winner = if score.p0 >= MATCH_WIN_THRESHOLD {
-            0
-        } else {
-            1
-        };
+        // MatchOver is only ever the sim's score decision, so a winner
+        // exists; a forfeit never reaches this ceremony.
+        let winner = score.winner().unwrap_or(0) as usize;
         commands.spawn((
             DevourFang {
                 t: -DEVOUR_HOLD,
@@ -120,7 +117,7 @@ fn devouring_ceremony(
                     60.0,
                 );
             }
-            shake.add_trauma(TRAUMA_DEVOUR);
+            shake.add_trauma(tuning.shake.devour);
             commands.entity(entity).despawn();
         }
     }

@@ -38,8 +38,13 @@ use render::{EffectsPlugin, PLAYER_RENDER_SIZE, RenderSyncPlugin, player_atlas_l
 use replay::{ReplayPlayback, ReplayPlaybackPlugin, decode_for_sim_version};
 use sim::{
     AnimState, BOOMERANG_HALF_EXTENT_CM, Boomerang, GgrsCfg, PLAYER_HALF_EXTENT_CM, Player,
-    PositionF, PreviousPositionF, SelectedArena, SimPlugin, SimSnapshot, VelocityF, arena_walls,
+    PositionF, PreviousPositionF, SelectedArena, SimPlugin, SimSnapshot, VelocityF,
 };
+
+/// Whether the tape is a determinism-probe tape (seats at the origin,
+/// rounds that never end) rather than a recorded match (`--live`).
+#[derive(Resource)]
+struct ProbeLayout(bool);
 
 /// Snapshot interval in sim ticks. Per BUILD_PLAN § Phase 14 Produces:
 /// "Snapshots taken every 60 frames" (1 second at 60 Hz). Bigger
@@ -74,10 +79,14 @@ const PALETTE_HOT_BONE: Color = render::palette::HOT_BONE;
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().collect();
-    let path = match args.get(1) {
+    // `--live`: a tape the game recorded, under the rules it was played by.
+    // Without it, the determinism probe's setup (the canonical demo and the
+    // fuzz tapes), exactly as `replay_sync` re-simulates it.
+    let live = args.iter().any(|a| a == "--live");
+    let path = match args.iter().skip(1).find(|a| !a.starts_with("--")) {
         Some(p) => PathBuf::from(p),
         None => {
-            eprintln!("usage: replay_viewer <path.bmrg>");
+            eprintln!("usage: replay_viewer [--live] <path.bmrg>");
             return ExitCode::from(2);
         }
     };
@@ -138,17 +147,21 @@ fn main() -> ExitCode {
     }
     let session = sb.start_synctest_session().expect("synctest");
 
-    App::new()
-        .add_plugins(DefaultPlugins.set(WindowPlugin {
-            primary_window: Some(Window {
-                title: format!("2-Top — replay viewer ({})", path.display()),
-                resolution: (960u32, 720u32).into(),
-                ..default()
-            }),
+    let mut app = App::new();
+    app.add_plugins(DefaultPlugins.set(WindowPlugin {
+        primary_window: Some(Window {
+            title: format!("2-Top — replay viewer ({})", path.display()),
+            resolution: (960u32, 720u32).into(),
             ..default()
-        }))
-        .add_plugins(GgrsPlugin::<GgrsCfg>::default())
-        .add_plugins(SimPlugin)
+        }),
+        ..default()
+    }))
+    .add_plugins(GgrsPlugin::<GgrsCfg>::default())
+    .add_plugins(SimPlugin);
+    if !live {
+        app.add_plugins(sim::InfiniteRoundPlugin);
+    }
+    app.insert_resource(ProbeLayout(!live))
         .add_plugins(ReplayPlaybackPlugin)
         .add_plugins(RenderSyncPlugin)
         .add_plugins(EffectsPlugin)
@@ -320,6 +333,7 @@ fn setup(
     asset_server: Res<AssetServer>,
     mut atlases: ResMut<Assets<TextureAtlasLayout>>,
     selected: Res<SelectedArena>,
+    probe: Res<ProbeLayout>,
 ) {
     commands.spawn(Camera2d);
 
@@ -328,45 +342,34 @@ fn setup(
     // via render::player_atlas_layout so the viewer renders matches
     // exactly as players saw them.
     let layout = player_atlas_layout(&mut atlases);
-    let p0_image = asset_server.load("sprites/players/duelist_a_sheet.png");
-    let p1_image = asset_server.load("sprites/players/duelist_b_sheet.png");
-
-    commands.spawn((
-        Player { handle: 0 },
-        PositionF(Vec2F::ZERO),
-        PreviousPositionF(Vec2F::ZERO),
-        VelocityF(Vec2F::ZERO),
-        Sprite {
-            image: p0_image,
-            texture_atlas: Some(TextureAtlas {
-                layout: layout.clone(),
-                index: 0,
-            }),
-            custom_size: Some(Vec2::splat(PLAYER_RENDER_SIZE)),
-            ..default()
-        },
-        Transform::default(),
-    ));
-
-    commands.spawn((
-        Player { handle: 1 },
-        PositionF(Vec2F::ZERO),
-        PreviousPositionF(Vec2F::ZERO),
-        VelocityF(Vec2F::ZERO),
-        Sprite {
-            image: p1_image,
-            texture_atlas: Some(TextureAtlas { layout, index: 0 }),
-            custom_size: Some(Vec2::splat(PLAYER_RENDER_SIZE)),
-            ..default()
-        },
-        Transform::default(),
-    ));
-
-    // Phase 15 cycle 3b: walls are sim-only entities; the
-    // training_floor backdrop below carries the visual wall pattern.
-    for wall in arena_walls() {
-        commands.spawn(wall);
+    // The table every builder lays (`sim::spawn_match_world`); the viewer
+    // only dresses it. The probe's one layout difference — both seats at
+    // the origin — matches `replay_sync::build_probe_app`.
+    let laid = sim::spawn_match_world(&mut commands, selected.0);
+    let sheets = [
+        "sprites/players/duelist_a_sheet.png",
+        "sprites/players/duelist_b_sheet.png",
+    ];
+    for (handle, sheet) in sheets.into_iter().enumerate() {
+        let mut duelist = commands.entity(laid.duelists[handle]);
+        duelist.insert((
+            Sprite {
+                image: asset_server.load(sheet),
+                texture_atlas: Some(TextureAtlas {
+                    layout: layout.clone(),
+                    index: 0,
+                }),
+                custom_size: Some(Vec2::splat(PLAYER_RENDER_SIZE)),
+                ..default()
+            },
+            Transform::default(),
+        ));
+        if probe.0 {
+            duelist.insert((PositionF(Vec2F::ZERO), PreviousPositionF(Vec2F::ZERO)));
+        }
     }
+    // Walls and cover are sim-only here; the training_floor backdrop below
+    // carries the visual wall pattern.
 
     commands.spawn((
         Sprite {
@@ -379,7 +382,14 @@ fn setup(
 
     // Phase 16: spawn the selected arena's bone-pyre cover (same shared
     // helper as the app crate, so the viewer renders arenas identically).
-    render::spawn_arena_props(&mut commands, &asset_server, &mut atlases, &selected, 1.0);
+    render::spawn_arena_props(
+        &mut commands,
+        &asset_server,
+        &mut atlases,
+        &selected,
+        1.0,
+        &laid,
+    );
 
     // Frame counter HUD pinned to the upper-left, world-space (matches
     // the existing debug overlay convention in the app crate).

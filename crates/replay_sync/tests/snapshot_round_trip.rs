@@ -19,7 +19,7 @@
 use bevy::prelude::*;
 use replay::ReplayPlayback;
 use replay_sync::fuzz::fuzz_replay;
-use replay_sync::{build_app_configurable, world_state_checksum};
+use replay_sync::{build_probe_app_configurable, world_state_checksum};
 use sim::{FrameCount, SimSnapshot};
 
 /// Advance `app.update()` until `FrameCount.0 >= target` or a hard
@@ -52,7 +52,7 @@ fn run_to(seed: u64, target_frame: u32) -> (u64, SimSnapshot) {
     // OR the internal input delay buffer (input_delay). Both are
     // session-internal state independent of the World. For replay
     // playback (no rollback, no network) both should be 0.
-    let mut app = build_app_configurable(fuzz_replay(seed), 0, 0);
+    let mut app = build_probe_app_configurable(fuzz_replay(seed), 0, 0);
     advance_to(&mut app, target_frame);
     let snap = SimSnapshot::capture(app.world_mut());
     let checksum = world_state_checksum(app.world_mut());
@@ -63,7 +63,7 @@ fn run_to(seed: u64, target_frame: u32) -> (u64, SimSnapshot) {
 /// to snap.frame), reset the replay cursor, and advance forward to
 /// `final_frame`. Returns the post-advance checksum.
 fn restore_then_run_to(seed: u64, snap: &SimSnapshot, final_frame: u32) -> u64 {
-    let mut app = build_app_configurable(fuzz_replay(seed), 0, 0);
+    let mut app = build_probe_app_configurable(fuzz_replay(seed), 0, 0);
     snap.restore(app.world_mut());
     app.world_mut().resource_mut::<ReplayPlayback>().cursor = snap.frame as usize;
     advance_to(&mut app, final_frame);
@@ -130,11 +130,11 @@ fn back_to_back_restore_is_idempotent() {
     let seed = 7_u64;
     let (_, snap) = run_to(seed, 80);
 
-    let mut app1 = build_app_configurable(fuzz_replay(seed), 0, 0);
+    let mut app1 = build_probe_app_configurable(fuzz_replay(seed), 0, 0);
     snap.restore(app1.world_mut());
     let after_first = world_state_checksum(app1.world_mut());
 
-    let mut app2 = build_app_configurable(fuzz_replay(seed), 0, 0);
+    let mut app2 = build_probe_app_configurable(fuzz_replay(seed), 0, 0);
     snap.restore(app2.world_mut());
     snap.restore(app2.world_mut()); // restore twice
     let after_second = world_state_checksum(app2.world_mut());

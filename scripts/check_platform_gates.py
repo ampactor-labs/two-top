@@ -16,6 +16,14 @@ say so on the line above:
     // platform-gate-ok: the browser uses the keyboard source too
     #[cfg(not(target_os = "android"))]
 
+A second rule keeps policy out of target gates altogether. In the app
+crate, a `target_os` / `target_family` gate may only appear in the
+platform adapter (`crates/app/src/platform/`), the bootstrap (`lib.rs`)
+and the files that are themselves per-platform I/O backends (listed in
+`APP_GATE_ALLOWLIST` with the reason). Everything else is kernel: it asks
+`platform::DeviceProfile` at runtime or calls a `platform::` function, so
+a policy decided once takes effect in every build.
+
 Run: python3 scripts/check_platform_gates.py
 """
 
@@ -32,6 +40,18 @@ BARE = re.compile(r'not\s*\(\s*target_os\s*=\s*"android"\s*\)')
 # read before judging it — `logging.rs` spells the gate correctly and a
 # line-at-a-time check calls it a violation.
 ATTR = re.compile(r"\bcfg(?:_attr)?\s*\(")
+
+APP_SRC = CRATES / "app" / "src"
+TARGET = re.compile(r"\btarget_(?:os|family)\s*=")
+# Files outside platform/ that may branch on the target, and why. Each is
+# platform I/O, not policy: what it does differs per platform by nature.
+APP_GATE_ALLOWLIST = {
+    "lib.rs": "bootstrap: the entry points, window/canvas and asset-root setup",
+    "logging.rs": "log sinks: stderr, a rolling file, the browser console",
+    "paths.rs": "storage backends: the filesystem, Android dirs, localStorage",
+    "netplay.rs": "the ICE fetch: a blocking request on a thread, or the page's fetch",
+    "share.rs": "the tape post: a blocking request, or the page's fetch and download",
+}
 
 
 def cfg_expressions(text: str):
@@ -79,12 +99,28 @@ def main() -> int:
                 f"{' '.join(expr.split())}"
             )
 
+    for path in sorted(APP_SRC.rglob("*.rs")):
+        rel = path.relative_to(APP_SRC)
+        if rel.parts[0] == "platform" or str(rel) in APP_GATE_ALLOWLIST:
+            continue
+        for n, expr in cfg_expressions(path.read_text()):
+            if TARGET.search(expr):
+                findings.append(
+                    f"{path.relative_to(ROOT)}:{n}: a target gate in kernel code — "
+                    f"read `platform::DeviceProfile` or call a `platform::` function "
+                    f"(or, for genuine per-platform I/O, add the file to "
+                    f"APP_GATE_ALLOWLIST with the reason)\n    {' '.join(expr.split())}"
+                )
+
     for f in findings:
         print(f"FAIL {f}")
     if findings:
         print(f"\n{len(findings)} unacknowledged platform gate(s).")
         return 1
-    print("platform gates ok — every non-Android gate names wasm or acknowledges it.")
+    print(
+        "platform gates ok — every non-Android gate names wasm or acknowledges it, "
+        "and app policy reads DeviceProfile instead of the target."
+    )
     return 0
 
 

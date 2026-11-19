@@ -1,0 +1,224 @@
+# Changelog
+
+In this document, all notable changes are listed, including bug fixes, breaking changes, and improvements to behaviour or documentation.
+
+## Unreleased
+
+## 0.12.0
+
+### Bug fixes
+- fix: `spectator_handles()` now returns only spectator handles; previously it incorrectly returned local + spectator handles due to a copy-paste bug (fixes [#105](https://github.com/gschup/ggrs/issues/105))
+- fix: `network_stats()` for spectator handles no longer panics — it was looking up the address in `player_reg.remotes` instead of `player_reg.spectators`
+- fix: confirmed inputs are now flushed to spectators immediately within `advance_frame()`, reducing spectator latency by one frame; previously the packets were queued and only sent on the next `poll_remote_clients()` call
+- fix: spectator session no longer stalls at frame 0 when started before the host; sync request retries now use a dedicated timer instead of the shared last-send timer, which was being reset by ACKs and keepalives
+- fix: delta compression no longer panics when inputs serialize to variable sizes (e.g. enums with variants of different sizes); each encoded input is now length-prefixed
+
+### Breaking changes
+- breaking: the network wire format for input packets has changed; clients on different versions of ggrs will not be able to communicate
+- breaking: `GgrsError::NotEnoughData` is a new error variant returned by `network_stats()` when less than one second has elapsed since the connection was established; previously `GgrsError::NotSynchronized` was returned in both this case and the "not yet connected" case
+- breaking: `SessionBuilder::start_synctest_session()` now returns `GgrsError::InvalidRequest` if sparse saving is enabled, rather than silently ignoring the setting — `SyncTestSession` must save every frame to compare checksums across the check window
+- breaking: `SessionBuilder::with_num_players()` now returns `Result<Self, GgrsError>` and immediately rejects a value of `0`; previously the error was deferred to session start
+- breaking: `Config` trait now requires a `type InputPredictor: InputPredictor<Self::Input>` associated type; migrate existing impls by adding `type InputPredictor = ggrs::PredictRepeatLast;`, which preserves the previous behaviour of repeating the last known input
+
+### Improvements
+- feat: custom input prediction via the new `InputPredictor` trait; set `type InputPredictor` on your `Config` to control how missing remote inputs are predicted. GGRS ships with `PredictRepeatLast` (repeat last input, good for held-button state) and `PredictDefault` (always use `Input::default()`, good for one-shot events); implement the trait yourself for custom strategies (closes [#69](https://github.com/gschup/ggrs/issues/69))
+- feat: `Display` implementations added for `SessionState`, `InputStatus`, `PlayerType`, and `DesyncDetection`
+- refactor: `poll_remote_clients()` collects endpoint events before processing, removing unnecessary pre-emptive clones of handles and addresses
+- docs: `SessionBuilder` methods now document valid value ranges and constraint relationships
+- docs: `NetworkStats` now explains the one-second warmup window and the idiomatic `NotEnoughData` handling pattern
+- docs: `SyncTestSession` struct now fully documents the save/advance/rollback/compare lifecycle, the panic-on-mismatch behaviour, and the all-players-local requirement
+- docs: `NonBlockingSocket` now includes a WASM/WebRTC implementation example using matchbox
+- docs: `P2PSession::advance_frame()` and `poll_remote_clients()` now document the spectator packet delivery timing
+- docs: `SpectatorSession::advance_frame()` now documents its dependency on the host having called `poll_remote_clients` for inputs to have arrived
+- docs: `SpectatorSession::frames_behind_host()` now documents that both `current_frame` and `last_recv_frame` start at `NULL_FRAME`
+- examples: `handle_requests` no longer takes an `in_lockstep` flag or uses `unreachable!()` — all request variants are handled unconditionally, relying on the library's guarantee that Save/Load are never sent in lockstep mode
+
+### Crate hygiene
+- chore: `rust-version = "1.87"` added to `Cargo.toml`, establishing the declared MSRV
+- chore: added comment to the `getrandom` optional dependency clarifying it exists to forward the `js` feature to `rand` on WASM targets
+
+### Code quality
+- clippy: resolved warnings across the codebase; added `#[must_use]` to `SessionBuilder` and its builder methods
+- refactor: internal constants consolidated and de-duplicated; `GgrsError` now derives `Eq`; minor readability improvements throughout
+- tests: expanded unit and integration test coverage across all session types and internal modules
+
+## 0.11.1
+
+- fix: input packet size is now computed via `bincode::serialized_size` instead of `std::mem::size_of`, allowing enum inputs whose serialized size differs from their in-memory layout to work correctly
+
+## 0.11.0
+
+- add `tracing` crate for logging support
+- breaking change: `Config::Input` must now satisfy `Default` + serde's `Serialize` & `DeserializeOwned` traits, rather than bytemuck's `Pod` and `Zeroable`.
+  - This allows enums with fields as well as variable-sized types (such as `Vec`) to be directly used as the GGRS input type, and should generally be more flexible than the old bounds.
+  - To migrate old code, it's recommended to simply derive `Default` and `Serialize` & `Deserialize` on your `Input` type.
+  - Or, to migrate old code strictly without changing behavior, implement `Default` in terms of `bytemuck::Zeroable::zeroed()` and implement `Serialize` and `DeserializedOwned` in terms of `bytemuck::bytes_of()` and (probably) `bytemuck::pod_read_unaligned()`.
+  - Fixes [#40](https://github.com/gschup/ggrs/issues/40) and [#74](https://github.com/gschup/ggrs/issues/74).
+- lockstep determinism is now possible by setting max predictions to 0
+- allow non-`Clone` types to be stored in `GameStateCell`.
+- added `SyncTestSession::current_frame()` and `SpectatorSession::current_frame()` to match the existing `P2PSession::current_frame()`.
+- added `P2PSession::desync_detection()` to read the session's desync detection mode.
+- fix: ggrs no longer panics when a client's local frame advantage exceeds the range of an i8 ([#35](https://github.com/gschup/ggrs/issues/35))
+- fix: ggrs no longer panics when trying to send an overly large UDP packet, unless debug assertions are on.
+- fix: ggrs no longer panics when trying to send a message over a custom socket implementation if that message exceeded the maximum safe UDP packet size, even though the underlying socket might have totally different applicable thresholds for what messages can be safely delivered.
+- fix a false positive in `P2PSession`'s desync detection; it was possible for a desync to incorrectly be detected when `P2PSession::advance_frame()` would 1. enqueue a checksum-changing rollback, 2. mark a to-be-rolled-back frame as confirmed, and 3. send that newly-confirmed frame's still-incorrect checksum to peers.
+
+## 0.10.2
+
+- fix dependency versions
+
+## 0.10.1
+
+- SyncTest now checks frames in chronological order
+
+## 0.10.0
+
+- Rename types with GGRS prefix to match rust naming conventions
+- Removed deprecated `GgrsError` variants
+- `GameStateCell` now implements debug.
+- fixed a bug where checksums of unconfirmed frames were compared during desync detection.
+- You can now trigger a desync manually in the example game by pressing SPACE.
+
+## 0.9.4
+
+- `SessionBuilder` now implements debug. This requires `Config::Address` to have Debug
+- Optional desync detection for p2p sessions. This feature can be used by using `with_desync_detection_mode` in the `SessionBuilder`.
+
+## 0.9.3
+
+- added support for fieldless enums in `PlayerInput`
+
+## 0.9.2
+
+- fixed a bug where sync would not work with RTT higher than SYNC_RETRY_INTERVAL
+
+## 0.9.1
+
+- fixed multiple local players, added example documentation for it
+- fixed save and advance request ordering during a rollback in P2PSessions
+
+## 0.9.0
+
+- removed `GameState` from the public API.
+- removed `PlayerInput` from the public API. `AdvanceFrame` requests will now hand over a tuple with the `InputStatus` and status of that input
+- added `InputStatus` enum to distinguish the status of given inputs
+- users now have to call `add_local_input(..)` for every local player before calling `advance_frame()`
+- enabled multiple players per endpoint
+- sessions are now constructed through a unified `SessionBuilder`
+- overhauled all generics
+- provided inputs are now generic. The user has to only supply a POD struct instead of serialized input
+- added a `Config` trait with types to bundle all generic options
+- renamed `GameInput` to `PlayerInput`
+- the user now has to explicitly create a socket themselves before creating a session
+
+## 0.8.0
+
+- `GameState` now is a generic `GameState<T: Clone = Vec<u8>>`, so serialization of game state to save and load is no longer required
+- `trait NonBlockingSocket` now is a generic `NonBlockingSocket<A>`, where `A` generalizes the address that the socket uses to send a packet.
+
+## 0.7.2
+
+- massively improved performance by improving input packet handling
+
+## 0.7.1
+
+- added getter for the max prediction frames parameter in `P2PSession` and `SyncTestSession`
+
+## 0.7.0
+
+- removed the const `MAX_PREDICTION_FRAMES` and made it a parameter for the user to choose
+
+## 0.6.0
+
+- added `P2PSession::current_frame()`
+- made `P2PSession::confirmed_frame()` public to let users access it
+- removed the need for a player cap and a maximum input size
+- adjusted session creation API to reflect the above change
+- fixed a bug where a p2p session without remote players would not start
+- migrated to rust 2021
+
+## 0.5.1
+
+- ggrs no longer panics when packets have been tampered with
+- added `P2PSession::frames_ahead()` that shows how many frames the session believes to be ahead of other sessions.
+
+## 0.5.0
+
+- renamed session constructors to make them more idiomatic. Sessions are now created through `P2PSession::new(...)` and `P2PSession::new_with_socket(...)`.
+- added functions to create sessions with own sockets provided
+- turned NonBlockingSocket into a trait to allow alternate socket types in the future.
+- fixed a bug where calling network_stats without any time passed would lead to a division by 0.
+- fixed a bug where packet transmission time would be accounted for with RTT instead of RTT / 2
+
+## 0.4.4
+
+- fixed a bug where p2p sessions would falsely skip frames even when there able to run the frame
+- implemented some first steps towards WASM compatibility
+
+## 0.4.3
+
+- changed license from MIT to MIT or Apache 2.0 at the users option
+- added `local_player_handle()` to `P2PSession`, which returns the handle of the local player
+- added `set_fps(desired_fps)` to `P2PSpectatorSession`
+
+## 0.4.2
+
+- users are now allowed to save `None` buffers for a `GgrsRequest::SaveRequest`. This allows users to keep their own state history and load/save more efficiently
+- added `num_players()`, `input_size()` getters to all sessions
+
+## 0.4.1
+
+- added sparse saving feature `P2PSession`, minimizing the SaveState requests to a bare minimum at the cost of potentially longer rollbacks
+- added `set_sparse_saving()` to `P2PSession` to enable sparse saving
+- added `set_fps(desired_fps)` to `P2PSession` for the user to set expected update frequency. This is helpful for frame synchronization between sessions
+- fixed a bug where a spectator would not handle disconnected players correctly with more than two players
+- fixed a bug where changes to `disconnect_timeout` and `disconnect_notify_start` would change existings endpoints, but would not influence endpoints created afterwards
+- expanded the BoxGame example for up to four players and as many spectators as wanted
+- minor code optimizations
+
+## 0.4.0
+
+- spectators catch up by advancing the frame twice per `advance_frame(...)` call, if too far behind
+- added `frames_behind_host()` to `P2PSpectatorSession`, allowing to query how many frames the spectator client is behind the last received input
+- added `set_max_frames_behind(desired_value)`to `P2PSpectatorSession`, allowing to set after how many frames behind the spectator fast-forwards to catch up
+- added `set_catchup_speed(desired_value)` to `P2PSpectatorSession`, allowing to set how many frames the spectator catches up per `advance_frame()` call, if too far behind
+- in `SyncTestSession`, the user now can (and has to) provide input for all players in order to advance the frame
+
+## 0.3.0
+
+- `GgrsError::InvalidRequest` now has an added `info` field to explain the problem in more detail
+- removed unused `GgrsError::GeneralFailure`
+- removed multiple methods in `SyncTestSession`, as they didn't fulfill any meaningful purpose
+- removed unused sequence number from message header, fixing related issues
+- fixed an issue where out-of-order packets would cause a crash
+- other minor improvements
+
+## 0.2.5
+
+- when a player disconnects, the other players now rollback to that frame. This is done in order to eliminate wrong predictions and resimulate the game with correct disconnection indicators
+- spectators now also handle those disconnections correctly
+
+## 0.2.4
+
+- fixed an issue where the spectator would assign wrong frames to the input
+- players disconnecting now leads to a rollback to the disconnect frame, so wrongly made predictions can be removed
+- in the box game example, disconnected players now spin
+- minor code and documentation cleanups
+
+## 0.2.3
+
+- fixed an issue where encoding/decoding reference would not match, leading to client desyncs
+
+## 0.2.2
+
+- SyncTestSession now actually compares checksums again
+- if the user doesn't provide checksums, GGRS computes a fletcher16 checksum
+- internal refactoring/renaming
+
+## 0.2.1
+
+- fixed an issue where the spectator would only handle one UDP packet and drop the rest
+
+## 0.2.0
+
+- Reworked API: Instead of the user passing a GGRSInterface trait object, GGRS now returns a list of GgrsRequests for the user to fulfill

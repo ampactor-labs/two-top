@@ -42,17 +42,20 @@ fn spawn_summoning(mut commands: Commands) {
     commands.spawn((
         SummoningText,
         Text2d::new(String::new()),
-        TextFont {
-            font_size: 54.0,
-            ..default()
-        },
+        (
+            TextFont {
+                font_size: crate::ui::TextRole::Summoning.default_size(),
+                ..default()
+            },
+            crate::ui::TextRole::Summoning,
+        ),
         TextColor(render::palette::HOT_BONE),
         TextLayout::new_with_justify(Justify::Center),
         // Wide bounds: without them Bevy wraps at awkward widths on the
         // phone ("the other / phone" mid-phrase breaks).
         bevy::text::TextBounds::new_horizontal(1080.0),
         ScreenAnchor::new(0.0, 0.25, 0.0, 0.0),
-        Transform::from_xyz(0.0, 0.0, 210.0),
+        Transform::from_xyz(0.0, 0.0, crate::ui::z::MENU_TEXT),
         Visibility::Hidden,
     ));
 }
@@ -63,6 +66,21 @@ fn spawn_summoning(mut commands: Commands) {
 /// connect" — so past this threshold the wait names its likely cause
 /// instead of breathing dots forever.
 const STALL_DIAGNOSIS_SECS: f32 = 15.0;
+
+/// What a long wait for a challenger says. Lead with the mismatch a
+/// player can fix from the seat; then the network. A build without a relay
+/// says the one thing that is certain: phones on mobile data will not
+/// reach each other. Pure.
+pub fn stall_hint(relay: Option<bool>) -> &'static str {
+    if relay == Some(false) {
+        "\n\nif the other phone shows this too:\ncheck both show the same sim number -\nthis build can't relay: phones on\nmobile data won't reach each other,\nput both on the same Wi-Fi"
+    } else {
+        "\n\nif the other phone shows this too:\ncheck both show the same sim number -\nelse try both on Wi-Fi, or both on data"
+    }
+}
+
+/// Seconds a paired session may spend synchronizing in silence.
+const SYNC_WORD_SECS: f32 = 2.0;
 
 /// While in-match but pre-peer, the wait is a *ceremony*, not a debug
 /// string: SUMMONING with a breathing ellipsis and the dialed room. The
@@ -77,6 +95,13 @@ fn update_summoning(
     room: Res<RoomCode>,
     peer_profile: Res<net::PeerProfile>,
     absence: Res<crate::netplay::RecentAbsence>,
+    sync: Res<crate::netplay::SyncWait>,
+    ice: Res<crate::netplay::IceStatus>,
+    silence: (
+        Res<net::SilenceClock>,
+        Res<net::LastPeerMessageFrame>,
+        Res<net::PeerPaused>,
+    ),
     mut stall: Local<Option<(std::mem::Discriminant<LobbyState>, f32)>>,
     mut q: Query<(&mut Text2d, &mut Visibility), With<SummoningText>>,
 ) {
@@ -85,7 +110,7 @@ fn update_summoning(
     };
     // At MatchOver the summary card owns the screen — it carries the fled /
     // abandoned facts itself, and this text was stacking straight into it.
-    if *screen.get() != AppScreen::InMatch || matches!(*match_state, sim::MatchState::MatchOver) {
+    if *screen.get() != AppScreen::InMatch || match_state.is_match_over() {
         *vis = Visibility::Hidden;
         *stall = None;
         return;
@@ -104,19 +129,19 @@ fn update_summoning(
     let dots = [".", "..", "...", ".."][(now * 2.0) as usize % 4];
     // The table no longer splits rooms (the pair agrees on one after
     // pairing), so the line names what actually must match: the code, and
-    // the sim version — that is the segment in the room name, so a phone
+    // the epoch (sim and wire generations) — that is the segment in the room name, so a phone
     // on another sim generation sits in a room this one never sees. The
     // build number rides along because it is what people can read off an
     // APK, but two builds on the same sim pair fine.
     let build = env!("CARGO_PKG_VERSION");
-    let sim_v = sim::SIM_VERSION;
+    let epoch = crate::room_code::epoch();
     let room_line = if room.custom {
         format!(
-            "room {}\nbuild {build} / sim v{sim_v}",
+            "room {}\nbuild {build} / {epoch}",
             code_spaced(&room.code_string())
         )
     } else {
-        format!("quick match\nbuild {build} / sim v{sim_v}")
+        format!("quick match\nbuild {build} / {epoch}")
     };
     let challenger = crate::profile::peer_name(peer_profile.0);
     let msg = match &*state {
@@ -135,17 +160,18 @@ fn update_summoning(
             };
             let mut m = format!("AWAITING A CHALLENGER{dots}\n\n{room_line}\n{ask}");
             if since > STALL_DIAGNOSIS_SECS {
-                // Lead with the mismatch a player can fix from the seat;
-                // the network is the second guess, not the first.
-                m.push_str(
-                    "\n\nif the other phone shows this too:\ncheck both show the same sim number -\nelse try both on Wi-Fi, or both on data",
-                );
+                m.push_str(stall_hint(ice.relay));
             }
             Some(m)
         }
-        LobbyState::Disconnected { .. } => Some(format!(
-            "{challenger} AWAY{dots}\nhold the field - forfeit soon"
-        )),
+        LobbyState::Disconnected { .. } => {
+            let (clock, heard, paused) = silence;
+            let left = away_secs_left(clock.0, heard.0, paused.0);
+            // A peer that said it was stepping out is waited for longer,
+            // and the wait says so.
+            let what = if paused.0 { "STEPPED AWAY" } else { "AWAY" };
+            Some(format!("{challenger} {what}\n\n{left}\n\nhold the field"))
+        }
         LobbyState::Forfeited { .. } => {
             // If OUR phone went away just before the forfeit, we are the
             // one who fled — say so instead of gaslighting the player.
@@ -157,6 +183,16 @@ fn update_summoning(
         }
         LobbyState::SummonFailed => Some(
             "COULDN'T REACH THE ROOM SERVER\n\ncheck this phone's connection,\nthen CANCEL and try again"
+                .to_string(),
+        ),
+        // Paired, and the first frame is taking its time: say so after a
+        // moment rather than show a frozen board (it normally lands in
+        // well under a second; `netplay::SYNC_BUDGET_SECS` bounds it).
+        LobbyState::Connected { .. } if sync.waiting() => {
+            (since > SYNC_WORD_SECS).then(|| format!("REACHING {challenger}{dots}"))
+        }
+        LobbyState::PeerUnreachable => Some(
+            "COULDN'T REACH YOUR CHALLENGER\n\ntry both on Wi-Fi,\nor both on data,\nthen CANCEL and try again"
                 .to_string(),
         ),
         // A desync ends at MatchOver, where the summary card owns the screen.
@@ -171,6 +207,14 @@ fn update_summoning(
     }
 }
 
+/// Whole seconds until an away peer is forfeited (net's silence FSM), never
+/// below 1 while the overlay still shows. Pure for tests.
+fn away_secs_left(clock: u32, last_heard: u32, paused: bool) -> u32 {
+    let silent = clock.saturating_sub(last_heard);
+    let left = net::forfeit_after(paused).saturating_sub(silent);
+    left.div_ceil(sim::TICK_HZ as u32).max(1)
+}
+
 /// "CURS" → "C U R S" (the glyphs read as a dialed code, not a word).
 fn code_spaced(code: &str) -> String {
     code.chars().map(String::from).collect::<Vec<_>>().join(" ")
@@ -179,10 +223,13 @@ fn code_spaced(code: &str) -> String {
 fn spawn_overlay(mut commands: Commands) {
     commands.spawn((
         Text2d::new(String::new()),
-        TextFont {
-            font_size: 13.0,
-            ..default()
-        },
+        (
+            TextFont {
+                font_size: crate::ui::TextRole::Debug.default_size(),
+                ..default()
+            },
+            crate::ui::TextRole::Debug,
+        ),
         // Yellow tint distinguishes lobby state from the cyan-ish
         // input debug overlay so they're trivially separable on
         // screen even before reading the actual text.
@@ -190,7 +237,7 @@ fn spawn_overlay(mut commands: Commands) {
         // Top-right corner — keeps it out of the way of the top-left input
         // debug overlay. Pinned to the real screen corner on any aspect.
         ScreenAnchor::new(1.0, 1.0, -160.0, -30.0),
-        Transform::from_xyz(0.0, 0.0, 100.0),
+        Transform::from_xyz(0.0, 0.0, crate::ui::z::NOTE),
         LobbyOverlayText,
     ));
 }
@@ -249,6 +296,41 @@ fn update_overlay(
             )
         }
         LobbyState::SummonFailed => "lobby: summons FAILED (signaling lost)".to_string(),
+        LobbyState::PeerUnreachable => "lobby: peer UNREACHABLE (sync never finished)".to_string(),
     };
     text.0 = label;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_away_countdown_reaches_the_forfeit_and_waits_longer_for_a_pause() {
+        let hz = sim::TICK_HZ as u32;
+        // A second of silence: the AWAY overlay has just come up.
+        assert_eq!(away_secs_left(hz, 0, false), 8);
+        assert_eq!(away_secs_left(hz, 0, true), 19);
+        // The last moment before the forfeit still shows a 1, never a 0.
+        assert_eq!(away_secs_left(net::FORFEIT_AFTER_FRAMES - 1, 0, false), 1);
+        assert_eq!(away_secs_left(net::FORFEIT_AFTER_FRAMES + 50, 0, false), 1);
+    }
+}
+
+#[cfg(test)]
+mod stall_hint_tests {
+    use super::stall_hint;
+
+    #[test]
+    fn a_build_without_a_relay_says_so() {
+        assert!(stall_hint(Some(false)).contains("can't relay"));
+        assert!(!stall_hint(Some(true)).contains("can't relay"));
+        assert!(!stall_hint(None).contains("can't relay"));
+        for relay in [None, Some(false), Some(true)] {
+            assert!(
+                stall_hint(relay).is_ascii(),
+                "the bundled font is ASCII-only"
+            );
+        }
+    }
 }

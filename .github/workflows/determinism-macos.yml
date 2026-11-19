@@ -1,0 +1,58 @@
+name: Determinism (macOS)
+
+# The determinism lanes on macOS, Apple silicon and Intel, split out of
+# determinism.yml so they run only where they can change the answer: the
+# sim, its math, the replay tools, the vendored crates, the lockfile or the
+# toolchain. macOS minutes bill at 10x Linux, and an unrelated PR should
+# not show a dead check. Each lane runs the sim crates' tests (which hold
+# the canonical demo against its committed golden TSV) and then replays the
+# demo with replay_sync and compares the output to that same golden file.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+    paths:
+      - "crates/sim/**"
+      - "crates/fixed_math/**"
+      - "crates/replay/**"
+      - "crates/replay_sync/**"
+      - "vendor/**"
+      - "tests/demos/**"
+      - "Cargo.lock"
+      - "rust-toolchain.toml"
+      - ".github/workflows/determinism-macos.yml"
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_PROFILE_DEV_DEBUG: line-tables-only
+
+jobs:
+  determinism:
+    name: ${{ matrix.target }}
+    runs-on: ${{ matrix.runs-on }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: aarch64-apple-darwin
+            runs-on: macos-14
+          - target: x86_64-apple-darwin
+            runs-on: macos-15-intel
+    steps:
+      - uses: actions/checkout@v5
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: determinism-${{ matrix.target }}
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest
+      - name: Run tests
+        run: cargo nextest run --workspace --exclude app --exclude ice_vendor --locked --no-fail-fast
+      - name: Canonical demo against the golden TSV
+        run: |
+          cargo run -p replay_sync --bin replay_sync --locked --release -- \
+            --demo tests/demos/canonical/match_v1.bmrg --output checksum.tsv
+          cmp checksum.tsv tests/demos/canonical/match_v1.checksums.tsv

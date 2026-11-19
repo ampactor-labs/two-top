@@ -299,12 +299,12 @@ For the second phone, either repeat the ADB install or send that same
 Both phones boot to the Title screen with **"TAP TO FIND OPPONENT"**. Tap the
 arena line under the table to open the roster (seven tables, each with its
 floor and rules) and pick one. The pick does NOT need to match: the room is
-`two-top-v15?next=2` (or `two-top-CURS-v15?next=2` for a private code), and
-once two phones pair they agree on one table (the lower peer id's pick) before
-the session starts. The `-v15` is `sim::SIM_VERSION`: two APKs on different
-sim versions land in different rooms and never pair, which is the only
-version check the live wire has — the waiting screen shows the build and the
-sim version so two people can compare. Then both players tap PLAY.
+`two-top-v16p2?next=2` (or `two-top-CURS-v16p2?next=2` for a private code),
+and once two phones pair they agree on one table (the lower peer id's pick)
+before the session starts. The `-v16p2` is the epoch: `sim::SIM_VERSION` and
+`net::NET_PROTOCOL`. Two APKs on different generations land in different rooms
+and never pair, which is the only version check the live wire has — the
+waiting screen shows the build and the epoch so two people can compare. Then both players tap PLAY.
 
 ### 4f. What to verify (Phase 12, Gate 1)
 
@@ -313,8 +313,8 @@ sim version so two people can compare. Then both players tap PLAY.
 - Move, throw, recall, kill, respawn — all in lockstep on both screens.
 - Score and match state stay identical on both devices for the full round
   and any subsequent rounds, ending naturally at first-to-5 → match-over.
-- **Rematch:** after match-over, **either** player pressing Throw restarts
-  both devices together (score back to 0-0, fresh countdown, no desync).
+- **Rematch:** after match-over and the summary's beat, both players pressing
+  Throw (RUN IT BACK) restarts both devices together (score back to 0-0, fresh countdown, no desync).
   Note: the couch-only "ESC back to lobby" does not apply online.
 
 ### 4g. Resilience gates (optional, same setup)
@@ -448,6 +448,20 @@ signaling server pairs you → you fight.
 This uses your local debug keystore to sign a release build for sideload
 playtesting. For store distribution, use a real upload/release key instead.
 
+**When it crashes on their phone** you do not need the phone. The next
+time they open 2-Top the title shows LAST RUN CRASHED / TAP HERE TO SEND
+THE REPORT; the tap opens their share sheet on a text report (phone, GPU,
+how Android says the run ended, the panic, the log tail) and they send it
+to you like any other message. `SIDELOAD.md` § After a crash has what is
+in it and where the same files sit for `adb`.
+
+**Friends on iPhone** play the web build: send them the Pages URL (or let
+them scan a private room's join QR, which offers PLAY IN THE BROWSER on an
+iPhone). Safari → Share → **Add to Home Screen** gives them the full-screen
+game and keeps their identity and rivalry ledger from being evicted; the
+page itself says so the first few times. Browser and APK meet in the same
+rooms, on the same sim version.
+
 For same-wifi: the signaling server runs on your machine (Rung 4 setup).
 For cross-network: deploy `matchbox_server` to a public host (see Rung 5).
 
@@ -488,17 +502,43 @@ the share; `replay_sync --attest` verifies them wherever the files are.
 
 **The gauntlet (practice vs the bot).** Tap PRACTICE VS BOT on the Title
 (P on desktop), then PLAY. The match runs the normal local session with the
-bot supplying player 2's inputs — it keeps range, plants visibly before it
-throws, dashes through your fangs, and steers its recalls. Beat it and your
-GAUNTLET TIER climbs (the button label carries the number); every tier the
-bot opens a little sharper — harder throws, then (from tier 3) a dodge
-reflex that fires on some of your throws and more of them as it climbs,
-tighter aim — up to a beatable ceiling at tier 10. Lose and the tier drops
-one rung (never back to the dummy; best tier is remembered in
-`career.json`), so a losing streak keeps easing the bot off. A fresh
-install's bot starts as a passive dummy that only starts lobbing back once
-you have landed three kills, so the first match is the tutorial. Practice results never touch the online career W-L.
+bot supplying player 2's inputs — it keeps range, routes around cover to a
+clear line, plants visibly before it throws, dashes out of your fangs'
+lanes, and steers its recalls. Beat it and your GAUNTLET TIER climbs (the
+button label carries the number); every tier the bot opens a little
+sharper — harder throws, a quicker read of you, throws that lead where
+you are walking, then (from tier 3) a dodge reflex that fires on some of
+your throws and more of them as it climbs — up to a beatable ceiling at
+tier 10. Lose and the tier drops one rung (never back to tier 0; best tier
+is remembered in `career.json`), so a losing streak keeps easing the bot
+off. Within a match it eases a notch while it leads by two kills and
+sharpens a notch while you do. A fresh install starts at tier 0, a
+sparring partner: slow, telegraphed lobs every few seconds and no
+dodging, so even a player who has not found the controls meets a fang in
+flight and a finished match. The summary says where the ladder went
+(UP TO GAUNTLET 4, GAUNTLET MASTERED). The ladder is tuned against a
+headless bench (`docs/BOT_LADDER.md`). Practice results never touch the
+online career W-L.
 `TWOTOP_PRACTICE=1` env arms it for desktop automation.
+
+**First Blood.** A fresh install (no match ever played) goes from naming
+itself straight into a guided practice match on the Vigil that teaches one
+verb at a time — move, throw, recall and catch, a charged kill, dodging a
+throw, the perfect catch, the edge — then a match to five against tier 1,
+and a summary that offers FIND OPPONENT. One line on screen at a time, worded
+for touch or keys by what the player last used; each stage moves on when the
+player actually does the thing. SKIP (the quit chip) ends it for good; a
+player who arrived by a join link never gets it unasked; SETTINGS → HOW TO
+PLAY runs it again. `TWOTOP_FIRST_BLOOD=1` forces it (`0` keeps it away;
+capture and autostart runs keep it away unless forced), and
+`TWOTOP_LESSON_STAGE=dodge` (any stage) starts it partway, for checking one
+stage. Progress is `progress.json` beside `settings.json`.
+
+In real matches (online and practice, not couch) the same line speaks up at
+three moments: GET BACK ON THE FLOOR whenever you are out past the edge,
+HOLD A DIRECTION after two dashes pressed with the stick at rest, and PICK
+IT UP, OR RECALL when your fang has lain loose for three seconds. The last
+two stop after three showings ever (`crates/app/src/nudges.rs`).
 
 **Trading tapes.** A match tape is a ~14 KB `.bmrg` file, and the sim is
 deterministic, so a friend's tape plays on your device exactly as it played
@@ -574,7 +614,7 @@ stick on the right half, throw on the left, dash bottom-LEFT.
 ## Known gaps (so you don't chase non-bugs)
 
 - **No in-app way to enter a room URL.** The lobby overlay is read-only.
-  Desktop uses `--room`/`MATCHBOX_ROOM`; the phone uses the compile-time
+  Desktop uses `--room`/`TWOTOP_ROOM`; the phone uses the compile-time
   `TWOTOP_ROOM` bake (Rung 4d). An in-app lobby text field is future work.
   (Private ROOMS within the baked server are in — the glyph pad above.)
 - **STUN-only traversal fails behind carrier NAT.** For Rung 5

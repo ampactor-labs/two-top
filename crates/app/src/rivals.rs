@@ -27,7 +27,7 @@ const LIST_PITCH: f32 = 0.088;
 /// thumb's worth (the REPLAYS ceiling, same reasoning).
 const LIST_MAX: usize = 8;
 /// The BACK band at the bottom — same gesture as every menu.
-const BACK_BAND: (f32, f32) = (0.86, 0.96);
+const BACK_BAND: crate::ui::Band = crate::ui::BACK;
 /// Detail view: the tape rows start here.
 const DETAIL_TAPES_TOP: f32 = 0.52;
 const DETAIL_TAPES_PITCH: f32 = 0.075;
@@ -106,7 +106,7 @@ fn row_name(record: &CareerRecord, key: &str, r: &RivalRecord) -> String {
 fn spawn_text(
     commands: &mut Commands,
     text: String,
-    size: f32,
+    size: crate::ui::TextRole,
     color: Color,
     anchor: (f32, f32),
     z: f32,
@@ -114,10 +114,13 @@ fn spawn_text(
     commands.spawn((
         RivalsUi,
         Text2d::new(text),
-        TextFont {
-            font_size: size,
-            ..default()
-        },
+        (
+            TextFont {
+                font_size: size.default_size(),
+                ..default()
+            },
+            size,
+        ),
         TextColor(color),
         TextLayout::new_with_justify(Justify::Center),
         ScreenAnchor::new(anchor.0, anchor.1, 0.0, 0.0),
@@ -126,7 +129,7 @@ fn spawn_text(
 }
 
 fn row_anchor_y(i: usize, top: f32, pitch: f32) -> f32 {
-    1.0 - 2.0 * (top + (i as f32 + 0.5) * pitch)
+    crate::ui::anchor_y(top + (i as f32 + 0.5) * pitch)
 }
 
 /// (Re)build the screen for the current view. Runs on enter and on any
@@ -148,9 +151,9 @@ fn build_rivals_ui(world: &mut World) {
             spawn_text(
                 &mut commands,
                 "THE RIVALS".to_string(),
-                72.0,
+                crate::ui::TextRole::PageTitle,
                 render::palette::HOT_BONE,
-                (0.0, 1.0 - 2.0 * 0.08),
+                (0.0, crate::ui::anchor_y(0.08)),
                 210.0,
             );
             let rows = ranked(&record);
@@ -158,7 +161,7 @@ fn build_rivals_ui(world: &mut World) {
                 spawn_text(
                     &mut commands,
                     "NO RIVALS YET\nFIND AN OPPONENT AND MAKE ONE".to_string(),
-                    34.0,
+                    crate::ui::TextRole::RivalsEmpty,
                     render::palette::BONE.with_alpha(0.7),
                     (0.0, 0.0),
                     210.0,
@@ -169,7 +172,7 @@ fn build_rivals_ui(world: &mut World) {
                 spawn_text(
                     &mut commands,
                     row_name(&record, key, r),
-                    40.0,
+                    crate::ui::TextRole::RivalRowName,
                     render::palette::BONE,
                     (-0.30, ay + 0.026),
                     210.0,
@@ -182,7 +185,7 @@ fn build_rivals_ui(world: &mut World) {
                 spawn_text(
                     &mut commands,
                     format!("{}   {}", standing_line(&r.name, r), met),
-                    24.0,
+                    crate::ui::TextRole::RivalRowDetail,
                     render::palette::BONE.with_alpha(0.6),
                     (-0.30, ay - 0.030),
                     210.0,
@@ -192,7 +195,7 @@ fn build_rivals_ui(world: &mut World) {
                     spawn_text(
                         &mut commands,
                         token,
-                        34.0,
+                        crate::ui::TextRole::RivalRowSub,
                         if r.streak > 0 {
                             render::palette::SPARK
                         } else {
@@ -211,17 +214,17 @@ fn build_rivals_ui(world: &mut World) {
             spawn_text(
                 &mut commands,
                 row_name(&record, &key, r),
-                64.0,
+                crate::ui::TextRole::RivalName,
                 render::palette::HOT_BONE,
-                (0.0, 1.0 - 2.0 * 0.10),
+                (0.0, crate::ui::anchor_y(0.10)),
                 210.0,
             );
             spawn_text(
                 &mut commands,
                 format!("{} MEETINGS - {}", r.meetings(), standing_line(&r.name, r)),
-                36.0,
+                crate::ui::TextRole::RivalStanding,
                 render::palette::BONE,
-                (0.0, 1.0 - 2.0 * 0.20),
+                (0.0, crate::ui::anchor_y(0.20)),
                 210.0,
             );
             let mut facts: Vec<String> = Vec::new();
@@ -248,9 +251,9 @@ fn build_rivals_ui(world: &mut World) {
                 spawn_text(
                     &mut commands,
                     fact.clone(),
-                    28.0,
+                    crate::ui::TextRole::RivalFact,
                     render::palette::BONE.with_alpha(0.75),
-                    (0.0, 1.0 - 2.0 * (0.27 + i as f32 * 0.050)),
+                    (0.0, crate::ui::anchor_y(0.27 + i as f32 * 0.050)),
                     210.0,
                 );
             }
@@ -258,9 +261,9 @@ fn build_rivals_ui(world: &mut World) {
                 spawn_text(
                     &mut commands,
                     "SPAR THEIR SHADE".to_string(),
-                    32.0,
+                    crate::ui::TextRole::RivalShade,
                     render::palette::EMBER,
-                    (0.0, 1.0 - (SHADE_BAND.0 + SHADE_BAND.1)),
+                    (0.0, crate::ui::band_anchor_y(SHADE_BAND)),
                     210.0,
                 );
             }
@@ -268,7 +271,7 @@ fn build_rivals_ui(world: &mut World) {
                 spawn_text(
                     &mut commands,
                     "NO TAPES OF THIS RIVALRY YET".to_string(),
-                    26.0,
+                    crate::ui::TextRole::RivalNoTapes,
                     render::palette::BONE.with_alpha(0.5),
                     (0.0, row_anchor_y(0, DETAIL_TAPES_TOP, DETAIL_TAPES_PITCH)),
                     210.0,
@@ -278,7 +281,7 @@ fn build_rivals_ui(world: &mut World) {
                 spawn_text(
                     &mut commands,
                     format!("ROLL {}", tape.trim_end_matches(".bmrg")),
-                    28.0,
+                    crate::ui::TextRole::RivalTape,
                     render::palette::SPARK,
                     (0.0, row_anchor_y(i, DETAIL_TAPES_TOP, DETAIL_TAPES_PITCH)),
                     210.0,
@@ -288,11 +291,11 @@ fn build_rivals_ui(world: &mut World) {
     }
 
     // BACK, in the shared language.
-    let back_y = 1.0 - (BACK_BAND.0 + BACK_BAND.1);
+    let back_y = crate::ui::band_anchor_y(BACK_BAND);
     spawn_text(
         &mut commands,
         "BACK".to_string(),
-        40.0,
+        crate::ui::TextRole::Back,
         render::palette::HOT_BONE,
         (0.0, back_y),
         210.0,
@@ -303,7 +306,7 @@ fn enter_rivals(world: &mut World) {
     // Capture-verification reach (the TWOTOP_AUTOSTART family): land
     // straight on the deepest rivalry's detail so the harness can see
     // the facts stack, the shade band, and the tape rows without input.
-    let detail = std::env::var("TWOTOP_AUTOSTART").is_ok_and(|v| v == "rivalsdetail");
+    let detail = crate::config::Knob::Autostart.value().as_deref() == Some("rivalsdetail");
     *world.resource_mut::<RivalsView>() = if detail {
         ranked(world.resource::<CareerRecord>())
             .first()
@@ -516,6 +519,14 @@ impl Plugin for RivalsPlugin {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_rivals_tap_targets_never_overlap() {
+        for band in [crate::ui::TOP_EXIT, BACK_BAND] {
+            assert!(!crate::ui::overlaps(SHADE_BAND, band), "{band:?}");
+        }
+        assert!(!crate::ui::overlaps(BACK_BAND, crate::ui::TOP_EXIT));
+    }
     use crate::grudge::rival_key;
 
     fn rival(name: &str, wins: u32, losses: u32, last_met: u64) -> RivalRecord {

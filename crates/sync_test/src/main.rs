@@ -3,10 +3,8 @@ use bevy::time::TimeUpdateStrategy;
 use bevy_ggrs::GgrsPlugin;
 use bevy_ggrs::prelude::*;
 use core::time::Duration;
-use fixed_math::Vec2F;
 use sim::{
     DefaultInputsPlugin, GgrsCfg, Player, PlayerInput, PositionF, SimPlugin, SynthesizedInputs,
-    VelocityF,
 };
 
 fn main() {
@@ -45,17 +43,12 @@ fn main() {
     app.add_plugins(DefaultInputsPlugin);
     app.insert_resource(Session::SyncTest(session));
 
-    // Spawn one entity per player handle.
-    app.world_mut().spawn((
-        Player { handle: 0 },
-        PositionF(Vec2F::ZERO),
-        VelocityF(Vec2F::ZERO),
-    ));
-    app.world_mut().spawn((
-        Player { handle: 1 },
-        PositionF(Vec2F::ZERO),
-        VelocityF(Vec2F::ZERO),
-    ));
+    // The table every builder lays: duelists at their spawn points, walls,
+    // cover and the arena's pyres (rollback entities too), in the one
+    // canonical order.
+    let arena = sim::ArenaId::Anchor;
+    app.insert_resource(sim::SelectedArena(arena));
+    sim::spawn_match_world_now(app.world_mut(), arena);
 
     for f in 0..frames {
         // Alternate stick direction every 60 frames so the entities move,

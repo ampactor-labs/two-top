@@ -27,9 +27,18 @@ pub fn intro_lines(
     practice: bool,
     my_name: &str,
     peer_name: Option<&str>,
+    shade_name: Option<&str>,
     gauntlet_tier: u32,
     rivalry: Option<String>,
 ) -> (String, String) {
+    // A shade moves neither the ladder nor the rivalry: it is sparring,
+    // against a fitted likeness — named as one.
+    if practice && let Some(shade) = shade_name {
+        return (
+            format!("{my_name} vs {shade} SHADE"),
+            "SPARRING".to_string(),
+        );
+    }
     if practice {
         let stakes = if crate::grudge::gauntlet_mastered(gauntlet_tier) {
             format!("GAUNTLET TIER {gauntlet_tier} - MASTERED")
@@ -47,22 +56,28 @@ pub fn intro_lines(
 }
 
 fn spawn_intro_card(mut commands: Commands) {
-    for (line, fy, size) in [(0usize, 0.26, 56.0), (1usize, 0.325, 32.0)] {
+    for (line, fy, size) in [
+        (0usize, 0.26, crate::ui::TextRole::IntroTitle),
+        (1usize, 0.325, crate::ui::TextRole::IntroSub),
+    ] {
         commands.spawn((
             IntroCardLine(line),
             Text2d::new(String::new()),
-            TextFont {
-                font_size: size,
-                ..default()
-            },
+            (
+                TextFont {
+                    font_size: size.default_size(),
+                    ..default()
+                },
+                size,
+            ),
             TextColor(if line == 0 {
                 render::palette::HOT_BONE
             } else {
                 render::palette::BONE.with_alpha(0.85)
             }),
             TextLayout::new_with_justify(Justify::Center),
-            ScreenAnchor::new(0.0, 1.0 - 2.0 * fy, 0.0, 0.0),
-            Transform::from_xyz(0.0, 0.0, 205.0),
+            ScreenAnchor::new(0.0, crate::ui::anchor_y(fy), 0.0, 0.0),
+            Transform::from_xyz(0.0, 0.0, crate::ui::z::MENU_TEXT - 5.0),
             Visibility::Hidden,
         ));
     }
@@ -85,6 +100,8 @@ fn update_intro_card(
     career: Res<crate::grudge::CareerRecord>,
     profile: Res<crate::profile::LocalProfile>,
     peer: Res<net::PeerProfile>,
+    first_blood: Res<crate::first_blood::FirstBlood>,
+    shade: Res<crate::bot::ShadeStyle>,
     mut q: Query<(&IntroCardLine, &mut Text2d, &mut Visibility)>,
 ) {
     let show = *screen.get() == AppScreen::InMatch
@@ -106,13 +123,17 @@ fn update_intro_card(
         practice.0,
         &profile.name_string(),
         peer_name.as_deref(),
+        shade.0.as_ref().map(|s| s.name.as_str()),
         career.gauntlet_tier,
         career.rivalry_line(peer.0),
     );
+    if first_blood.active {
+        stakes = "FIRST BLOOD".to_string();
+    }
     // Online the table was agreed at pairing and may not be the one this
     // player picked — say where they are sitting.
     if online {
-        let table = format!("AT {}", crate::arena_select::arena_title(selected.0));
+        let table = format!("AT {}", render::arena::info(selected.0).title);
         stakes = if stakes.is_empty() {
             table
         } else {
@@ -145,10 +166,10 @@ mod tests {
 
     #[test]
     fn practice_card_states_the_tier() {
-        let (names, stakes) = intro_lines(true, true, "CURS", None, 6, None);
+        let (names, stakes) = intro_lines(true, true, "CURS", None, None, 6, None);
         assert_eq!(names, "CURS vs THE BOT");
         assert_eq!(stakes, "GAUNTLET TIER 6");
-        let (_, fresh) = intro_lines(false, true, "CURS", None, 0, None);
+        let (_, fresh) = intro_lines(false, true, "CURS", None, None, 0, None);
         assert_eq!(fresh, "SPARRING");
     }
 
@@ -159,6 +180,7 @@ mod tests {
             false,
             "CURS",
             Some("TAGA"),
+            None,
             0,
             Some("4TH MEETING with TAGA - you lead 2-1".into()),
         );
@@ -167,8 +189,15 @@ mod tests {
     }
 
     #[test]
+    fn a_shade_is_named_as_one() {
+        let (names, stakes) = intro_lines(true, true, "CURS", None, Some("TAGA"), 6, None);
+        assert_eq!(names, "CURS vs TAGA SHADE");
+        assert_eq!(stakes, "SPARRING");
+    }
+
+    #[test]
     fn couch_card_says_the_only_true_thing() {
-        let (names, stakes) = intro_lines(false, false, "CURS", None, 3, None);
+        let (names, stakes) = intro_lines(false, false, "CURS", None, None, 3, None);
         assert_eq!(names, "CUR vs STAG");
         assert!(stakes.is_empty(), "no stakes line to invent on the couch");
     }
@@ -177,7 +206,7 @@ mod tests {
     fn online_without_identity_falls_back_to_couch_read() {
         // A peer build with no profile message yet: no name to print, so
         // the card refuses to guess.
-        let (names, _) = intro_lines(true, false, "CURS", None, 0, None);
+        let (names, _) = intro_lines(true, false, "CURS", None, None, 0, None);
         assert_eq!(names, "CUR vs STAG");
     }
 }

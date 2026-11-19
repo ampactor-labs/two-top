@@ -1,0 +1,8 @@
+# Files compared byte for byte on every platform must check out the same
+# on every platform. A Windows checkout (core.autocrlf=true on the hosted
+# runners) rewrote the committed checksum goldens to CRLF, and the
+# Windows determinism lane's golden test failed on line endings alone.
+*.tsv  text eol=lf
+*.sh   text eol=lf
+# Match tapes are binary: never touched by line-ending conversion.
+*.bmrg binary

@@ -10,6 +10,11 @@
 //! them to disk, run the script — and asserts the script names a real
 //! frame and a real column from the checksum TSV header.
 
+// These run scripts/diagnose_desync.sh through bash. On the Windows lane
+// `bash` is WSL's launcher with no Linux installed; the script is a
+// Unix operator tool, covered on the Linux and macOS lanes.
+#![cfg(not(windows))]
+
 use replay_sync::{canonical_replay, compute_checksum_tsv};
 use std::path::PathBuf;
 use std::process::Command;
