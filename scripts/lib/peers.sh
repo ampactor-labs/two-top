@@ -19,9 +19,20 @@ peers_init() {
   PORT=$2
   DISPLAY_NUM=$3
   PIDS=()
-  trap 'for p in "${PIDS[@]}"; do kill -CONT "$p" 2>/dev/null; kill "$p" 2>/dev/null; done' EXIT
-  matchbox_server "127.0.0.1:$PORT" > "$WORK/signal.log" 2>&1 &
-  PIDS+=($!); disown
+  trap peers_stop EXIT
+  # Back-to-back smokes reuse the port; the last one's server can still
+  # hold it for a moment (and 0.15 refuses to start rather than wait), so
+  # retry the bind for a while instead of failing the next scenario.
+  local tries=0 server
+  while :; do
+    matchbox_server "127.0.0.1:$PORT" > "$WORK/signal.log" 2>&1 &
+    server=$!; disown
+    sleep 1
+    kill -0 "$server" 2>/dev/null && break
+    tries=$((tries + 1))
+    [ $tries -ge 20 ] && { echo "FAIL: the room server could not bind port $PORT"; cat "$WORK/signal.log"; exit 1; }
+  done
+  PIDS+=($server)
   Xvfb "$DISPLAY_NUM" -screen 0 1280x1400x24 > /dev/null 2>&1 &
   PIDS+=($!); disown
   sleep 2
@@ -45,6 +56,18 @@ peer_start() {
 }
 
 pid_of() { eval "echo \$PID_$1"; }
+
+# Stop everything this smoke started and wait (up to 5 s) for it to exit,
+# so the next smoke finds the port and the display free.
+peers_stop() {
+  local p n
+  for p in "${PIDS[@]}"; do kill -CONT "$p" 2>/dev/null; kill "$p" 2>/dev/null; done
+  for n in $(seq 50); do
+    for p in "${PIDS[@]}"; do kill -0 "$p" 2>/dev/null && break; p=; done
+    [ -z "$p" ] && return 0
+    sleep 0.1
+  done
+}
 
 # kill_peer <name> [signal]: e.g. kill_peer b -9, kill_peer b -STOP.
 kill_peer() { kill "${2:--TERM}" "$(pid_of "$1")" 2>/dev/null; }
