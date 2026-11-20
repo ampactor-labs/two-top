@@ -10,11 +10,10 @@
 use std::io::Write;
 
 use bevy::prelude::*;
-use bevy_ggrs::PlayerInputs;
 use sim::{
     AnimState, Boomerang, BoomerangMods, CatchStreak, DashState, Dead, Empowered, FrameCount,
-    GgrsCfg, HeldModifier, InputHistory, MatchScore, MatchState, OobTimer, Player, PositionF,
-    SimRng, SpawnGuard, StunFrames, Taunt, ThrowCapacity, ThrowCharge, VelocityF,
+    HeldModifier, InputHistory, MatchScore, MatchState, OobTimer, Player, PositionF, SimRng,
+    SpawnGuard, StunFrames, Taunt, ThrowCapacity, ThrowCharge, VelocityF,
 };
 
 /// The open log, if the knob is set.
@@ -40,7 +39,7 @@ fn log_state(
     score: Res<MatchScore>,
     rng: Res<SimRng>,
     history: Res<InputHistory>,
-    inputs: Option<Res<PlayerInputs<GgrsCfg>>>,
+    inputs: Res<sim::TickInputs>,
     players: Query<(
         &Player,
         (
@@ -79,14 +78,7 @@ fn log_state(
     fangs.sort();
     // The input values only: their status (confirmed or predicted)
     // legitimately differs between the two peers.
-    let inputs = inputs
-        .map(|i| {
-            format!(
-                "{:?}",
-                i.iter().map(|(input, _)| *input).collect::<Vec<_>>()
-            )
-        })
-        .unwrap_or_default();
+    let inputs = format!("{:?}", inputs.0.to_vec());
     // The rollback order bevy_ggrs mixes into every checksum: the number
     // of ids ever registered, and the index of each live player and fang.
     let mut order: Vec<String> = ids

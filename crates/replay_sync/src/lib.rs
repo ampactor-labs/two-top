@@ -386,6 +386,51 @@ pub fn compute_live_checksum_tsv(replay: &Replay) -> String {
     checksum_tsv(build_live_app(replay.clone()), replay.header.frame_count)
 }
 
+/// [`compute_live_checksum_tsv`] without a session: the same tape run
+/// through [`sim::fast_forward`] on a freshly laid table. Equal to the live
+/// TSV row for row, which is what lets every re-simulation that is not a
+/// live match (a theater seek, a resume, a scouting pass) use it.
+pub fn compute_fast_forward_checksum_tsv(replay: &Replay) -> String {
+    let mut world = fast_forward_world(replay);
+    let mut out = String::new();
+    out.push_str(TSV_HEADER);
+    out.push('\n');
+    // The session-driven run's first update simulates nothing (the session
+    // is starting), so its row `f` is the table after `f` ticks: row 0 is
+    // the table as laid.
+    let frames = replay.header.frame_count;
+    if frames == 0 {
+        return out;
+    }
+    checksum_row(&mut out, world.world_mut(), 0);
+    let n = ((frames - 1) as usize).min(replay.inputs.len());
+    let mut frame = 1u32;
+    sim::fast_forward(world.world_mut(), &replay.inputs[..n], |world| {
+        checksum_row(&mut out, world, frame);
+        frame += 1;
+    });
+    out
+}
+
+/// A headless app holding the table `replay` was played on, ready for
+/// [`sim::fast_forward`]: the sim, bevy_ggrs's schedules, no session.
+pub fn fast_forward_world(replay: &Replay) -> App {
+    let mut app = App::new();
+    app.add_plugins(MinimalPlugins);
+    app.insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_secs_f64(
+        1.0 / sim::TICK_HZ as f64,
+    )));
+    app.add_plugins(GgrsPlugin::<GgrsCfg>::default());
+    app.add_plugins(SimPlugin);
+    let arena = sim::ArenaId::from_u8(replay.header.arena_id);
+    app.insert_resource(sim::SelectedArena(arena));
+    sim::spawn_match_world_now(app.world_mut(), arena);
+    // One update finishes plugin setup (startup systems, schedules); with
+    // no session bevy_ggrs leaves the frame count at zero.
+    app.update();
+    app
+}
+
 fn checksum_tsv(mut app: App, frames: u32) -> String {
     let mut out = String::new();
     out.push_str(TSV_HEADER);
@@ -393,7 +438,14 @@ fn checksum_tsv(mut app: App, frames: u32) -> String {
 
     for frame in 0..frames {
         app.update();
-        let world = app.world_mut();
+        checksum_row(&mut out, app.world_mut(), frame);
+    }
+
+    out
+}
+
+fn checksum_row(out: &mut String, world: &mut World, frame: u32) {
+    {
         let pos_part = hash_component::<PositionF>(world);
         let vel_part = hash_component::<VelocityF>(world);
         let dash_part = hash_component::<DashState>(world);
@@ -404,13 +456,11 @@ fn checksum_tsv(mut app: App, frames: u32) -> String {
         let total =
             pos_part ^ vel_part ^ dash_part ^ stun_part ^ boom_part ^ score_part ^ state_part;
         writeln!(
-            &mut out,
+            out,
             "{frame}\t{total:016x}\t{pos_part:016x}\t{vel_part:016x}\t{dash_part:016x}\t{stun_part:016x}\t{boom_part:016x}\t{score_part:016x}\t{state_part:016x}"
         )
         .expect("write tsv row");
     }
-
-    out
 }
 
 /// Replay the tape to its end and return the final match score — the

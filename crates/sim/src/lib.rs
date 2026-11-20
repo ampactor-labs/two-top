@@ -1,8 +1,8 @@
 use bevy::prelude::*;
 use bevy_ggrs::prelude::*;
 use bevy_ggrs::{
-    AdvanceWorld, AdvanceWorldSystems, GgrsConfig, LocalInputs, LocalPlayers, PlayerInputs,
-    RollbackApp, SyncTestMismatch,
+    AdvanceWorld, AdvanceWorldSystems, ConfirmedFrameCount, GgrsConfig, LocalInputs, LocalPlayers,
+    PlayerInputs, RollbackApp, RollbackFrameCount, SyncTestMismatch,
 };
 use bytemuck::{Pod, Zeroable};
 use fixed_math::{Fix, RectF, Vec2F};
@@ -1248,12 +1248,73 @@ pub struct SynthesizedInputs(pub PlayerInput);
 /// detection (e.g. dash-cancel into throw).
 pub const INPUT_HISTORY_LEN: usize = 8;
 
+/// The inputs of the tick being simulated, one per handle: the only input
+/// the sim reads. `capture_tick_inputs` fills it from bevy_ggrs's
+/// `PlayerInputs` at the top of every live tick; anything else that runs
+/// ticks (a fast-forward, a resume) sets it directly and leaves
+/// `PlayerInputs` absent. Overwritten before each use, so it needs no
+/// rollback registration and is never checksummed.
+#[derive(Resource, Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct TickInputs(pub [PlayerInput; 2]);
+
+impl std::ops::Index<usize> for TickInputs {
+    type Output = PlayerInput;
+    fn index(&self, handle: usize) -> &PlayerInput {
+        &self.0[handle]
+    }
+}
+
+/// Run `inputs.len()` ticks without a ggrs session, exactly as bevy_ggrs
+/// advances a frame: bump `RollbackFrameCount`, hand the sim the tick's
+/// inputs, run `AdvanceWorld` (and so `GgrsSchedule` with its command
+/// flushes and bevy_ggrs's own per-frame systems). Every tick is final, so
+/// `ConfirmedFrameCount` follows the frame. `after_tick` sees the world
+/// after each tick (an observer for scouting, a checksum for a test).
+///
+/// No snapshots are taken: a fast-forward is a straight run, not a
+/// session. Pass a tape in chunks to spread a long one across frames.
+/// The theater's seek, a resume, a scouting pass and replay checks all
+/// re-simulate through this one routine.
+pub fn fast_forward(
+    world: &mut World,
+    inputs: &[[PlayerInput; 2]],
+    mut after_tick: impl FnMut(&mut World),
+) {
+    for pair in inputs {
+        let frame = {
+            let mut count = world.get_resource_or_insert_with(|| RollbackFrameCount(0));
+            count.0 += 1;
+            count.0
+        };
+        world.insert_resource(ConfirmedFrameCount(frame));
+        world.get_resource_or_insert_with(TickInputs::default).0 = *pair;
+        world.run_schedule(AdvanceWorld);
+        after_tick(world);
+    }
+}
+
+/// First `GgrsSchedule` system: copy bevy_ggrs's inputs for this tick into
+/// [`TickInputs`]. Without `PlayerInputs` (a tick driven outside bevy_ggrs)
+/// it leaves whatever the driver set.
+pub fn capture_tick_inputs(
+    ggrs: Option<Res<PlayerInputs<GgrsCfg>>>,
+    mut inputs: ResMut<TickInputs>,
+) {
+    // One seat in some test sessions; seats past the session's stay neutral.
+    if let Some(ggrs) = ggrs {
+        inputs.0 = [PlayerInput::default(); 2];
+        for (seat, (input, _)) in inputs.0.iter_mut().zip(ggrs.iter()) {
+            *seat = *input;
+        }
+    }
+}
+
 /// Per-handle ring buffer of the last `INPUT_HISTORY_LEN` ticks of
 /// inputs. Index 0 is oldest, INPUT_HISTORY_LEN-1 is newest. Pushed
 /// at the END of each `GgrsSchedule` tick by `advance_input_history`,
 /// so during edge consumers in tick N the ring's last entry is tick
 /// N-1's input — i.e. "previous" from the consumer's POV. Edges are
-/// derived by comparing `PlayerInputs<GgrsCfg>` (= current tick) to
+/// derived by comparing [`TickInputs`] (= current tick) to
 /// the ring's last entry.
 ///
 /// Rolled back so resimulation reconstructs the same forgiveness
@@ -1411,7 +1472,7 @@ pub fn tick_dash_state(state: DashState) -> DashState {
 /// so this tick's movement system sees the new `DashState::Dashing`.
 pub fn start_dash(
     match_state: Res<MatchState>,
-    inputs: Res<PlayerInputs<GgrsCfg>>,
+    inputs: Res<TickInputs>,
     history: Res<InputHistory>,
     mut q: Query<(
         &Player,
@@ -1428,7 +1489,7 @@ pub fn start_dash(
         if dead.is_dying() {
             continue;
         }
-        let (curr, _status) = inputs[player.handle];
+        let curr = inputs[player.handle];
         let ring = history.0.get(&player.handle);
         let prev = ring.map(previous_input).unwrap_or_default();
         // A fresh DASH edge, or one still alive in the buffer window: a
@@ -1459,7 +1520,7 @@ pub fn start_dash(
 /// favor (`tick_taunt_and_guard` cancels the taunt the same tick).
 pub fn start_taunt(
     match_state: Res<MatchState>,
-    inputs: Res<PlayerInputs<GgrsCfg>>,
+    inputs: Res<TickInputs>,
     history: Res<InputHistory>,
     mut q: Query<(&Player, &Dead, &DashState, &ThrowCharge, &mut Taunt)>,
 ) {
@@ -1474,7 +1535,7 @@ pub fn start_taunt(
         {
             continue;
         }
-        let (curr, _status) = inputs[player.handle];
+        let curr = inputs[player.handle];
         let prev = history
             .0
             .get(&player.handle)
@@ -1504,7 +1565,7 @@ pub fn start_taunt(
 #[allow(clippy::type_complexity)]
 pub fn player_movement(
     match_state: Res<MatchState>,
-    inputs: Res<PlayerInputs<GgrsCfg>>,
+    inputs: Res<TickInputs>,
     mut q: Query<(
         &Player,
         &Dead,
@@ -1528,7 +1589,7 @@ pub fn player_movement(
         let velocity = match *dash {
             DashState::Dashing { dir, .. } => Vec2F::new(dir.x * dash_speed, dir.y * dash_speed),
             _ => {
-                let (input, _status) = inputs[player.handle];
+                let input = inputs[player.handle];
                 // Rooted while winding up OR steering a fang home with AIM
                 // held. An inert hold (no charge armed, no fang out) leaves
                 // the stick to walk — the AIM bit alone means nothing.
@@ -1579,7 +1640,7 @@ pub fn tick_player_timers(mut q: Query<(&mut DashState, &mut StunFrames)>) {
 ///   otherwise it counts down, and completing the full flex feeds the
 ///   perfect-catch streak ladder one tier.
 pub fn tick_taunt_and_guard(
-    inputs: Res<PlayerInputs<GgrsCfg>>,
+    inputs: Res<TickInputs>,
     history: Res<InputHistory>,
     mut q: Query<(
         &Player,
@@ -1592,7 +1653,7 @@ pub fn tick_taunt_and_guard(
     )>,
 ) {
     for (player, dead, dash, charge, mut taunt, mut guard, mut streak) in &mut q {
-        let (curr, _status) = inputs[player.handle];
+        let curr = inputs[player.handle];
         let prev = history
             .0
             .get(&player.handle)
@@ -2143,7 +2204,7 @@ pub fn throw_boomerangs(
     frame: Res<FrameCount>,
     match_state: Res<MatchState>,
     mut commands: Commands,
-    inputs: Res<PlayerInputs<GgrsCfg>>,
+    inputs: Res<TickInputs>,
     history: Res<InputHistory>,
     mut players: ThrowerQuery,
     boomerangs: Query<(&Boomerang, &BoomerangMods)>,
@@ -2198,7 +2259,7 @@ pub fn throw_boomerangs(
             .filter(|(b, m)| b.owner_handle == player.handle && !m.is_secondary)
             .count();
         let can_throw = owned < capacity.0 as usize;
-        let (curr, _) = inputs[player.handle];
+        let curr = inputs[player.handle];
         // A ring that hasn't been created yet (first-ever tick) reads as
         // default inputs, so a first-tick press still counts as a fresh
         // edge — same convention as recall_boomerangs. Skipping the tick
@@ -2723,7 +2784,7 @@ type RecallOwnerQuery<'w, 's> = Query<
 pub fn recall_boomerangs(
     frame: Res<FrameCount>,
     match_state: Res<MatchState>,
-    inputs: Res<PlayerInputs<GgrsCfg>>,
+    inputs: Res<TickInputs>,
     history: Res<InputHistory>,
     mut players: RecallOwnerQuery,
     mut boomerangs: RecallQuery,
@@ -2754,7 +2815,7 @@ pub fn recall_boomerangs(
             continue;
         };
         let no_free_slot = owned.get(&boom.owner_handle).copied().unwrap_or(0) >= capacity.0;
-        let (curr, _) = inputs[boom.owner_handle];
+        let curr = inputs[boom.owner_handle];
         // Manual recall: owner pressed THROW_DOWN this tick AND has no slot to
         // throw into (else the press is a fresh charged throw). A ring that
         // hasn't been created yet (first-ever tick) reads as default inputs,
@@ -3359,7 +3420,7 @@ type RematchPlayerQuery<'w, 's> = Query<
 #[allow(clippy::too_many_arguments)]
 pub fn apply_rematch(
     frame: Res<FrameCount>,
-    inputs: Res<PlayerInputs<GgrsCfg>>,
+    inputs: Res<TickInputs>,
     history: Res<InputHistory>,
     mut state: ResMut<MatchState>,
     mut score: ResMut<MatchScore>,
@@ -3381,7 +3442,7 @@ pub fn apply_rematch(
     // Restart on a THROW rising edge from either player (edge derived from the
     // rolled-back history, never a wire bit — Global rule 4).
     let restart = players.iter().any(|(player, ..)| {
-        let (curr, _status) = inputs[player.handle];
+        let curr = inputs[player.handle];
         let prev = history
             .0
             .get(&player.handle)
@@ -3532,7 +3593,7 @@ pub fn next_anim_state(
 /// Per CONVENTIONS: animation does not interpolate — `display_index`
 /// snaps to a single atlas frame per tick.
 pub fn advance_animation(
-    inputs: Res<PlayerInputs<GgrsCfg>>,
+    inputs: Res<TickInputs>,
     mut q: Query<(
         &Player,
         &Dead,
@@ -3545,7 +3606,7 @@ pub fn advance_animation(
     boomerangs: Query<(&Boomerang, &BoomerangMods)>,
 ) {
     for (player, dead, dash, stun, charge, taunt, mut anim) in &mut q {
-        let (curr, _) = inputs[player.handle];
+        let curr = inputs[player.handle];
         // While a LIVE aim rides the wire (charge armed, or a fang out being
         // steered) the stick carries aim, not movement, and the player is
         // anchored — it must not read as "moving" or it'd play the run cycle
@@ -3571,12 +3632,12 @@ pub fn advance_animation(
 /// populated for both local and remote players (relevant once
 /// networking lands in Phase 11).
 pub fn advance_input_history(
-    inputs: Res<PlayerInputs<GgrsCfg>>,
+    inputs: Res<TickInputs>,
     mut history: ResMut<InputHistory>,
     players: Query<&Player>,
 ) {
     for player in &players {
-        let (current_input, _status) = inputs[player.handle];
+        let current_input = inputs[player.handle];
         let entry = history
             .0
             .entry(player.handle)
@@ -3677,6 +3738,7 @@ impl Plugin for SimPlugin {
             .init_resource::<MatchScore>()
             .init_resource::<MatchState>()
             .init_resource::<InputHistory>()
+            .init_resource::<TickInputs>()
             .init_resource::<SelectedArena>()
             .init_resource::<BridgeState>()
             .init_resource::<DoorCooldown>()
@@ -3773,7 +3835,7 @@ impl Plugin for SimPlugin {
         app.add_systems(
             GgrsSchedule,
             (
-                snapshot_previous,
+                (capture_tick_inputs, snapshot_previous).chain(),
                 tick_respawn,
                 apply_rematch,
                 tick_match_state,

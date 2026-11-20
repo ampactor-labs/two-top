@@ -25,9 +25,9 @@
 //! nothing feeds back into sim, so determinism is untouched.
 
 use bevy::prelude::*;
-use bevy_ggrs::{GgrsSchedule, PlayerInputs};
+use bevy_ggrs::GgrsSchedule;
 use replay::{FORMAT_VERSION, MAGIC, Replay, ReplayHeader, encode};
-use sim::{FrameCount, GgrsCfg, MatchScore, MatchState, PlayerInput, SelectedArena, TICK_HZ};
+use sim::{FrameCount, MatchScore, MatchState, PlayerInput, SelectedArena, TICK_HZ};
 use std::path::PathBuf;
 
 /// A tick-0 write against a tape longer than this is a fresh session (new
@@ -97,9 +97,9 @@ pub struct LastSavedReplay(pub Option<PathBuf>);
 /// simulated. Runs for every tick INCLUDING resimulations — a resimulated
 /// tick overwrites its slot with the corrected inputs, so the tape
 /// converges to confirmed values by construction.
-pub fn capture_tick_inputs(
+pub fn record_tick(
     frame: Res<FrameCount>,
-    inputs: Res<PlayerInputs<GgrsCfg>>,
+    inputs: Res<sim::TickInputs>,
     score: Res<MatchScore>,
     theater: Res<crate::theater::TheaterMode>,
     mut rec: ResMut<MatchRecorder>,
@@ -121,7 +121,7 @@ pub fn capture_tick_inputs(
         // A fresh session always restarts at tick 0; start a fresh tape.
         rec.reset();
     }
-    let pair = [inputs[0].0, inputs[1].0];
+    let pair = inputs.0;
     let score = *score;
     match t.cmp(&rec.frames.len()) {
         std::cmp::Ordering::Less => {
@@ -357,10 +357,7 @@ impl Plugin for MatchRecorderPlugin {
             // After the ENTIRE sim chain (CONVENTIONS: explicit ordering in
             // GgrsSchedule) — the frame counter and input history have both
             // advanced, so the tick just simulated is `FrameCount - 1`.
-            .add_systems(
-                GgrsSchedule,
-                capture_tick_inputs.after(sim::advance_input_history),
-            )
+            .add_systems(GgrsSchedule, record_tick.after(sim::advance_input_history))
             .add_systems(
                 Update,
                 save_replay_on_match_over.after(crate::attest::settle_match_over),
@@ -471,10 +468,7 @@ mod tests {
         app.insert_resource(Session::SyncTest(session));
         app.init_resource::<MatchRecorder>();
         app.init_resource::<crate::theater::TheaterMode>();
-        app.add_systems(
-            GgrsSchedule,
-            capture_tick_inputs.after(sim::advance_input_history),
-        );
+        app.add_systems(GgrsSchedule, record_tick.after(sim::advance_input_history));
         for handle in 0..2usize {
             app.world_mut().spawn((
                 Player { handle },

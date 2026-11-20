@@ -193,15 +193,11 @@ fn build(arena: ArenaId, seats: [Seat; 2], seed: u32, check_distance: usize) -> 
 #[derive(Resource, Default)]
 struct Tape(Vec<[PlayerInput; 2]>);
 
-fn record_tape(
-    frame: Res<sim::FrameCount>,
-    inputs: Res<PlayerInputs<GgrsCfg>>,
-    mut tape: ResMut<Tape>,
-) {
+fn record_tape(frame: Res<sim::FrameCount>, inputs: Res<sim::TickInputs>, mut tape: ResMut<Tape>) {
     let Some(t) = frame.0.checked_sub(1) else {
         return;
     };
-    let pair = [inputs[0].0, inputs[1].0];
+    let pair = inputs.0;
     let t = t as usize;
     if t < tape.0.len() {
         tape.0[t] = pair;
