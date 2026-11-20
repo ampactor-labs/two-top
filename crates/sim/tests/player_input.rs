@@ -48,14 +48,15 @@ fn button_bits_are_unique() {
 }
 
 #[test]
-fn button_bits_in_low_nibble_only() {
-    // ARCHITECTURE.md: bits 4-7 reserved.
+fn button_bits_stay_out_of_the_reserved_bits() {
+    // ARCHITECTURE.md: bits 5-7 reserved.
     let combined = PlayerInput::THROW_DOWN
         | PlayerInput::AIM_ACTIVE
         | PlayerInput::DASH_DOWN
-        | PlayerInput::TAUNT_DOWN;
+        | PlayerInput::TAUNT_DOWN
+        | PlayerInput::HOLD;
     assert_eq!(
-        combined & 0xF0,
+        combined & 0xE0,
         0,
         "named button bits leak into reserved nibble"
     );

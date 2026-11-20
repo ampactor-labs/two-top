@@ -31,7 +31,11 @@ impl PlayerInput {
     pub const AIM_ACTIVE: u8 = 0b0000_0010;
     pub const DASH_DOWN: u8 = 0b0000_0100;
     pub const TAUNT_DOWN: u8 = 0b0000_1000;
-    // Bits 4-7 reserved.
+    /// "Hold the round": sent by both phones for a moment after a dropped
+    /// link is restored. Acted on only when BOTH seats send it on the same
+    /// tick ([`apply_resume_hold`]), so no one player can stall a match.
+    pub const HOLD: u8 = 0b0001_0000;
+    // Bits 5-7 reserved.
 }
 
 // ---- ggrs config ----
@@ -137,7 +141,13 @@ pub fn tick_duration() -> core::time::Duration {
 /// streak, OOB timer and throw state reset, the first pickup is 8 s off
 /// again, and the countdown is [`MatchState::opening`] (one tick shorter
 /// than before, as long as a fresh match's).
-pub const SIM_VERSION: u32 = 16;
+///
+/// `17` = a fair comeback. [`PlayerInput::HOLD`] from both seats on one
+/// tick of a live round turns it into a one-digit countdown (fangs and
+/// charges cleared, positions kept, a fresh round clock): what both phones
+/// send right after a dropped link is restored, so neither player walks
+/// back into a fight already under way.
+pub const SIM_VERSION: u32 = 17;
 
 // ---- Components ----
 
@@ -3404,6 +3414,25 @@ pub fn tick_match_state(
     };
 }
 
+/// `GgrsSchedule` system: both seats sending [`PlayerInput::HOLD`] on one
+/// tick of a live round restart it with a one-digit countdown from where
+/// everyone stands. Consensus only: one seat's HOLD does nothing, so it
+/// cannot be used to stall. Outside a live round it is ignored (a countdown,
+/// a round break or a decided match already holds the players).
+pub fn apply_resume_hold(
+    frame: Res<FrameCount>,
+    inputs: Res<TickInputs>,
+    mut state: ResMut<MatchState>,
+) {
+    let both = inputs.0.iter().all(|i| i.buttons & PlayerInput::HOLD != 0);
+    if both && matches!(*state, MatchState::InRound { .. }) {
+        *state = MatchState::Countdown {
+            digit: MID_MATCH_COUNTDOWN_DIGITS,
+            expires_at_frame: frame.0 + COUNTDOWN_DIGIT_FRAMES,
+        };
+    }
+}
+
 /// `GgrsSchedule` system: deterministic "play again". `MatchOver` is terminal
 /// in [`tick_match_state`]; this is the one escape — a THROW rising edge from
 /// *either* player once the rematch is open ([`MatchState::rematch_open`],
@@ -3875,7 +3904,7 @@ impl Plugin for SimPlugin {
             (
                 (capture_tick_inputs, snapshot_previous).chain(),
                 tick_respawn,
-                apply_rematch,
+                (apply_rematch, apply_resume_hold).chain(),
                 tick_match_state,
                 reset_round_state,
                 (start_dash, start_taunt).chain(),

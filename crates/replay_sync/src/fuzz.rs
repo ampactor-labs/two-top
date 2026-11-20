@@ -20,10 +20,11 @@ use sim::PlayerInput;
 /// Phase 5 cross-platform check.
 pub const FUZZ_FRAMES: u32 = 1800;
 
-/// Wire-format mask for valid `buttons` bits. Bits 4-7 are reserved per
+/// Wire-format mask for valid `buttons` bits (HOLD included, so the fuzzer
+/// drives the resume countdown too). Bits 5-7 are reserved per
 /// ARCHITECTURE.md § Input Model and must never be set on the wire — even
 /// random fuzzer-generated input keeps this contract.
-pub const BUTTONS_VALID_MASK: u8 = 0x0F;
+pub const BUTTONS_VALID_MASK: u8 = 0x1F;
 
 #[derive(Debug)]
 pub enum FuzzError {

@@ -47,9 +47,9 @@ fn fuzz_replay_respects_wire_constraints() {
                 "frame {i} stick_y out of range: {}",
                 p.stick_y
             );
-            // Bits 4-7 of `buttons` are reserved per ARCHITECTURE.md.
+            // Bits 5-7 of `buttons` are reserved per ARCHITECTURE.md.
             assert_eq!(
-                p.buttons & 0xF0,
+                p.buttons & 0xE0,
                 0,
                 "frame {i} reserved button bits set: {:#010b}",
                 p.buttons

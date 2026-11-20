@@ -361,7 +361,8 @@ impl PlayerInput {
     pub const AIM_ACTIVE: u8 = 0b0000_0010;
     pub const DASH_DOWN:  u8 = 0b0000_0100;
     pub const TAUNT_DOWN: u8 = 0b0000_1000;
-    // bits 4-7 reserved
+    pub const HOLD:       u8 = 0b0001_0000; // both seats: resume countdown (SIM 17)
+    // bits 5-7 reserved
 }
 ```
 
