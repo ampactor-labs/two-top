@@ -26,6 +26,11 @@
 //!
 //! If the two never meet again within [`RESUME_WINDOW_SECS`], the match is
 //! booked exactly as the drop always was: unfinished, nobody's win.
+//!
+//! The app itself can die too (Android reclaims a backgrounded app during
+//! a long call). Once a second a live duel writes a [`Checkpoint`]; a
+//! relaunch inside the window finds it and goes straight back into the
+//! resume room, where the other phone is still waiting.
 
 use bevy::prelude::*;
 use bevy_ggrs::Session;
@@ -93,6 +98,208 @@ pub struct ResumeCount(pub u32);
 /// Ticks before which the local input carries HOLD (after a resume).
 #[derive(Resource, Default)]
 pub struct ResumeHold(pub Option<u32>);
+
+/// What a relaunched app needs to resume the duel it died in.
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq)]
+pub struct Checkpoint {
+    /// Unix seconds when written: a checkpoint older than the resume
+    /// window is a duel the other phone has given up on.
+    pub saved_unix: u64,
+    pub ids: (u128, u128),
+    pub local_handle: u8,
+    pub input_delay: u8,
+    pub arena: u8,
+    pub peer_id: u128,
+    pub peer: Option<net::ProfileData>,
+    pub peer_key: Option<[u8; 32]>,
+    pub url: String,
+    pub inputs: Vec<[PlayerInput; 2]>,
+}
+
+const CHECKPOINT_FILE: &str = "resume.bin";
+
+fn unix_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs())
+}
+
+/// Seconds of the resume window a checkpoint written at `saved` still has
+/// at `now`; `None` once it has run out. Pure.
+pub fn checkpoint_left(saved: u64, now: u64) -> Option<f32> {
+    let age = now.saturating_sub(saved) as f32;
+    (age < RESUME_WINDOW_SECS).then_some(RESUME_WINDOW_SECS - age)
+}
+
+fn clear_checkpoint() {
+    if let Some(path) = crate::paths::config_file(CHECKPOINT_FILE) {
+        let _ = std::fs::remove_file(path);
+    }
+}
+
+/// Once a second during a live online duel: the checkpoint a relaunch
+/// resumes from. Removed the moment the duel cannot be resumed any more
+/// (decided, or no longer live).
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
+fn write_checkpoint(
+    time: Res<Time<Real>>,
+    session: Option<Res<Session<GgrsCfg>>>,
+    resume: Option<Res<Resume>>,
+    began: Res<crate::netplay::DuelBegan>,
+    state: Res<sim::MatchState>,
+    lobby: Res<LobbyState>,
+    world_bits: (
+        Res<crate::netplay::SessionIds>,
+        Res<crate::netplay::LocalPlayerHandle>,
+        Res<crate::netplay::SessionLink>,
+        Res<sim::SelectedArena>,
+        Res<net::PeerProfile>,
+        Res<net::PeerKeys>,
+        Res<crate::room_code::RoomCode>,
+        Res<crate::recorder::MatchRecorder>,
+    ),
+    clock: crate::sim_clock::SimClock,
+    mut next_at: Local<f32>,
+    mut written: Local<bool>,
+) {
+    let live = matches!(session.as_deref(), Some(Session::P2P(_)))
+        && began.0
+        && !state.is_match_over()
+        && lobby.is_in_match();
+    if resume.is_some() {
+        return; // a resume in flight keeps the last live checkpoint
+    }
+    if !live {
+        if std::mem::take(&mut *written) {
+            clear_checkpoint();
+        }
+        return;
+    }
+    let now = time.elapsed_secs();
+    if now < *next_at {
+        return;
+    }
+    *next_at = now + 1.0;
+    let (ids, local, link, arena, peer, keys, room, recorder) = world_bits;
+    let (Some(ids), Some(handle), Some(peer_id)) = (ids.0, local.0, lobby_peer(&lobby)) else {
+        return;
+    };
+    let (lo, hi) = (ids.0.min(ids.1), ids.0.max(ids.1));
+    let Some(url) = room.resume_url(&net::resume_room(lo, hi)) else {
+        return;
+    };
+    let checkpoint = Checkpoint {
+        saved_unix: unix_now(),
+        ids,
+        local_handle: handle as u8,
+        input_delay: link.input_delay as u8,
+        arena: arena.0.as_u8(),
+        peer_id,
+        peer: peer.0,
+        peer_key: keys.0,
+        url,
+        inputs: recorder.inputs_through(clock.confirmed_tick().max(0) as usize),
+    };
+    if let (Some(path), Ok(bytes)) = (
+        crate::paths::config_file(CHECKPOINT_FILE),
+        postcard::to_allocvec(&checkpoint),
+    ) && crate::paths::write_atomic(&path, &bytes).is_ok()
+    {
+        *written = true;
+    }
+}
+
+fn lobby_peer(lobby: &LobbyState) -> Option<u128> {
+    match lobby {
+        LobbyState::Connected { peer_id } | LobbyState::Disconnected { peer_id, .. } => {
+            Some(peer_id.0.as_u128())
+        }
+        _ => None,
+    }
+}
+
+/// A checkpoint found at boot, still inside its window: the next match
+/// entry resumes it instead of looking for a new opponent.
+#[derive(Resource)]
+pub struct PendingCheckpoint(pub Checkpoint);
+
+fn load_checkpoint(mut commands: Commands, netplay: Res<crate::netplay::NetplayConfig>) {
+    let Some(path) = crate::paths::config_file(CHECKPOINT_FILE) else {
+        return;
+    };
+    let Ok(bytes) = crate::paths::read_bytes(&path) else {
+        return;
+    };
+    clear_checkpoint();
+    let Ok(checkpoint) = postcard::from_bytes::<Checkpoint>(&bytes) else {
+        return;
+    };
+    if netplay.room_url.is_none() || checkpoint_left(checkpoint.saved_unix, unix_now()).is_none() {
+        return;
+    }
+    tracing::warn!(
+        target: "two_top::resume",
+        ticks = checkpoint.inputs.len(),
+        "relaunched inside a dropped duel's window — going back in",
+    );
+    commands.insert_resource(PendingCheckpoint(checkpoint));
+}
+
+/// On the Title with a pending checkpoint: straight into the match.
+fn enter_pending_resume(
+    pending: Option<Res<PendingCheckpoint>>,
+    mut practice: ResMut<crate::bot::PracticeMode>,
+    mut selected: ResMut<sim::SelectedArena>,
+    mut next: ResMut<NextState<crate::screen::AppScreen>>,
+) {
+    let Some(pending) = pending else {
+        return;
+    };
+    practice.0 = false;
+    selected.0 = sim::ArenaId::from_u8(pending.0.arena);
+    next.set(crate::screen::AppScreen::InMatch);
+}
+
+/// Match entry with a pending checkpoint (`netplay::start_matchbox`): set
+/// the duel back up from it and dial the resume room. `true` if it did.
+pub fn begin_from_checkpoint(world: &mut World) -> bool {
+    let Some(PendingCheckpoint(cp)) = world.remove_resource::<PendingCheckpoint>() else {
+        return false;
+    };
+    let Some(left) = checkpoint_left(cp.saved_unix, unix_now()) else {
+        return false;
+    };
+    let handle = cp.local_handle as usize;
+    let peer_id = PeerId(uuid::Uuid::from_u128(cp.peer_id));
+    world.resource_mut::<crate::netplay::LocalPlayerHandle>().0 = Some(handle);
+    world.resource_mut::<crate::netplay::SessionIds>().0 = Some(cp.ids);
+    world.resource_mut::<crate::netplay::DuelBegan>().0 = true;
+    world.resource_mut::<net::PeerProfile>().0 = cp.peer;
+    world.resource_mut::<net::PeerKeys>().0 = cp.peer_key;
+    world.resource_mut::<render::PerspectiveFlip>().0 = if handle == 1 { -1.0 } else { 1.0 };
+    world.resource_mut::<ResumeCount>().0 += 1;
+    let now = world.resource::<Time<Real>>().elapsed_secs();
+    world.insert_resource(Resume {
+        ids: cp.ids,
+        local_handle: handle,
+        input_delay: cp.input_delay as usize,
+        peer_id,
+        inputs: cp.inputs,
+        old_session: None,
+        url: cp.url.clone(),
+        dialed_at: now,
+        deadline: now + left,
+        phase: Phase::Talk {
+            peer: None,
+            hello_sent: false,
+            their_count: None,
+            tail_sent: false,
+        },
+    });
+    crate::netplay::open_resume_socket(world, cp.url);
+    *world.resource_mut::<LobbyState>() = LobbyState::Reconnecting { peer_id };
+    true
+}
 
 /// May this ending be resumed instead? A live duel (begun, not decided)
 /// whose link died, not a goodbye; within the per-session budget. Pure.
@@ -423,6 +630,14 @@ impl Plugin for ResumePlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<ResumeCount>()
             .init_resource::<ResumeHold>()
+            .add_systems(PostStartup, load_checkpoint)
+            .add_systems(
+                Update,
+                (
+                    write_checkpoint,
+                    enter_pending_resume.run_if(in_state(crate::screen::AppScreen::Title)),
+                ),
+            )
             .add_systems(
                 Update,
                 (
@@ -450,6 +665,15 @@ mod tests {
 
     fn peer() -> PeerId {
         PeerId(uuid::Uuid::from_u128(5))
+    }
+
+    #[test]
+    fn a_checkpoint_lives_for_the_resume_window() {
+        assert_eq!(checkpoint_left(100, 100), Some(RESUME_WINDOW_SECS));
+        assert_eq!(checkpoint_left(100, 130), Some(RESUME_WINDOW_SECS - 30.0));
+        assert_eq!(checkpoint_left(100, 100 + RESUME_WINDOW_SECS as u64), None);
+        // A clock that went backwards reads as fresh, not as a panic.
+        assert_eq!(checkpoint_left(200, 100), Some(RESUME_WINDOW_SECS));
     }
 
     #[test]

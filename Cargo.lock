@@ -201,6 +201,7 @@ dependencies = [
  "jni 0.21.1",
  "js-sys",
  "net",
+ "postcard",
  "qrcode",
  "rand 0.8.6",
  "render",

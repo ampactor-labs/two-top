@@ -4,8 +4,9 @@
 //! LEFT half is the floating move stick: wherever a touch lands, the stick
 //! spawns there — base ring at the touch origin, knob riding the drag, gone
 //! the moment the thumb lifts. The RIGHT half is the throw BUTTON: any
-//! touch there charges a throw, and while it's held the LEFT stick aims
-//! (same model as the desktop throw-key + d-pad). A ring appears under the
+//! touch there charges a throw, and while it's held a drag of that same
+//! thumb aims (or the LEFT stick, same model as the desktop throw-key +
+//! d-pad); a flick throws along the flick. A ring appears under the
 //! right thumb as the charge cue, and the move stick turns ember to say
 //! "you're aiming with this now". DASH stays fixed in the bottom-right
 //! corner (the dash zone), where the right thumb can find it blind.
@@ -75,12 +76,17 @@ const DASH_RING_SIZE: f32 = 210.0;
 /// span keeps the picture honest on every aspect (the corners past the
 /// inscribed circle stay live, which errs the safe way: bigger target than
 /// advertised, never smaller).
+/// The dash ring's size in rest-view world units: the anchor pass scales
+/// it with the camera (`anchor::apply_screen_anchors`), so it is sized from
+/// the un-zoomed view. Sizing it from the zoomed rect scaled it twice, and
+/// the ring shrank under the kill-cam.
 fn dash_ring_size(rect: &ViewRect) -> f32 {
-    if rect.half == Vec2::ZERO {
+    if rect.half == Vec2::ZERO || rect.scale <= 0.0 {
         return DASH_RING_SIZE;
     }
-    let w = (1.0 - input_touch::DASH_ZONE_X_FRAC) * rect.half.x * 2.0;
-    let h = (1.0 - input_touch::DASH_ZONE_Y_FRAC) * rect.half.y * 2.0;
+    let rest = rect.half / rect.scale;
+    let w = (1.0 - input_touch::DASH_ZONE_X_FRAC) * rest.x * 2.0;
+    let h = (1.0 - input_touch::DASH_ZONE_Y_FRAC) * rest.y * 2.0;
     w.min(h)
 }
 
@@ -216,7 +222,7 @@ fn spawn_controls(
             HintZone::Throw,
             0.5,
             -0.38,
-            "THROW\nhold to charge, stick aims",
+            "THROW\nhold to charge, drag to aim\nor flick it",
         ),
         (
             HintZone::Taunt,

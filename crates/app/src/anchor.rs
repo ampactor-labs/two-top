@@ -50,11 +50,14 @@ impl Default for ViewRect {
 
 impl ViewRect {
     /// World position for a normalized anchor. `frac` runs (-1,-1) at the
-    /// bottom-left corner to (1,1) at the top-right; `offset` is a world-unit
-    /// nudge from that point (so an inward margin on a positive edge is a
-    /// negative offset).
+    /// bottom-left corner to (1,1) at the top-right; `offset` is a nudge
+    /// from that point in rest-view world units (so an inward margin on a
+    /// positive edge is a negative offset). The offset zooms with the
+    /// camera, like the anchored entity's own size: under the kill-cam a
+    /// 40-unit margin stays 40 units *on screen*, instead of growing 1.6x
+    /// and pushing the HUD inward.
     pub fn anchor_pos(&self, frac: Vec2, offset: Vec2) -> Vec2 {
-        self.center + self.half * frac + offset
+        self.center + self.half * frac + offset * self.scale
     }
 }
 
@@ -236,6 +239,25 @@ mod tests {
         let zoomed = view_half_extents(Vec2::new(600.0, 900.0), &automin(1160.0, 1285.0, 0.625));
         assert!(zoomed.x < neutral.x && zoomed.y < neutral.y);
         assert!((zoomed.x / neutral.x - 0.625).abs() < 1e-4);
+    }
+
+    #[test]
+    fn offsets_hold_their_screen_size_under_the_zoom() {
+        let rest = ViewRect {
+            center: Vec2::ZERO,
+            half: Vec2::new(100.0, 200.0),
+            scale: 1.0,
+        };
+        let zoomed = ViewRect {
+            half: rest.half * 0.625,
+            scale: 0.625,
+            ..rest
+        };
+        // As a fraction of the visible width, the margin is the same.
+        let margin = |r: &ViewRect| {
+            (r.half.x - r.anchor_pos(Vec2::new(1.0, 0.0), Vec2::new(-40.0, 0.0)).x) / r.half.x
+        };
+        assert!((margin(&rest) - margin(&zoomed)).abs() < 1e-5);
     }
 
     #[test]

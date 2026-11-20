@@ -539,7 +539,10 @@ pub struct NetplayStatePlugin;
 
 impl Plugin for NetplayStatePlugin {
     fn build(&self, app: &mut App) {
+        // Always present (couch and practice too): the resume checkpoint
+        // and the ending path read them whatever the build.
         app.init_resource::<SessionEnding>()
+            .init_resource::<SessionLink>()
             .init_resource::<DuelBegan>()
             .init_resource::<IceStatus>()
             .init_resource::<SyncWait>()
@@ -597,7 +600,6 @@ impl Plugin for MatchboxPlugin {
                 OnEnter(crate::screen::AppScreen::InMatch),
                 (reset_absence, |mut redials: ResMut<Redials>| redials.0 = 0),
             )
-            .init_resource::<SessionLink>()
             .init_resource::<RollbackDepths>()
             .add_systems(
                 bevy_ggrs::LoadWorld,
@@ -1053,6 +1055,10 @@ fn start_matchbox(world: &mut World) {
     let Some(url) = config.room_url else {
         return;
     };
+    // A relaunch inside a dropped duel's window goes back to that duel.
+    if crate::resume::begin_from_checkpoint(world) {
+        return;
+    }
 
     if let Some(ice_url) = config.ice_url {
         let now = world.resource::<Time<Real>>().elapsed_secs();

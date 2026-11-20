@@ -110,6 +110,7 @@ tracing-subscriber = { version = "0.3", default-features = false, features = [
 # (persistence is a desktop convenience; not load-bearing).
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+postcard = { version = "1", default-features = false, features = ["alloc"] }
 dirs = "5"
 
 # NORTH N3 — SHARE renders the watch link as a QR sprite (share.rs).

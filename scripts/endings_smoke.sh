@@ -15,6 +15,10 @@
 #           ~9 s and it dials the resume room; B, waking to a dead link,
 #           follows: the match resumes and is played to the end, the two
 #           tapes identical and both signed results verifying.
+#   relaunch B is killed outright mid-match and launched again 5 s later
+#           (Android reclaiming the app during a call). B finds its
+#           checkpoint and goes straight back to the resume room, where A
+#           is waiting: the match resumes and finishes, as for freeze.
 #   drop    Every UDP packet is dropped for 12 s mid-match (the network
 #           going away under both phones). Both must resume the match and
 #           finish it, as for freeze.
@@ -25,7 +29,7 @@
 # Usage: scripts/endings_smoke.sh <scenario> [app-binary]
 # Same needs as scripts/lib/peers.sh.
 set -u
-SCENARIO=${1:?usage: endings_smoke.sh desync|kill|early|freeze|drop|leave [app]}
+SCENARIO=${1:?usage: endings_smoke.sh desync|kill|early|freeze|relaunch|drop|leave [app]}
 APP=${2:-target/debug/app}
 . "$(dirname "$0")/lib/peers.sh"
 peers_init "endings-$SCENARIO" "${PORT:-3541}" "${DISPLAY_NUM:-:96}"
@@ -119,6 +123,16 @@ freeze)
   kill -CONT "$(pid_of b)"
   finish_resumed
   pass "a 12 s freeze was resumed and the match finished; tapes identical, both results verify"
+  ;;
+relaunch)
+  started || fail "the match never started"
+  sleep 4
+  kill -9 "$(pid_of b)"
+  sleep 5
+  peer_start b TWOTOP_AUTOPILOT=3 TWOTOP_ARENA=vigil
+  wait_for_log b "going back in" 20 || fail "the relaunched B never found its checkpoint"
+  finish_resumed
+  pass "B was killed and relaunched; it went back in, the match resumed and finished"
   ;;
 drop)
   started || fail "the match never started"
