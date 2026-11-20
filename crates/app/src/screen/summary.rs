@@ -303,6 +303,22 @@ pub(super) enum SummaryAction {
     Primary,
     /// The labeled top-exit strip: LOBBY (couch/practice) / LEAVE (online).
     Exit,
+    /// WATCH THE KILL (couch/practice): the deciding kill, replayed.
+    Watch,
+}
+
+/// WATCH THE KILL's band (window-fraction, y-down), on the LEFT half only:
+/// at MatchOver a right-half tap is a THROW, and a throw restarts the
+/// match.
+pub(super) const WATCH_BAND: ui::Band = (0.72, 0.79);
+
+/// Did any tap land on WATCH THE KILL (its band, left half)? Pure.
+pub(super) fn watch_tapped(taps: impl IntoIterator<Item = Vec2>, window: Vec2) -> bool {
+    window.x > 0.0
+        && window.y > 0.0
+        && taps
+            .into_iter()
+            .any(|p| p.x / window.x < 0.5 && ui::in_band(p.y / window.y, WATCH_BAND))
 }
 
 #[derive(Component)]
@@ -466,6 +482,21 @@ pub(super) fn spawn_summary_buttons(commands: &mut Commands) {
         spawn_button_part(
             commands,
             role,
+            Vec2::new(ui::anchor_x(0.25), ui::band_anchor_y(WATCH_BAND)),
+            Vec2::new(420.0, 76.0),
+            crate::ui::TextRole::ButtonExit,
+            &mut |ec, role| {
+                ec.insert(SummaryButton {
+                    action: SummaryAction::Watch,
+                    role,
+                });
+            },
+        );
+    }
+    for role in [BtnRole::Border, BtnRole::Fill, BtnRole::Label] {
+        spawn_button_part(
+            commands,
+            role,
             Vec2::new(0.0, TOP_EXIT_ANCHOR_Y),
             Vec2::new(340.0, 76.0),
             crate::ui::TextRole::ButtonExit,
@@ -505,6 +536,7 @@ pub(super) fn update_summary_buttons(
     consent: Res<net::RematchConsent>,
     lobby: Res<net::LobbyState>,
     first_blood: Res<crate::first_blood::FirstBlood>,
+    saved: Res<crate::recorder::LastSavedReplay>,
     mut q: SummaryButtonQuery,
 ) {
     let over = *screen.get() == AppScreen::InMatch
@@ -538,6 +570,8 @@ pub(super) fn update_summary_buttons(
             && match btn.action {
                 SummaryAction::Primary => primary.is_some(),
                 SummaryAction::Exit => true,
+                // Offline only: online the match's world is the session's.
+                SummaryAction::Watch => (practice.0 || !online) && saved.0.is_some(),
             };
         *vis = if shown {
             Visibility::Visible
@@ -578,6 +612,7 @@ pub(super) fn update_summary_buttons(
                             "LOBBY"
                         }
                         .to_string(),
+                        SummaryAction::Watch => "WATCH THE KILL".to_string(),
                     };
                 }
                 if let Some(mut c) = color {
@@ -613,6 +648,10 @@ pub(super) fn summary_buttons_input(
         ResMut<NextState<AppScreen>>,
         Res<sim::FrameCount>,
     ),
+    (saved, mut watch): (
+        Res<crate::recorder::LastSavedReplay>,
+        ResMut<crate::theater::PendingWatch>,
+    ),
 ) {
     if *screen.get() != AppScreen::InMatch
         || !state.is_match_over()
@@ -621,6 +660,17 @@ pub(super) fn summary_buttons_input(
         // decided sits right on this button: let the result land first.
         || !since.rematch_live(time.elapsed_secs(), &state, frame.0)
     {
+        return;
+    }
+    let online = netplay.room_url.is_some() && !practice.0;
+    if !online
+        && watch_tapped(touches.iter_just_pressed().map(|t| t.position()), window.0)
+        && let Some(path) = saved.0.clone()
+    {
+        // Out through the Title (the match screen must be left for the
+        // theater to build its own), which rolls the tape at the kill.
+        watch.0 = Some(path);
+        next.set(AppScreen::Title);
         return;
     }
     if !ui::tapped(
@@ -637,7 +687,6 @@ pub(super) fn summary_buttons_input(
         next.set(AppScreen::Title);
         return;
     }
-    let online = netplay.room_url.is_some() && !practice.0;
     if !online {
         pending.0 = UI_THROW_FRAMES;
         return;

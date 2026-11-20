@@ -101,6 +101,9 @@ fn record_then_playback_reproduces_end_state() {
             winner: None,
             player_handles: [None, None],
             arena_id: 0,
+            start_tick: 0,
+            kind: replay::TapeKind::default(),
+            kills: Vec::new(),
         },
         inputs: recorded_frames,
     };

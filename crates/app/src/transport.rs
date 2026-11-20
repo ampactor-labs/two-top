@@ -1,4 +1,4 @@
-//! Pause, speed and fast seek for anything that plays the sim back at a
+//! Pause and speed for anything that plays the sim back at a
 //! pace other than real time: the replay theater today, the feel lab and
 //! the live viewer next. All of it is `Time<Virtual>`: the sim's ticks are
 //! driven by virtual time, so slowing it slows the match and pausing it
@@ -9,9 +9,6 @@ use bevy::prelude::*;
 /// Playback speeds a thumb picks from. 0.25x is a desktop-scrubbing speed;
 /// the phone gets the four that matter.
 pub const SPEED_PRESETS: [f32; 4] = [0.5, 1.0, 2.0, 4.0];
-
-/// Virtual-time multiplier while a seek runs the sim forward to its target.
-pub const SEEK_SPEED: f32 = 64.0;
 
 /// Play at `speed`.
 pub fn play(world: &mut World, speed: f32) {
@@ -32,11 +29,6 @@ pub fn apply(world: &mut World, paused: bool, speed: f32) {
     } else {
         play(world, speed);
     }
-}
-
-/// Run as fast as a seek runs.
-pub fn seek(world: &mut World) {
-    play(world, SEEK_SPEED);
 }
 
 /// Back to real time, unpaused: what every other screen expects.

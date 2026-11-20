@@ -208,6 +208,9 @@ mod tests {
                 winner: None,
                 player_handles: [None, None],
                 arena_id: 0,
+                start_tick: 0,
+                kind: replay::TapeKind::default(),
+                kills: Vec::new(),
             },
             inputs: Vec::new(),
         }

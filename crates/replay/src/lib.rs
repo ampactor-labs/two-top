@@ -5,7 +5,25 @@ use serde::{Deserialize, Serialize};
 use sim::{GgrsCfg, PlayerInput};
 
 pub const MAGIC: [u8; 4] = *b"BMRG";
-pub const FORMAT_VERSION: u16 = 1;
+/// 2: the header names which match of the session the tape shows
+/// (`start_tick`), what kind of tape it is, and its kills.
+pub const FORMAT_VERSION: u16 = 2;
+
+/// What a tape is a recording of.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
+pub enum TapeKind {
+    /// Two people on one device (or a test).
+    #[default]
+    Couch,
+    /// An online duel between two phones.
+    Duel,
+    /// Practice against the bot, at a gauntlet tier.
+    Practice { tier: u8 },
+    /// A spar against a rival's shade.
+    Shade,
+    /// The newcomer lesson.
+    Lesson,
+}
 
 /// A frame's worth of inputs for a 1v1 match.
 pub type FrameInputs = [PlayerInput; 2];
@@ -29,6 +47,14 @@ pub struct ReplayHeader {
     pub winner: Option<u8>,
     pub player_handles: [Option<String>; 2],
     pub arena_id: u8,
+    /// The tick this tape's match starts on. A session that ran it back
+    /// records every match from tick 0; the theater fast-forwards to here
+    /// and plays this one.
+    pub start_tick: u32,
+    pub kind: TapeKind,
+    /// Every confirmed kill in this match: (tick, victim seat). The scrub
+    /// strip marks them; WATCH THE KILL jumps to the last.
+    pub kills: Vec<(u32, u8)>,
 }
 
 #[derive(Debug)]
@@ -112,6 +138,19 @@ pub fn decode(bytes: &[u8]) -> Result<Replay, ReplayError> {
         });
     }
     Ok(replay)
+}
+
+/// The header alone, without decoding the inputs behind it: what a list of
+/// tapes needs, at a fraction of the cost of [`decode`].
+pub fn decode_header(bytes: &[u8]) -> Result<ReplayHeader, ReplayError> {
+    let (header, _): (ReplayHeader, _) = postcard::take_from_bytes(bytes)?;
+    if header.magic != MAGIC {
+        return Err(ReplayError::InvalidMagic(header.magic));
+    }
+    if header.format_version != FORMAT_VERSION {
+        return Err(ReplayError::UnsupportedFormatVersion(header.format_version));
+    }
+    Ok(header)
 }
 
 /// Decode and additionally enforce strict `sim_version` match against the

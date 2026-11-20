@@ -58,6 +58,11 @@ const SCRUB_BAND: (f32, f32) = (0.86, 0.97);
 pub struct TheaterMode {
     active: bool,
     total_frames: u32,
+    /// The tick this tape's match starts on (`ReplayHeader::start_tick`):
+    /// the scrub strip spans `first_frame..total_frames`.
+    first_frame: u32,
+    /// The match's kills (tick, victim seat), marked on the scrub strip.
+    kills: Vec<(u32, u8)>,
     prev_arena: Option<sim::ArenaId>,
     /// Names carried in the tape header, for the marquee.
     names: [Option<String>; 2],
@@ -172,7 +177,7 @@ struct TapeList(Vec<TapeEntry>);
 struct ReplayScreenText;
 
 #[derive(Component)]
-struct TapeRow;
+struct TapeRow(usize);
 
 /// The list's subline ("tap a tape to watch it") — stands down while a
 /// refusal notice speaks in its place.
@@ -201,6 +206,40 @@ struct ScrubPart(ScrubRole);
 enum ScrubRole {
     Track,
     Fill,
+    /// The `n`th kill's mark.
+    Kill(usize),
+}
+
+/// Most kill marks drawn on the strip (a match has at most nine kills).
+const KILL_MARKS: usize = 9;
+
+/// A scrub landing within this fraction of a kill mark snaps to just
+/// before the kill: the marks are what a thumb aims at.
+const KILL_SNAP: f32 = 0.03;
+
+/// Ticks of run-up shown before a kill a scrub snapped to (2 s).
+const KILL_RUN_UP: u32 = 120;
+
+/// The fraction of the strip at `frame`, for a match spanning
+/// `first..total`. Pure.
+fn strip_frac(frame: u32, first: u32, total: u32) -> f32 {
+    let span = total.saturating_sub(first).max(1);
+    (frame.saturating_sub(first) as f32 / span as f32).clamp(0.0, 1.0)
+}
+
+/// Where a scrub at strip fraction `fx` seeks: just before a kill when it
+/// lands on one's mark, else the frame under the finger. Pure.
+fn scrub_target(fx: f32, first: u32, total: u32, kills: &[(u32, u8)]) -> u32 {
+    let lo = first.max(1);
+    let hi = total.saturating_sub(1).max(lo);
+    if let Some((tick, _)) = kills
+        .iter()
+        .find(|(tick, _)| (strip_frac(*tick, first, total) - fx).abs() < KILL_SNAP)
+    {
+        return tick.saturating_sub(KILL_RUN_UP).clamp(lo, hi);
+    }
+    let span = total.saturating_sub(first) as f32;
+    (first + (fx * span) as u32).clamp(lo, hi)
 }
 
 #[derive(Component)]
@@ -230,8 +269,7 @@ fn scan_tapes() -> Vec<TapeEntry> {
         .into_iter()
         .filter_map(|path| {
             let bytes = crate::paths::read_bytes(&path).ok()?;
-            let replay = replay::decode(&bytes).ok()?;
-            let h = &replay.header;
+            let h = &replay::decode_header(&bytes).ok()?;
             let foreign_version = (h.sim_version != sim::SIM_VERSION).then_some(h.sim_version);
             let winner_name = match h.winner {
                 Some(w) => h.player_handles[w as usize % 2]
@@ -239,9 +277,10 @@ fn scan_tapes() -> Vec<TapeEntry> {
                     .unwrap_or_else(|| if w == 0 { "CUR".into() } else { "STAG".into() }),
                 None => "NOBODY".into(),
             };
-            let secs = h.frame_count / h.frame_rate.max(1) as u32;
+            let secs = h.frame_count.saturating_sub(h.start_tick) / h.frame_rate.max(1) as u32;
             let mut line = format!(
-                "{} WINS - {} - {}:{:02} - {}",
+                "{} {} WINS - {} - {}:{:02} - {}",
+                kind_badge(h.kind),
                 winner_name,
                 arena_label(h.arena_id),
                 secs / 60,
@@ -262,8 +301,68 @@ fn scan_tapes() -> Vec<TapeEntry> {
         })
         .collect();
     tapes.sort_by_key(|(at, _)| std::cmp::Reverse(*at));
-    tapes.truncate(LIST_MAX);
     tapes.into_iter().map(|(_, t)| t).collect()
+}
+
+/// The list's word for what a tape is. Pure.
+fn kind_badge(kind: replay::TapeKind) -> String {
+    match kind {
+        replay::TapeKind::Duel => "DUEL".into(),
+        replay::TapeKind::Practice { tier } => format!("BOT T{tier}"),
+        replay::TapeKind::Shade => "SHADE".into(),
+        replay::TapeKind::Lesson => "LESSON".into(),
+        replay::TapeKind::Couch => "COUCH".into(),
+    }
+}
+
+/// Which page of the list is showing ([`LIST_MAX`] tapes a page).
+#[derive(Resource, Default)]
+struct TapePage(usize);
+
+fn page_count(tapes: usize) -> usize {
+    tapes.div_ceil(LIST_MAX).max(1)
+}
+
+/// The subline: what to do, and the page when there is more than one.
+/// Pure.
+fn list_subline(tapes: usize, page: usize) -> String {
+    match (tapes, page_count(tapes)) {
+        (0, _) => "no tapes yet - every decided match saves one".into(),
+        (_, 1) => "tap a tape to watch it".into(),
+        (_, pages) => format!(
+            "tap a tape to watch it\npage {}/{pages} - tap here for more",
+            page + 1
+        ),
+    }
+}
+
+/// The subline's band (window-fraction, y-down): tapping it turns the page.
+const SUBLINE_BAND: (f32, f32) = (0.13, 0.195);
+
+/// Fill the row slots from the current page.
+#[allow(clippy::type_complexity)]
+fn update_tape_rows(
+    list: Res<TapeList>,
+    page: Res<TapePage>,
+    mut rows: Query<(&TapeRow, &mut Text2d, &mut TextColor)>,
+    mut sub: Query<&mut Text2d, (With<ReplaySubline>, Without<TapeRow>)>,
+) {
+    if !(list.is_changed() || page.is_changed()) {
+        return;
+    }
+    for (row, mut text, mut color) in &mut rows {
+        let tape = list.0.get(page.0 * LIST_MAX + row.0);
+        text.0 = tape.map(|t| t.line.clone()).unwrap_or_default();
+        // A foreign-version tape reads as an artifact, not an option.
+        color.0 = if tape.is_some_and(|t| t.foreign_version.is_some()) {
+            render::palette::BONE.with_alpha(0.35)
+        } else {
+            render::palette::BONE
+        };
+    }
+    for mut text in &mut sub {
+        text.0 = list_subline(list.0.len(), page.0);
+    }
 }
 
 /// A tape header's arena byte, as the replay list prints it. An id this
@@ -306,6 +405,7 @@ fn enter_replays(
     mut commands: Commands,
     mut list: ResMut<TapeList>,
     mut notice: ResMut<TapeNoticeState>,
+    mut page: ResMut<TapePage>,
 ) {
     list.0 = scan_tapes();
     notice.0 = None;
@@ -325,11 +425,8 @@ fn enter_replays(
         ScreenAnchor::new(0.0, 0.78, 0.0, 0.0),
         Transform::from_xyz(0.0, 0.0, crate::ui::z::MENU_TEXT),
     ));
-    let sub = if list.0.is_empty() {
-        "no tapes yet - every decided match saves one".to_string()
-    } else {
-        "tap a tape to watch it".to_string()
-    };
+    page.0 = 0;
+    let sub = list_subline(list.0.len(), 0);
     commands.spawn((
         ReplayScreenText,
         ReplaySubline,
@@ -366,18 +463,18 @@ fn enter_replays(
         Transform::from_xyz(0.0, 0.0, crate::ui::z::MENU_TEXT + 0.5),
         Visibility::Hidden,
     ));
-    for (i, tape) in list.0.iter().enumerate() {
+    for i in 0..LIST_MAX {
         let fy = LIST_TOP + (i as f32 + 0.5) * LIST_PITCH;
-        // A foreign-version tape reads as an artifact, not an option.
-        let color = if tape.foreign_version.is_some() {
+        let tape = list.0.get(i);
+        let color = if tape.is_some_and(|t| t.foreign_version.is_some()) {
             render::palette::BONE.with_alpha(0.35)
         } else {
             render::palette::BONE
         };
         commands.spawn((
             ReplayScreenText,
-            TapeRow,
-            Text2d::new(tape.line.clone()),
+            TapeRow(i),
+            Text2d::new(tape.map(|t| t.line.clone()).unwrap_or_default()),
             (
                 TextFont {
                     font_size: crate::ui::TextRole::ListRow.font_size(),
@@ -479,6 +576,7 @@ fn exit_replays(mut commands: Commands, q: Query<Entity, With<ReplayScreenText>>
 fn replays_input(world: &mut World) {
     let win = world.resource::<WindowSize>().0;
     let mut tapped_row: Option<usize> = None;
+    let mut next_page = false;
     let mut back = world
         .resource::<ButtonInput<KeyCode>>()
         .just_pressed(KeyCode::Escape);
@@ -490,6 +588,8 @@ fn replays_input(world: &mut World) {
                 let fy = t.position().y / win.y;
                 if (BACK_BAND.0..BACK_BAND.1).contains(&fy) {
                     back = true;
+                } else if (SUBLINE_BAND.0..SUBLINE_BAND.1).contains(&fy) {
+                    next_page = true;
                 } else if fy >= LIST_TOP {
                     let row = ((fy - LIST_TOP) / LIST_PITCH) as usize;
                     if fy < LIST_TOP + LIST_PITCH * LIST_MAX as f32 {
@@ -498,8 +598,11 @@ fn replays_input(world: &mut World) {
                 }
             }
         }
-        // Desktop dev path: 1-8 pick a row directly.
+        // Desktop dev path: 1-8 pick a row directly, N turns the page.
         let keys = world.resource::<ButtonInput<KeyCode>>();
+        if keys.just_pressed(KeyCode::KeyN) || keys.just_pressed(KeyCode::PageDown) {
+            next_page = true;
+        }
         for (key, row) in [
             (KeyCode::Digit1, 0usize),
             (KeyCode::Digit2, 1),
@@ -522,6 +625,14 @@ fn replays_input(world: &mut World) {
             .set(AppScreen::Title);
         return;
     }
+    if next_page {
+        let pages = page_count(world.resource::<TapeList>().0.len());
+        let mut page = world.resource_mut::<TapePage>();
+        page.0 = (page.0 + 1) % pages;
+        return;
+    }
+    // A row is a slot on the current page.
+    let mut tapped_row = tapped_row.map(|row| world.resource::<TapePage>().0 * LIST_MAX + row);
     // TWOTOP_AUTOPLAY_TAPE=1: roll the newest tape on arrival, once per
     // process (headless capture verification of the theater, pairing with
     // TWOTOP_AUTOSTART=replays; the once-latch keeps exiting playback from
@@ -624,6 +735,37 @@ fn update_tape_notice(
     }
 }
 
+/// A tape to roll at its last kill, asked for by WATCH THE KILL on a
+/// summary; the Title hands it to the theater ([`roll_pending_watch`]).
+#[derive(Resource, Default)]
+pub struct PendingWatch(pub Option<PathBuf>);
+
+/// On the Title with a pending WATCH THE KILL: roll the tape from two
+/// seconds before its last kill, at half speed.
+fn roll_pending_watch(world: &mut World) {
+    let Some(path) = world.resource_mut::<PendingWatch>().0.take() else {
+        return;
+    };
+    let Ok(bytes) = crate::paths::read_bytes(&path) else {
+        return;
+    };
+    let Ok(replay) = decode_for_sim_version(&bytes, sim::SIM_VERSION) else {
+        return;
+    };
+    let at = replay
+        .header
+        .kills
+        .last()
+        .map(|(tick, _)| tick.saturating_sub(KILL_RUN_UP));
+    world.resource_mut::<crate::share::SharedTapePath>().0 = Some(path);
+    start_playback(world, replay);
+    let mut controls = world.resource_mut::<TheaterControls>();
+    if let Some(at) = at {
+        controls.seek_target = Some(at.max(controls.seek_target.unwrap_or(0)));
+    }
+    controls.speed_idx = 0; // half speed: the kill is the point
+}
+
 /// Load a decoded tape and roll it: arena from the header, playback
 /// resources in, then enter the match screen (whose spawn path sees the
 /// theater flag and builds the playback session).
@@ -638,11 +780,17 @@ pub(crate) fn start_playback(world: &mut World, replay: Replay) {
         let mut theater = world.resource_mut::<TheaterMode>();
         theater.active = true;
         theater.total_frames = header.frame_count;
+        theater.first_frame = header.start_tick.min(header.frame_count);
+        theater.kills = header.kills.clone();
         theater.prev_arena = Some(prev_arena);
         theater.names = header.player_handles.clone();
     }
     world.insert_resource(ReplayPlayback::new(replay));
-    world.insert_resource(TheaterControls::default());
+    // A later match of a session tape: fast-forward to where it starts.
+    world.insert_resource(TheaterControls {
+        seek_target: (header.start_tick > 0).then_some(header.start_tick),
+        ..TheaterControls::default()
+    });
     world.insert_resource(SnapshotBuffer::default());
     world
         .resource_mut::<NextState<AppScreen>>()
@@ -744,6 +892,24 @@ fn spawn_theater_ui(mut commands: Commands, theater: Res<TheaterMode>) {
         bevy::sprite::Anchor::CENTER_LEFT,
         Transform::from_xyz(0.0, 0.0, crate::ui::z::MENU_TEXT - 0.5),
     ));
+    // The kill marks: one tick on the strip per kill, in the victim's
+    // stain color, so the match's story reads at a glance.
+    for (n, (_, victim)) in theater.kills.iter().take(KILL_MARKS).enumerate() {
+        commands.spawn((
+            TheaterMarquee,
+            ScrubPart(ScrubRole::Kill(n)),
+            Sprite {
+                color: if *victim == 0 {
+                    render::palette::P0_BLOOD
+                } else {
+                    render::palette::P1_CYAN
+                },
+                custom_size: Some(Vec2::ZERO),
+                ..default()
+            },
+            Transform::from_xyz(0.0, 0.0, crate::ui::z::MENU_TEXT),
+        ));
+    }
     // Speed pips.
     for (i, speed) in SPEED_PRESETS.iter().enumerate() {
         let fx = 0.5 + (i as f32 - (SPEED_PRESETS.len() as f32 - 1.0) / 2.0) * 0.16;
@@ -821,7 +987,7 @@ fn theater_input(
     }
     if keys.just_pressed(KeyCode::Home) {
         controls.paused = true;
-        controls.seek_target = Some(1);
+        controls.seek_target = Some(theater.first_frame.max(1));
     }
     if keys.just_pressed(KeyCode::End) {
         controls.paused = true;
@@ -876,7 +1042,7 @@ fn theater_input(
         // now refuses a header that lies about its count, but a 0- or
         // 1-frame tape is a legitimate encoding, so the guard stays.
         if total >= 2 && scrub_debounce(fx, &mut controls.scrub_anchor) {
-            let target = ((fx * total as f32) as u32).clamp(1, total - 1);
+            let target = scrub_target(fx, theater.first_frame, total, &theater.kills);
             controls.paused = true;
             controls.seek_target = Some(target);
         }
@@ -968,16 +1134,59 @@ fn theater_drive_seek(world: &mut World) {
                 }
             }
         }
+        // Forward: re-simulate straight to the target from the tape's own
+        // inputs (`sim::fast_forward`), a chunk per frame, banking the
+        // scrub snapshots on the way. Instant for a scrub; a few frames
+        // for a whole match on a slow phone.
+        fast_seek(world, target);
         let now = world.resource::<sim::FrameCount>().0;
         if now >= target {
             world.resource_mut::<TheaterControls>().seek_target = None;
             theater_apply_play_pause(world, controls.paused);
         } else {
-            crate::transport::seek(world);
+            crate::transport::pause(world);
         }
     } else {
         theater_apply_play_pause(world, controls.paused);
     }
+}
+
+/// Ticks a forward seek re-simulates per frame.
+const SEEK_CHUNK: usize = 1_500;
+
+/// Run the tape forward toward `target` (at most [`SEEK_CHUNK`] ticks this
+/// frame) outside the playback session, advancing its cursor to match.
+fn fast_seek(world: &mut World, target: u32) {
+    let now = world.resource::<sim::FrameCount>().0;
+    if now >= target {
+        return;
+    }
+    let inputs = {
+        let playback = world.resource::<ReplayPlayback>();
+        let from = playback.cursor.min(playback.replay.inputs.len());
+        let to = (from + (target - now) as usize)
+            .min(from + SEEK_CHUNK)
+            .min(playback.replay.inputs.len());
+        playback.replay.inputs[from..to].to_vec()
+    };
+    if inputs.is_empty() {
+        return;
+    }
+    let n = inputs.len();
+    sim::fast_forward(world, &inputs, |world| {
+        let frame = world.resource::<sim::FrameCount>().0;
+        if should_snapshot(frame)
+            && !world
+                .resource::<SnapshotBuffer>()
+                .entries
+                .iter()
+                .any(|s| s.frame == frame)
+        {
+            let snap = SimSnapshot::capture(world);
+            world.resource_mut::<SnapshotBuffer>().entries.push(snap);
+        }
+    });
+    world.resource_mut::<ReplayPlayback>().cursor += n;
 }
 
 fn theater_apply_play_pause(world: &mut World, paused: bool) {
@@ -1003,7 +1212,7 @@ fn theater_update_ui(
         return;
     };
     let total = theater.total_frames.max(1);
-    let progress = (frame.0 as f32 / total as f32).clamp(0.0, 1.0);
+    let progress = strip_frac(frame.0, theater.first_frame, total);
 
     // Band center/height in world units through the view rect.
     let band_center_frac = crate::ui::band_anchor_y(SCRUB_BAND); // y-up anchor frac
@@ -1020,6 +1229,15 @@ fn theater_update_ui(
             ScrubRole::Fill => {
                 sprite.custom_size = Some(Vec2::new(width * progress, height * 1.9));
                 tx.translation.x = rect.center.x - width * 0.5;
+                tx.translation.y = center_y;
+            }
+            ScrubRole::Kill(n) => {
+                let Some((tick, _)) = theater.kills.get(n) else {
+                    continue;
+                };
+                let f = strip_frac(*tick, theater.first_frame, total);
+                sprite.custom_size = Some(Vec2::new(height * 0.9, height * 3.4));
+                tx.translation.x = rect.center.x - width * 0.5 + width * f;
                 tx.translation.y = center_y;
             }
         }
@@ -1068,6 +1286,12 @@ impl Plugin for TheaterPlugin {
         app.init_resource::<TheaterMode>()
             .init_resource::<TapeList>()
             .init_resource::<TapeNoticeState>()
+            .init_resource::<TapePage>()
+            .init_resource::<PendingWatch>()
+            .add_systems(
+                Update,
+                roll_pending_watch.run_if(in_state(AppScreen::Title)),
+            )
             .add_systems(OnEnter(AppScreen::Replays), enter_replays)
             .add_systems(OnExit(AppScreen::Replays), exit_replays)
             .add_systems(OnEnter(AppScreen::InMatch), spawn_theater_ui)
@@ -1078,7 +1302,7 @@ impl Plugin for TheaterPlugin {
             .add_systems(
                 Update,
                 (
-                    (replays_input, update_tape_notice)
+                    (replays_input, update_tape_rows, update_tape_notice)
                         .chain()
                         .run_if(in_state(AppScreen::Replays)),
                     // Ordered: the seek `theater_input` issues this frame must
@@ -1099,6 +1323,41 @@ mod tests {
 
     /// Playback's tap targets: leave, speed, scrub. None may overlap.
     #[test]
+    fn the_list_pages_and_says_so() {
+        assert_eq!(page_count(0), 1);
+        assert_eq!(page_count(LIST_MAX), 1);
+        assert_eq!(page_count(LIST_MAX + 1), 2);
+        assert!(list_subline(0, 0).starts_with("no tapes"));
+        assert_eq!(list_subline(3, 0), "tap a tape to watch it");
+        assert!(list_subline(LIST_MAX * 2 + 1, 1).contains("page 2/3"));
+    }
+
+    #[test]
+    fn the_strip_spans_the_tapes_own_match() {
+        assert_eq!(strip_frac(1_000, 1_000, 3_000), 0.0);
+        assert_eq!(strip_frac(2_000, 1_000, 3_000), 0.5);
+        assert_eq!(
+            strip_frac(500, 1_000, 3_000),
+            0.0,
+            "before the match clamps"
+        );
+        // A scrub maps into the match, never before it.
+        assert_eq!(scrub_target(0.0, 1_000, 3_000, &[]), 1_000);
+        assert_eq!(scrub_target(0.5, 1_000, 3_000, &[]), 2_000);
+        assert_eq!(scrub_target(1.0, 1_000, 3_000, &[]), 2_999);
+    }
+
+    #[test]
+    fn a_scrub_on_a_kill_mark_lands_just_before_the_kill() {
+        let kills = [(2_000, 1)];
+        assert_eq!(
+            scrub_target(0.51, 1_000, 3_000, &kills),
+            2_000 - KILL_RUN_UP
+        );
+        assert_eq!(scrub_target(0.80, 1_000, 3_000, &kills), 2_600);
+    }
+
+    #[test]
     fn the_theaters_tap_targets_never_overlap() {
         let bands = [EXIT_BAND, SPEED_BAND, SCRUB_BAND];
         for (i, a) in bands.iter().enumerate() {
@@ -1107,8 +1366,10 @@ mod tests {
                 assert!(!crate::ui::overlaps(*a, *b), "{a:?} overlaps {b:?}");
             }
         }
-        // The list's BACK and its top exit, likewise.
+        // The list's BACK and its top exit, likewise; and the page-turn
+        // band stays clear of the first row.
         assert!(!crate::ui::overlaps(BACK_BAND, EXIT_BAND));
+        assert!(SUBLINE_BAND.1 <= LIST_TOP);
     }
 
     /// The sequence from the crash reports, which a fresh launch never
@@ -1325,6 +1586,9 @@ mod tests {
                 winner: Some(0),
                 player_handles: [None, None],
                 arena_id: 0,
+                start_tick: 0,
+                kind: replay::TapeKind::default(),
+                kills: Vec::new(),
             },
             inputs,
         };

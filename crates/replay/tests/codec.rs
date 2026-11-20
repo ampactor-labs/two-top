@@ -18,6 +18,9 @@ fn sample_replay() -> Replay {
             winner: Some(1),
             player_handles: [Some("alice".to_string()), Some("bob".to_string())],
             arena_id: 0,
+            start_tick: 0,
+            kind: replay::TapeKind::default(),
+            kills: Vec::new(),
         },
         inputs: vec![
             [
@@ -51,6 +54,14 @@ fn sample_replay() -> Replay {
             [PlayerInput::default(), PlayerInput::default()],
         ],
     }
+}
+
+#[test]
+fn the_header_decodes_on_its_own() {
+    let r = sample_replay();
+    let bytes = replay::encode(&r).unwrap();
+    assert_eq!(replay::decode_header(&bytes).unwrap(), r.header);
+    assert!(replay::decode_header(&bytes[..3]).is_err());
 }
 
 #[test]

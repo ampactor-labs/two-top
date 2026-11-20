@@ -48,11 +48,23 @@ pub struct MatchRecorder {
     scores: Vec<MatchScore>,
     /// Latch so one MatchOver writes exactly one file.
     saved: bool,
+    /// Every confirmed kill of the session: (tick, victim seat).
+    kills: Vec<(u32, u8)>,
 }
 
 impl MatchRecorder {
     fn reset(&mut self) {
         *self = Self::default();
+    }
+
+    /// The tick the match that ends at `end` (exclusive) began on: the last
+    /// rematch in the score trail (the score falling back to 0-0), or 0.
+    pub fn match_start(&self, end: usize) -> u32 {
+        let scores = &self.scores[..end.min(self.scores.len())];
+        scores
+            .windows(2)
+            .rposition(|w| w[0] != MatchScore::default() && w[1] == MatchScore::default())
+            .map_or(0, |i| i as u32 + 1)
     }
 
     /// The recorded inputs of the first `ticks` ticks (fewer if fewer were
@@ -187,6 +199,38 @@ fn header_names(
     names
 }
 
+/// Collect the session's confirmed kills for the tape's header.
+fn note_confirmed_kills(
+    mut kills: MessageReader<render::facts::KillConfirmed>,
+    mut rec: ResMut<MatchRecorder>,
+) {
+    for kill in kills.read() {
+        let entry = (kill.tick, kill.victim as u8);
+        if !rec.kills.contains(&entry) {
+            rec.kills.push(entry);
+        }
+    }
+}
+
+/// What this tape is a recording of. Pure.
+pub fn tape_kind(
+    online: bool,
+    practice: bool,
+    shade: bool,
+    lesson: bool,
+    tier: u32,
+) -> replay::TapeKind {
+    match (online, practice, shade, lesson) {
+        (_, true, true, _) => replay::TapeKind::Shade,
+        (_, true, _, true) => replay::TapeKind::Lesson,
+        (_, true, _, _) => replay::TapeKind::Practice {
+            tier: tier.min(u8::MAX as u32) as u8,
+        },
+        (true, false, _, _) => replay::TapeKind::Duel,
+        _ => replay::TapeKind::Couch,
+    }
+}
+
 /// Once the match's ending can no longer roll back
 /// (`attest::MatchOverSettled`), write the ticks that are fact
 /// ([`tape_ticks`]) as a `.bmrg`.
@@ -204,9 +248,10 @@ fn save_replay_on_match_over(
     lobby: Res<net::LobbyState>,
     absence: Res<crate::netplay::RecentAbsence>,
     time: Res<Time<Real>>,
-    (settled, ending): (
+    (settled, ending, first_blood): (
         Res<crate::attest::MatchOverSettled>,
         Res<crate::netplay::SessionEnding>,
+        Res<crate::first_blood::FirstBlood>,
     ),
     mut record: ResMut<crate::grudge::CareerRecord>,
     mut rec: ResMut<MatchRecorder>,
@@ -262,6 +307,7 @@ fn save_replay_on_match_over(
                     crate::grudge::Outcome::Unfinished => None,
                 }
             };
+            let start_tick = rec.match_start(ticks);
             let recorded_at = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.as_secs())
@@ -286,10 +332,27 @@ fn save_replay_on_match_over(
                         &peer,
                     ),
                     arena_id: selected.0.as_u8(),
+                    start_tick,
+                    kind: tape_kind(
+                        netplay.room_url.is_some(),
+                        practice.0,
+                        shade.0.is_some(),
+                        first_blood.active,
+                        record.gauntlet_tier,
+                    ),
+                    kills: rec
+                        .kills
+                        .iter()
+                        .copied()
+                        .filter(|(tick, _)| (start_tick..ticks as u32).contains(tick))
+                        .collect(),
                 },
                 inputs: rec.frames[..ticks].to_vec(),
             };
             last_saved.0 = write_replay(&replay, recorded_at, winner);
+            if let Some(dir) = replays_dir() {
+                prune_tapes(&dir, &record);
+            }
             // A live duel's tape lands on the rival's ring too, so the
             // rivals screen can replay the recent conversation.
             if let (Some(path), Some(peer), false) = (&last_saved.0, peer.0, practice.0)
@@ -303,6 +366,71 @@ fn save_replay_on_match_over(
 }
 
 /// Encode + write the tape. Returns the path on success.
+/// Tapes kept per kind: duels are the record of a rivalry; practice,
+/// couch and the rest are kept for a while.
+pub const KEEP_DUELS: usize = 200;
+pub const KEEP_OTHERS: usize = 40;
+
+/// Which of `tapes` (file name, recorded-at, is a duel) to delete: past the
+/// newest [`KEEP_DUELS`] duels and [`KEEP_OTHERS`] others, never one that
+/// is `protected` (on a rival's ring, or carrying a signed result). Pure.
+pub fn tapes_to_prune(
+    tapes: &[(String, u64, bool)],
+    protected: &std::collections::BTreeSet<String>,
+) -> Vec<String> {
+    let mut sorted: Vec<&(String, u64, bool)> = tapes.iter().collect();
+    sorted.sort_by_key(|(_, at, _)| std::cmp::Reverse(*at));
+    let (mut duels, mut others) = (0usize, 0usize);
+    let mut out = Vec::new();
+    for (name, _, duel) in sorted {
+        let kept = if *duel { &mut duels } else { &mut others };
+        *kept += 1;
+        let limit = if *duel { KEEP_DUELS } else { KEEP_OTHERS };
+        if *kept > limit && !protected.contains(name) {
+            out.push(name.clone());
+        }
+    }
+    out
+}
+
+/// After a save: delete the tapes past the keep limits. A rival's ring and
+/// every signed result are never touched.
+fn prune_tapes(dir: &std::path::Path, record: &crate::grudge::CareerRecord) {
+    let mut protected: std::collections::BTreeSet<String> = record
+        .rivals
+        .values()
+        .flat_map(|r| r.tapes.iter().cloned())
+        .collect();
+    let mut tapes = Vec::new();
+    for path in crate::paths::list_dir(dir, "bmrg") {
+        let Some(name) = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .map(str::to_string)
+        else {
+            continue;
+        };
+        if path.with_extension("attest.json").exists() {
+            protected.insert(name.clone());
+        }
+        let Ok(bytes) = crate::paths::read_bytes(&path) else {
+            continue;
+        };
+        let Ok(header) = replay::decode_header(&bytes) else {
+            continue; // not ours to judge
+        };
+        tapes.push((
+            name,
+            header.recorded_at,
+            header.kind == replay::TapeKind::Duel,
+        ));
+    }
+    for name in tapes_to_prune(&tapes, &protected) {
+        let _ = std::fs::remove_file(dir.join(&name));
+        tracing::info!(target: "two_top::recorder", tape = name, "pruned an old tape");
+    }
+}
+
 fn write_replay(replay: &Replay, recorded_at: u64, winner: Option<u8>) -> Option<PathBuf> {
     let bytes = match encode(replay) {
         Ok(b) => b,
@@ -364,6 +492,7 @@ impl Plugin for MatchRecorderPlugin {
             // GgrsSchedule) — the frame counter and input history have both
             // advanced, so the tick just simulated is `FrameCount - 1`.
             .add_systems(GgrsSchedule, record_tick.after(sim::advance_input_history))
+            .add_systems(Update, note_confirmed_kills.after(render::facts::KillFacts))
             .add_systems(
                 Update,
                 save_replay_on_match_over.after(crate::attest::settle_match_over),
@@ -374,6 +503,50 @@ impl Plugin for MatchRecorderPlugin {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pruning_keeps_the_newest_and_never_a_protected_tape() {
+        let mut tapes = Vec::new();
+        for i in 0..(KEEP_OTHERS as u64 + 5) {
+            tapes.push((format!("p{i}"), i, false));
+        }
+        tapes.push(("duel".to_string(), 0, true));
+        let protected = ["p0".to_string()].into_iter().collect();
+        let pruned = tapes_to_prune(&tapes, &protected);
+        // The five oldest practice tapes go, except the protected one;
+        // the lone duel stays.
+        assert_eq!(pruned, vec!["p4", "p3", "p2", "p1"]);
+    }
+
+    #[test]
+    fn a_match_starts_at_the_last_rematch() {
+        let mut rec = MatchRecorder::default();
+        let s = |p0, p1| MatchScore { p0, p1 };
+        rec.scores = vec![
+            s(0, 0),
+            s(1, 0),
+            s(5, 0),
+            s(5, 0),
+            s(0, 0),
+            s(0, 1),
+            s(0, 2),
+        ];
+        assert_eq!(rec.match_start(7), 4, "the rematch tick");
+        assert_eq!(rec.match_start(3), 0, "the first match starts at 0");
+    }
+
+    #[test]
+    fn a_tape_knows_what_it_recorded() {
+        use replay::TapeKind;
+        assert_eq!(tape_kind(true, false, false, false, 0), TapeKind::Duel);
+        assert_eq!(tape_kind(false, false, false, false, 0), TapeKind::Couch);
+        assert_eq!(
+            tape_kind(true, true, false, false, 7),
+            TapeKind::Practice { tier: 7 }
+        );
+        assert_eq!(tape_kind(false, true, true, false, 7), TapeKind::Shade);
+        assert_eq!(tape_kind(false, true, false, true, 0), TapeKind::Lesson);
+    }
     use bevy::time::TimeUpdateStrategy;
     use bevy_ggrs::GgrsPlugin;
     use bevy_ggrs::prelude::*;
@@ -390,9 +563,10 @@ mod tests {
             frames: vec![[PlayerInput::default(); 2]],
             scores: vec![MatchScore { p0: 1, p1: 0 }],
             saved: true,
+            kills: vec![(3, 1)],
         };
         rec.reset();
-        assert!(rec.frames.is_empty() && rec.scores.is_empty());
+        assert!(rec.frames.is_empty() && rec.scores.is_empty() && rec.kills.is_empty());
         assert!(!rec.saved);
     }
 
@@ -406,6 +580,7 @@ mod tests {
                 MatchScore { p0: 2, p1: 0 },
             ],
             saved: false,
+            kills: Vec::new(),
         };
         assert_eq!(
             rec.score_after(-1),

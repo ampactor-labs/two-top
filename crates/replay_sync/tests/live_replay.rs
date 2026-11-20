@@ -27,6 +27,9 @@ fn tape(arena: ArenaId, inputs: Vec<[sim::PlayerInput; 2]>) -> Replay {
             winner: None,
             player_handles: [None, None],
             arena_id: arena.as_u8(),
+            start_tick: 0,
+            kind: replay::TapeKind::default(),
+            kills: Vec::new(),
         },
         inputs,
     }

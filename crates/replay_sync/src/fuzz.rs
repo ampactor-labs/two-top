@@ -90,6 +90,9 @@ pub fn fuzz_replay(seed: u64) -> Replay {
             // same INPUT tape but may land on a different arena than they
             // did under an older roster.
             arena_id: (seed % sim::ALL_ARENAS.len() as u64) as u8,
+            start_tick: 0,
+            kind: replay::TapeKind::default(),
+            kills: Vec::new(),
         },
         inputs,
     }

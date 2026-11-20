@@ -1032,6 +1032,18 @@ mod tests {
     use super::*;
 
     #[test]
+    fn watch_the_kill_sits_clear_of_the_other_summary_targets() {
+        use summary::{WATCH_BAND, watch_tapped};
+        assert!(!ui::overlaps(WATCH_BAND, PLAY_BTN_RECT));
+        assert!(!ui::overlaps(WATCH_BAND, TOP_EXIT_BAND));
+        let win = Vec2::new(1080.0, 2400.0);
+        // Left half, in band: WATCH. Right half (a THROW at MatchOver): not.
+        assert!(watch_tapped([Vec2::new(270.0, 0.75 * 2400.0)], win));
+        assert!(!watch_tapped([Vec2::new(810.0, 0.75 * 2400.0)], win));
+        assert!(!watch_tapped([Vec2::new(270.0, 0.5 * 2400.0)], win));
+    }
+
+    #[test]
     fn app_screen_defaults_to_title() {
         assert_eq!(AppScreen::default(), AppScreen::Title);
     }
