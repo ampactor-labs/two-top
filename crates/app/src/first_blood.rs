@@ -199,9 +199,10 @@ fn auto_begin(
             _ => None,
         });
     let scripted = crate::config::Knob::Capture.is_set() || crate::config::Knob::Autostart.is_set();
+    // Any link (a table, a tape, a shade) brought them here for that.
     let arrived_by_link = crate::platform::launch_link()
         .as_deref()
-        .and_then(crate::room_code::parse_join)
+        .and_then(crate::launch::LaunchLink::parse)
         .is_some();
     if should_auto_run(
         &progress.0,

@@ -40,7 +40,7 @@ fn main() -> ExitCode {
             eprintln!(
                 "usage: replay_sync (--demo <path.bmrg> | --fuzz <seed>) \
                  [--live] [--output <path.tsv>] [--dump-state-at <frame>] \
-                 [--emit-bmrg <path>] [--attest <path.attest.json>]\n\
+                 [--emit-bmrg <path>] [--attest]\n\
                  --live re-simulates a recorded match under the rules it was \
                  played by; without it --demo runs the determinism probe \
                  (the canonical demo and the cross-platform lanes)"
@@ -74,17 +74,24 @@ fn main() -> ExitCode {
         return ExitCode::SUCCESS;
     }
 
-    // NORTH N2: verify a dual-signed result against this tape. The tape
-    // re-simulates (that's the whole point), the statement's facts must
-    // match it, and both signatures must check out.
-    if let Some(attest_path) = arg_value::<String>(&args, "--attest") {
-        let attestation: net::Attestation = match fs::read_to_string(&attest_path)
+    // NORTH N2: verify the dual-signed result sealed into this tape. The
+    // tape re-simulates (that's the whole point), the statement's facts
+    // and input hash must match it, and both signatures must check out.
+    if args.iter().any(|a| a == "--attest") {
+        let Some(path) = arg_value::<String>(&args, "--demo") else {
+            eprintln!("replay_sync: --attest reads the seal of a --demo tape");
+            return ExitCode::from(2);
+        };
+        let attestation: net::Attestation = match fs::read(&path)
             .map_err(|e| e.to_string())
+            .and_then(|bytes| {
+                replay::read_seal(&bytes).ok_or_else(|| "the tape carries no seal".to_string())
+            })
             .and_then(|text| serde_json::from_str(&text).map_err(|e| e.to_string()))
         {
             Ok(a) => a,
             Err(e) => {
-                eprintln!("replay_sync: failed to read attestation {attest_path}: {e}");
+                eprintln!("replay_sync: no signed result in {path}: {e}");
                 return ExitCode::FAILURE;
             }
         };
@@ -153,6 +160,29 @@ fn load_demo(path: &PathBuf) -> Result<replay::Replay, ExitCode> {
         eprintln!("replay_sync: failed to read {}: {}", path.display(), e);
         ExitCode::FAILURE
     })?;
+    // A `.live` file is a broadcast saved off the relay (header, then raw
+    // input pairs): as far as it goes, it is a tape.
+    if path.extension().is_some_and(|e| e == "live") {
+        return match replay::decode_live(&bytes) {
+            Ok(Some(tape)) if tape.header.sim_version == sim::SIM_VERSION => Ok(tape),
+            Ok(Some(tape)) => {
+                eprintln!(
+                    "replay_sync: live tape is sim {}, this binary {}",
+                    tape.header.sim_version,
+                    sim::SIM_VERSION
+                );
+                Err(ExitCode::FAILURE)
+            }
+            Ok(None) => {
+                eprintln!("replay_sync: live tape has no header yet");
+                Err(ExitCode::FAILURE)
+            }
+            Err(e) => {
+                eprintln!("replay_sync: failed to decode live tape: {e}");
+                Err(ExitCode::FAILURE)
+            }
+        };
+    }
     decode_for_sim_version(&bytes, sim::SIM_VERSION).map_err(|e| {
         eprintln!("replay_sync: failed to decode: {e}");
         ExitCode::FAILURE

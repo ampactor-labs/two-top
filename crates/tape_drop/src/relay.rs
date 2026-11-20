@@ -9,7 +9,8 @@
 //!   The bytes are the stream the app writes: a postcard `ReplayHeader`,
 //!   then input pairs, so a live tape that has ended is a tape.
 //! * **Results**: dual-signed match results posted for the ladder
-//!   (`POST /results`), listed newest first (`GET /results?since=<unix>`).
+//!   (`POST /results` names a sealed tape the relay holds; the result is
+//!   the tape's own seal), listed newest first (`GET /results?since=<unix>`).
 //!   The relay keeps them; the ladder page verifies each one itself in the
 //!   browser (re-simulating the tape, checking both signatures), so the
 //!   relay is never the thing trusted.
@@ -131,7 +132,7 @@ pub struct ResultRow {
     pub posted_unix: u64,
     /// The relay id of the tape the result is about (a sealed tape).
     pub tape: String,
-    /// The `.attest.json` document, as the phone wrote it.
+    /// The attestation sealed into the tape, as the phones signed it.
     pub attestation: serde_json::Value,
 }
 
@@ -156,23 +157,51 @@ impl Results {
     }
 }
 
-/// A body posted to `/results`: `{"tape": <id>, "attestation": {...}}`.
-pub fn parse_result(body: &[u8], posted_unix: u64) -> Option<ResultRow> {
+/// A body posted to `/results`: `{"tape": <id>}`. The result itself is
+/// the tape's own seal ([`seal_of`]), so a result can only ever be the one
+/// its tape carries.
+pub fn parse_result_tape(body: &[u8]) -> Option<String> {
     #[derive(serde::Deserialize)]
     struct Posted {
         tape: String,
-        attestation: serde_json::Value,
     }
     if body.len() > RESULT_MAX_BYTES {
         return None;
     }
     let posted: Posted = serde_json::from_slice(body).ok()?;
     let id_ok = posted.tape.len() == 12 && posted.tape.bytes().all(|b| b.is_ascii_hexdigit());
-    (id_ok && posted.attestation.is_object()).then_some(ResultRow {
-        posted_unix,
-        tape: posted.tape,
-        attestation: posted.attestation,
-    })
+    id_ok.then_some(posted.tape)
+}
+
+/// The signed result sealed into a tape's end (`replay::seal`): `SEAL`,
+/// a varint length, that many bytes of JSON, and nothing after. Found
+/// from the end, without the game's codec, so the relay stays small.
+pub fn seal_of(tape: &[u8]) -> Option<serde_json::Value> {
+    let from = tape.len().saturating_sub(RESULT_MAX_BYTES + 16);
+    let mut at = tape.len().checked_sub(5)?;
+    loop {
+        if at < from {
+            return None;
+        }
+        if tape[at..].starts_with(b"SEAL") {
+            let rest = &tape[at + 4..];
+            // A postcard varint: seven bits a byte, low first.
+            let (mut len, mut shift, mut used) = (0usize, 0u32, 0usize);
+            for b in rest.iter().take(4) {
+                len |= ((b & 0x7f) as usize) << shift;
+                shift += 7;
+                used += 1;
+                if b & 0x80 == 0 {
+                    break;
+                }
+            }
+            if used > 0 && rest.len() == used + len {
+                let value: serde_json::Value = serde_json::from_slice(&rest[used..]).ok()?;
+                return value.is_object().then_some(value);
+            }
+        }
+        at = at.checked_sub(1)?;
+    }
 }
 
 /// `n` random bytes as hex, from the system's randomness (the relay runs
@@ -270,13 +299,28 @@ mod tests {
     }
 
     #[test]
-    fn results_are_parsed_strictly_and_listed_newest_first() {
-        let ok = br#"{"tape":"0123456789ab","attestation":{"statement":{}}}"#;
-        let row = parse_result(ok, 100).unwrap();
-        assert_eq!(row.tape, "0123456789ab");
-        assert!(parse_result(br#"{"tape":"../etc","attestation":{}}"#, 1).is_none());
-        assert!(parse_result(br#"{"tape":"0123456789ab","attestation":3}"#, 1).is_none());
-        assert!(parse_result(b"not json", 1).is_none());
+    fn results_name_a_tape_and_carry_its_seal() {
+        assert_eq!(
+            parse_result_tape(br#"{"tape":"0123456789ab"}"#).as_deref(),
+            Some("0123456789ab")
+        );
+        assert!(parse_result_tape(br#"{"tape":"../etc"}"#).is_none());
+        assert!(parse_result_tape(b"not json").is_none());
+        let json = br#"{"statement":{"x":1},"sig_low":"a","sig_high":"b"}"#;
+        let mut tape = b"BMRG...inputs...".to_vec();
+        assert!(seal_of(&tape).is_none(), "an unsealed tape has no result");
+        tape.extend_from_slice(b"SEAL");
+        tape.push(json.len() as u8);
+        tape.extend_from_slice(json);
+        assert_eq!(seal_of(&tape).unwrap()["sig_low"], "a");
+        // Trailing bytes after the seal: not a seal.
+        tape.push(0);
+        assert!(seal_of(&tape).is_none());
+        let row = ResultRow {
+            posted_unix: 100,
+            tape: "0123456789ab".into(),
+            attestation: serde_json::json!({}),
+        };
         let mut results = Results::default();
         results.post(row.clone());
         results.post(ResultRow {

@@ -30,19 +30,24 @@ mod bot;
 mod callout;
 mod camera;
 mod capture;
+mod clip;
 mod config;
 mod crash_report;
 mod dark_beyond;
 mod debug_overlay;
 mod devour;
+mod feel_lab;
 mod first_blood;
 mod grudge;
 mod haptics;
 mod hud;
 mod intro_card;
 mod keys;
+mod ladder;
+mod launch;
 mod lesson;
 mod lifecycle;
+mod live;
 mod lobby_overlay;
 mod logging;
 mod netplay;
@@ -68,6 +73,7 @@ mod touch_controls;
 mod transport;
 mod tuning_reload;
 mod ui;
+mod verify;
 use anchor::{FullScreenSprite, ScreenAnchorPlugin};
 use attest::AttestPlugin;
 use audio::GameAudioPlugin;
@@ -257,6 +263,12 @@ pub fn run() {
         .add_plugins(GrudgePlugin)
         .add_plugins(AttestPlugin)
         .add_plugins(share::SharePlugin)
+        .add_plugins(live::LivePlugin)
+        .add_plugins(launch::LaunchPlugin)
+        .add_plugins(shade::ShadePlugin)
+        .add_plugins(ladder::LadderPlugin)
+        .add_plugins(verify::VerifyPlugin)
+        .add_plugins(clip::ClipPlugin)
         .add_plugins(rivals::RivalsPlugin)
         .add_plugins(ProfilePlugin)
         .add_plugins(MatchRecorderPlugin)
@@ -320,6 +332,7 @@ pub fn run() {
     app.insert_state(AppScreen::Title);
     app.add_plugins(netplay::NetplayStatePlugin);
     app.add_plugins(resume::ResumePlugin);
+    app.add_plugins(feel_lab::FeelLabPlugin);
     app.init_resource::<sim_clock::ClockBase>();
     if online {
         app.add_plugins(MatchboxPlugin);

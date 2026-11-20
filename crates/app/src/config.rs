@@ -24,7 +24,9 @@ pub enum Knob {
     Capture,
     CrashNotice,
     Fault,
+    FeelLab,
     FirstBlood,
+    GoLive,
     LeanGpu,
     LessonStage,
     ShowTouch,
@@ -36,7 +38,7 @@ pub enum Knob {
 }
 
 impl Knob {
-    pub const ALL: [Knob; 17] = [
+    pub const ALL: [Knob; 19] = [
         Knob::Autostart,
         Knob::Practice,
         Knob::Autopilot,
@@ -45,7 +47,9 @@ impl Knob {
         Knob::Capture,
         Knob::CrashNotice,
         Knob::Fault,
+        Knob::FeelLab,
         Knob::FirstBlood,
+        Knob::GoLive,
         Knob::LeanGpu,
         Knob::LessonStage,
         Knob::ShowTouch,
@@ -88,9 +92,17 @@ impl Knob {
                 "TWOTOP_FAULT",
                 "desync@<tick>: debug builds only, a one-sided desync",
             ),
+            Knob::FeelLab => (
+                "TWOTOP_FEEL_LAB",
+                "1: practice opens with the feel lab on (captures; 3 fingers on a phone)",
+            ),
             Knob::FirstBlood => (
                 "TWOTOP_FIRST_BLOOD",
                 "1: run the newcomer lesson as if never seen",
+            ),
+            Knob::GoLive => (
+                "TWOTOP_GO_LIVE",
+                "1: open a live tape at boot, as GO LIVE does (smokes)",
             ),
             Knob::LeanGpu => ("TWOTOP_LEAN_GPU", "1: the lean render path weak phones get"),
             Knob::LessonStage => (

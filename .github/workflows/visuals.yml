@@ -1,0 +1,55 @@
+name: Visuals
+
+# The contact sheet: every screen at four window sizes, rendered headlessly
+# on Mesa's software Vulkan (lavapipe) under Xvfb and uploaded as one HTML
+# page (scripts/contact_sheet.sh). Nightly, and on demand; download the
+# artifact and open index.html to see what the game looks like at this
+# commit. Informational: it fails only when a screen could not be
+# captured at all.
+
+on:
+  schedule:
+    - cron: "41 8 * * *"
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - "assets/**"
+      - "crates/render/**"
+      - "crates/app/src/**"
+      - "scripts/contact_sheet.sh"
+      - ".github/workflows/visuals.yml"
+
+concurrency:
+  group: visuals-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  contact-sheet:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install system packages
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libasound2-dev libudev-dev xvfb \
+            mesa-vulkan-drivers libvulkan1 libxkbcommon-x11-0
+          echo "VK_ICD_FILENAMES=$(ls /usr/share/vulkan/icd.d/lvp_icd*.json | head -1)" >> "$GITHUB_ENV"
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: visuals
+      - name: Build
+        run: cargo build --locked -p app --bins
+      - name: Capture every screen at every size
+        run: scripts/contact_sheet.sh
+      - name: Upload the contact sheet
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: contact-sheet-${{ github.sha }}
+          path: target/contact-sheet
+          if-no-files-found: ignore

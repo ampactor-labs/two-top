@@ -1,0 +1,122 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>2-Top — the ladder</title>
+  <link rel="icon" type="image/png" href="icon-192.png">
+  <meta name="theme-color" content="#100e22">
+  <style>
+    html, body { margin: 0; background: #100e22; color: #f2e5c9; font-family: monospace; }
+    body { padding: 1.2em max(1em, env(safe-area-inset-left)); max-width: 46em; margin: auto; }
+    h1 { color: #fff3ca; letter-spacing: 0.2em; margin: 0.2em 0; }
+    h2 { color: #ffdc70; font-size: 16px; margin-top: 1.6em; }
+    table { border-collapse: collapse; width: 100%; }
+    td, th { padding: 0.35em 0.5em; text-align: left; border-bottom: 1px solid #2a2550; }
+    th { color: rgba(210,196,156,0.6); font-weight: normal; }
+    td.n { text-align: right; }
+    .dim { color: rgba(210,196,156,0.6); font-size: 13px; }
+    a { color: #ffdc70; }
+    .tag { color: rgba(210,196,156,0.5); font-size: 12px; }
+  </style>
+</head>
+<body>
+  <h1>THE LADDER</h1>
+  <div class="dim">
+    Results both duelists agreed to post, each signed by both phones. Every
+    row opens the match itself: the theater re-plays it and checks both
+    signatures, and says VERIFIED only if the tape reaches the score they
+    signed. One season per version of the game.
+  </div>
+  <div id="out"><p class="dim">reading the ladder…</p></div>
+  <script type="module">
+    // Substituted by the Pages workflow, as in index.html.
+    const DROP_URL = "__TWOTOP_DROP_URL__";
+    const out = document.getElementById("out");
+    const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]);
+    const hex = (bytes) => bytes.map((b) => b.toString(16).padStart(2, "0")).join("");
+
+    // The tape header (postcard): enough of it for the duelists' names.
+    function names(buf) {
+      const b = new Uint8Array(buf);
+      let i = 4;
+      const varint = () => { let v = 0, s = 0; for (;;) { const x = b[i++]; v += (x & 0x7f) * 2 ** s; s += 7; if (!(x & 0x80)) return v; } };
+      varint(); varint(); varint();   // format, sim version, seed
+      i += 2;                         // players, frame rate
+      varint(); varint();             // frame count, recorded at
+      if (b[i++] === 1) i++;          // winner
+      const handles = [];
+      for (let h = 0; h < 2; h++) {
+        if (b[i++] === 1) { const n = varint(); handles.push(new TextDecoder().decode(b.slice(i, i + n))); i += n; }
+        else handles.push(null);
+      }
+      return handles;
+    }
+
+    async function main() {
+      if (!DROP_URL || DROP_URL.startsWith("__")) {
+        out.innerHTML = '<p class="dim">this build has no relay configured</p>';
+        return;
+      }
+      const base = DROP_URL.replace(/\/$/, "");
+      const rows = await (await fetch(`${base}/results?since=0`)).json();
+      rows.sort((a, b) => a.posted_unix - b.posted_unix);
+      // Names, from each tape's own header (best effort: a tape that has
+      // expired from the relay leaves its players by their key tags).
+      const named = {};
+      await Promise.all(rows.slice(-300).map(async (r) => {
+        try {
+          const res = await fetch(`${base}/tape/${r.tape}`);
+          if (res.ok) named[r.tape] = names(await res.arrayBuffer());
+        } catch (_) { /* expired */ }
+      }));
+      const seasons = {};
+      for (const r of rows) {
+        const s = r.attestation.statement;
+        const season = (seasons[s.sim_version] ??= { players: {}, games: [] });
+        const seats = [s.seat_low, s.seat_high].map((seat) => {
+          const key = hex(seat.pubkey);
+          const name = named[r.tape]?.[seat.handle] ?? null;
+          const p = (season.players[key] ??= { key, name, rating: 1000, won: 0, lost: 0 });
+          if (name) p.name = name;
+          return { p, score: seat.score };
+        });
+        const [a, b] = seats;
+        if (a.score === b.score) continue;
+        // Elo, K = 32, in the order the results were posted.
+        const expected = 1 / (1 + 10 ** ((b.p.rating - a.p.rating) / 400));
+        const won = a.score > b.score ? 1 : 0;
+        a.p.rating += 32 * (won - expected);
+        b.p.rating -= 32 * (won - expected);
+        (won ? a : b).p.won++;
+        (won ? b : a).p.lost++;
+        season.games.push({ r, a, b });
+      }
+      const versions = Object.keys(seasons).map(Number).sort((x, y) => y - x);
+      if (!versions.length) {
+        out.innerHTML = '<p class="dim">no results yet - turn the ladder on in Settings, both of you</p>';
+        return;
+      }
+      let html = "";
+      for (const v of versions) {
+        const season = seasons[v];
+        const ranked = Object.values(season.players).sort((x, y) => y.rating - x.rating);
+        html += `<h2>SEASON ${v}</h2><table><tr><th>#</th><th>duelist</th><th class="n">rating</th><th class="n">W-L</th></tr>`;
+        ranked.forEach((p, i) => {
+          html += `<tr><td>${i + 1}</td><td>${esc(p.name ?? "?")} <span class="tag">${p.key.slice(0, 6)}</span></td>`
+            + `<td class="n">${Math.round(p.rating)}</td><td class="n">${p.won}-${p.lost}</td></tr>`;
+        });
+        html += `</table><h2>RECENT</h2><table>`;
+        for (const g of season.games.slice(-20).reverse()) {
+          const when = new Date(g.r.posted_unix * 1000).toISOString().slice(0, 10);
+          html += `<tr><td class="dim">${when}</td><td>${esc(g.a.p.name ?? "?")} ${g.a.score} - ${g.b.score} ${esc(g.b.p.name ?? "?")}</td>`
+            + `<td><a href="./#watch=${esc(g.r.tape)}">watch &amp; verify</a></td></tr>`;
+        }
+        html += "</table>";
+      }
+      out.innerHTML = html;
+    }
+    main().catch((e) => { out.innerHTML = `<p class="dim">the ladder could not be read: ${esc(e)}</p>`; });
+  </script>
+</body>
+</html>

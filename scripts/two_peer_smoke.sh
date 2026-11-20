@@ -10,7 +10,7 @@
 #   2. nobody pressed RUN IT BACK, so neither restarts (a THROW in flight
 #      at the decision must not become a rematch, SIM_VERSION 16);
 #   3. both save a tape and a signed result; the tapes replay to the same
-#      per-frame checksums and each attestation verifies against its tape;
+#      per-frame checksums and each tape's seal (its signed result) verifies against it;
 #   4. THROW pressed in both windows (RUN IT BACK) restarts both, no desync.
 #
 # A CI gate on main and nightly (.github/workflows/netplay.yml, open ground,
@@ -71,7 +71,7 @@ echo "OK: both peers decided the match (rematch opens at tick $FA), no desync"
 # results rather than guessing how long that takes.
 deadline=$((SECONDS + 30))
 until TA=$(tape a) && TB=$(tape b) && [ -n "$TA" ] && [ -n "$TB" ] \
-    && [ -f "${TA%.bmrg}.attest.json" ] && [ -f "${TB%.bmrg}.attest.json" ]; do
+    && grep -qa SEAL "$TA" && grep -qa SEAL "$TB"; do
   [ $SECONDS -ge $deadline ] && fail "both tapes and both signed results not filed within 30s (tapes: '${TA:-}' '${TB:-}')"
   check_health
   [ "$(restarts a)" = 0 ] || fail "the match restarted from MatchOver with nobody pressing RUN IT BACK"
@@ -91,9 +91,8 @@ LA=$(($(wc -l < "$WORK/a.tsv") - 1)); LB=$(($(wc -l < "$WORK/b.tsv") - 1))
   || fail "the tapes replay differently (tapes $LA / $LB frames)"
 echo "OK: both tapes replay to the same $LA frames"
 for t in "$TA" "$TB"; do
-  att="${t%.bmrg}.attest.json"
-  "$RS" --demo "$t" --attest "$att" > /dev/null 2>&1 || fail "$(basename "$att") does not verify against its tape"
-  echo "OK: $(basename "$att") verifies against its tape"
+  "$RS" --demo "$t" --attest > /dev/null 2>&1 || fail "the seal of $(basename "$t") does not verify against it"
+  echo "OK: the seal of $(basename "$t") verifies against it"
 done
 
 # 4: RUN IT BACK from both windows: THROW (Space) on the summary is

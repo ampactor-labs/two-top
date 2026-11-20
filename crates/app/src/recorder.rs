@@ -73,6 +73,21 @@ impl MatchRecorder {
         self.frames[..ticks.min(self.frames.len())].to_vec()
     }
 
+    /// A recorder that has recorded `inputs` (tests).
+    #[cfg(test)]
+    pub fn with_inputs(inputs: Vec<replay::FrameInputs>) -> Self {
+        Self {
+            scores: vec![MatchScore::default(); inputs.len()],
+            frames: inputs,
+            ..Self::default()
+        }
+    }
+
+    /// Every tick recorded so far (the unconfirmed tail included).
+    pub fn inputs(&self) -> &[replay::FrameInputs] {
+        &self.frames
+    }
+
     /// The score after tick `tick` (`-1`, or a tick not recorded: 0-0).
     pub fn score_after(&self, tick: i32) -> MatchScore {
         usize::try_from(tick)
@@ -172,7 +187,7 @@ pub fn record_tick(
 /// profile fills our seat and the peer's `Profile` handshake fills theirs.
 /// Practice names the bot honestly. Couch leaves both `None` (two humans,
 /// one device — the viewer falls back to CUR/STAG).
-fn header_names(
+pub(crate) fn header_names(
     netplay: &crate::netplay::NetplayConfig,
     practice: bool,
     shade: Option<&str>,
@@ -410,12 +425,12 @@ fn prune_tapes(dir: &std::path::Path, record: &crate::grudge::CareerRecord) {
         else {
             continue;
         };
-        if path.with_extension("attest.json").exists() {
-            protected.insert(name.clone());
-        }
         let Ok(bytes) = crate::paths::read_bytes(&path) else {
             continue;
         };
+        if replay::read_seal(&bytes).is_some() {
+            protected.insert(name.clone());
+        }
         let Ok(header) = replay::decode_header(&bytes) else {
             continue; // not ours to judge
         };

@@ -1992,6 +1992,13 @@ fn pump_side_channel(world: &mut World) {
                     .0
                     .push(NetMsg::Pong { id });
             }
+            NetMsg::Ladder => {
+                world.resource_mut::<crate::ladder::PeerConsent>().0 = true;
+            }
+            NetMsg::Live => {
+                tracing::info!(target: "two_top::net", "the peer is broadcasting this duel");
+                world.resource_mut::<crate::live::OnAir>().peer = true;
+            }
             NetMsg::Pausing => {
                 tracing::info!(target: "two_top::net", "peer is going away for a moment — holding the match longer");
                 world.resource_mut::<net::PeerPaused>().0 = true;

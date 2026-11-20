@@ -45,6 +45,10 @@ pub struct Settings {
     /// layer hits hard by design; this is the kindness knob for anyone it
     /// hits too hard. Kill flash and haptics are separate.
     pub shake: f32,
+    /// Post this phone's signed results to the public ladder. Off until
+    /// the player turns it on, and a result is posted only when BOTH
+    /// duelists have it on (`ladder.rs`).
+    pub ladder: bool,
 }
 
 impl Default for Settings {
@@ -57,6 +61,7 @@ impl Default for Settings {
             southpaw: false,
             arena: 0,
             shake: 1.0,
+            ladder: false,
         }
     }
 }
@@ -194,21 +199,34 @@ fn push_deadzone(
 // which is the whole job of a group header.
 const GROUPS_TOP: f32 = 0.215;
 const GROUP_HEADER_H: f32 = 0.028;
-const ROW_PITCH: f32 = 0.070;
-const GROUP_GAP: f32 = 0.060;
+const ROW_PITCH: f32 = 0.048;
+const GROUP_GAP: f32 = 0.030;
 const HEADING_FY: f32 = 0.115;
-const ROW_COUNT: usize = 6;
+const ROW_COUNT: usize = 9;
 /// The tappable row's box, in world units — the same bordered-box
 /// language as every other control in the game. Bare floating words gave
 /// no clue they could be tapped, and read as noise over the live table.
-const ROW_FILL: Vec2 = Vec2::new(700.0, 92.0);
+const ROW_FILL: Vec2 = Vec2::new(700.0, 56.0);
 /// Where each row's arrow sits, as a world-unit offset from the screen
 /// centre (never a normalized fraction — that would slide the arrows off
 /// a fixed-width box on any aspect but the phone's).
 const ROW_ARROW_X: f32 = 300.0;
 /// The groups, naming rows by their settled indices (0 haptics, 1 sfx,
-/// 2 music, 3 deadzone, 4 southpaw, 5 shake — `adjust_settings`' keys).
-const GROUPS: [(&str, [usize; 2]); 3] = [("FEEL", [0, 5]), ("AUDIO", [1, 2]), ("CONTROL", [3, 4])];
+/// 2 music, 3 deadzone, 4 southpaw, 5 shake — `adjust_settings`' keys —
+/// the SHARE group: 6 go live (`live.rs`) and 7 send my shade
+/// (`shade.rs`), which are actions, and 8 ladder, a saved consent).
+const GROUPS: [(&str, &[usize]); 4] = [
+    ("FEEL", &[0, 5]),
+    ("AUDIO", &[1, 2]),
+    ("CONTROL", &[3, 4]),
+    ("SHARE", &[LIVE_ROW, SHADE_ROW, LADDER_ROW]),
+];
+/// The GO LIVE row.
+pub(crate) const LIVE_ROW: usize = 6;
+/// The SEND MY SHADE row.
+pub(crate) const SHADE_ROW: usize = 7;
+/// The ladder consent row.
+const LADDER_ROW: usize = 8;
 /// BACK, matching the replays screen's band exactly.
 const BACK_BAND: crate::ui::Band = crate::ui::BACK;
 /// HOW TO PLAY: under the heading, clear of the top strip (BACK's, on
@@ -229,7 +247,7 @@ fn layout() -> SettingsLayout {
     for (g, (_, rows)) in GROUPS.iter().enumerate() {
         header_centers[g] = cursor + GROUP_HEADER_H * 0.5;
         cursor += GROUP_HEADER_H;
-        for &row in rows {
+        for &row in rows.iter() {
             row_bands[row] = (cursor, cursor + ROW_PITCH);
             cursor += ROW_PITCH;
         }
@@ -242,7 +260,7 @@ fn layout() -> SettingsLayout {
 }
 
 /// The setting row whose band contains a y-down window fraction.
-fn row_at(fy: f32) -> Option<usize> {
+pub(crate) fn row_at(fy: f32) -> Option<usize> {
     layout()
         .row_bands
         .iter()
@@ -428,8 +446,11 @@ fn spawn_setting_rows(mut commands: Commands) {
 /// A row's label: the knob's name and where it currently sits. The tap
 /// arrows are their own entities at the box's ends, so they are no longer
 /// part of this string.
-fn row_text(settings: &Settings, row: usize) -> String {
+fn row_text(settings: &Settings, live: &str, row: usize) -> String {
     match row {
+        LIVE_ROW => live.to_string(),
+        SHADE_ROW => "send my shade".to_string(),
+        LADDER_ROW => format!("ladder {}", if settings.ladder { "on" } else { "off" }),
         0 => format!("haptics {}", if settings.haptics { "on" } else { "off" }),
         1 => format!("sfx {:.0}%", settings.sfx_volume * 100.0),
         2 => format!("music {:.0}%", settings.music_volume * 100.0),
@@ -445,6 +466,7 @@ fn row_text(settings: &Settings, row: usize) -> String {
 fn update_setting_rows(
     screen: Res<State<crate::screen::AppScreen>>,
     settings: Res<Settings>,
+    live: Res<crate::live::Broadcast>,
     mut pieces: Query<
         (&SettingsPiece, Option<&mut Text2d>, &mut Visibility),
         Without<SettingsBack>,
@@ -464,7 +486,7 @@ fn update_setting_rows(
         if let SettingsPiece::Row(row, RowPart::Label) = piece
             && let Some(mut text) = text
         {
-            text.0 = row_text(&settings, *row);
+            text.0 = row_text(&settings, &live.row_label(), *row);
         }
     }
     for (part, mut vis, text) in &mut back {
@@ -546,6 +568,8 @@ fn adjust_settings(
                 2 => s.music_volume += 0.1 * sign,
                 3 => s.stick_deadzone += 0.02 * sign,
                 4 => s.southpaw = !s.southpaw,
+                LIVE_ROW | SHADE_ROW => {}
+                LADDER_ROW => s.ladder = !s.ladder,
                 _ => s.shake += 0.25 * sign,
             }
         }
@@ -583,6 +607,7 @@ mod tests {
             southpaw: true,
             arena: 3,
             shake: -2.0,
+            ladder: false,
         }
         .clamped();
         assert_eq!(wild.stick_deadzone, DEADZONE_MAX);

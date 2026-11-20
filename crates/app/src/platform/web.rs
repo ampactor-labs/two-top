@@ -16,6 +16,9 @@ use crate::screen::AppScreen;
 
 static WATCH_TAPE: OnceLock<Vec<u8>> = OnceLock::new();
 static JOIN_LINK: OnceLock<String> = OnceLock::new();
+/// A live tape's address and whether it was still open, when the shared
+/// link named a broadcast (`live.rs`).
+static LIVE_TAPE: OnceLock<(String, bool)> = OnceLock::new();
 
 /// The page's entry point. `watch_tape` is the raw `.bmrg` bytes when the
 /// URL named a shared match (index.html already fetched them from the
@@ -24,13 +27,21 @@ static JOIN_LINK: OnceLock<String> = OnceLock::new();
 /// button — which `room_code` dials in at boot exactly as the APK does
 /// with a scanned link.
 #[wasm_bindgen]
-pub fn web_start(watch_tape: Option<Vec<u8>>, join: Option<String>) {
+pub fn web_start(
+    watch_tape: Option<Vec<u8>>,
+    join: Option<String>,
+    live_url: Option<String>,
+    live_open: bool,
+) {
     console_error_panic_hook::set_once();
     if let Some(bytes) = watch_tape {
         let _ = WATCH_TAPE.set(bytes);
     }
     if let Some(join) = join {
         let _ = JOIN_LINK.set(join);
+    }
+    if let Some(url) = live_url {
+        let _ = LIVE_TAPE.set((url, live_open));
     }
     crate::run();
 }
@@ -134,6 +145,17 @@ pub(crate) fn watch_autoplay(world: &mut World, mut done: Local<bool>) {
     let Some(bytes) = WATCH_TAPE.get() else {
         return;
     };
+    // A broadcast: the feed rolls it once its header is in, and keeps
+    // asking the relay for the ticks still to come.
+    if let Some((url, open)) = LIVE_TAPE.get() {
+        tracing::info!(target: "two_top::web", open, "live tape on the projector");
+        world.insert_resource(crate::live::LiveFeed::new(
+            url.clone(),
+            bytes.clone(),
+            *open,
+        ));
+        return;
+    }
     match replay::decode_for_sim_version(bytes, sim::SIM_VERSION) {
         Ok(replay) => {
             tracing::info!(
@@ -142,6 +164,7 @@ pub(crate) fn watch_autoplay(world: &mut World, mut done: Local<bool>) {
                 "shared tape on the projector",
             );
             crate::theater::start_playback(world, replay);
+            crate::verify::note(world, bytes);
         }
         Err(e) => {
             tracing::error!(target: "two_top::web", error = %e, "shared tape rejected");

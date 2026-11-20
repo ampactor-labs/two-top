@@ -500,8 +500,10 @@ pub const NAME_MAX: usize = 12;
 /// see (the side channel, the handshake). Bump it on any such change; it
 /// rides the room name beside `sim::SIM_VERSION`, so two builds that
 /// cannot talk never meet. 2: one keyed `Profile` (the unkeyed one and
-/// `Profile2` are gone).
-pub const NET_PROTOCOL: u32 = 2;
+/// `Profile2` are gone). 3: `Live` and `Ladder`, and signed statements
+/// bind the match's input hash (`MatchStatement` v2), which a v2 peer
+/// would refuse to co-sign.
+pub const NET_PROTOCOL: u32 = 3;
 
 /// Tail padding for names shorter than [`NAME_MAX`]. A fixed array keeps
 /// `ProfileData` `Copy`, allocation-free, and bounded BY CONSTRUCTION — a
@@ -597,6 +599,15 @@ pub enum NetMsg {
     Delay {
         frames: u8,
     },
+    /// "This duel is on air": the sender is streaming it, confirmed tick
+    /// by confirmed tick, to the tape relay, where anyone with the link
+    /// watches. Both phones then wear the LIVE mark, so nobody is
+    /// broadcast without seeing it.
+    Live,
+    /// "Post our signed results to the ladder": sent at the start of a
+    /// session by a side that has the ladder on. A result is posted only
+    /// when both sides said it.
+    Ladder,
 }
 
 /// Why a session ended, in a [`NetMsg::Ended`].
@@ -817,7 +828,8 @@ pub fn portable_hash64<T: core::hash::Hash>(value: &T) -> u64 {
 }
 
 pub const STATEMENT_MAGIC: [u8; 4] = *b"2TRS";
-pub const STATEMENT_VERSION: u16 = 1;
+/// 2: the statement binds the match's inputs (`tape_hash`).
+pub const STATEMENT_VERSION: u16 = 2;
 
 /// One duelist's seat in a [`MatchStatement`]. `handle` records which ggrs
 /// seat this identity played (both peers agree on it: lower matchbox
@@ -850,6 +862,10 @@ pub struct MatchStatement {
     pub match_index: u32,
     pub seat_low: SeatStatement,
     pub seat_high: SeatStatement,
+    /// `replay::body_hash` of the match's inputs, tick 0 through the
+    /// deciding tick: the same on both phones, which recorded the same
+    /// confirmed ticks. A seal moved onto another tape stops verifying.
+    pub tape_hash: [u8; 32],
 }
 
 impl MatchStatement {
@@ -883,7 +899,14 @@ impl MatchStatement {
             match_index,
             seat_low,
             seat_high,
+            tape_hash: [0; 32],
         }
+    }
+
+    /// The statement, bound to the inputs whose hash is `tape_hash`.
+    pub fn with_tape_hash(mut self, tape_hash: [u8; 32]) -> Self {
+        self.tape_hash = tape_hash;
+        self
     }
 
     /// The bytes both peers sign. Postcard is deterministic for a fixed
@@ -1417,9 +1440,11 @@ mod tests {
     #[test]
     fn the_side_channel_keeps_its_wire_indices() {
         assert_eq!(
-            NET_PROTOCOL, 2,
+            NET_PROTOCOL, 3,
             "re-pin the indices below for the new protocol"
         );
+        assert_eq!(&*encode_net_msg(&NetMsg::Live), &[10u8][..]);
+        assert_eq!(&*encode_net_msg(&NetMsg::Ladder), &[11u8][..]);
         assert_eq!(&*encode_net_msg(&NetMsg::Bye), &[2u8][..]);
         assert_eq!(&*encode_net_msg(&NetMsg::Pausing), &[5u8][..]);
         assert_eq!(

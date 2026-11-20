@@ -9,6 +9,8 @@ rust-version.workspace = true
 [dependencies]
 serde = { version = "1", default-features = false, features = ["derive", "alloc", "std"] }
 postcard = { version = "1", features = ["use-std"] }
+# The body hash a signed result binds (`body_hash`).
+sha2 = "0.10"
 bevy = { version = "=0.19.1", default-features = false, features = ["std", "bevy_log"] }
 bevy_ggrs = "=0.22"
 sim = { path = "../sim" }

@@ -1,4 +1,16 @@
 fn main() {
+    // Windows: the icon the window already wears (platform::desktop) is
+    // the one Explorer and the taskbar show for the .exe too.
+    #[cfg(windows)]
+    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows") {
+        println!("cargo:rerun-if-changed=windows/two-top.ico");
+        let mut res = winresource::WindowsResource::new();
+        res.set_icon("windows/two-top.ico");
+        if let Err(e) = res.compile() {
+            println!("cargo:warning=the Windows icon was not embedded: {e}");
+        }
+    }
+
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("android") {
         // oboe-sys links Android's static libc++ when Bevy audio pulls cpal in,
         // but with cargo-apk's clang linker the matching ABI archive is not

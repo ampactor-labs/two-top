@@ -504,6 +504,9 @@ pub fn verify_attestation(replay: &Replay, attestation: &net::Attestation) -> Re
     if !attestation.verify() {
         return Err("signature verification failed".to_string());
     }
+    if stmt.tape_hash != replay::body_hash(&replay.inputs) {
+        return Err("the signed result is about other inputs than this tape's".to_string());
+    }
     let score = final_score(replay);
     for (handle, replayed) in [(0u8, score.p0), (1u8, score.p1)] {
         let Some(seat) = stmt.seat_for_handle(handle) else {

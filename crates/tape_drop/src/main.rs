@@ -426,15 +426,22 @@ fn handle(shared: &Shared, req: Req<'_>, now: Instant) -> Resp {
             if limited(&mut st.writes) {
                 return Resp::err(429, "slow down");
             }
-            let Some(row) = relay::parse_result(&req.body, unix_now()) else {
+            let Some(tape) = relay::parse_result_tape(&req.body) else {
                 return Resp::err(400, "not a result");
             };
-            // A result is about a tape the relay holds, so the ladder can
-            // re-simulate it; one about nothing is refused here.
-            if st.drop.get(&row.tape, now).is_none() {
+            // The result is the one the tape carries, and the tape is one
+            // the relay holds: the ladder can re-simulate it and check it.
+            let Some(bytes) = st.drop.get(&tape, now) else {
                 return Resp::err(404, "no such tape");
-            }
-            st.results.post(row);
+            };
+            let Some(attestation) = relay::seal_of(&bytes) else {
+                return Resp::err(422, "that tape carries no signed result");
+            };
+            st.results.post(relay::ResultRow {
+                posted_unix: unix_now(),
+                tape,
+                attestation,
+            });
             Resp::json(200, "{}")
         }
         (Get, ["results"]) => {
@@ -883,38 +890,37 @@ mod route_tests {
     }
 
     #[test]
-    fn a_result_must_name_a_tape_the_relay_holds() {
+    fn a_result_is_the_seal_of_a_tape_the_relay_holds() {
         let s = shared();
         let t0 = Instant::now();
-        let mut tape = b"BMRG".to_vec();
-        tape.extend_from_slice(&[7u8; 40]);
-        let id = json(&handle(&s, req(Method::Post, "/tape", "", None, &tape), t0))["id"]
-            .as_str()
-            .unwrap()
-            .to_string();
-        let orphan = br#"{"tape":"000000000000","attestation":{}}"#;
-        assert_eq!(
-            handle(&s, req(Method::Post, "/results", "", None, orphan), t0).status,
-            404
-        );
-        let body = format!(r#"{{"tape":"{id}","attestation":{{"a":1}}}}"#);
-        assert_eq!(
+        let mut plain = b"BMRG".to_vec();
+        plain.extend_from_slice(&[7u8; 40]);
+        let mut sealed = plain.clone();
+        sealed.extend_from_slice(b"SEAL\x07{\"a\":1}");
+        let post = |body: &[u8]| handle(&s, req(Method::Post, "/tape", "", None, body), t0);
+        let plain_id = json(&post(&plain))["id"].as_str().unwrap().to_string();
+        let sealed_id = json(&post(&sealed))["id"].as_str().unwrap().to_string();
+        let result = |id: &str| {
+            let body = format!(r#"{{"tape":"{id}"}}"#);
             handle(
                 &s,
                 req(Method::Post, "/results", "", None, body.as_bytes()),
-                t0
+                t0,
             )
-            .status,
-            200
-        );
+            .status
+        };
+        assert_eq!(result("000000000000"), 404);
+        assert_eq!(result(&plain_id), 422, "an unsigned tape is no result");
+        assert_eq!(result(&sealed_id), 200);
         let listed = json(&handle(
             &s,
             req(Method::Get, "/results", "since=0", None, b""),
             t0,
         ));
-        assert_eq!(listed[0]["tape"], id.as_str());
+        assert_eq!(listed[0]["tape"], sealed_id.as_str());
+        assert_eq!(listed[0]["attestation"]["a"], 1);
         // A sealed tape reads from an offset too.
-        let path = format!("/tape/{id}");
+        let path = format!("/tape/{plain_id}");
         assert_eq!(
             handle(&s, req(Method::Get, &path, "from=40", None, b""), t0).body,
             [7u8; 4]

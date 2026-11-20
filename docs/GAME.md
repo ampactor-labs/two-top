@@ -96,9 +96,10 @@ neither endpoint, so the deployed browser build offers SAVE TAPE, while its
 - **Signed results.** An ed25519 key is minted beside the install-id. When an
   online match is decided on score, both phones build the same canonical
   `MatchStatement`, sign it, and swap signatures over the reliable side
-  channel; the pair lands beside the tape as `<stem>.attest.json`, and
-  `replay_sync --attest` re-runs the tape and verifies both signatures
-  offline. Forfeits stay in the ledger only.
+  channel; the pair is sealed into the tape's end (the statement binds the
+  match's input hash), and `replay_sync --attest` re-runs the tape and
+  verifies both signatures offline; the theater does the same as it plays.
+  Forfeits stay in the ledger only.
 - **Rivals.** A per-opponent ledger ("4TH MEETING, you lead 2-1") with a
   RIVALS screen: rivalry rows ranked with standing, streak and last meeting,
   and a per-rival detail with the rivalry's own tapes playable in place.

@@ -497,8 +497,18 @@ summary once the tape saves, and in the theater while a tape plays. Tap it
 `<watch-url>#watch=<id>` with the link printed under it — any phone camera
 opens the match in a browser, playing through the real engine. Links live
 about a week (the drop's TTL) and re-sharing the same match re-mints the
-same link. Attestations (`.attest.json` beside a tape) do not travel with
-the share; `replay_sync --attest` verifies them wherever the files are.
+same link. A decided online match's signed result is sealed into the tape
+itself, so it travels with the share; `replay_sync --demo <tape> --attest`
+verifies it anywhere, and the web theater checks it as it plays (SIGNED,
+then VERIFIED when the replayed score matches).
+
+**LIVE.** Settings → SHARE → GO LIVE opens a live tape at the drop and shows
+its watch link as a QR; the next online duel goes out on it, confirmed tick
+by confirmed tick, and both phones wear the LIVE mark. Viewers open the link
+(browser or `twotop://watch/<id>`) and watch it as it plays. SEND MY SHADE
+(same group) shares a link that lets a friend spar your fitted shade; LADDER
+ON posts your signed results to `<watch-url>/ladder.html` when your opponent
+has it on too. Locally: `scripts/live_smoke.sh`.
 
 **The gauntlet (practice vs the bot).** Tap PRACTICE VS BOT on the Title
 (P on desktop), then PLAY. The match runs the normal local session with the

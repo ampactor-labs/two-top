@@ -60,13 +60,13 @@ finish_resumed() {
   done
   deadline=$((SECONDS + 30))
   until TA=$(tape a) && TB=$(tape b) && [ -n "$TA" ] && [ -n "$TB" ] \
-      && [ -f "${TA%.bmrg}.attest.json" ] && [ -f "${TB%.bmrg}.attest.json" ]; do
+      && grep -qa SEAL "$TA" && grep -qa SEAL "$TB"; do
     [ $SECONDS -ge $deadline ] && fail "the resumed result was not filed on both phones"
     sleep 1
   done
   cmp -s "$TA" "$TB" || fail "the two tapes of the resumed match differ"
   for t in "$TA" "$TB"; do
-    "$RS" --demo "$t" --attest "${t%.bmrg}.attest.json" > /dev/null 2>&1 || fail "$(basename "$t") does not verify"
+    "$RS" --demo "$t" --attest > /dev/null 2>&1 || fail "$(basename "$t")'s seal does not verify"
   done
   sleep 2
   read -r aw al au <<< "$(ledger a)"; read -r bw bl bu <<< "$(ledger b)"
@@ -154,7 +154,7 @@ leave)
   # The filing: both tapes and both signed results.
   deadline=$((SECONDS + 30))
   until TA=$(tape a) && TB=$(tape b) && [ -n "$TA" ] && [ -n "$TB" ] \
-      && [ -f "${TA%.bmrg}.attest.json" ] && [ -f "${TB%.bmrg}.attest.json" ]; do
+      && grep -qa SEAL "$TA" && grep -qa SEAL "$TB"; do
     [ $SECONDS -ge $deadline ] && fail "the result was not filed on both phones"
     sleep 1
   done
@@ -171,7 +171,7 @@ leave)
   has_log b "peer ended the session.*honoured=true" && fail "B let A's leaving undo a settled result"
   cmp -s "$TA" "$TB" || fail "the two tapes differ"
   for t in "$TA" "$TB"; do
-    "$RS" --demo "$t" --attest "${t%.bmrg}.attest.json" > /dev/null 2>&1 || fail "$(basename "$t") does not verify"
+    "$RS" --demo "$t" --attest > /dev/null 2>&1 || fail "$(basename "$t")'s seal does not verify"
   done
   read -r aw al au <<< "$(ledger a)"; read -r bw bl bu <<< "$(ledger b)"
   [ "$aw $al $au" = "$bl $bw $bu" ] && [ "$au" = 0 ] && [ $((aw + al)) = 1 ] \

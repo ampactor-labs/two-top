@@ -144,6 +144,16 @@ fn build_rivals_ui(world: &mut World) {
     }
     let view = world.resource::<RivalsView>().clone();
     let record = world.resource::<CareerRecord>().clone();
+    // What their tapes say about them (read once, as the page opens).
+    let scouting = match &view {
+        RivalsView::Detail(key) => {
+            let me = world
+                .resource::<crate::profile::LocalProfile>()
+                .name_string();
+            crate::shade::scouting_line(&crate::shade::ring_stats(&record, key, &me))
+        }
+        RivalsView::List => None,
+    };
     let mut commands = world.commands();
 
     match view {
@@ -241,11 +251,18 @@ fn build_rivals_ui(world: &mut World) {
             if r.attested_wins > 0 {
                 facts.push(format!("{} OF YOUR WINS ARE SEALED", r.attested_wins));
             }
-            if r.last_met_unix > 0 {
+            if let Some(line) = &scouting {
+                facts.push(line.clone());
+            } else if r.last_met_unix > 0 {
                 facts.push(format!(
                     "LAST MET {}",
                     crate::theater::date_label(r.last_met_unix)
                 ));
+            }
+            // Three lines fit above SPAR THEIR SHADE; the scouting line,
+            // last pushed, is the one worth keeping.
+            while facts.len() > 3 {
+                facts.remove(0);
             }
             for (i, fact) in facts.iter().enumerate() {
                 spawn_text(
@@ -441,6 +458,7 @@ fn roll_tape(world: &mut World, filename: &str) {
         Ok(replay) => {
             world.resource_mut::<crate::share::SharedTapePath>().0 = Some(path);
             crate::theater::start_playback(world, replay);
+            crate::verify::note(world, &bytes);
         }
         Err(e) => {
             tracing::warn!(target: "two_top::rivals", error = %e, "rivalry tape rejected");
@@ -466,22 +484,7 @@ fn summon_shade(world: &mut World, key: &str) {
     let my_name = world
         .resource::<crate::profile::LocalProfile>()
         .name_string();
-    let Some(dir) = crate::recorder::replays_dir() else {
-        return;
-    };
-    let mut stats = Vec::new();
-    for tape in &tapes {
-        let Ok(bytes) = crate::paths::read_bytes(&dir.join(tape)) else {
-            continue;
-        };
-        let Ok(replay) = replay::decode_for_sim_version(&bytes, sim::SIM_VERSION) else {
-            continue;
-        };
-        let Some(handle) = crate::shade::rival_handle(&replay, &rival_name, &my_name) else {
-            continue;
-        };
-        stats.push(crate::shade::extract(&replay.inputs, handle));
-    }
+    let stats = crate::shade::ring_stats(world.resource::<CareerRecord>(), key, &my_name);
     if stats.is_empty() {
         tracing::warn!(target: "two_top::rivals", "no readable tape names the rival's seat — no shade");
         return;

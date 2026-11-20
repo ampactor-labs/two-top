@@ -7,9 +7,9 @@
 //! builds the identical canonical statement, signs it with the key minted
 //! beside its install-id, and sends the signature over the reliable side
 //! channel. Once the peer's signature verifies AND the recorder has frozen
-//! the tape, the pair lands beside it as `<stem>.attest.json` — an
-//! artifact `replay_sync --attest` can check end-to-end: re-run the tape,
-//! rebuild the statement, verify both signatures.
+//! the tape, the pair is sealed into the tape's end (`replay::seal`) — a
+//! tape `replay_sync --attest` can check end-to-end: re-run it, rebuild
+//! the statement, match its input hash, verify both signatures.
 //!
 //! Forfeits stay ledger-only: each client's lobby FSM observes the
 //! walk-away at its own frame, so there is no shared statement to sign.
@@ -38,6 +38,8 @@ pub struct AttestState {
     /// would pair this match's signatures with the previous match's tape.
     tape_before: Option<PathBuf>,
     written: bool,
+    /// A tape this session sealed and the ladder has not seen yet.
+    pub sealed: Option<(PathBuf, MatchStatement)>,
 }
 
 impl AttestState {
@@ -120,9 +122,12 @@ pub fn settle_match_over(
 fn sign_decided_match(
     score: Res<MatchScore>,
     selected: Res<sim::SelectedArena>,
-    netplay: Res<NetplayConfig>,
-    practice: Res<crate::bot::PracticeMode>,
-    theater: Res<crate::theater::TheaterMode>,
+    (netplay, practice, theater): (
+        Res<NetplayConfig>,
+        Res<crate::bot::PracticeMode>,
+        Res<crate::theater::TheaterMode>,
+    ),
+    (state, rec): (Res<MatchState>, Res<crate::recorder::MatchRecorder>),
     local: Res<LocalPlayerHandle>,
     session: Res<SessionIds>,
     profile: Res<crate::profile::LocalProfile>,
@@ -187,6 +192,18 @@ fn sign_decided_match(
     } else {
         (score.p1, score.p0)
     };
+    // What the statement binds: the match's inputs through the deciding
+    // tick, which are fact now and the same on both phones (and exactly
+    // what the tape keeps, `recorder::tape_ticks`).
+    let Some(decided) = state.decided_at() else {
+        return;
+    };
+    let through = decided as usize + 1;
+    if rec.inputs().len() < through {
+        tracing::warn!(target: "two_top::attest", "the tape is short of the deciding tick — unsigned");
+        return;
+    }
+    let tape_hash = replay::body_hash(&rec.inputs()[..through]);
     let statement = MatchStatement::new(
         sim::SIM_VERSION,
         selected.0.as_u8(),
@@ -206,7 +223,8 @@ fn sign_decided_match(
                 score: their_score,
             },
         ],
-    );
+    )
+    .with_tape_hash(tape_hash);
     let sig = net::sign_statement(&statement, &our_key);
     attest.decided += 1;
     attest.statement = Some(statement);
@@ -255,7 +273,7 @@ fn verify_peer_sig(
 }
 
 /// Once both signatures exist AND the recorder has frozen this match's
-/// tape, write `<stem>.attest.json` beside it and credit the attested win.
+/// tape, seal the pair into it and credit the attested win.
 #[allow(clippy::too_many_arguments)]
 fn write_attestation(
     last_saved: Res<LastSavedReplay>,
@@ -294,8 +312,7 @@ fn write_attestation(
         sig_low: net::sig_to_hex(&sig_low),
         sig_high: net::sig_to_hex(&sig_high),
     };
-    let out = path.with_extension("attest.json");
-    let json = match serde_json::to_string_pretty(&attestation) {
+    let json = match serde_json::to_string(&attestation) {
         Ok(json) => json,
         Err(e) => {
             tracing::warn!(target: "two_top::attest", error = %e, "attestation encode failed");
@@ -303,15 +320,23 @@ fn write_attestation(
             return;
         }
     };
-    if let Err(e) = crate::paths::write_atomic(&out, json.as_bytes()) {
-        tracing::warn!(target: "two_top::attest", error = %e, "attestation write failed");
+    // The seal rides at the tape's end: one file to keep, share, verify.
+    let sealed = crate::paths::read_bytes(&path)
+        .map_err(|e| e.to_string())
+        .and_then(|bytes| replay::seal(&bytes, &json).map_err(|e| e.to_string()));
+    let written = sealed
+        .and_then(|bytes| crate::paths::write_atomic(&path, &bytes).map_err(|e| e.to_string()));
+    if let Err(e) = written {
+        tracing::warn!(target: "two_top::attest", error = %e, "the seal could not be written");
+        attest.written = true;
         return;
     }
     attest.written = true;
+    attest.sealed = Some((path.clone(), statement));
     tracing::info!(
         target: "two_top::attest",
-        path = %out.display(),
-        "attestation written",
+        path = %path.display(),
+        "tape sealed with the signed result",
     );
     if let (Some(handle), Some(peer)) = (local.0, peer.0) {
         let ours_score = if handle == 0 { score.p0 } else { score.p1 };
@@ -364,13 +389,34 @@ mod tests {
 
     /// Drive the whole state machine as one peer of a decided match, with
     /// the "opponent" simulated by signing the expected statement with
-    /// their key: the sidecar lands beside the tape, verifies end-to-end,
-    /// and the attested win reaches the ledger.
+    /// their key: the seal lands in the tape, verifies end-to-end, and the
+    /// attested win reaches the ledger.
     #[test]
     fn a_decided_match_writes_a_verifying_attestation() {
         let dir = crate::paths::test_scratch("attest_e2e");
         let tape = dir.join("match_170_curwins.bmrg");
-        std::fs::write(&tape, b"tape bytes irrelevant here").unwrap();
+        let inputs = vec![[sim::PlayerInput::default(); 2]; 1];
+        let bare = replay::encode(&replay::Replay {
+            header: replay::ReplayHeader {
+                magic: replay::MAGIC,
+                format_version: replay::FORMAT_VERSION,
+                sim_version: sim::SIM_VERSION,
+                seed: 0,
+                num_players: 2,
+                frame_rate: sim::TICK_HZ as u8,
+                frame_count: 1,
+                recorded_at: 0,
+                winner: Some(0),
+                player_handles: [None, None],
+                arena_id: sim::ArenaId::Pit.as_u8(),
+                start_tick: 0,
+                kind: replay::TapeKind::Duel,
+                kills: Vec::new(),
+            },
+            inputs: inputs.clone(),
+        })
+        .unwrap();
+        std::fs::write(&tape, &bare).unwrap();
 
         let our_key = [21u8; 32];
         let their_key = [22u8; 32];
@@ -407,6 +453,7 @@ mod tests {
         app.init_resource::<NetSendQueue>();
         app.insert_resource(LastSavedReplay(None));
         app.init_resource::<crate::grudge::CareerRecord>();
+        app.insert_resource(crate::recorder::MatchRecorder::with_inputs(inputs.clone()));
 
         // Tick 1: MatchOver observed — we sign and queue our signature.
         app.update();
@@ -434,7 +481,8 @@ mod tests {
                     score: 2,
                 },
             ],
-        );
+        )
+        .with_tape_hash(replay::body_hash(&inputs));
 
         // Tick 2: the peer's signature over the SAME statement arrives,
         // and the recorder freezes the tape.
@@ -443,10 +491,14 @@ mod tests {
         app.world_mut().resource_mut::<LastSavedReplay>().0 = Some(tape.clone());
         app.update();
 
-        let sidecar = tape.with_extension("attest.json");
-        assert!(sidecar.exists(), "attestation lands beside the tape");
-        let attestation: net::Attestation =
-            serde_json::from_str(&std::fs::read_to_string(&sidecar).unwrap()).unwrap();
+        let sealed = std::fs::read(&tape).unwrap();
+        let seal = replay::read_seal(&sealed).expect("the tape is sealed");
+        assert_eq!(
+            replay::decode(&sealed).unwrap().inputs,
+            inputs,
+            "still the tape"
+        );
+        let attestation: net::Attestation = serde_json::from_str(&seal).unwrap();
         assert_eq!(attestation.statement, expected);
         assert!(attestation.verify(), "both signatures check out");
         let record = app.world().resource::<crate::grudge::CareerRecord>();

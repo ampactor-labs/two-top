@@ -92,7 +92,8 @@ fn honest_attestation(replay: &Replay) -> Attestation {
                 score: score.p1,
             },
         ],
-    );
+    )
+    .with_tape_hash(replay::body_hash(&replay.inputs));
     Attestation {
         statement,
         sig_low: sig_to_hex(&sign_statement(&statement, KEY_A)),
@@ -174,4 +175,18 @@ fn the_verified_score_is_the_one_played() {
     let (report, _) = played();
     let score = final_score(decided_replay());
     assert_eq!((score.p0, score.p1), report.score);
+}
+
+#[test]
+fn a_seal_moved_onto_other_inputs_is_refused() {
+    let replay = decided_replay();
+    let attestation = honest_attestation(replay);
+    // The same match, one tick of input changed after the decision: the
+    // scores still re-simulate, the signatures still verify, the inputs
+    // are not the ones that were signed.
+    let mut other = replay.clone();
+    let last = other.inputs.len() - 1;
+    other.inputs[last][0].buttons ^= PlayerInput::TAUNT_DOWN;
+    let err = verify_attestation(&other, &attestation).unwrap_err();
+    assert!(err.contains("other inputs"), "{err}");
 }

@@ -406,8 +406,21 @@ pub struct ReplayHeader {
     pub winner: Option<u8>,
     pub player_handles: [Option<String>; 2],
     pub arena_id: u8,
+    pub start_tick: u32,            // which match of a session tape this is
+    pub kind: TapeKind,             // Couch / Duel / Practice / Shade / Lesson
+    pub kills: Vec<(u32, u8)>,      // (tick, victim seat), for the scrub strip
 }
 ```
+
+**Seal.** A decided online match's dual-signed result rides at the tape's end: `SEAL`, then the
+`net::Attestation` JSON as a postcard string (`replay::seal` / `read_seal`). The statement binds
+`replay::body_hash` (SHA-256 of the match's inputs), so a seal moved onto other inputs stops
+verifying. A tape is one file to keep, prune (a sealed tape is never pruned), upload and verify.
+
+**Live stream.** A tape being broadcast (`app::live`, `tape_drop`'s open tapes) is the postcard
+header followed by raw eight-byte input pairs, appended in confirmed chunks — any prefix is a valid
+stream (`replay::decode_live`). An ended live tape replays exactly like the sealed tape of the same
+match (`scripts/live_smoke.sh` checks it frame for frame).
 
 **One table, two re-simulation setups.** `sim::spawn_match_world(commands, arena)` is the one
 place that decides what a match starts with and in which order: duelists at

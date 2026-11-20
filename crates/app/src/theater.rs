@@ -66,11 +66,19 @@ pub struct TheaterMode {
     prev_arena: Option<sim::ArenaId>,
     /// Names carried in the tape header, for the marquee.
     names: [Option<String>; 2],
+    /// The tape is still growing (a live broadcast, `live.rs`): the end of
+    /// what has arrived is a wait, not the end.
+    live: bool,
 }
 
 impl TheaterMode {
     pub fn active(&self) -> bool {
         self.active
+    }
+
+    /// Is the tape still growing?
+    pub fn live(&self) -> bool {
+        self.active && self.live
     }
 
     /// The tape's duelist names (header order = handle order).
@@ -687,6 +695,7 @@ fn replays_input(world: &mut World) {
     // The share surface needs to know which tape is on the projector.
     world.resource_mut::<crate::share::SharedTapePath>().0 = Some(path.clone());
     start_playback(world, replay);
+    crate::verify::note(world, &bytes);
 }
 
 /// Every refusal a tape tap can hit answers on screen through here — the
@@ -759,11 +768,38 @@ fn roll_pending_watch(world: &mut World) {
         .map(|(tick, _)| tick.saturating_sub(KILL_RUN_UP));
     world.resource_mut::<crate::share::SharedTapePath>().0 = Some(path);
     start_playback(world, replay);
+    crate::verify::note(world, &bytes);
     let mut controls = world.resource_mut::<TheaterControls>();
     if let Some(at) = at {
         controls.seek_target = Some(at.max(controls.seek_target.unwrap_or(0)));
     }
     controls.speed_idx = 0; // half speed: the kill is the point
+}
+
+/// Is the projector still chasing a seek?
+pub(crate) fn seeking(world: &World) -> bool {
+    world
+        .get_resource::<TheaterControls>()
+        .is_some_and(|c| c.seek_target.is_some())
+}
+
+/// Roll the tape on the projector to just before its last kill, at full
+/// speed (CLIP's moment); from the top when it has no kill.
+pub(crate) fn roll_to_last_kill(world: &mut World) {
+    let (first, at) = {
+        let theater = world.resource::<TheaterMode>();
+        (
+            theater.first_frame,
+            theater
+                .kills
+                .last()
+                .map(|(tick, _)| tick.saturating_sub(KILL_RUN_UP)),
+        )
+    };
+    let mut controls = world.resource_mut::<TheaterControls>();
+    controls.seek_target = Some(at.unwrap_or(first).max(first).max(1));
+    controls.paused = false;
+    controls.speed_idx = 1;
 }
 
 /// Load a decoded tape and roll it: arena from the header, playback
@@ -784,8 +820,11 @@ pub(crate) fn start_playback(world: &mut World, replay: Replay) {
         theater.kills = header.kills.clone();
         theater.prev_arena = Some(prev_arena);
         theater.names = header.player_handles.clone();
+        theater.live = false;
     }
     world.insert_resource(ReplayPlayback::new(replay));
+    // A tape with a seal says so through `verify::note`, after this.
+    world.insert_resource(crate::verify::SealCheck::Unsealed);
     // A later match of a session tape: fast-forward to where it starts.
     world.insert_resource(TheaterControls {
         seek_target: (header.start_tick > 0).then_some(header.start_tick),
@@ -1013,8 +1052,8 @@ fn theater_input(
             }
             continue; // scrub presses are handled with drags below
         }
-        // The SHARE label's own tap is SHARE's, not a pause.
-        if share.hit(p, win) {
+        // The SHARE label's own tap is SHARE's, not a pause; CLIP's too.
+        if share.hit(p, win) || crate::clip::hit(p, win, theater.active) {
             continue;
         }
         // Anywhere else: transport toggle.
@@ -1095,10 +1134,18 @@ fn theater_drive_seek(world: &mut World) {
     let total = world.resource::<TheaterMode>().total_frames;
 
     // Tape exhausted in normal play: hold on the last frame instead of
-    // letting the sim idle forward on neutral inputs.
+    // letting the sim idle forward on neutral inputs. A live tape that has
+    // run dry only waits (a few ticks short of the edge, so one frame's
+    // burst of ticks never runs past what has arrived); it plays on by
+    // itself when more arrives.
     if controls.seek_target.is_none() && !controls.paused {
         let cursor = world.resource::<ReplayPlayback>().cursor as u32;
-        if cursor >= total {
+        if world.resource::<TheaterMode>().live {
+            if cursor + LIVE_EDGE >= total {
+                crate::transport::pause(world);
+                return;
+            }
+        } else if cursor >= total {
             world.resource_mut::<TheaterControls>().paused = true;
         }
     }
@@ -1190,8 +1237,55 @@ fn fast_seek(world: &mut World, target: u32) {
 }
 
 fn theater_apply_play_pause(world: &mut World, paused: bool) {
-    let speed = SPEED_PRESETS[world.resource::<TheaterControls>().speed_idx];
+    let mut speed = SPEED_PRESETS[world.resource::<TheaterControls>().speed_idx];
+    let theater = world.resource::<TheaterMode>();
+    if theater.live {
+        let cursor = world.resource::<ReplayPlayback>().cursor as u32;
+        speed *= live_speed(theater.total_frames.saturating_sub(cursor));
+    }
     crate::transport::apply(world, paused, speed);
+}
+
+/// Ticks a live viewer keeps between the playhead and the newest tick
+/// that has arrived.
+const LIVE_EDGE: u32 = 8;
+/// Behind by more than this, a live viewer plays fast until caught up.
+const LIVE_BEHIND: u32 = 3 * sim::TICK_HZ as u32;
+
+/// The live viewer's pace multiplier, `ahead` ticks from the newest. Pure.
+fn live_speed(ahead: u32) -> f32 {
+    if ahead > LIVE_BEHIND { 1.25 } else { 1.0 }
+}
+
+/// Mark the tape just rolled as live (`open`) or finished.
+pub(crate) fn set_live(world: &mut World, open: bool) {
+    world.resource_mut::<TheaterMode>().live = open;
+}
+
+/// Ticks that have just arrived for the live tape on the projector.
+pub(crate) fn extend_live(world: &mut World, pairs: &[replay::FrameInputs], open: bool) {
+    if !world.resource::<TheaterMode>().active {
+        return;
+    }
+    let (had, cursor) = {
+        let mut playback = world.resource_mut::<ReplayPlayback>();
+        let had = playback.replay.inputs.len();
+        playback.replay.inputs.extend_from_slice(pairs);
+        let total = playback.replay.inputs.len() as u32;
+        playback.replay.header.frame_count = total;
+        (had, playback.cursor)
+    };
+    {
+        let mut theater = world.resource_mut::<TheaterMode>();
+        theater.total_frames += pairs.len() as u32;
+        theater.live = open;
+    }
+    // A frame hitch ran the sim past what had arrived, on neutral input:
+    // go back to the last good tick and play the real ones.
+    if cursor > had && !pairs.is_empty() {
+        tracing::warn!(target: "two_top::live", cursor, had, "ran past the live edge — re-seeking");
+        world.resource_mut::<TheaterControls>().seek_target = Some(had as u32);
+    }
 }
 
 /// Scrub bar + speed pip rendering. Sized against the live view rect so the
@@ -1269,7 +1363,9 @@ fn theater_teardown(world: &mut World) {
         theater.active = false;
         theater.prev_arena = None;
         theater.names = [None, None];
+        theater.live = false;
     }
+    world.remove_resource::<crate::live::LiveFeed>();
     world.remove_resource::<ReplayPlayback>();
     world.remove_resource::<TheaterControls>();
     world.remove_resource::<SnapshotBuffer>();
@@ -1320,6 +1416,62 @@ impl Plugin for TheaterPlugin {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_live_viewer_hurries_only_when_well_behind() {
+        assert_eq!(live_speed(0), 1.0);
+        assert_eq!(live_speed(LIVE_BEHIND), 1.0);
+        assert_eq!(live_speed(LIVE_BEHIND + 1), 1.25);
+    }
+
+    #[test]
+    fn arriving_ticks_grow_the_tape_and_repair_an_overrun() {
+        let mut world = World::new();
+        let tape = replay::Replay {
+            header: replay::ReplayHeader {
+                magic: replay::MAGIC,
+                format_version: replay::FORMAT_VERSION,
+                sim_version: sim::SIM_VERSION,
+                seed: 0,
+                num_players: 2,
+                frame_rate: sim::TICK_HZ as u8,
+                frame_count: 10,
+                recorded_at: 0,
+                winner: None,
+                player_handles: [None, None],
+                arena_id: 0,
+                start_tick: 0,
+                kind: replay::TapeKind::Duel,
+                kills: Vec::new(),
+            },
+            inputs: vec![[sim::PlayerInput::default(); 2]; 10],
+        };
+        world.insert_resource(TheaterMode {
+            active: true,
+            total_frames: 10,
+            live: true,
+            ..default()
+        });
+        world.insert_resource(TheaterControls::default());
+        world.insert_resource(ReplayPlayback::new(tape));
+        // In step: the playhead behind the edge.
+        world.resource_mut::<ReplayPlayback>().cursor = 8;
+        extend_live(&mut world, &[[sim::PlayerInput::default(); 2]; 5], true);
+        assert_eq!(world.resource::<TheaterMode>().total_frames, 15);
+        assert_eq!(
+            world.resource::<ReplayPlayback>().replay.header.frame_count,
+            15
+        );
+        assert_eq!(world.resource::<TheaterControls>().seek_target, None);
+        // A hitch ran past the edge on made-up input: back to the edge.
+        world.resource_mut::<ReplayPlayback>().cursor = 17;
+        extend_live(&mut world, &[[sim::PlayerInput::default(); 2]; 5], false);
+        assert_eq!(world.resource::<TheaterControls>().seek_target, Some(15));
+        assert!(
+            !world.resource::<TheaterMode>().live(),
+            "the tape has ended"
+        );
+    }
 
     /// Playback's tap targets: leave, speed, scrub. None may overlap.
     #[test]

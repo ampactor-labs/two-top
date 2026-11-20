@@ -51,6 +51,10 @@ APP_GATE_ALLOWLIST = {
     "paths.rs": "storage backends: the filesystem, Android dirs, localStorage",
     "netplay.rs": "the ICE fetch: a blocking request on a thread, or the page's fetch",
     "share.rs": "the tape post: a blocking request, or the page's fetch and download",
+    "live.rs": "the relay: blocking requests on threads, or the page's fetch",
+    "launch.rs": "a watch link's tape: a blocking fetch, or the page already has it",
+    "ladder.rs": "the result post: a blocking request (the browser posts nothing)",
+    "clip.rs": "the page's MediaRecorder hook; native has no clip",
 }
 
 

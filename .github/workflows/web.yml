@@ -98,9 +98,10 @@ jobs:
           scripts/wasm_opt.sh dist/app_bg.wasm
           cp web/index.html dist/
           cp web/join.html dist/
+          cp web/ladder.html web/privacy.html dist/
           cp web/manifest.webmanifest dist/
           cp web/icon-192.png web/icon-512.png web/apple-touch-icon.png dist/
-          sed -i "s|__TWOTOP_DROP_URL__|${TWOTOP_DROP_URL}|" dist/index.html
+          sed -i "s|__TWOTOP_DROP_URL__|${TWOTOP_DROP_URL}|" dist/index.html dist/ladder.html
           # The boot line counts the module's download against this.
           sed -i "s|__TWOTOP_WASM_BYTES__|$(stat -c%s dist/app_bg.wasm)|" dist/index.html
           cp -r assets dist/assets

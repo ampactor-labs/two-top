@@ -159,72 +159,27 @@ pub fn join_link(watch_base: &str, code: &str, arena: sim::ArenaId) -> String {
     )
 }
 
-/// Point the dial and the table at a join link. `false` (and nothing
-/// changed) for anything that isn't one.
-fn apply_join(
-    uri: &str,
-    code: &mut RoomCode,
-    selected: &mut sim::SelectedArena,
-    settings: &mut crate::settings::Settings,
-) -> bool {
-    let Some((slots, arena)) = parse_join(uri) else {
-        tracing::info!(target: "two_top::room_code", "launch link is not a join link");
-        return false;
-    };
-    code.slots = slots;
-    code.custom = true;
-    selected.0 = arena;
-    settings.arena = arena.as_u8();
-    crate::settings::persist(settings);
-    save_room_code(code);
+/// Point the dial and the table at a join link's code and arena
+/// (`launch::LaunchLink::Join`, from wherever the link arrived).
+pub fn dial(world: &mut World, slots: [u8; CODE_LEN], arena: sim::ArenaId) {
+    {
+        let mut code = world.resource_mut::<RoomCode>();
+        code.slots = slots;
+        code.custom = true;
+        save_room_code(&code);
+    }
+    world.resource_mut::<sim::SelectedArena>().0 = arena;
+    {
+        let mut settings = world.resource_mut::<crate::settings::Settings>();
+        settings.arena = arena.as_u8();
+        crate::settings::persist(&settings);
+    }
     tracing::info!(
         target: "two_top::room_code",
-        code = %code.code_string(),
+        code = %world.resource::<RoomCode>().code_string(),
         arena = render::arena::info(arena).room_tag,
         "join link accepted — the table is set",
     );
-    true
-}
-
-/// A scanned join link lands both phones at the same table with zero
-/// typing — parse the launch link into the dial and the arena pick. Runs
-/// once in PostStartup (after the persisted arena restore, so the link's
-/// pick wins the boot it arrived on). Where the link comes from is the
-/// platform's business (`platform::launch_link`): the launch intent on
-/// Android, the page's `#join=` fragment in the browser, nothing yet on
-/// desktop.
-fn apply_launch_join(
-    mut code: ResMut<RoomCode>,
-    mut selected: ResMut<sim::SelectedArena>,
-    mut settings: ResMut<crate::settings::Settings>,
-) {
-    if let Some(uri) = crate::platform::launch_link() {
-        apply_join(&uri, &mut code, &mut selected, &mut settings);
-    }
-}
-
-/// A warm start: claim a join link left for the running game when 2-Top
-/// regains focus on the Title (`platform::pending_join_link`: the join
-/// page's clipboard on Android, a second launch's hand-off on desktop).
-fn claim_clipboard_join(
-    mut focus: MessageReader<bevy::window::WindowFocused>,
-    screen: Res<State<AppScreen>>,
-    mut code: ResMut<RoomCode>,
-    mut selected: ResMut<sim::SelectedArena>,
-    mut settings: ResMut<crate::settings::Settings>,
-) {
-    // Drain every focus message this frame (not `any`, which would stop
-    // early and leave the rest to re-trigger next frame).
-    let mut gained = false;
-    for f in focus.read() {
-        gained |= f.focused;
-    }
-    if !gained || *screen.get() != AppScreen::Title {
-        return;
-    }
-    if let Some(uri) = crate::platform::pending_join_link() {
-        apply_join(&uri, &mut code, &mut selected, &mut settings);
-    }
 }
 
 fn room_code_path() -> Option<PathBuf> {
@@ -586,10 +541,6 @@ pub struct RoomCodePlugin;
 
 impl Plugin for RoomCodePlugin {
     fn build(&self, app: &mut App) {
-        // The scanned join link lands after the persisted picks restore,
-        // so the boot it arrived on is the boot it configures.
-        app.add_systems(PostStartup, apply_launch_join)
-            .add_systems(Update, claim_clipboard_join);
         app.insert_resource(load_room_code())
             .add_systems(Startup, (init_room_code, spawn_pad))
             .add_systems(Update, update_join_qr)

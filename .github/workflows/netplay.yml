@@ -92,7 +92,7 @@ jobs:
         # Two builds: naming --example limits cargo to that target, so one
         # command would skip the app and replay_sync binaries.
         run: |
-          cargo build --locked -p app -p replay_sync --bins
+          cargo build --locked -p app -p replay_sync -p tape_drop --bins
           cargo build --locked -p app --example silent_peer
       # The online smokes never boot a build without a room; couch and
       # practice once panicked on their first frame for a week unseen.
@@ -117,6 +117,9 @@ jobs:
           # One retry, only for a timeout.
           full || { grep -q "no finished match" full.out && full; }
           scripts/endings_smoke.sh leave
+      - name: LIVE (a broadcast duel, watched from its link)
+        if: steps.gate.outputs.run == 'true' && matrix.full
+        run: ARENA=vigil TIMEOUT=900 scripts/live_smoke.sh
       - name: Full match over a slow, lossy link (40 ms ± 10 ms, 1 % loss)
         if: steps.gate.outputs.run == 'true' && matrix.full
         run: |

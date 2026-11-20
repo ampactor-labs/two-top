@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>2-Top — privacy</title>
+  <link rel="icon" type="image/png" href="icon-192.png">
+  <style>
+    html, body { margin: 0; background: #100e22; color: #f2e5c9; font: 16px/1.55 monospace; }
+    body { padding: 1.4em; max-width: 42em; margin: auto; }
+    h1, h2 { color: #fff3ca; } h2 { font-size: 17px; margin-top: 1.6em; }
+    a { color: #ffdc70; }
+  </style>
+</head>
+<body>
+  <h1>2-Top — privacy</h1>
+  <p>2-Top has no accounts, no ads, no analytics and no tracking. This page
+  says everything the game stores or sends, and when.</p>
+
+  <h2>On your device</h2>
+  <p>A random install id, the name you dial, a signing key made on the
+  device, your settings, your record against each opponent, and your match
+  tapes. None of it leaves the device unless something below sends it.</p>
+
+  <h2>When you play online</h2>
+  <p>The game asks a matchmaking server to pair it with another player, and
+  then talks to that player's device directly (WebRTC). Like any direct
+  connection, it reveals your IP address to the other player. When a direct
+  connection is impossible, traffic passes through a relay (TURN), which
+  forwards it without storing it. Your install id, name and public signing
+  key go to your opponent, so each of you can keep a record of the other
+  and sign results together.</p>
+
+  <h2>Only when you choose to share</h2>
+  <ul>
+    <li><b>SHARE</b> uploads that match's tape to the tape relay so the link
+      works. Tapes expire after about a week.</li>
+    <li><b>GO LIVE</b> streams your next duel's inputs to the relay while it
+      is played, for anyone with the link. Your opponent's screen shows LIVE.</li>
+    <li><b>SEND MY SHADE</b> puts your name, install id and four play-style
+      numbers into a link.</li>
+    <li><b>LADDER ON</b> publishes your signed results, including names, scores
+      and public keys, on the ladder page. It does this only when your opponent
+      has the ladder on too.</li>
+  </ul>
+
+  <h2>Crashes</h2>
+  <p>A crash log stays on the device. You decide whether to send it to anyone.</p>
+
+  <h2>Removing it</h2>
+  <p>Uninstalling the app deletes everything it stored on the device. Shared
+  tapes expire from the relay by themselves. To have a ladder entry or a
+  shared tape removed sooner, open an issue on the project's repository.</p>
+</body>
+</html>

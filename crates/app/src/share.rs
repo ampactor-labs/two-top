@@ -121,7 +121,7 @@ struct ShareLabel {
     on_summary: bool,
 }
 
-#[derive(Component)]
+#[derive(Component, Clone)]
 struct ShareOverlayPiece;
 
 /// `<watch-url>#watch=<id>`, tolerant of a trailing slash on the bake.
@@ -317,7 +317,18 @@ fn drive_share(
     mut labels: Query<(&ShareLabel, &mut Visibility, &mut Text2d)>,
     overlay: Query<Entity, With<ShareOverlayPiece>>,
     mut live_band: ResMut<ShareTapBand>,
+    (shade, score, profile): (
+        Res<crate::bot::ShadeStyle>,
+        Res<sim::MatchScore>,
+        Res<crate::profile::LocalProfile>,
+    ),
 ) {
+    // A spar against a sent shade: the summary's share sends the result
+    // back with the tape (SEND RESULT), so its owner sees how it went.
+    let spar = shade
+        .0
+        .as_ref()
+        .filter(|_| *screen.get() == AppScreen::InMatch);
     if !config.complete() {
         live_band.0 = None;
         return;
@@ -351,7 +362,12 @@ fn drive_share(
             Visibility::Hidden
         };
         // A link if there is a drop to post to; otherwise a file.
-        text.0 = if posts { "SHARE" } else { "SAVE TAPE" }.to_string();
+        text.0 = match (posts, spar.is_some() && label.on_summary) {
+            (true, true) => "SEND RESULT",
+            (true, false) => "SHARE",
+            (false, _) => "SAVE TAPE",
+        }
+        .to_string();
     }
 
     let win = window.0;
@@ -431,6 +447,10 @@ fn drive_share(
                 .try_recv();
             match outcome {
                 Ok(Ok(url)) => {
+                    if let Some(spec) = spar {
+                        let line = spar_result_line(&profile.name_string(), &spec.name, *score);
+                        crate::platform::share_text("2-Top", &format!("{line}\n{url}"));
+                    }
                     spawn_overlay(&mut commands, &mut images, &url);
                     *state = ShareState::Showing;
                 }
@@ -461,6 +481,19 @@ fn drive_share(
     }
 }
 
+/// What SEND RESULT says. The player is seat 0 against the shade. Pure.
+pub(crate) fn spar_result_line(me: &str, shade: &str, score: sim::MatchScore) -> String {
+    let verb = if score.p0 > score.p1 {
+        "beat"
+    } else {
+        "fell to"
+    };
+    format!(
+        "{me} {verb} {shade}'S SHADE {}-{} in 2-Top",
+        score.p0, score.p1
+    )
+}
+
 /// Log a post's outcome where it is made, then pass it on.
 fn log_posted(outcome: Result<String, String>) -> Result<String, String> {
     if let Ok(url) = &outcome {
@@ -472,6 +505,17 @@ fn log_posted(outcome: Result<String, String>) -> Result<String, String> {
 /// The QR card: code sprite center-screen, the link under it, the close
 /// hint under that. All screen-anchored, z above every other overlay.
 fn spawn_overlay(commands: &mut Commands, images: &mut Assets<Image>, url: &str) {
+    spawn_link_card(commands, images, url, ShareOverlayPiece);
+}
+
+/// A link as a card: its QR, the link under it, the close hint. Each piece
+/// wears `marker`, so its owner closes it. Shared by SHARE and GO LIVE.
+pub(crate) fn spawn_link_card<M: Component + Clone>(
+    commands: &mut Commands,
+    images: &mut Assets<Image>,
+    url: &str,
+    marker: M,
+) {
     let Some((image, side)) = qr_image(url) else {
         tracing::warn!(target: "two_top::share", "QR render failed — link is still in the log");
         tracing::info!(target: "two_top::share", %url, "watch link");
@@ -481,7 +525,7 @@ fn spawn_overlay(commands: &mut Commands, images: &mut Assets<Image>, url: &str)
     // custom_size, never Transform::scale — the screen-anchor system owns
     // anchored scale (see room_code's join QR for the incident report).
     commands.spawn((
-        ShareOverlayPiece,
+        marker.clone(),
         Sprite {
             image: handle,
             custom_size: Some(Vec2::splat(190.0)),
@@ -492,7 +536,7 @@ fn spawn_overlay(commands: &mut Commands, images: &mut Assets<Image>, url: &str)
     ));
     let _ = side;
     commands.spawn((
-        ShareOverlayPiece,
+        marker.clone(),
         Text2d::new(url.to_string()),
         (
             TextFont {
@@ -507,7 +551,7 @@ fn spawn_overlay(commands: &mut Commands, images: &mut Assets<Image>, url: &str)
         Transform::from_xyz(0.0, 0.0, crate::ui::z::MENU_TEXT),
     ));
     commands.spawn((
-        ShareOverlayPiece,
+        marker.clone(),
         Text2d::new("TAP TO CLOSE"),
         (
             TextFont {
@@ -593,6 +637,14 @@ mod tests {
                 "the label at {anchor:?} sits inside its own band {band:?}",
             );
         }
+    }
+
+    #[test]
+    fn a_spar_result_says_who_won() {
+        let line = spar_result_line("CUR", "TAGC", sim::MatchScore { p0: 5, p1: 3 });
+        assert_eq!(line, "CUR beat TAGC'S SHADE 5-3 in 2-Top");
+        let line = spar_result_line("CUR", "TAGC", sim::MatchScore { p0: 1, p1: 5 });
+        assert!(line.contains("fell to"));
     }
 
     #[test]

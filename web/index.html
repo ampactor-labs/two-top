@@ -136,12 +136,71 @@
       const Tracked = function (...args) {
         const ctx = new Native(...args);
         liveAudio.push(ctx);
+        // A tap for clips: everything the game plays also reaches a
+        // stream a recorder can take (twotopClip, below).
+        try { ctx.twotopTap = ctx.createMediaStreamDestination(); } catch (_) { /* no streams here */ }
         return ctx;
       };
       Tracked.prototype = Native.prototype;
       window.AudioContext = Tracked;
       if (window.webkitAudioContext) window.webkitAudioContext = Tracked;
+      const connect = AudioNode.prototype.connect;
+      AudioNode.prototype.connect = function (target, ...rest) {
+        const out = connect.call(this, target, ...rest);
+        const tap = this.context && this.context.twotopTap;
+        if (tap && target === this.context.destination) {
+          try { connect.call(this, tap); } catch (_) { /* not connectable */ }
+        }
+        return out;
+      };
     })();
+
+    // CLIP: record the next few seconds of the canvas and the game's
+    // sound, then offer the file to the share sheet (or as a download).
+    // The theater calls this from its CLIP label (crates/app/src/clip.rs)
+    // after rolling the tape to the moment worth keeping. The share needs
+    // a fresh tap of its own (browsers allow a share only from one), so
+    // the finished clip waits behind a button.
+    window.twotopClip = (seconds) => {
+      const canvas = document.getElementById("twotop-canvas");
+      if (!canvas || !canvas.captureStream || !window.MediaRecorder) return false;
+      const stream = canvas.captureStream(30);
+      for (const ctx of liveAudio) {
+        for (const t of ctx.twotopTap ? ctx.twotopTap.stream.getAudioTracks() : []) stream.addTrack(t);
+      }
+      const type = ["video/mp4", "video/webm;codecs=vp9,opus", "video/webm"]
+        .find((t) => MediaRecorder.isTypeSupported(t));
+      let rec;
+      try { rec = new MediaRecorder(stream, type ? { mimeType: type } : {}); } catch (_) { return false; }
+      const chunks = [];
+      rec.ondataavailable = (e) => { if (e.data.size) chunks.push(e.data); };
+      rec.onstop = () => {
+        const blob = new Blob(chunks, { type: rec.mimeType });
+        const ext = rec.mimeType.includes("mp4") ? "mp4" : "webm";
+        const file = new File([blob], `2-top-clip.${ext}`, { type: blob.type });
+        window.twotopLastClip = { bytes: blob.size, type: blob.type };
+        const btn = document.createElement("button");
+        btn.textContent = "SHARE THE CLIP";
+        btn.style.cssText = "position:fixed;left:50%;bottom:14%;transform:translateX(-50%);"
+          + "padding:0.9em 1.4em;font:20px monospace;background:#201c42;color:#fff3ca;"
+          + "border:3px solid #fff3ca;z-index:10";
+        btn.onclick = async () => {
+          btn.remove();
+          if (navigator.canShare && navigator.canShare({ files: [file] })) {
+            try { await navigator.share({ files: [file], title: "2-Top" }); return; } catch (_) { /* fall through */ }
+          }
+          const url = URL.createObjectURL(blob);
+          const a = document.createElement("a");
+          a.href = url; a.download = file.name; a.click();
+          setTimeout(() => URL.revokeObjectURL(url), 10000);
+        };
+        document.body.appendChild(btn);
+        setTimeout(() => btn.remove(), 30000);
+      };
+      rec.start(250);
+      setTimeout(() => rec.state !== "inactive" && rec.stop(), Math.max(1, seconds) * 1000);
+      return true;
+    };
     const wakeAudio = () => {
       for (const ctx of liveAudio) {
         if (ctx.state !== "running" && ctx.state !== "closed") {
@@ -261,6 +320,8 @@
     const say = (t) => { boot.textContent = t; };
 
     let notice = "";
+    // A broadcast answers with X-Live-Open: the game keeps reading it.
+    let live = { url: undefined, open: false };
     async function watchTape() {
       const m = location.hash.match(/^#watch=([0-9a-f]{12})$/);
       if (!m) return undefined;
@@ -269,13 +330,16 @@
         return undefined;
       }
       say("FETCHING THE TAPE…");
-      const res = await fetch(`${DROP_URL.replace(/\/$/, "")}/tape/${m[1]}`);
+      const url = `${DROP_URL.replace(/\/$/, "")}/tape/${m[1]}`;
+      const res = await fetch(url);
       if (!res.ok) {
         notice = res.status === 404
           ? "that tape has expired from the drop - ask for a fresh link"
           : `tape drop answered ${res.status}`;
         return undefined;
       }
+      const flag = res.headers.get("X-Live-Open");
+      if (flag !== null) live = { url, open: flag === "1" };
       return new Uint8Array(await res.arrayBuffer());
     }
 
@@ -332,7 +396,10 @@
       // the game dials that code and table at boot, like a scanned link
       // does in the APK.
       const join = location.hash.match(/^#join=([A-Za-z]{4}-[a-z]+)$/);
-      web_start(tape, join ? join[1] : undefined);
+      // A sent shade (#shade=NAME.<id>.<habits>) lands the same way.
+      const shade = location.hash.match(/^#shade=([A-Za-z0-9.]+)$/);
+      const link = join ? join[1] : shade ? `twotop://shade/${shade[1]}` : undefined;
+      web_start(tape, link, live.url, live.open);
     } catch (e) {
       // A bevy wasm app "exits" its main via an exception on purpose
       // (winit keeps running); anything else is a real boot failure.

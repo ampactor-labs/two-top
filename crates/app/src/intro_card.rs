@@ -101,7 +101,7 @@ fn update_intro_card(
     profile: Res<crate::profile::LocalProfile>,
     peer: Res<net::PeerProfile>,
     first_blood: Res<crate::first_blood::FirstBlood>,
-    shade: Res<crate::bot::ShadeStyle>,
+    (shade, scouting): (Res<crate::bot::ShadeStyle>, Res<crate::shade::Scouting>),
     mut q: Query<(&IntroCardLine, &mut Text2d, &mut Visibility)>,
 ) {
     let show = *screen.get() == AppScreen::InMatch
@@ -129,6 +129,14 @@ fn update_intro_card(
     );
     if first_blood.active {
         stakes = "FIRST BLOOD".to_string();
+    }
+    // A rival with tapes on this phone: the one habit worth knowing.
+    if online && let Some(line) = &scouting.0 {
+        stakes = if stakes.is_empty() {
+            line.clone()
+        } else {
+            format!("{stakes}\n{line}")
+        };
     }
     // Online the table was agreed at pairing and may not be the one this
     // player picked — say where they are sitting.
