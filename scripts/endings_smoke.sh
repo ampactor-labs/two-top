@@ -106,8 +106,14 @@ leave)
     sleep 1
   done
   win=$(DISPLAY=$DISPLAY_NUM xdotool search --sync --onlyvisible --pid "$(pid_of a)" 2>/dev/null | head -1)
-  DISPLAY=$DISPLAY_NUM xdotool windowfocus --sync "$win" keydown Escape sleep 0.2 keyup Escape
-  wait_for_log a "leaving — last word sent" 10 || fail "A never left"
+  # The summary ignores LEAVE for its first 1.6 s (a stray tap from the
+  # last exchange must not end it), and the filing can finish well inside
+  # that: press again until A leaves.
+  for _ in 1 2 3 4 5; do
+    DISPLAY=$DISPLAY_NUM xdotool windowfocus --sync "$win" keydown Escape sleep 0.2 keyup Escape
+    wait_for_log a "leaving — last word sent" 2 && break
+  done
+  has_log a "leaving — last word sent" || fail "A never left"
   wait_for_log b "peer ended the session" 10 || fail "B never heard A leave"
   has_log b "peer ended the session.*honoured=true" && fail "B let A's leaving undo a settled result"
   cmp -s "$TA" "$TB" || fail "the two tapes differ"
