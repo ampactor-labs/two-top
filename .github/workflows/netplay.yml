@@ -108,7 +108,7 @@ jobs:
           SILENT=1 scripts/pause_smoke.sh
           scripts/sync_budget_smoke.sh
           MODE=leave scripts/sync_budget_smoke.sh
-          for s in desync kill early freeze; do scripts/endings_smoke.sh "$s"; done
+          for s in desync kill early freeze drop; do scripts/endings_smoke.sh "$s"; done
       - name: Full match, then LEAVE
         if: steps.gate.outputs.run == 'true' && matrix.full
         run: |

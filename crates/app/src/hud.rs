@@ -219,7 +219,6 @@ const PIP_SLAM_SCALE: f32 = 2.3;
 /// seconds remaining).
 #[derive(Default)]
 struct PipSlams {
-    prev: [u8; 2],
     live: [Option<(u8, f32)>; 2],
 }
 
@@ -228,6 +227,7 @@ fn update_score_pips(
     awaiting: Res<AwaitingPeer>,
     score: Res<MatchScore>,
     time: Res<Time<Real>>,
+    mut kills: MessageReader<render::facts::KillConfirmed>,
     mut slams: Local<PipSlams>,
     mut q: Query<(&ScorePip, &mut Sprite, &mut Visibility)>,
 ) {
@@ -236,14 +236,18 @@ fn update_score_pips(
     // Smooth pulse for the match-point pip (render-only, non-rollback clock).
     let pulse = 0.4 + 0.6 * (time.elapsed_secs() * 6.0).sin().mul_add(0.5, 0.5);
 
-    // Slam detection: a player's count climbing arms a slam on the pip that
-    // just filled; a reset (rematch) just re-baselines quietly.
+    // Slam: a CONFIRMED kill lands on the killer's newest pip (the other
+    // seat in a 1v1). A predicted kill fills the pip quietly and a rollback
+    // empties it again; only a kill that stands slams.
     let dt = time.delta_secs();
-    for (player, won) in [(0usize, score.p0), (1usize, score.p1)] {
-        if won > slams.prev[player] && in_match {
-            slams.live[player] = Some((won - 1, PIP_SLAM_SECS));
+    for kill in kills.read() {
+        let scorer = 1 - kill.victim.min(1);
+        let won = if scorer == 0 { score.p0 } else { score.p1 };
+        if won > 0 && in_match {
+            slams.live[scorer] = Some((won - 1, PIP_SLAM_SECS));
         }
-        slams.prev[player] = won;
+    }
+    for player in 0..2usize {
         if let Some((_, ref mut left)) = slams.live[player] {
             *left -= dt;
             if *left <= 0.0 {

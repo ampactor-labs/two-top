@@ -542,7 +542,32 @@ impl Plugin for NetplayStatePlugin {
         app.init_resource::<SessionEnding>()
             .init_resource::<DuelBegan>()
             .init_resource::<IceStatus>()
-            .init_resource::<SyncWait>();
+            .init_resource::<SyncWait>()
+            .add_systems(
+                Update,
+                publish_fact_horizon.before(render::facts::KillFacts),
+            );
+    }
+}
+
+/// How far the match is final, for the honest kill beats
+/// ([`render::facts`]): online, through the confirmed tick; offline (couch,
+/// practice, the theater: nothing to mispredict) everything simulated.
+/// Once an online session has ended the horizon stays where it last was:
+/// whatever was still predicted then never happened.
+fn publish_fact_horizon(
+    session: Option<Res<Session<GgrsCfg>>>,
+    clock: crate::sim_clock::SimClock,
+    ending: Res<SessionEnding>,
+    mut horizon: ResMut<render::facts::FactHorizon>,
+) {
+    let next = match session.as_deref() {
+        Some(Session::P2P(_)) => Some(clock.confirmed_tick().max(0) as u32),
+        _ if ending.0.is_some() => horizon.0,
+        _ => None,
+    };
+    if horizon.0 != next {
+        horizon.0 = next;
     }
 }
 
@@ -802,6 +827,12 @@ struct IceAnswer {
 struct IceCache(Option<(RtcIceServerConfig, f32)>);
 
 impl IceCache {
+    /// The cached relay config even past its refresh point: a resume needs
+    /// a relay now and its credential stays valid for twice that.
+    fn any(&self) -> Option<RtcIceServerConfig> {
+        self.0.as_ref().map(|(config, _)| config.clone())
+    }
+
     fn fresh(&self, now: f32) -> Option<RtcIceServerConfig> {
         self.0
             .as_ref()
@@ -1136,7 +1167,11 @@ fn open_socket(world: &mut World, url: String, ice: RtcIceServerConfig) {
 
 /// Per-frame driver. Exclusive-world so it can touch the non-send socket,
 /// the lobby resources, and the ggrs `Session` without borrow gymnastics.
-fn drive_netplay(world: &mut World) {
+pub(crate) fn drive_netplay(world: &mut World) {
+    // A resume owns the socket while it is in flight (`resume.rs`).
+    if world.contains_resource::<crate::resume::Resume>() {
+        return;
+    }
     let Some(channel_taken) = world
         .get_non_send::<MatchboxDriver>()
         .map(|d| d.channel_taken)
@@ -1293,6 +1328,112 @@ fn watch_sync(world: &mut World) {
         "session never synchronized — giving up on this peer",
     );
     sync_failed(world);
+}
+
+// ---- Resume plumbing (`resume.rs` drives; the socket lives here) ----------
+
+/// Drop the connection under a broken session without a word: the link is
+/// already gone, there is nobody to say goodbye to.
+pub(crate) fn drop_connection(world: &mut World) {
+    world.remove_non_send::<MatchboxDriver>();
+    world.resource_mut::<PendingP2PSwap>().0 = None;
+    *world.resource_mut::<SyncWait>() = SyncWait::default();
+}
+
+/// Dial a resume room with the relay config already in hand (a resume
+/// cannot wait on a fresh credential fetch).
+pub(crate) fn open_resume_socket(world: &mut World, url: String) {
+    let ice = world
+        .resource::<IceCache>()
+        .any()
+        .unwrap_or_else(ice_server_config);
+    open_socket(world, url, ice);
+}
+
+/// Peer-state changes on the resume socket; `None` once it has died.
+pub(crate) fn poll_resume_socket(world: &mut World) -> Option<Vec<(PeerId, PeerState)>> {
+    let mut driver = world.get_non_send_mut::<MatchboxDriver>()?;
+    driver.socket.try_update_peers().ok()
+}
+
+pub(crate) fn send_resume(world: &mut World, peer: PeerId, msg: &net::ResumeMsg) {
+    if let Some(mut driver) = world.get_non_send_mut::<MatchboxDriver>() {
+        let _ = driver
+            .socket
+            .channel_mut(SIDE_CHANNEL)
+            .try_send(net::encode_resume(msg), peer);
+    }
+}
+
+/// Resume messages from `peer`, in order; anything else is dropped (no
+/// session exists yet to want it).
+pub(crate) fn receive_resume(world: &mut World, peer: PeerId) -> Vec<net::ResumeMsg> {
+    let Some(mut driver) = world.get_non_send_mut::<MatchboxDriver>() else {
+        return Vec::new();
+    };
+    driver
+        .socket
+        .channel_mut(SIDE_CHANNEL)
+        .receive()
+        .into_iter()
+        .filter(|(from, _)| *from == peer)
+        .filter_map(|(_, bytes)| net::decode_resume(&bytes))
+        .collect()
+}
+
+/// The resumed match's session: the new connection, the old seats and
+/// delay. The table is already laid and re-simulated to where the old
+/// session confirmed (`resume.rs`); identity, keys and the session ids
+/// carry over unchanged, so a result signed later names the same match.
+pub(crate) fn start_resumed_session(
+    world: &mut World,
+    peer_id: PeerId,
+    local_handle: usize,
+    input_delay: usize,
+) {
+    let Some(mut driver) = world.get_non_send_mut::<MatchboxDriver>() else {
+        return;
+    };
+    let Some(channel) = driver.socket.take_channel(GGRS_CHANNEL).ok() else {
+        return;
+    };
+    driver.channel_taken = true;
+    let bridge = MatchboxBridge::new(channel);
+    let bytes_sent = bridge.bytes_sent();
+    let session = SessionBuilder::<GgrsCfg>::new()
+        .with_num_players(2)
+        .expect("2 players")
+        .with_input_delay(input_delay)
+        .with_max_prediction_window(MAX_PREDICTION_FRAMES)
+        .with_disconnect_timeout(GGRS_DISCONNECT_TIMEOUT)
+        .with_desync_detection_mode(DesyncDetection::On {
+            interval: DESYNC_CHECK_INTERVAL,
+        })
+        .add_player(PlayerType::Local, local_handle)
+        .expect("add local player")
+        .add_player(PlayerType::Remote(peer_to_addr(peer_id)), 1 - local_handle)
+        .expect("add remote player")
+        .start_p2p_session(bridge)
+        .expect("start p2p session");
+    world.insert_resource(Session::P2P(session));
+    world.resource_mut::<SessionLink>().input_delay = input_delay;
+    world.resource_mut::<SessionLink>().bytes_sent = bytes_sent;
+    let now_secs = world.resource::<Time<Real>>().elapsed_secs();
+    *world.resource_mut::<SyncWait>() = SyncWait {
+        since: Some(now_secs),
+        peer_gone: false,
+    };
+    world.resource_mut::<net::PeerPaused>().0 = false;
+    let now = world.resource::<net::SilenceClock>().0;
+    world.resource_mut::<LastPeerMessageFrame>().0 = now;
+    *world.resource_mut::<LobbyState>() = LobbyState::Connected { peer_id };
+    tracing::info!(
+        target: "two_top::net",
+        local_handle,
+        input_delay,
+        peer_id = %peer_id,
+        "resumed P2P session",
+    );
 }
 
 /// Fold a session that never synchronized and go back to the room: once
@@ -1488,6 +1629,8 @@ fn perform_swap(world: &mut World, peer_id: PeerId, agreed: Agreed) {
         bridge
     };
     let bytes_sent = bridge.bytes_sent();
+    // A fresh session numbers its frames from the match's first tick.
+    world.insert_resource(crate::sim_clock::ClockBase(0));
 
     let mut sb = SessionBuilder::<GgrsCfg>::new()
         .with_num_players(2)
@@ -2195,6 +2338,10 @@ pub fn leave_online_match(world: &mut World, farewell: Farewell) {
     world.resource_mut::<LocalPlayerHandle>().0 = None;
     world.resource_mut::<RecentAbsence>().0 = None;
     world.resource_mut::<render::PerspectiveFlip>().0 = 1.0;
+    world.remove_resource::<crate::resume::Resume>();
+    world.insert_resource(crate::sim_clock::ClockBase(0));
+    world.resource_mut::<crate::resume::ResumeCount>().0 = 0;
+    world.resource_mut::<crate::resume::ResumeHold>().0 = None;
     {
         use rand::SeedableRng as _;
         world.resource_mut::<render::CosmeticRng>().0 =

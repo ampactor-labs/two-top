@@ -15,7 +15,7 @@
 use bevy::prelude::*;
 use rand::Rng as _;
 use render::CosmeticRng;
-use sim::{Boomerang, BoomerangState, MatchScore, PositionF};
+use sim::{Boomerang, BoomerangState, PositionF};
 
 /// How many eye-pairs haunt the void.
 const EYE_PAIRS: usize = 26;
@@ -96,11 +96,10 @@ fn spawn_eyes(mut commands: Commands, mut rng: ResMut<CosmeticRng>) {
 #[allow(clippy::too_many_arguments)]
 fn animate_eyes(
     time: Res<Time<Real>>,
-    score: Res<MatchScore>,
     state: Res<sim::MatchState>,
     mut armed: ResMut<crate::grudge::MilestoneFlareArmed>,
     mut flare: ResMut<EyeFlare>,
-    mut last_score: Local<Option<MatchScore>>,
+    mut kills: MessageReader<render::facts::KillConfirmed>,
     fangs: Query<(&PositionF, &Boomerang)>,
     mut eyes: Query<(&VoidEye, &mut Sprite, &mut Transform)>,
 ) {
@@ -111,12 +110,10 @@ fn animate_eyes(
         armed.0 = false;
         flare.0 = 2.5;
     }
-    // A kill = the total went UP (a rematch reset going to 0-0 must not flare).
-    let prev = last_score.unwrap_or(*score);
-    if score.p0 + score.p1 > prev.p0 + prev.p1 {
+    // A confirmed kill makes the void look.
+    if kills.read().count() > 0 {
         flare.0 = 1.0;
     }
-    *last_score = Some(*score);
     flare.0 = (flare.0 - time.delta_secs() * 1.3).max(0.0);
 
     // The thing the void watches: the first flying fang, if any.

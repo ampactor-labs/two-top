@@ -190,6 +190,7 @@ impl Default for PerspectiveFlip {
 // ===========================================================================
 
 pub mod arena;
+pub mod facts;
 pub mod tuning;
 
 pub mod palette {
@@ -1565,7 +1566,6 @@ pub fn spawn_hit_and_death_bursts(
     assets: Res<EffectAssets>,
     tuning: Res<tuning::Tuning>,
     mut shake: ResMut<ScreenShake>,
-    mut last_kill: ResMut<LastKillPos>,
     players: Query<(&Player, &Dead, &Transform)>,
     mut prev: Local<PrevDying>,
 ) {
@@ -1578,7 +1578,6 @@ pub fn spawn_hit_and_death_bursts(
             // record where it happened so the kill-cam can punch in on the
             // round/match-ending blow.
             shake.add_trauma(tuning.shake.kill);
-            last_kill.0 = pos;
             spawn_kill_flash(&mut commands, tuning.flash.kill_alpha);
             // Hit burst — quick 4-frame flash, ~70 ms total. Above
             // gameplay z so it pops over the player sprite that just
@@ -1606,36 +1605,48 @@ pub fn spawn_hit_and_death_bursts(
                 80.0,
                 9.5,
             );
-            // Persistent floor stain — the synthesis primitive from
-            // VISUAL_TARGET_PACK.md. Cell 3 is the corpse-mark, the
-            // continuation of the death burst's final frame. Sized
-            // 32 px so it reads as a real footprint without dominating
-            // the arena.
-            let (stain_image, stain_layout) = if player.handle == 0 {
-                assets.p0_stain.clone()
-            } else {
-                assets.p1_stain.clone()
-            };
-            commands.spawn((
-                Sprite {
-                    image: stain_image,
-                    texture_atlas: Some(TextureAtlas {
-                        layout: stain_layout,
-                        index: 3,
-                    }),
-                    custom_size: Some(Vec2::splat(32.0)),
-                    ..default()
-                },
-                Anchor::CENTER,
-                // Z below players (0.0) but above the floor (-1.0) so
-                // players step over the stains visually.
-                Transform::from_xyz(pos.x, pos.y, -0.5),
-                FloorStain {
-                    owner_handle: player.handle,
-                },
-            ));
         }
         prev.0.insert(player.handle, now_dying);
+    }
+}
+
+/// On a confirmed kill ([`facts::KillConfirmed`]): the persistent floor
+/// stain at the corpse and the kill position the kill-cam punches in on.
+/// Not on the raw edge: a stain is permanent, and a kill a rollback undoes
+/// must leave no mark.
+pub fn mark_confirmed_kills(
+    mut commands: Commands,
+    assets: Res<EffectAssets>,
+    mut last_kill: ResMut<LastKillPos>,
+    mut kills: MessageReader<facts::KillConfirmed>,
+) {
+    for kill in kills.read() {
+        last_kill.0 = kill.pos;
+        // Cell 3 of the stain sheet is the corpse-mark, the continuation
+        // of the death burst's final frame (VISUAL_TARGET_PACK.md), sized
+        // 32 px so it reads as a footprint without dominating the arena.
+        let (stain_image, stain_layout) = if kill.victim == 0 {
+            assets.p0_stain.clone()
+        } else {
+            assets.p1_stain.clone()
+        };
+        commands.spawn((
+            Sprite {
+                image: stain_image,
+                texture_atlas: Some(TextureAtlas {
+                    layout: stain_layout,
+                    index: 3,
+                }),
+                custom_size: Some(Vec2::splat(32.0)),
+                ..default()
+            },
+            Anchor::CENTER,
+            // Below players (0.0), above the floor (-1.0).
+            Transform::from_xyz(kill.pos.x, kill.pos.y, -0.5),
+            FloorStain {
+                owner_handle: kill.victim,
+            },
+        ));
     }
 }
 
@@ -1663,11 +1674,9 @@ pub struct FloorStain {
 /// arena remembers each round's violence") cranked to match-scope —
 /// the most aesthetically aligned scope for the gore-revival pole.
 ///
-/// Currently `MatchOver` is terminal in sim, so this trigger never
-/// fires within a single app session — stains effectively persist
-/// for the lifetime of the process. The system is wired up in
-/// advance for the eventual Phase 18 "play again" flow, where the
-/// MatchOver → Countdown transition becomes a real signal.
+/// Only MatchOver → Countdown (a rematch) counts. A predicted decision a
+/// rollback undoes goes MatchOver → InRound, and wiping the match's
+/// stains then would erase a match still being played.
 pub fn clear_stains_on_match_reset(
     state: Res<MatchState>,
     mut prev: Local<Option<MatchState>>,
@@ -1675,8 +1684,8 @@ pub fn clear_stains_on_match_reset(
     stains: Query<Entity, With<FloorStain>>,
 ) {
     let was_match_over = prev.is_some_and(|s| s.is_match_over());
-    let now_post_match_over = !state.is_match_over();
-    if was_match_over && now_post_match_over {
+    let rematch = matches!(*state, MatchState::Countdown { .. });
+    if was_match_over && rematch {
         for entity in &stains {
             commands.entity(entity).despawn();
         }
@@ -2072,6 +2081,9 @@ impl Plugin for EffectsPlugin {
             .init_resource::<ScreenShake>()
             .init_resource::<tuning::Tuning>()
             .init_resource::<LastKillPos>()
+            .init_resource::<facts::FactHorizon>()
+            .init_resource::<facts::KillWatch>()
+            .add_message::<facts::KillConfirmed>()
             .init_resource::<MatchPointRitual>()
             .add_systems(Startup, load_effect_assets)
             .add_systems(
@@ -2080,6 +2092,9 @@ impl Plugin for EffectsPlugin {
                     advance_effect_sprites,
                     cull_excess_effects,
                     spawn_hit_and_death_bursts,
+                    (facts::confirm_kills, mark_confirmed_kills)
+                        .chain()
+                        .in_set(facts::KillFacts),
                     spawn_recall_pulses,
                     spawn_ambient_embers,
                     spawn_boomerang_trail,

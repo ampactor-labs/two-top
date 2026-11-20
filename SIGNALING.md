@@ -424,23 +424,26 @@ If either side desyncs visibly, take both `.bmrg.log` files and run
   replays the missed ticks), and the post-blip simulation stays
   bit-identical.
 
-### Gate 3: forfeit on long disconnection
+### Gate 3: a long disconnection resumes the duel
 
-* Same setup, but kill connectivity on one device for 12+ seconds.
-* The surviving device counts `<NAME> AWAY` down and transitions to
-  `<NAME> FLED - the field is yours` at ~9 s of silence (net's silence
-  FSM, `FORFEIT_AFTER_FRAMES = 540`; 20 s if the phone announced it was
-  going to the background), records the match **unfinished** (a dropped
-  link proves nothing about who left: nobody's win, nobody's loss), and
-  offers the top-band LEAVE.
-* `sim::MatchState::MatchOver` fires (the round flow ends; HUD shows
-  match-over state).
-* The forfeiting peer, on coming back, sees `MATCH ABANDONED — you
-  left the duel` (its own absence is tracked, so the copy doesn't
-  gaslight) and records the LOSS.
+* Same setup, but kill connectivity on one device (or both) for 12+
+  seconds: airplane mode, a Wi-Fi to mobile-data switch, a call.
+* Each device counts `<NAME> AWAY` down; at ~9 s of silence (net's
+  silence FSM, `FORFEIT_AFTER_FRAMES = 540`; 20 s if the phone announced
+  it was going to the background), or the moment its link is known dead,
+  it shows `RECONNECTING <NAME>` with a 60 s clock (`resume.rs`).
+* Restore connectivity. Both devices meet in the session's resume room
+  (`net::resume_room`), agree on every input both had confirmed, rebuild
+  the match from them, and play on after a one-digit countdown (both
+  phones send HOLD, SIM 17). The resumed match must not desync, and its
+  tapes and signed result are those of one uninterrupted match
+  (`scripts/endings_smoke.sh drop` and `freeze` check exactly this).
+* If they never meet again within the window, the match is recorded
+  **unfinished** (a dropped link proves nothing about who left: nobody's
+  win, nobody's loss) and the top-band LEAVE is offered.
 * Bonus check: instead of killing connectivity, QUIT twice on one
-  device mid-match — the other flips to `<NAME> FLED` *immediately* (the
-  `Bye` concession), no 9 s wait.
+  device mid-match: the other flips to `<NAME> FLED` *immediately* (the
+  `Bye` concession), no wait and no resume.
 
 ---
 

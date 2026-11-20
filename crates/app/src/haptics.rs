@@ -26,7 +26,7 @@
 use bevy::platform::collections::HashMap;
 use bevy::prelude::*;
 
-use sim::{Boomerang, BoomerangMods, Dead, Empowered, Player};
+use sim::{Boomerang, BoomerangMods, Empowered, Player};
 
 use crate::netplay::LocalPlayerHandle;
 use crate::settings::Settings;
@@ -78,20 +78,15 @@ fn haptic_on_throw(
     }
 }
 
-/// Kill haptic: any player entering `is_dying` (the round-defining impact).
+/// Kill haptic: a confirmed kill (the round-defining impact), never one a
+/// rollback can still take back.
 fn haptic_on_kill(
-    players: Query<(&Player, &Dead)>,
+    mut kills: MessageReader<render::facts::KillConfirmed>,
     settings: Res<Settings>,
     tuning: Res<render::tuning::Tuning>,
-    mut prev: Local<HashMap<usize, bool>>,
 ) {
-    for (player, dead) in &players {
-        let now = dead.is_dying();
-        let was = prev.get(&player.handle).copied().unwrap_or(false);
-        if now && !was && settings.haptics {
-            vibrate(tuning.haptics.kill_ms);
-        }
-        prev.insert(player.handle, now);
+    if kills.read().count() > 0 && settings.haptics {
+        vibrate(tuning.haptics.kill_ms);
     }
 }
 

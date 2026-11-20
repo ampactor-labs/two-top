@@ -12,7 +12,7 @@
 
 use bevy::prelude::*;
 use render::{EffectAssets, LastKillPos, ScreenShake};
-use sim::{MatchScore, MatchState, Player};
+use sim::{MatchScore, Player};
 
 /// Seconds the fang holds at the kill spot before flying (lets the kill-cam
 /// finish its punch-in so the whole ceremony is on-camera).
@@ -43,7 +43,7 @@ impl Plugin for DevourPlugin {
 fn devouring_ceremony(
     mut commands: Commands,
     time: Res<Time<Real>>,
-    state: Res<MatchState>,
+    settled: Res<crate::attest::MatchOverSettled>,
     score: Res<MatchScore>,
     last_kill: Res<LastKillPos>,
     asset_server: Res<AssetServer>,
@@ -54,7 +54,9 @@ fn devouring_ceremony(
     mut fang: Query<(Entity, &mut DevourFang, &mut Transform, &mut Sprite), Without<Player>>,
     mut prev_over: Local<bool>,
 ) {
-    let over = state.is_match_over();
+    // The ceremony waits for the decision to stand (a predicted deciding
+    // kill can still be rolled back); it ends when the match does.
+    let over = settled.settled;
     let entered = over && !*prev_over;
     *prev_over = over;
 

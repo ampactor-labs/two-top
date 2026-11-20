@@ -55,6 +55,12 @@ impl MatchRecorder {
         *self = Self::default();
     }
 
+    /// The recorded inputs of the first `ticks` ticks (fewer if fewer were
+    /// recorded): what a resume rebuilds the match from.
+    pub fn inputs_through(&self, ticks: usize) -> Vec<replay::FrameInputs> {
+        self.frames[..ticks.min(self.frames.len())].to_vec()
+    }
+
     /// The score after tick `tick` (`-1`, or a tick not recorded: 0-0).
     pub fn score_after(&self, tick: i32) -> MatchScore {
         usize::try_from(tick)

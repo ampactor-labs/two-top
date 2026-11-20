@@ -697,6 +697,105 @@ impl KeyedProfile {
     }
 }
 
+// ---- Resume (a match continued after a dropped link) ----------------------
+//
+// When the transport under a live duel dies (a Wi-Fi to mobile handoff, the
+// room server restarting, a long freeze), both phones dial a room named
+// after the session that broke ([`resume_room`]) and rebuild the match from
+// the inputs both have confirmed. These messages ride the reliable side
+// channel of the NEW connection, before any session exists, behind a tag
+// byte no `NetMsg` starts with, so a stray one can never be read as the
+// other kind.
+
+/// First byte of every encoded [`ResumeMsg`]. `NetMsg`'s postcard variant
+/// index is its first byte and stays far below this.
+pub const RESUME_TAG: u8 = 0xEE;
+
+/// The resume handshake.
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub enum ResumeMsg {
+    /// "I was in the session `(lo, hi)` (its two original peer ids, sorted)
+    /// and hold confirmed inputs for its first `confirmed` ticks."
+    Hello { lo: u128, hi: u128, confirmed: u32 },
+    /// Sent once both hellos are in: the inputs from tick `from` (the
+    /// lower of the two confirmed counts) to the end of what this side
+    /// holds, and [`inputs_hash`] of everything before `from`, which both
+    /// must share.
+    Tail {
+        from: u32,
+        prefix: u64,
+        inputs: Vec<[sim::PlayerInput; 2]>,
+    },
+}
+
+pub fn encode_resume(msg: &ResumeMsg) -> Packet {
+    let mut bytes = vec![RESUME_TAG];
+    bytes.extend(postcard::to_allocvec(msg).expect("ResumeMsg postcard encoding cannot fail"));
+    bytes.into()
+}
+
+/// `None` for anything that is not a resume message. Never panics on peer
+/// bytes.
+pub fn decode_resume(bytes: &[u8]) -> Option<ResumeMsg> {
+    match bytes.split_first() {
+        Some((&RESUME_TAG, rest)) => postcard::from_bytes(rest).ok(),
+        _ => None,
+    }
+}
+
+/// A width-portable hash of an input stream (both phones compute it on
+/// the prefix they must share).
+pub fn inputs_hash(inputs: &[[sim::PlayerInput; 2]]) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = portable_checksum_hasher();
+    inputs.len().hash(&mut h);
+    for pair in inputs {
+        pair.hash(&mut h);
+    }
+    h.finish()
+}
+
+/// The room a broken session's two phones meet in again: named from the
+/// session's sorted original peer ids, so only those two land there.
+pub fn resume_room(lo: u128, hi: u128) -> String {
+    use std::hash::{Hash, Hasher};
+    let mut h = portable_checksum_hasher();
+    (lo, hi).hash(&mut h);
+    format!("re{:016x}", h.finish())
+}
+
+/// Both sides' agreed input stream: `ours` (what this side holds) merged
+/// with the peer's [`ResumeMsg::Tail`]. The shared prefix must hash the
+/// same on both sides; the longer side's tail extends it. Pure.
+pub fn merge_resume(
+    ours: &[[sim::PlayerInput; 2]],
+    from: u32,
+    their_prefix: u64,
+    their_tail: &[[sim::PlayerInput; 2]],
+) -> Result<Vec<[sim::PlayerInput; 2]>, &'static str> {
+    let from = from as usize;
+    if from > ours.len() {
+        return Err("the peer's prefix is longer than what we hold");
+    }
+    if inputs_hash(&ours[..from]) != their_prefix {
+        return Err("the two records disagree before the break");
+    }
+    let our_tail = &ours[from..];
+    // Where both hold a tick, they must hold the same one.
+    let overlap = our_tail.len().min(their_tail.len());
+    if our_tail[..overlap] != their_tail[..overlap] {
+        return Err("the two records disagree after the break");
+    }
+    let longer = if their_tail.len() > our_tail.len() {
+        their_tail
+    } else {
+        our_tail
+    };
+    let mut merged = ours[..from].to_vec();
+    merged.extend_from_slice(longer);
+    Ok(merged)
+}
+
 /// The width-portable hasher wrapper now lives in `sim`, beside the
 /// checksum registrations that use it; re-exported here for
 /// `replay_sync` and existing callers.
@@ -964,6 +1063,10 @@ pub enum LobbyState {
     /// the peer — the disconnection countdown is
     /// `frame.0 - since_frame >= GRACE_FRAMES`.
     Disconnected { peer_id: PeerId, since_frame: u32 },
+    /// The transport under a live duel died and both phones are dialing
+    /// the session's resume room to continue it (`peer_id`: the original
+    /// peer). Not terminal and not "in match": no session runs meanwhile.
+    Reconnecting { peer_id: PeerId },
     /// The match ended without the sim deciding it. `conceded` is the
     /// fact the ledger can bank: true when the peer said goodbye (a
     /// deliberate quit — their app filed the loss before sending it),
@@ -1553,6 +1656,64 @@ mod tests {
         );
         assert_eq!(sig_from_hex(&sig_to_hex(&sig)), Some(sig));
         assert_eq!(sig_from_hex(&"0".repeat(127)), None);
+    }
+
+    #[test]
+    fn resume_messages_round_trip_and_never_read_as_net_msgs() {
+        let tail = ResumeMsg::Tail {
+            from: 7,
+            prefix: 99,
+            inputs: vec![[sim::PlayerInput::default(); 2]; 3],
+        };
+        for msg in [
+            ResumeMsg::Hello {
+                lo: 1,
+                hi: 2,
+                confirmed: 400,
+            },
+            tail,
+        ] {
+            let bytes = encode_resume(&msg);
+            assert_eq!(decode_resume(&bytes), Some(msg));
+            assert_eq!(decode_net_msg(&bytes), None);
+        }
+        assert_eq!(decode_resume(&encode_net_msg(&NetMsg::Bye)), None);
+        assert_eq!(decode_resume(&[]), None);
+        assert_eq!(decode_resume(&[RESUME_TAG, 0xff, 0xff]), None);
+    }
+
+    #[test]
+    fn a_resume_merges_to_the_longer_record_and_refuses_a_disagreement() {
+        let tick = |b: u8| {
+            let mut p = [sim::PlayerInput::default(); 2];
+            p[0].buttons = b;
+            p
+        };
+        let long: Vec<_> = (0..10).map(tick).collect();
+        let short = &long[..6];
+        // The short side merges the long side's tail...
+        let tail = &long[6..];
+        assert_eq!(
+            merge_resume(short, 6, inputs_hash(&long[..6]), tail).unwrap(),
+            long
+        );
+        // ...and the long side keeps its own, the short side's tail empty.
+        assert_eq!(
+            merge_resume(&long, 6, inputs_hash(short), &[]).unwrap(),
+            long
+        );
+        // A prefix that differs is refused.
+        let mut other = long.clone();
+        other[2] = tick(9);
+        assert!(merge_resume(&other, 6, inputs_hash(short), &[]).is_err());
+        // So is a tail that contradicts what we hold.
+        assert!(merge_resume(&long, 6, inputs_hash(short), &[tick(77)]).is_err());
+    }
+
+    #[test]
+    fn a_resume_room_is_the_same_for_both_sides_and_distinct_per_session() {
+        assert_eq!(resume_room(3, 9), resume_room(3, 9));
+        assert_ne!(resume_room(3, 9), resume_room(3, 10));
     }
 
     #[test]

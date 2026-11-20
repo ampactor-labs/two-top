@@ -53,6 +53,7 @@ mod pointer;
 mod presentation;
 mod profile;
 mod recorder;
+mod resume;
 mod rivals;
 mod room_code;
 mod runes;
@@ -318,6 +319,7 @@ pub fn run() {
 
     app.insert_state(AppScreen::Title);
     app.add_plugins(netplay::NetplayStatePlugin);
+    app.add_plugins(resume::ResumePlugin);
     app.init_resource::<sim_clock::ClockBase>();
     if online {
         app.add_plugins(MatchboxPlugin);

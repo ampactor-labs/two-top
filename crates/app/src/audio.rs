@@ -478,13 +478,19 @@ fn play_catch_sfx(
     }
 }
 
-/// Per-player previous `is_dying`, for the kill and respawn cues.
+/// Per player: previous `is_dying`, and whether the death in the world was
+/// confirmed (the respawn cue answers only a kill that was announced).
 #[derive(Default)]
-struct DyingTrack(HashMap<usize, bool>);
+struct DyingTrack {
+    dying: HashMap<usize, bool>,
+    confirmed: [bool; 2],
+}
 
-/// Kill cue + music duck: the tick a player transitions into dying, the 80s
+/// Kill cue + music duck on a CONFIRMED kill ([`render::facts`]): the 80s
 /// action hit lands and the music bus dips out of its way (sidechain feel:
-/// instant attack here, slow release in [`mix_music`]).
+/// instant attack here, slow release in [`mix_music`]). Never on a kill a
+/// rollback can still undo. The respawn cue plays when a confirmed victim
+/// gets up.
 #[allow(clippy::too_many_arguments)]
 fn play_kill_sfx(
     mut commands: Commands,
@@ -498,6 +504,7 @@ fn play_kill_sfx(
     mut mix: ResMut<MusicMix>,
     mut rng: ResMut<CosmeticRng>,
     players: Query<(&Player, &Dead)>,
+    mut kills: MessageReader<render::facts::KillConfirmed>,
     mut track: Local<DyingTrack>,
 ) {
     let mine = crate::runes::my_sting(profile.install_id);
@@ -509,14 +516,15 @@ fn play_kill_sfx(
     let peer_sting = far_identity.map(crate::runes::my_sting);
     let local_handle = local.0.unwrap_or(0);
     let theater_names = theater.active().then(|| theater.header_names());
-    for (player, dead) in &players {
-        let now = dead.is_dying();
-        let was = track.0.get(&player.handle).copied().unwrap_or(false);
-        if now && !was {
+    for kill in kills.read() {
+        if let Some(c) = track.confirmed.get_mut(kill.victim) {
+            *c = true;
+        }
+        {
             // The KILLER's sting, not the fallen's: in a 1v1 the killer is
             // the other seat, and the hit is their voice (the mint's third
             // axis — see crate::runes).
-            let killer = 1 - (player.handle % 2);
+            let killer = 1 - (kill.victim % 2);
             let theater_name = theater_names.as_ref().map(|names| names[killer].as_deref());
             let sting =
                 crate::runes::sting_for(killer, local_handle, mine, peer_sting, theater_name)
@@ -533,14 +541,21 @@ fn play_kill_sfx(
             );
             mix.duck = mix.duck.min(KILL_DUCK);
         }
+    }
+    for (player, dead) in &players {
+        let now = dead.is_dying();
+        let was = track.dying.get(&player.handle).copied().unwrap_or(false);
         if !now && was {
-            play(
-                &mut commands,
-                &assets.respawn,
-                sfx_gain(&settings) * TRIM_RESPAWN,
-            );
+            let seat = player.handle.min(1);
+            if std::mem::take(&mut track.confirmed[seat]) {
+                play(
+                    &mut commands,
+                    &assets.respawn,
+                    sfx_gain(&settings) * TRIM_RESPAWN,
+                );
+            }
         }
-        track.0.insert(player.handle, now);
+        track.dying.insert(player.handle, now);
     }
 }
 
@@ -800,11 +815,19 @@ fn play_match_state_sfx(
     assets: Res<AudioAssets>,
     settings: Res<Settings>,
     state: Res<MatchState>,
+    settled: Res<crate::attest::MatchOverSettled>,
     mut prev: Local<Option<MatchState>>,
+    mut won_played: Local<bool>,
 ) {
     let now = *state;
     let prev_state = *prev;
     *prev = Some(now);
+    // The match-won stinger waits for the decision to be beyond rollback.
+    if !settled.over {
+        *won_played = false;
+    } else if settled.settled && !std::mem::replace(&mut *won_played, true) {
+        play(&mut commands, &assets.match_win_sting, sfx_gain(&settings));
+    }
 
     let is_countdown = |s: MatchState| matches!(s, MatchState::Countdown { .. });
     let is_roundover = |s: MatchState| matches!(s, MatchState::RoundOver { .. });
@@ -842,10 +865,8 @@ fn play_match_state_sfx(
         );
         return;
     }
-    // Round over → the mournful sting; the whole match won → the big one.
-    if is_matchover(now) && !is_matchover(prev_state) {
-        play(&mut commands, &assets.match_win_sting, sfx_gain(&settings));
-    } else if is_roundover(now) && !is_roundover(prev_state) {
+    // Round over → the mournful sting (the match-won one is above).
+    if is_roundover(now) && !is_roundover(prev_state) && !is_matchover(now) {
         play(&mut commands, &assets.round_over_sting, sfx_gain(&settings));
     }
 }

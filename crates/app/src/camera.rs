@@ -187,11 +187,10 @@ fn update_camera_base(
 fn update_kill_cam(
     tuning: Res<Tuning>,
     state: Res<MatchState>,
-    score: Res<sim::MatchScore>,
     last_kill: Res<LastKillPos>,
+    mut kills: MessageReader<render::facts::KillConfirmed>,
     mut kc: ResMut<KillCam>,
     mut prev: Local<Option<MatchState>>,
-    mut prev_kills: Local<Option<u32>>,
 ) {
     let now = *state;
     let in_beat = |s: &MatchState| {
@@ -205,17 +204,21 @@ fn update_kill_cam(
     let entering_beat = in_beat(&now) && !prev.map(|p| in_beat(&p)).unwrap_or(false);
     let entering_countdown = in_countdown(&now) && !prev.map(|p| in_countdown(&p)).unwrap_or(false);
 
-    let kills = score.p0 as u32 + score.p1 as u32;
-    let fresh_kill = prev_kills.is_some_and(|k| kills > k);
-    *prev_kills = Some(kills);
+    let fresh_kill = kills.read().count() > 0;
 
     if entering_beat {
         kc.target = last_kill.0;
         kc.zooming_in = true;
         kc.strength = 1.0;
         kc.hold_frames = f32::INFINITY;
-    } else if entering_countdown {
+    } else if entering_countdown
+        || (kc.hold_frames.is_infinite() && matches!(now, MatchState::InRound { .. }))
+    {
+        // A countdown releases the beat; so does a rollback that took the
+        // decision back (MatchOver → InRound), or the camera would hold
+        // the zoom on a match still being played.
         kc.zooming_in = false;
+        kc.hold_frames = 0.0;
     } else if fresh_kill && matches!(now, MatchState::InRound { .. }) {
         kc.target = last_kill.0;
         kc.zooming_in = true;

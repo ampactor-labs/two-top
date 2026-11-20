@@ -57,6 +57,15 @@ pub const STICK_MAX_RADIUS_PX: f32 = 80.0;
 /// Deflection therefore never exceeds saturation, which keeps a followed
 /// stick pinned at full push, and reversing direction responds immediately
 /// instead of asking the thumb to swim back across a dead 2×radius span.
+/// A throw-thumb drag past this many px aims the throw along the drag
+/// (drag-to-aim), overriding the left stick: aiming with the thumb that
+/// throws, as the touch layout promises.
+pub const THROW_DRAG_AIM_PX: f32 = 22.0;
+
+/// A throw-thumb release moving at least this many px per frame is a
+/// FLICK: the fang flies along the flick at full power.
+pub const FLICK_PX_PER_FRAME: f32 = 14.0;
+
 pub const STICK_FOLLOW_RADIUS_PX: f32 = STICK_MAX_RADIUS_PX * STICK_DEADZONE_SATURATION;
 
 /// Window size in logical pixels. Populated by the app each frame
@@ -156,6 +165,10 @@ pub struct TouchState {
     /// on the frame it spawns the boomerang. This is the "sticky-on-release
     /// frame" the input model promises.
     pub aim_release_sticky: bool,
+    /// The throw thumb's position last frame and its smoothed velocity (px
+    /// per frame, y-down): what makes a release a flick.
+    pub throw_last_pos: Option<Vec2>,
+    pub throw_velocity: Vec2,
     /// Id of the active dash touch, if any. Sticky like `stick_touch`.
     pub dash_touch: Option<u64>,
     /// True iff a dash-zone touch is currently held.
@@ -503,20 +516,48 @@ pub fn apply_throw_state(state: &mut TouchState, window: Vec2, southpaw: bool) {
     let new_throw = select_throw_touch(prev_throw, &state.touches, window, southpaw);
     state.right_touch = new_throw;
 
+    let throw_touch = new_throw.and_then(|id| state.find(id).copied());
     match new_throw {
         Some(_) => {
-            // Throw button down: charging. The deadzone-curved left stick
-            // is the aim — direction is the throw heading, magnitude the
-            // power. A centered stick means no aim, so releasing then is a
-            // tap-throw along the facing direction, exactly like the
-            // desktop d-pad path. Movement isn't lost: sim roots the
-            // character while charging, so the left thumb is free to aim.
-            let aim = state.stick.filter(|v| *v != Vec2::ZERO);
+            // Throw button down: charging. The aim is the throw thumb's own
+            // drag once it has moved (drag-to-aim), else the deadzone-curved
+            // left stick — direction is the throw heading, magnitude the
+            // power. Neither means no aim, so releasing then is a tap-throw
+            // at the opponent, exactly like the desktop path. Movement isn't
+            // lost: sim roots the character while charging.
+            let drag = throw_touch.map(|t| t.current_pos - t.start_pos);
+            if let Some(t) = throw_touch {
+                if let Some(last) = state.throw_last_pos {
+                    // Smoothed, so one jittery report can't fake a flick.
+                    state.throw_velocity =
+                        state.throw_velocity * 0.4 + (t.current_pos - last) * 0.6;
+                }
+                state.throw_last_pos = Some(t.current_pos);
+            }
+            let aim = drag
+                .filter(|d| d.length() >= THROW_DRAG_AIM_PX)
+                .map(|d| d.normalize() * (d.length() / STICK_MAX_RADIUS_PX).clamp(0.5, 1.0))
+                .or_else(|| state.stick.filter(|v| *v != Vec2::ZERO));
             state.throw_held = true;
             state.aim_release_sticky = false;
             state.aim_active = aim.is_some();
             state.aim_vec = aim;
             state.aim_angle_rad = aim.map_or(0.0, stick_aim_angle);
+        }
+        None if prev_throw.is_some()
+            && !state.aim_release_sticky
+            && state.throw_velocity.length() >= FLICK_PX_PER_FRAME =>
+        {
+            // A FLICK: the thumb left the glass moving fast. The fang flies
+            // along the flick at full power, held one frame like any aimed
+            // release so sim sees it on the spawn tick.
+            state.throw_held = false;
+            state.aim_release_sticky = true;
+            state.aim_active = true;
+            state.aim_vec = Some(state.throw_velocity.normalize());
+            state.aim_angle_rad = stick_aim_angle(state.throw_velocity.normalize());
+            state.throw_last_pos = None;
+            state.throw_velocity = Vec2::ZERO;
         }
         None if prev_throw.is_some() && state.aim_active && !state.aim_release_sticky => {
             // First frame after an *aimed* throw touch released: hold the aim
@@ -529,6 +570,8 @@ pub fn apply_throw_state(state: &mut TouchState, window: Vec2, southpaw: bool) {
         }
         None => {
             // No throw touch (and no pending sticky-release): fully clear.
+            state.throw_last_pos = None;
+            state.throw_velocity = Vec2::ZERO;
             state.throw_held = false;
             state.aim_active = false;
             state.aim_angle_rad = 0.0;
@@ -1324,6 +1367,68 @@ mod tests {
         assert!(is_throw_zone(Vec2::new(1079.0, 1500.0), win));
         assert!(is_throw_zone(Vec2::new(700.0, 2300.0), win)); // left of the dash corner
         assert!(is_throw_zone(Vec2::new(900.0, 1900.0), win)); // above the dash corner
+    }
+
+    /// One frame of the throw thumb at `pos` (or lifted, `None`).
+    fn throw_frame(state: &mut TouchState, pos: Option<Vec2>) {
+        let win = Vec2::new(1080.0, 2400.0);
+        let start = Vec2::new(800.0, 1500.0);
+        state.touches = pos
+            .map(|p| {
+                let mut touch = t(9, start);
+                touch.current_pos = p;
+                vec![touch]
+            })
+            .unwrap_or_default();
+        apply_throw_state(state, win, false);
+    }
+
+    #[test]
+    fn dragging_the_throw_thumb_aims_along_the_drag() {
+        let mut s = TouchState::default();
+        let start = Vec2::new(800.0, 1500.0);
+        throw_frame(&mut s, Some(start));
+        assert!(!s.aim_active, "a still thumb does not aim");
+        // Drag up-left, slowly (no flick), past the threshold.
+        for step in 1..=8 {
+            throw_frame(&mut s, Some(start + Vec2::new(-6.0, -6.0) * step as f32));
+        }
+        assert!(s.aim_active);
+        let aim = s.aim_vec.unwrap();
+        assert!(aim.x < 0.0 && aim.y < 0.0, "{aim:?}");
+        // A slow release keeps the aim for the spawn frame, THROW up.
+        throw_frame(&mut s, None);
+        assert!(!s.throw_held && s.aim_release_sticky && s.aim_active);
+        let wire = quantize_inputs(&s);
+        assert!(wire.stick_x < 0 && wire.stick_y > 0, "{wire:?}");
+        throw_frame(&mut s, None);
+        assert!(!s.aim_active && s.aim_vec.is_none());
+    }
+
+    #[test]
+    fn a_flick_throws_along_the_flick_at_full_power() {
+        let mut s = TouchState::default();
+        let start = Vec2::new(800.0, 1500.0);
+        throw_frame(&mut s, Some(start));
+        throw_frame(&mut s, Some(start + Vec2::new(30.0, 0.0)));
+        throw_frame(&mut s, Some(start + Vec2::new(70.0, 0.0)));
+        throw_frame(&mut s, None);
+        assert!(s.aim_release_sticky && s.aim_active && !s.throw_held);
+        let aim = s.aim_vec.unwrap();
+        assert!((aim.length() - 1.0).abs() < 1e-4 && aim.x > 0.99, "{aim:?}");
+    }
+
+    #[test]
+    fn a_tap_is_still_a_tap() {
+        let mut s = TouchState::default();
+        let start = Vec2::new(800.0, 1500.0);
+        throw_frame(&mut s, Some(start));
+        throw_frame(&mut s, Some(start + Vec2::new(2.0, 1.0)));
+        throw_frame(&mut s, None);
+        assert!(
+            !s.aim_active && !s.throw_held,
+            "no aim: throws at the opponent"
+        );
     }
 
     #[test]

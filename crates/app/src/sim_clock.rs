@@ -40,6 +40,20 @@ impl SimClock<'_> {
     }
 }
 
+/// bevy_ggrs's counters as a fresh session expects them: frame 0, nothing
+/// confirmed (after ticks were run outside a session).
+pub fn reset_counters(world: &mut World) {
+    world.insert_resource(RollbackFrameCount(0));
+    world.insert_resource(ConfirmedFrameCount(-1));
+}
+
+/// Put the confirmed frame back at sim tick `tick` (a resume that gives
+/// up books the match where its link died).
+pub fn set_confirmed_tick(world: &mut World, tick: i32) {
+    let base = world.get_resource::<ClockBase>().map_or(0, |b| b.0);
+    world.insert_resource(ConfirmedFrameCount(tick - base));
+}
+
 /// [`SimClock::confirmed_tick`] for exclusive systems.
 pub fn confirmed_tick(world: &World) -> i32 {
     to_tick(

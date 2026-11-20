@@ -28,6 +28,7 @@ pub enum Knob {
     LeanGpu,
     LessonStage,
     ShowTouch,
+    ResumeSecs,
     Window,
     StateLog,
     Tuning,
@@ -35,7 +36,7 @@ pub enum Knob {
 }
 
 impl Knob {
-    pub const ALL: [Knob; 16] = [
+    pub const ALL: [Knob; 17] = [
         Knob::Autostart,
         Knob::Practice,
         Knob::Autopilot,
@@ -48,6 +49,7 @@ impl Knob {
         Knob::LeanGpu,
         Knob::LessonStage,
         Knob::ShowTouch,
+        Knob::ResumeSecs,
         Knob::Window,
         Knob::StateLog,
         Knob::Tuning,
@@ -96,6 +98,10 @@ impl Knob {
                 "<n>: start the newcomer lesson at stage n",
             ),
             Knob::ShowTouch => ("TWOTOP_SHOW_TOUCH", "1: draw the touch zones on desktop"),
+            Knob::ResumeSecs => (
+                "TWOTOP_RESUME_SECS",
+                "<s>: how long a dropped duel waits to resume (tests)",
+            ),
             Knob::Window => ("TWOTOP_WINDOW", "<w>x<h>: the desktop window size"),
             Knob::StateLog => (
                 "TWOTOP_STATE_LOG",

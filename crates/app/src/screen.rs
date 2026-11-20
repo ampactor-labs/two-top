@@ -229,12 +229,12 @@ impl Plugin for ScreenPlugin {
 pub struct VictoryPose(pub Option<usize>);
 
 fn update_victory_pose(
-    state: Res<MatchState>,
+    settled: Res<crate::attest::MatchOverSettled>,
     score: Res<MatchScore>,
     mut pose: ResMut<VictoryPose>,
 ) {
-    pose.0 = state
-        .is_match_over()
+    pose.0 = settled
+        .settled
         .then(|| score.winner())
         .flatten()
         .map(usize::from);
@@ -290,6 +290,17 @@ fn reset_rollback_clock_between_sessions(
     }
 }
 
+/// Hand a world that ran ticks outside any session (`sim::fast_forward`)
+/// to a new session as bevy_ggrs expects to find one: its frame count at
+/// 0, nothing confirmed, the rollback clock at zero. bevy_ggrs labels its
+/// snapshots by that frame count, so a count left where the fast-forward
+/// stopped (frame 391, say) files the new session's snapshots under 392+
+/// and its first rollback, to frame 4, finds nothing and panics.
+pub(crate) fn reset_rollback_clock(world: &mut World) {
+    crate::sim_clock::reset_counters(world);
+    *world.resource_mut::<Time<bevy_ggrs::GgrsTime>>() = Time::new_with(bevy_ggrs::GgrsTime);
+}
+
 /// Carries [`reset_rollback_clock_between_sessions`]. Split out of
 /// `ScreenPlugin` because the fix belongs to the ggrs session lifecycle
 /// rather than to screens; a headless harness that swaps sessions needs it
@@ -303,6 +314,33 @@ impl Plugin for RollbackClockPlugin {
             reset_rollback_clock_between_sessions.before(bevy_ggrs::RunGgrsSystems),
         );
     }
+}
+
+/// The render side of a match table: what [`despawn_match`] clears
+/// beyond the session and the sim's own entities. A resume clears it
+/// before laying the table again (`resume::rebuild_table`).
+#[allow(clippy::type_complexity)]
+pub(crate) fn despawn_match_effects(
+    mut commands: Commands,
+    mut kill_cam: ResMut<crate::camera::KillCam>,
+    mut last_kill: ResMut<render::LastKillPos>,
+    mut shake: ResMut<render::ScreenShake>,
+    effects: Query<
+        Entity,
+        Or<(
+            With<render::FloorStain>,
+            With<render::EffectSprite>,
+            With<render::TrailGhost>,
+            With<render::PickupAura>,
+        )>,
+    >,
+) {
+    for entity in &effects {
+        commands.entity(entity).despawn();
+    }
+    *kill_cam = crate::camera::KillCam::default();
+    *last_kill = render::LastKillPos::default();
+    *shake = render::ScreenShake::default();
 }
 
 /// `OnExit(InMatch)`: tear the whole match down — every app-spawned match

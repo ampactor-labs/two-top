@@ -3,7 +3,8 @@
 # By default B announces it first (its window covered, so it reports itself
 # occluded and sends `NetMsg::Pausing`): A must hold the match for the
 # paused grace (20 s) and carry on when B returns. SILENT=1 freezes B
-# without the announcement: A must forfeit it at the 9 s silence grace.
+# without the announcement: at the 9 s silence grace A gives up on the
+# old link and both resume the match on a new one.
 #
 # Usage: [SILENT=1] [AWAY_SECS=n] scripts/pause_smoke.sh [app-binary]
 set -u
@@ -29,8 +30,10 @@ sleep "$AWAY_SECS"
 kill_peer b -CONT
 sleep 8
 if [ -n "${SILENT:-}" ]; then
-  at=$(log_time a "next=Forfeited") || fail "a silent ${AWAY_SECS}s freeze was never forfeited"
-  pass "a silent freeze was forfeited $(python3 -c "print(round($at-$T0,1))")s in (the grace is 9 s)"
+  at=$(log_time a "dialing the resume room") || fail "a silent ${AWAY_SECS}s freeze was never noticed"
+  wait_for_log a "resumed — the match continues" 40 || fail "the silent freeze was never resumed"
+  wait_for_log b "resumed — the match continues" 10 || fail "B never resumed"
+  pass "a silent freeze was noticed $(python3 -c "print(round($at-$T0,1))")s in (the grace is 9 s) and resumed"
   exit 0
 fi
 has_log a "peer is going away for a moment" || fail "A never heard the pause"

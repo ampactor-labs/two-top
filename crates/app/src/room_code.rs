@@ -89,6 +89,18 @@ impl RoomCode {
     }
 }
 
+impl RoomCode {
+    /// The room `name` on this build's server, at this build's epoch: a
+    /// broken session's two phones meet there to resume it.
+    pub fn resume_url(&self, name: &str) -> Option<String> {
+        Some(room_url_with_parts(
+            self.base_url.as_ref()?,
+            Some(name),
+            &epoch(),
+        ))
+    }
+}
+
 /// What must match for two builds to share a room: the sim generation and
 /// the wire generation, as `v<SIM>p<NET>`.
 pub fn epoch() -> String {

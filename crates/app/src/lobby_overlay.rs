@@ -95,7 +95,10 @@ fn update_summoning(
     room: Res<RoomCode>,
     peer_profile: Res<net::PeerProfile>,
     absence: Res<crate::netplay::RecentAbsence>,
-    sync: Res<crate::netplay::SyncWait>,
+    (sync, resume): (
+        Res<crate::netplay::SyncWait>,
+        Option<Res<crate::resume::Resume>>,
+    ),
     ice: Res<crate::netplay::IceStatus>,
     silence: (
         Res<net::SilenceClock>,
@@ -180,6 +183,14 @@ fn update_summoning(
             } else {
                 Some(format!("{challenger} FLED\nthe field is yours"))
             }
+        }
+        // The link died under a live duel; both phones are finding each
+        // other again (`resume.rs`). The clock is the whole promise.
+        LobbyState::Reconnecting { .. } => {
+            let left = resume.as_ref().map_or(0.0, |r| r.seconds_left(now)).ceil() as u32;
+            Some(format!(
+                "RECONNECTING {challenger}{dots}\n\n0:{left:02}\n\nthe duel picks up where it stopped"
+            ))
         }
         LobbyState::SummonFailed => Some(
             "COULDN'T REACH THE ROOM SERVER\n\ncheck this phone's connection,\nthen CANCEL and try again"
@@ -297,6 +308,7 @@ fn update_overlay(
         }
         LobbyState::SummonFailed => "lobby: summons FAILED (signaling lost)".to_string(),
         LobbyState::PeerUnreachable => "lobby: peer UNREACHABLE (sync never finished)".to_string(),
+        LobbyState::Reconnecting { peer_id } => format!("lobby: RECONNECTING to {peer_id}"),
     };
     text.0 = label;
 }
