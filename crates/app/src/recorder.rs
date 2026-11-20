@@ -48,8 +48,6 @@ pub struct MatchRecorder {
     scores: Vec<MatchScore>,
     /// Latch so one MatchOver writes exactly one file.
     saved: bool,
-    /// Every confirmed kill of the session: (tick, victim seat).
-    kills: Vec<(u32, u8)>,
 }
 
 impl MatchRecorder {
@@ -214,17 +212,26 @@ pub(crate) fn header_names(
     names
 }
 
-/// Collect the session's confirmed kills for the tape's header.
-fn note_confirmed_kills(
-    mut kills: MessageReader<render::facts::KillConfirmed>,
-    mut rec: ResMut<MatchRecorder>,
-) {
-    for kill in kills.read() {
-        let entry = (kill.tick, kill.victim as u8);
-        if !rec.kills.contains(&entry) {
-            rec.kills.push(entry);
+/// The match's kills for the tape's header, read off the score trail:
+/// a point scored is a kill of the other seat. Both phones hold the same
+/// confirmed trail, so both tapes carry the same kills, which a list
+/// collected from kill messages could not promise across a resume (the
+/// fast-forwarded ticks announce nothing). Pure.
+pub fn kills_from_scores(scores: &[MatchScore], start: usize) -> Vec<(u32, u8)> {
+    let mut out = Vec::new();
+    for t in start.max(1)..scores.len() {
+        let (was, now) = (scores[t - 1], scores[t]);
+        if now == MatchScore::default() {
+            continue; // a rematch's reset, not a kill
+        }
+        if now.p0 > was.p0 {
+            out.push((t as u32, 1));
+        }
+        if now.p1 > was.p1 {
+            out.push((t as u32, 0));
         }
     }
+    out
 }
 
 /// What this tape is a recording of. Pure.
@@ -355,12 +362,7 @@ fn save_replay_on_match_over(
                         first_blood.active,
                         record.gauntlet_tier,
                     ),
-                    kills: rec
-                        .kills
-                        .iter()
-                        .copied()
-                        .filter(|(tick, _)| (start_tick..ticks as u32).contains(tick))
-                        .collect(),
+                    kills: kills_from_scores(&rec.scores[..ticks], start_tick as usize),
                 },
                 inputs: rec.frames[..ticks].to_vec(),
             };
@@ -507,7 +509,6 @@ impl Plugin for MatchRecorderPlugin {
             // GgrsSchedule) — the frame counter and input history have both
             // advanced, so the tick just simulated is `FrameCount - 1`.
             .add_systems(GgrsSchedule, record_tick.after(sim::advance_input_history))
-            .add_systems(Update, note_confirmed_kills.after(render::facts::KillFacts))
             .add_systems(
                 Update,
                 save_replay_on_match_over.after(crate::attest::settle_match_over),
@@ -573,15 +574,37 @@ mod tests {
     };
 
     #[test]
+    fn kills_are_read_off_the_score_trail() {
+        let s = |p0, p1| MatchScore { p0, p1 };
+        let trail = [
+            s(0, 0),
+            s(1, 0),
+            s(1, 0),
+            s(1, 1),
+            s(5, 1),
+            s(0, 0),
+            s(0, 1),
+        ];
+        assert_eq!(
+            kills_from_scores(&trail, 0),
+            vec![(1, 1), (3, 0), (4, 1), (6, 0)]
+        );
+        assert_eq!(
+            kills_from_scores(&trail, 5),
+            vec![(6, 0)],
+            "this match only"
+        );
+    }
+
+    #[test]
     fn recorder_reset_clears_everything() {
         let mut rec = MatchRecorder {
             frames: vec![[PlayerInput::default(); 2]],
             scores: vec![MatchScore { p0: 1, p1: 0 }],
             saved: true,
-            kills: vec![(3, 1)],
         };
         rec.reset();
-        assert!(rec.frames.is_empty() && rec.scores.is_empty() && rec.kills.is_empty());
+        assert!(rec.frames.is_empty() && rec.scores.is_empty());
         assert!(!rec.saved);
     }
 
@@ -595,7 +618,6 @@ mod tests {
                 MatchScore { p0: 2, p1: 0 },
             ],
             saved: false,
-            kills: Vec::new(),
         };
         assert_eq!(
             rec.score_after(-1),
