@@ -330,14 +330,6 @@ impl Plugin for RollbackClockPlugin {
 #[allow(clippy::type_complexity, clippy::too_many_arguments)]
 fn despawn_match(
     mut commands: Commands,
-    mut state: ResMut<MatchState>,
-    mut score: ResMut<MatchScore>,
-    mut frame: ResMut<sim::FrameCount>,
-    mut rng: ResMut<sim::SimRng>,
-    mut history: ResMut<sim::InputHistory>,
-    mut bridge: ResMut<sim::BridgeState>,
-    mut door: ResMut<sim::DoorCooldown>,
-    mut pickup_timer: ResMut<sim::PickupSpawnTimer>,
     mut kill_cam: ResMut<crate::camera::KillCam>,
     mut last_kill: ResMut<render::LastKillPos>,
     mut shake: ResMut<render::ScreenShake>,
@@ -361,22 +353,11 @@ fn despawn_match(
         commands.entity(entity).despawn();
     }
     commands.remove_resource::<Session<GgrsCfg>>();
-    *state = MatchState::default();
-    *score = MatchScore::default();
-    *frame = sim::FrameCount::default();
-    // The WHOLE rolled-back resource set resets, not just the three the
-    // summary reads. Anything skipped here seeds the next session with the
-    // previous match's tail: a carried `SimRng` made every second match's
-    // pickup schedule differ from a fresh boot (and two re-paired online
-    // peers with different histories would desync on it at the first
-    // spawn), a carried `InputHistory` made frame-1 edges read against the
-    // last match's final buttons, and a live `FireTrailCell` (no despawn
-    // system runs without a session) stayed lethal into the next match.
-    *rng = sim::SimRng::default();
-    *history = sim::InputHistory::default();
-    *bridge = sim::BridgeState::default();
-    *door = sim::DoorCooldown::default();
-    *pickup_timer = sim::PickupSpawnTimer::default();
+    // The WHOLE rolled-back resource set, from the sim's own list: a
+    // live `FireTrailCell` is despawned above (no despawn system runs
+    // without a session), and anything the reset skipped would seed the
+    // next session with this match's tail.
+    commands.queue(sim::reset_match_resources);
     *kill_cam = crate::camera::KillCam::default();
     *last_kill = render::LastKillPos::default();
     *shake = render::ScreenShake::default();

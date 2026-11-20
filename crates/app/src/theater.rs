@@ -32,11 +32,7 @@ use crate::screen::AppScreen;
 
 /// Sim ticks between scrub snapshots (1 s @ 60 Hz — the viewer's value).
 const SNAPSHOT_INTERVAL: u32 = 60;
-/// `Time<Virtual>` multiplier while a seek is in flight (viewer's value).
-const SEEK_SPEED: f32 = 64.0;
-/// Touch-facing playback speeds. 0.25x is a desktop-scrubbing speed; the
-/// phone gets the four that matter.
-const SPEED_PRESETS: [f32; 4] = [0.5, 1.0, 2.0, 4.0];
+use crate::transport::SPEED_PRESETS;
 /// Most recent tapes listed. Older ones stay on disk (a Files app reaches
 /// them); the list stays one thumb-screen tall.
 const LIST_MAX: usize = 8;
@@ -977,9 +973,7 @@ fn theater_drive_seek(world: &mut World) {
             world.resource_mut::<TheaterControls>().seek_target = None;
             theater_apply_play_pause(world, controls.paused);
         } else {
-            let mut vt = world.resource_mut::<Time<Virtual>>();
-            vt.unpause();
-            vt.set_relative_speed(SEEK_SPEED);
+            crate::transport::seek(world);
         }
     } else {
         theater_apply_play_pause(world, controls.paused);
@@ -988,13 +982,7 @@ fn theater_drive_seek(world: &mut World) {
 
 fn theater_apply_play_pause(world: &mut World, paused: bool) {
     let speed = SPEED_PRESETS[world.resource::<TheaterControls>().speed_idx];
-    let mut vt = world.resource_mut::<Time<Virtual>>();
-    if paused {
-        vt.pause();
-    } else {
-        vt.unpause();
-        vt.set_relative_speed(speed);
-    }
+    crate::transport::apply(world, paused, speed);
 }
 
 /// Scrub bar + speed pip rendering. Sized against the live view rect so the
@@ -1070,9 +1058,7 @@ fn theater_teardown(world: &mut World) {
     if let Some(arena) = prev_arena {
         world.resource_mut::<sim::SelectedArena>().0 = arena;
     }
-    let mut vt = world.resource_mut::<Time<Virtual>>();
-    vt.unpause();
-    vt.set_relative_speed(1.0);
+    crate::transport::realtime(world);
 }
 
 pub struct TheaterPlugin;

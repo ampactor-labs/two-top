@@ -60,9 +60,11 @@ mod screen;
 mod settings;
 mod shade;
 mod share;
+mod sim_clock;
 mod state_log;
 mod theater;
 mod touch_controls;
+mod transport;
 mod tuning_reload;
 mod ui;
 use anchor::{FullScreenSprite, ScreenAnchorPlugin};
@@ -316,6 +318,7 @@ pub fn run() {
 
     app.insert_state(AppScreen::Title);
     app.add_plugins(netplay::NetplayStatePlugin);
+    app.init_resource::<sim_clock::ClockBase>();
     if online {
         app.add_plugins(MatchboxPlugin);
     }
@@ -375,7 +378,7 @@ pub fn run() {
 
     // Verification capture (opt-in via TWOTOP_CAPTURE): screenshot then exit.
     if let Some(cap) = capture_config_from_env() {
-        app.insert_resource(cap).add_systems(Last, capture_frame);
+        capture::install(&mut app, cap);
     }
 
     // A panic that unwinds out of the whole app ended the run; mark it for

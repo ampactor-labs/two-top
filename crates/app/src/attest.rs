@@ -93,7 +93,7 @@ pub fn decision_settled(decided_at: Option<u32>, confirmed: i32) -> bool {
 pub fn settle_match_over(
     state: Res<MatchState>,
     session: Option<Res<bevy_ggrs::Session<sim::GgrsCfg>>>,
-    confirmed: Option<Res<bevy_ggrs::ConfirmedFrameCount>>,
+    clock: crate::sim_clock::SimClock,
     mut settled: ResMut<MatchOverSettled>,
 ) {
     settled.over = state.is_match_over();
@@ -106,7 +106,7 @@ pub fn settle_match_over(
     }
     settled.settled = match session.as_deref() {
         Some(bevy_ggrs::Session::P2P(_)) => {
-            decision_settled(state.decided_at(), confirmed.map_or(-1, |c| c.0))
+            decision_settled(state.decided_at(), clock.confirmed_tick())
         }
         _ => true,
     };

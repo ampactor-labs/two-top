@@ -3225,6 +3225,44 @@ pub fn spawn_match_world(commands: &mut Commands, arena: ArenaId) -> MatchWorld 
 
 /// [`spawn_match_world`] straight into a `World` (headless builders), with
 /// the spawns applied before it returns.
+/// Every rolled-back resource at its match-start value — the whole set
+/// `SimPlugin` registers, kept beside nothing else so a new one cannot be
+/// missed by one of several hand-written reset lists. Anything carried
+/// over seeds the next match with the last one's tail: a carried `SimRng`
+/// shifts the pickup schedule (and desyncs two re-paired peers with
+/// different histories), a carried `InputHistory` reads frame-1 edges
+/// against the last match's final buttons.
+pub fn reset_match_resources(world: &mut World) {
+    world.insert_resource(FrameCount::default());
+    world.insert_resource(MatchScore::default());
+    world.insert_resource(MatchState::default());
+    world.insert_resource(BridgeState::default());
+    world.insert_resource(DoorCooldown::default());
+    world.insert_resource(SimRng::default());
+    world.insert_resource(PickupSpawnTimer::default());
+    world.insert_resource(InputHistory::default());
+    world.insert_resource(TickInputs::default());
+}
+
+/// Clear the sim's table and lay `arena` again, as a fresh boot would:
+/// every rollback entity despawned, every rolled-back resource reset, the
+/// rollback numbering restarted (bevy_ggrs hashes each entity's
+/// registration index into the checksum), then [`spawn_match_world`].
+/// No session may be running. Render-side entities are the caller's.
+pub fn reset_match_world(world: &mut World, arena: ArenaId) -> MatchWorld {
+    let doomed: Vec<Entity> = world
+        .query_filtered::<Entity, With<bevy_ggrs::Rollback>>()
+        .iter(world)
+        .collect();
+    for entity in doomed {
+        world.despawn(entity);
+    }
+    reset_match_resources(world);
+    world.insert_resource(bevy_ggrs::RollbackOrdered::default());
+    world.insert_resource(SelectedArena(arena));
+    spawn_match_world_now(world, arena)
+}
+
 pub fn spawn_match_world_now(world: &mut World, arena: ArenaId) -> MatchWorld {
     let mut queue = bevy::ecs::world::CommandQueue::default();
     let laid = spawn_match_world(&mut Commands::new(&mut queue, world), arena);

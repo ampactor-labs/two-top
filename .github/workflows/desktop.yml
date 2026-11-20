@@ -95,8 +95,8 @@ jobs:
           mkdir -p /tmp/smoke && tar -xzf 2-Top-linux-x86_64.tar.gz -C /tmp/smoke
           cd /tmp/smoke
           export VK_ICD_FILENAMES=$(ls /usr/share/vulkan/icd.d/lvp_icd*.json | head -1)
-          HOME=/tmp/smoke/home TWOTOP_WINDOW=540x1170 TWOTOP_CAPTURE=/tmp/smoke/shot.png \
-            TWOTOP_CAPTURE_FRAMES=120 timeout 180 \
+          HOME=/tmp/smoke/home TWOTOP_WINDOW=540x1170 TWOTOP_CAPTURE=/tmp/smoke/shot.png@120 \
+            timeout 180 \
             xvfb-run -a -s "-screen 0 1280x1400x24" ./2-Top/two-top > run.log 2>&1 || { tail -40 run.log; exit 1; }
           test -s shot.png || { echo "no frame captured"; tail -40 run.log; exit 1; }
           if grep -q "PANIC" run.log; then tail -40 run.log; exit 1; fi

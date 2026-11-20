@@ -22,8 +22,6 @@ pub enum Knob {
     Arena,
     AutoplayTape,
     Capture,
-    CaptureFrames,
-    CaptureOn,
     CrashNotice,
     Fault,
     FirstBlood,
@@ -37,15 +35,13 @@ pub enum Knob {
 }
 
 impl Knob {
-    pub const ALL: [Knob; 18] = [
+    pub const ALL: [Knob; 16] = [
         Knob::Autostart,
         Knob::Practice,
         Knob::Autopilot,
         Knob::Arena,
         Knob::AutoplayTape,
         Knob::Capture,
-        Knob::CaptureFrames,
-        Knob::CaptureOn,
         Knob::CrashNotice,
         Knob::Fault,
         Knob::FirstBlood,
@@ -80,15 +76,7 @@ impl Knob {
             ),
             Knob::Capture => (
                 "TWOTOP_CAPTURE",
-                "<path.png>: screenshot after a settle, then exit",
-            ),
-            Knob::CaptureFrames => (
-                "TWOTOP_CAPTURE_FRAMES",
-                "<n>: render frames before the capture",
-            ),
-            Knob::CaptureOn => (
-                "TWOTOP_CAPTURE_ON",
-                "matchover: start the capture countdown at MatchOver",
+                "<path.png>[@<frames>|@matchover[+<frames>]]: screenshot, then exit",
             ),
             Knob::CrashNotice => (
                 "TWOTOP_CRASH_NOTICE",

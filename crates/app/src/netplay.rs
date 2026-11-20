@@ -409,13 +409,13 @@ pub struct DuelBegan(pub bool);
 
 fn note_duel_began(
     session: Option<Res<Session<GgrsCfg>>>,
-    confirmed: Option<Res<bevy_ggrs::ConfirmedFrameCount>>,
+    clock: crate::sim_clock::SimClock,
     mut began: ResMut<DuelBegan>,
 ) {
     if began.0 || !matches!(session.as_deref(), Some(Session::P2P(_))) {
         return;
     }
-    if confirmed.is_some_and(|c| c.0 >= sim::OPENING_GO_TICK as i32) {
+    if clock.confirmed_tick() >= sim::OPENING_GO_TICK as i32 {
         began.0 = true;
         tracing::info!(target: "two_top::net", "the duel began: the first GO is confirmed on both phones");
     }
@@ -682,10 +682,10 @@ impl RollbackDepths {
 /// the world is on back to the frame being loaded.
 fn note_rollback(
     frame: Res<sim::FrameCount>,
-    target: Res<bevy_ggrs::RollbackFrameCount>,
+    clock: crate::sim_clock::SimClock,
     mut depths: ResMut<RollbackDepths>,
 ) {
-    depths.record(frame.0 as i32 - target.0);
+    depths.record(frame.0 as i32 - clock.rollback_tick());
 }
 
 /// The link, in the log: every few seconds of a live online session, the
@@ -1717,9 +1717,7 @@ pub fn conclude_session(world: &mut World) {
     let Some(session) = world.remove_resource::<Session<GgrsCfg>>() else {
         return; // already concluded (or never began)
     };
-    let confirmed = world
-        .get_resource::<bevy_ggrs::ConfirmedFrameCount>()
-        .map_or(-1, |c| c.0);
+    let confirmed = crate::sim_clock::confirmed_tick(world);
     let confirmed_score = world
         .resource::<crate::recorder::MatchRecorder>()
         .score_after(confirmed);
