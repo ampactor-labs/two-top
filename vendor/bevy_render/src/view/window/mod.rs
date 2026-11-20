@@ -312,7 +312,10 @@ pub fn prepare_windows(
                         of your Linux GPU driver, so it can be safely ignored."
                 );
             }
-            wgpu::CurrentSurfaceTexture::Outdated => {
+            // two-top backport (vendor/README.md): a lost surface — Android
+            // after screen-off or an app switch — is rebuilt like an outdated
+            // one. Stock 0.19.1 logs it every frame and never recovers.
+            wgpu::CurrentSurfaceTexture::Outdated | wgpu::CurrentSurfaceTexture::Lost => {
                 render_device.configure_surface(surface, &surface_data.configuration);
                 let frame = match surface.get_current_texture() {
                     wgpu::CurrentSurfaceTexture::Success(surface_texture)

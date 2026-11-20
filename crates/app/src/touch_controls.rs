@@ -164,13 +164,13 @@ fn spawn_controls(
         Text2d::new("DASH"),
         (
             TextFont {
-                font_size: crate::ui::TextRole::TouchDash.default_size(),
+                font_size: crate::ui::TextRole::TouchDash.font_size(),
                 ..default()
             },
             crate::ui::TextRole::TouchDash,
         ),
         TextColor(dash_idle()),
-        TextLayout::new_with_justify(Justify::Center),
+        TextLayout::justify(Justify::Center),
         dash_anchor(false),
         Transform::from_xyz(0.0, 0.0, 61.0),
         Visibility::Hidden,
@@ -195,13 +195,13 @@ fn spawn_controls(
         Text2d::new("TAUNT"),
         (
             TextFont {
-                font_size: crate::ui::TextRole::TouchTaunt.default_size(),
+                font_size: crate::ui::TextRole::TouchTaunt.font_size(),
                 ..default()
             },
             crate::ui::TextRole::TouchTaunt,
         ),
         TextColor(taunt_idle()),
-        TextLayout::new_with_justify(Justify::Center),
+        TextLayout::justify(Justify::Center),
         taunt_anchor(),
         Transform::from_xyz(0.0, 0.0, 61.0),
         Visibility::Hidden,
@@ -230,13 +230,13 @@ fn spawn_controls(
             Text2d::new(text),
             (
                 TextFont {
-                    font_size: crate::ui::TextRole::TouchHint.default_size(),
+                    font_size: crate::ui::TextRole::TouchHint.font_size(),
                     ..default()
                 },
                 crate::ui::TextRole::TouchHint,
             ),
             TextColor(render::palette::COLD_STONE.with_alpha(0.55)),
-            TextLayout::new_with_justify(Justify::Center),
+            TextLayout::justify(Justify::Center),
             ScreenAnchor::new(fx, fy, 0.0, 0.0),
             Transform::from_xyz(0.0, 0.0, 61.0),
             Visibility::Hidden,

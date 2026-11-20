@@ -291,13 +291,13 @@ fn spawn_setting_rows(mut commands: Commands) {
         Text2d::new("SETTINGS"),
         (
             TextFont {
-                font_size: crate::ui::TextRole::ScreenTitle.default_size(),
+                font_size: crate::ui::TextRole::ScreenTitle.font_size(),
                 ..default()
             },
             crate::ui::TextRole::ScreenTitle,
         ),
         TextColor(render::palette::HOT_BONE),
-        TextLayout::new_with_justify(Justify::Center),
+        TextLayout::justify(Justify::Center),
         crate::anchor::ScreenAnchor::new(0.0, crate::ui::anchor_y(HEADING_FY), 0.0, 0.0),
         Transform::from_xyz(0.0, 0.0, crate::ui::z::MENU_TEXT),
         Visibility::Hidden,
@@ -308,13 +308,13 @@ fn spawn_setting_rows(mut commands: Commands) {
             Text2d::new(name.to_string()),
             (
                 TextFont {
-                    font_size: crate::ui::TextRole::GroupHeader.default_size(),
+                    font_size: crate::ui::TextRole::GroupHeader.font_size(),
                     ..default()
                 },
                 crate::ui::TextRole::GroupHeader,
             ),
             TextColor(render::palette::COLD_STONE),
-            TextLayout::new_with_justify(Justify::Center),
+            TextLayout::justify(Justify::Center),
             crate::anchor::ScreenAnchor::new(
                 0.0,
                 crate::ui::anchor_y(l.header_centers[g]),
@@ -354,7 +354,7 @@ fn spawn_setting_rows(mut commands: Commands) {
             Text2d::new(String::new()),
             (
                 TextFont {
-                    font_size: crate::ui::TextRole::SettingLabel.default_size(),
+                    font_size: crate::ui::TextRole::SettingLabel.font_size(),
                     ..default()
                 },
                 crate::ui::TextRole::SettingLabel,
@@ -377,13 +377,13 @@ fn spawn_setting_rows(mut commands: Commands) {
                 Text2d::new(glyph.to_string()),
                 (
                     TextFont {
-                        font_size: crate::ui::TextRole::SettingValue.default_size(),
+                        font_size: crate::ui::TextRole::SettingValue.font_size(),
                         ..default()
                     },
                     crate::ui::TextRole::SettingValue,
                 ),
                 TextColor(render::palette::HOT_BONE),
-                TextLayout::new_with_justify(Justify::Center),
+                TextLayout::justify(Justify::Center),
                 crate::anchor::ScreenAnchor::new(0.0, anchor_y, dx, 0.0),
                 Transform::from_xyz(0.0, 0.0, crate::ui::z::MENU_TEXT),
                 Visibility::Hidden,

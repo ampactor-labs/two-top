@@ -62,7 +62,7 @@ Hard rules. Violations cause subtle bugs that are expensive to find. The CI and 
 - **`Cargo.lock` is committed.**
 - **`--locked` is used in CI.**
 - **`rust-toolchain.toml` pins exact stable version.** Toolchain drift is itself a determinism risk.
-- **Bevy is pinned with `=` to a single patch version** (e.g. `bevy = "=0.18.1"`). Do not bump until `bevy_ggrs` and `bevy_matchbox` have shipped releases compatible with the new Bevy. Downstream rollback crates lag main `bevy` releases — chasing latest first guarantees broken determinism CI. (`bevy_roll_safe` was previously listed here; we cut the dep in Phase 11 — see MORGAN_NOTES § "Why we cut bevy_roll_safe".)
+- **Bevy is pinned with `=` to a single patch version** (e.g. `bevy = "=0.19.1"`). Do not bump until `bevy_ggrs` and `bevy_matchbox` have shipped releases compatible with the new Bevy. Downstream rollback crates lag main `bevy` releases — chasing latest first guarantees broken determinism CI. (`bevy_roll_safe` was previously listed here; we cut the dep in Phase 11 — see MORGAN_NOTES § "Why we cut bevy_roll_safe".)
 - **`clippy -D warnings` is enforced** in the `ci` workflow, for the host
   target *and* `wasm32-unknown-unknown` (the browser is a third platform
   with its own `cfg` arms; nothing else compiles them on a branch).

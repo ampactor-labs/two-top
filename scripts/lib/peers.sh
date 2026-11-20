@@ -6,7 +6,7 @@
 #   peer_start a TWOTOP_AUTOPILOT=8    # extra env per peer
 #   wait_for_log a "next=InRound" 120 || fail "the match never started"
 #
-# Needs matchbox_server 0.14, Xvfb and a Vulkan driver (lavapipe works),
+# Needs matchbox_server 0.15, Xvfb and a Vulkan driver (lavapipe works),
 # xdotool for window input, and built binaries (`cargo build -p app -p
 # replay_sync`). A failure keeps the work dir (logs, homes, tapes); a pass
 # removes it (`pass`).

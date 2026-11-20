@@ -339,7 +339,7 @@ struct DepartingSockets(Vec<Departing>);
 
 fn close_departed_sockets(world: &mut World) {
     let now = world.resource::<Time<Real>>().elapsed_secs();
-    let mut departing = world.non_send_resource_mut::<DepartingSockets>();
+    let mut departing = world.non_send_mut::<DepartingSockets>();
     if !departing.0.is_empty() {
         departing.0.retain(|d| now < d.until);
     }
@@ -455,7 +455,7 @@ struct MatchboxDriver {
     /// Side-channel packets that arrived during the table handshake but
     /// belong to the session (the peer swapped first and already sent its
     /// `Profile`). [`pump_side_channel`] reads these before anything new.
-    backlog: Vec<(PeerId, Box<[u8]>)>,
+    backlog: Vec<(PeerId, net::Packet)>,
     /// The ggrs session of a match that has ended ([`conclude_session`]):
     /// out of the world so nothing advances or rolls it back, but alive,
     /// because it owns the ggrs channel and matchbox ends the whole
@@ -566,7 +566,7 @@ impl Plugin for MatchboxPlugin {
             .init_resource::<IceCache>()
             .add_systems(OnEnter(crate::screen::AppScreen::Title), prefetch_ice)
             .init_resource::<Redials>()
-            .init_non_send_resource::<DepartingSockets>()
+            .init_non_send::<DepartingSockets>()
             .add_systems(OnExit(crate::screen::AppScreen::InMatch), restore_own_table)
             .add_systems(
                 OnEnter(crate::screen::AppScreen::InMatch),
@@ -630,11 +630,19 @@ impl LinkSummary {
     }
 }
 
+/// Kilobits per second from two byte counts `secs` apart. Pure.
+fn kbps_since(before: u64, now: u64, secs: f32) -> usize {
+    (now.saturating_sub(before) as f32 * 8.0 / 1000.0 / secs.max(f32::EPSILON)) as usize
+}
+
 /// The session's link as the handshake measured it, for the summary line.
-#[derive(Resource, Default, Clone, Copy, Debug)]
+#[derive(Resource, Default, Clone, Debug)]
 pub struct SessionLink {
     pub input_delay: usize,
     pub start_rtt_ms: Option<u32>,
+    /// The bridge's live count of bytes sent (ggrs 0.13 no longer reports
+    /// a rate itself).
+    pub bytes_sent: std::sync::Arc<std::sync::atomic::AtomicU64>,
 }
 
 /// How deep this match's rollbacks went: `by_depth[d]` counts rollbacks of
@@ -698,12 +706,14 @@ fn log_link(
     mut summary: Local<LinkSummary>,
     mut next_sample: Local<f32>,
     mut summarized: Local<bool>,
+    mut last_sent: Local<u64>,
 ) {
     let now = time.elapsed_secs();
     let (Some(session), Some(local)) = (session, local.0) else {
         *summary = LinkSummary::default();
         *summarized = false;
         *depths = RollbackDepths::default();
+        *last_sent = 0;
         return;
     };
     let Session::P2P(session) = &*session else {
@@ -743,13 +753,16 @@ fn log_link(
     let Ok(stats) = session.network_stats(1 - local) else {
         return;
     };
-    summary.add(stats.ping, stats.local_frames_behind, stats.kbps_sent);
+    let sent = link.bytes_sent.load(std::sync::atomic::Ordering::Relaxed);
+    let kbps_sent = kbps_since(*last_sent, sent, LINK_LOG_EVERY_SECS);
+    *last_sent = sent;
+    summary.add(stats.ping, stats.local_frames_behind, kbps_sent);
     tracing::info!(
         target: "two_top::net::link",
         ping_ms = stats.ping,
         local_frames_behind = stats.local_frames_behind,
         remote_frames_behind = stats.remote_frames_behind,
-        kbps_sent = stats.kbps_sent,
+        kbps_sent,
         send_queue = stats.send_queue_len,
         "link",
     );
@@ -1102,7 +1115,7 @@ fn open_socket(world: &mut World, url: String, ice: RtcIceServerConfig) {
         })
         .detach();
 
-    world.insert_non_send_resource(MatchboxDriver {
+    world.insert_non_send(MatchboxDriver {
         socket,
         channel_taken: false,
         interrupted: false,
@@ -1125,7 +1138,7 @@ fn open_socket(world: &mut World, url: String, ice: RtcIceServerConfig) {
 /// the lobby resources, and the ggrs `Session` without borrow gymnastics.
 fn drive_netplay(world: &mut World) {
     let Some(channel_taken) = world
-        .get_non_send_resource::<MatchboxDriver>()
+        .get_non_send::<MatchboxDriver>()
         .map(|d| d.channel_taken)
     else {
         return;
@@ -1166,7 +1179,7 @@ fn drive_netplay(world: &mut World) {
     // stall diagnosis this comment once claimed had already spoken.
     // CANCEL and PLAY THE BOT stay one tap away.
     let polled = {
-        let mut driver = world.non_send_resource_mut::<MatchboxDriver>();
+        let mut driver = world.non_send_mut::<MatchboxDriver>();
         let our_id = driver.socket.id();
         driver.socket.try_update_peers().map(|u| (our_id, u))
     };
@@ -1178,7 +1191,7 @@ fn drive_netplay(world: &mut World) {
                 error = %e,
                 "signaling connection lost before pairing — abandoning the summons",
             );
-            world.remove_non_send_resource::<MatchboxDriver>();
+            world.remove_non_send::<MatchboxDriver>();
             *world.resource_mut::<LobbyState>() = LobbyState::SummonFailed;
             return;
         }
@@ -1238,7 +1251,7 @@ fn watch_peer_link(world: &mut World) {
         _ => return,
     };
     let closed = world
-        .non_send_resource_mut::<MatchboxDriver>()
+        .non_send_mut::<MatchboxDriver>()
         .socket
         .try_update_peers()
         .is_ok_and(|updates| {
@@ -1314,7 +1327,7 @@ fn sync_failed(world: &mut World) {
 /// `true` when the match was just ended here.
 fn end_match_on_link_loss(world: &mut World) -> bool {
     let closed = world
-        .get_non_send_resource::<MatchboxDriver>()
+        .get_non_send::<MatchboxDriver>()
         .is_some_and(|driver| driver.socket.any_channel_closed());
     if !closed {
         return false;
@@ -1346,7 +1359,7 @@ fn end_match_on_link_loss(world: &mut World) -> bool {
 fn exchange_table(world: &mut World, peer_id: PeerId) -> Option<Agreed> {
     let ours = world.resource::<sim::SelectedArena>().0;
     let now = world.resource::<Time<Real>>().elapsed_secs();
-    let mut driver = world.non_send_resource_mut::<MatchboxDriver>();
+    let mut driver = world.non_send_mut::<MatchboxDriver>();
     let driver = &mut *driver;
     if driver.table.peer != Some(peer_id) {
         driver.table = TableHandshake {
@@ -1448,7 +1461,7 @@ fn exchange_table(world: &mut World, peer_id: PeerId) -> Option<Agreed> {
 /// `PeerId` isn't assigned yet (retried next frame).
 fn perform_swap(world: &mut World, peer_id: PeerId, agreed: Agreed) {
     let their_table = agreed.table;
-    let Some(our_id) = world.non_send_resource_mut::<MatchboxDriver>().socket.id() else {
+    let Some(our_id) = world.non_send_mut::<MatchboxDriver>().socket.id() else {
         return; // id not assigned yet; retry next tick
     };
 
@@ -1458,7 +1471,7 @@ fn perform_swap(world: &mut World, peer_id: PeerId, agreed: Agreed) {
     let peer_addr = peer_to_addr(peer_id);
 
     let bridge = {
-        let mut driver = world.non_send_resource_mut::<MatchboxDriver>();
+        let mut driver = world.non_send_mut::<MatchboxDriver>();
         let channel = driver
             .socket
             .take_channel(GGRS_CHANNEL)
@@ -1474,6 +1487,7 @@ fn perform_swap(world: &mut World, peer_id: PeerId, agreed: Agreed) {
         };
         bridge
     };
+    let bytes_sent = bridge.bytes_sent();
 
     let mut sb = SessionBuilder::<GgrsCfg>::new()
         .with_num_players(2)
@@ -1516,6 +1530,7 @@ fn perform_swap(world: &mut World, peer_id: PeerId, agreed: Agreed) {
     *world.resource_mut::<SessionLink>() = SessionLink {
         input_delay: agreed.delay,
         start_rtt_ms: agreed.rtt_ms,
+        bytes_sent,
     };
     world.resource_mut::<PendingP2PSwap>().0 = None;
     let built_at = world.resource::<Time<Real>>().elapsed_secs();
@@ -1628,7 +1643,7 @@ fn drain_session_events(world: &mut World) {
         *world.resource_mut::<SyncWait>() = SyncWait::default();
     }
     if let Some(interrupted) = interruption_edge {
-        world.non_send_resource_mut::<MatchboxDriver>().interrupted = interrupted;
+        world.non_send_mut::<MatchboxDriver>().interrupted = interrupted;
         if !interrupted {
             world.resource_mut::<net::PeerPaused>().0 = false;
         }
@@ -1638,7 +1653,7 @@ fn drain_session_events(world: &mut World) {
     // During an interruption the timer ages honestly — net's silence FSM
     // flips the lobby to `Disconnected` (the OPPONENT AWAY overlay) after
     // ~1 s and recovers it the moment pinning resumes.
-    if !world.non_send_resource::<MatchboxDriver>().interrupted {
+    if !world.non_send::<MatchboxDriver>().interrupted {
         let now = world.resource::<net::SilenceClock>().0;
         world.resource_mut::<LastPeerMessageFrame>().0 = now;
     }
@@ -1726,7 +1741,7 @@ pub fn conclude_session(world: &mut World) {
         confirmed,
         score: confirmed_score,
     });
-    if let Some(mut driver) = world.get_non_send_resource_mut::<MatchboxDriver>() {
+    if let Some(mut driver) = world.get_non_send_mut::<MatchboxDriver>() {
         driver.parked = Some(session);
     }
     // Tell the peer, unless it told us (a goodbye, its own ending) or this
@@ -1762,8 +1777,8 @@ fn pump_side_channel(world: &mut World) {
     let peer = session_peer(world.resource::<LobbyState>());
 
     let outbound: Vec<NetMsg> = std::mem::take(&mut world.resource_mut::<NetSendQueue>().0);
-    let inbound: Vec<(PeerId, Box<[u8]>)> = {
-        let mut driver = world.non_send_resource_mut::<MatchboxDriver>();
+    let inbound: Vec<(PeerId, net::Packet)> = {
+        let mut driver = world.non_send_mut::<MatchboxDriver>();
         if let Some(peer) = peer {
             for msg in &outbound {
                 // A closed socket is `end_match_on_link_loss`'s to report.
@@ -2137,7 +2152,7 @@ pub fn leave_online_match(world: &mut World, farewell: Farewell) {
     let mut outbound = std::mem::take(&mut world.resource_mut::<NetSendQueue>().0);
     outbound.push(word);
     let live = world.remove_resource::<Session<GgrsCfg>>();
-    let mut driver = world.remove_non_send_resource::<MatchboxDriver>();
+    let mut driver = world.remove_non_send::<MatchboxDriver>();
     let session = live.or_else(|| driver.as_mut().and_then(|d| d.parked.take()));
     if let Some(mut driver) = driver
         && let Some(peer) = peer
@@ -2158,14 +2173,11 @@ pub fn leave_online_match(world: &mut World, farewell: Farewell) {
         }
         tracing::info!(target: "two_top::net", ?farewell, sent, "leaving — last word sent");
         let until = world.resource::<Time<Real>>().elapsed_secs() + GOODBYE_LINGER_SECS;
-        world
-            .non_send_resource_mut::<DepartingSockets>()
-            .0
-            .push(Departing {
-                _socket: driver.socket,
-                _session: session,
-                until,
-            });
+        world.non_send_mut::<DepartingSockets>().0.push(Departing {
+            _socket: driver.socket,
+            _session: session,
+            until,
+        });
     }
     *world.resource_mut::<LobbyState>() = LobbyState::Idle;
     world.resource_mut::<PendingP2PSwap>().0 = None;
@@ -2327,7 +2339,7 @@ mod tests {
             .add_channel(ChannelConfig::unreliable())
             .add_channel(ChannelConfig::reliable())
             .build();
-        world.insert_non_send_resource(MatchboxDriver {
+        world.insert_non_send(MatchboxDriver {
             socket,
             channel_taken: false,
             interrupted: false,

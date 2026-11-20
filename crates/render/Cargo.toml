@@ -13,7 +13,7 @@ rust-version.workspace = true
 # CONVENTIONS § Module Boundaries which lists render's bevy as
 # "(full)". Still no `bevy_winit` / `bevy_window` here — the binary
 # crates own windowing.
-bevy = { version = "=0.18.1", default-features = false, features = [
+bevy = { version = "=0.19.1", default-features = false, features = [
     "std",
     "bevy_log",
     "bevy_asset",

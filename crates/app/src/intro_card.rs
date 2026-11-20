@@ -65,7 +65,7 @@ fn spawn_intro_card(mut commands: Commands) {
             Text2d::new(String::new()),
             (
                 TextFont {
-                    font_size: size.default_size(),
+                    font_size: size.font_size(),
                     ..default()
                 },
                 size,
@@ -75,7 +75,7 @@ fn spawn_intro_card(mut commands: Commands) {
             } else {
                 render::palette::BONE.with_alpha(0.85)
             }),
-            TextLayout::new_with_justify(Justify::Center),
+            TextLayout::justify(Justify::Center),
             ScreenAnchor::new(0.0, crate::ui::anchor_y(fy), 0.0, 0.0),
             Transform::from_xyz(0.0, 0.0, crate::ui::z::MENU_TEXT - 5.0),
             Visibility::Hidden,

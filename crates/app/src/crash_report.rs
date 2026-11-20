@@ -231,13 +231,13 @@ fn spawn_notice(mut commands: Commands) {
         Text2d::new("LAST RUN CRASHED\nTAP HERE TO SEND THE REPORT"),
         (
             TextFont {
-                font_size: crate::ui::TextRole::CrashNotice.default_size(),
+                font_size: crate::ui::TextRole::CrashNotice.font_size(),
                 ..default()
             },
             crate::ui::TextRole::CrashNotice,
         ),
         TextColor(render::palette::EMBER),
-        TextLayout::new_with_justify(Justify::Center),
+        TextLayout::justify(Justify::Center),
         ScreenAnchor::new(0.0, NOTICE_ANCHOR_Y, 0.0, 0.0),
         Transform::from_xyz(0.0, 0.0, crate::ui::z::MENU),
         Visibility::Hidden,

@@ -512,7 +512,7 @@ fn setup(
             tracing::info!(target: "two_top::app", "lean render: no HDR, no bloom");
         } else {
             camera.insert((
-                bevy::render::view::Hdr,
+                bevy::camera::Hdr,
                 bevy::post_process::bloom::Bloom::OLD_SCHOOL,
             ));
         }
@@ -528,7 +528,7 @@ fn setup(
             Text2d::new(keyboard_legend(profile.fullscreen_key)),
             (
                 TextFont {
-                    font_size: crate::ui::TextRole::KeyLegend.default_size(),
+                    font_size: crate::ui::TextRole::KeyLegend.font_size(),
                     ..default()
                 },
                 crate::ui::TextRole::KeyLegend,

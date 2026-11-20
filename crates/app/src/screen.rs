@@ -482,7 +482,7 @@ pub fn spawn_button_part(
             Text2d::new(String::new()),
             (
                 TextFont {
-                    font_size: font.default_size(),
+                    font_size: font.font_size(),
                     ..default()
                 },
                 font,
@@ -524,13 +524,13 @@ fn spawn_overlays(mut commands: Commands) {
         Text2d::new("2-TOP"),
         (
             TextFont {
-                font_size: crate::ui::TextRole::Wordmark.default_size(),
+                font_size: crate::ui::TextRole::Wordmark.font_size(),
                 ..default()
             },
             crate::ui::TextRole::Wordmark,
         ),
         TextColor(render::palette::HOT_BONE),
-        TextLayout::new_with_justify(Justify::Center),
+        TextLayout::justify(Justify::Center),
         ScreenAnchor::new(0.0, 0.80, 0.0, 0.0),
         Transform::from_xyz(0.0, 0.0, crate::ui::z::MENU),
         Visibility::Hidden,
@@ -542,13 +542,13 @@ fn spawn_overlays(mut commands: Commands) {
         Text2d::new(String::new()),
         (
             TextFont {
-                font_size: crate::ui::TextRole::TitleOverlay.default_size(),
+                font_size: crate::ui::TextRole::TitleOverlay.font_size(),
                 ..default()
             },
             crate::ui::TextRole::TitleOverlay,
         ),
         TextColor(render::palette::BONE),
-        TextLayout::new_with_justify(Justify::Center),
+        TextLayout::justify(Justify::Center),
         TextBounds::new_horizontal(TITLE_BODY_WIDTH),
         ScreenAnchor::new(0.0, SUBLINE_ANCHOR_Y, 0.0, 0.0),
         Transform::from_xyz(0.0, 0.0, crate::ui::z::MENU),
@@ -604,13 +604,13 @@ fn spawn_overlays(mut commands: Commands) {
             TextFont {
                 // 56, not 72: the card carries full sentences (rivalry line,
                 // replay note) and they must fit the bounds below unwrapped.
-                font_size: crate::ui::TextRole::SummaryCard.default_size(),
+                font_size: crate::ui::TextRole::SummaryCard.font_size(),
                 ..default()
             },
             crate::ui::TextRole::SummaryCard,
         ),
         TextColor(render::palette::HOT_BONE),
-        TextLayout::new_with_justify(Justify::Center),
+        TextLayout::justify(Justify::Center),
         // Wide explicit bounds — without them Bevy wraps Text2d at awkward
         // widths ("STAG WINS" became STAG/WINS, "2 - 5" split mid-score).
         // Same fix the summoning overlay needed (lobby_overlay.rs).

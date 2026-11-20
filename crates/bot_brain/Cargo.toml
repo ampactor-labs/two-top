@@ -9,9 +9,9 @@ rust-version.workspace = true
 [dependencies]
 # The practice bot's brain: reads sim components, answers wire inputs. No
 # rendering, no windowing, so the headless bench can drive it too.
-bevy = { version = "=0.18.1", default-features = false, features = ["std"] }
+bevy = { version = "=0.19.1", default-features = false, features = ["std"] }
 # The bench (`src/bench.rs`) drives whole headless matches through a
 # SyncTest session, the way replay_sync does.
-bevy_ggrs = "=0.21"
+bevy_ggrs = "=0.22"
 fixed_math = { path = "../fixed_math" }
 sim = { path = "../sim" }

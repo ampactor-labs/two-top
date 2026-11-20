@@ -13,8 +13,8 @@ rust-version.workspace = true
 # MatchboxBridge. (Phase 12 follows the same playbook as cutting
 # bevy_roll_safe in Phase 11: when the dep ecosystem lags our pinned
 # version, write the small adapter ourselves.)
-matchbox_socket = { version = "0.14", default-features = false }
-ggrs = { version = "0.12", default-features = false }
+matchbox_socket = { version = "0.15", default-features = false }
+ggrs = { version = "0.13", default-features = false }
 bincode = { version = "2.0", default-features = false, features = [
     "serde",
     "alloc",
@@ -55,7 +55,7 @@ ed25519-dalek = { version = "=2.2.0", default-features = false, features = [
 ] }
 # Bevy without render features — same posture as the sim crate.
 # We need `Resource` and the plugin/system traits, nothing else.
-bevy = { version = "=0.18.1", default-features = false, features = [
+bevy = { version = "=0.19.1", default-features = false, features = [
     "std",
     "bevy_log",
 ] }

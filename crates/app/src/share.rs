@@ -268,13 +268,13 @@ fn spawn_share_labels(
             Text2d::new(String::new()),
             (
                 TextFont {
-                    font_size: crate::ui::TextRole::ShareLabel.default_size(),
+                    font_size: crate::ui::TextRole::ShareLabel.font_size(),
                     ..default()
                 },
                 crate::ui::TextRole::ShareLabel,
             ),
             TextColor(render::palette::SPARK),
-            TextLayout::new_with_justify(Justify::Center),
+            TextLayout::justify(Justify::Center),
             ScreenAnchor::new(crate::ui::anchor_x(fx), crate::ui::anchor_y(fy), 0.0, 0.0),
             Transform::from_xyz(0.0, 0.0, crate::ui::z::MENU_TEXT - 5.0),
             Visibility::Hidden,
@@ -496,13 +496,13 @@ fn spawn_overlay(commands: &mut Commands, images: &mut Assets<Image>, url: &str)
         Text2d::new(url.to_string()),
         (
             TextFont {
-                font_size: crate::ui::TextRole::ShareUrl.default_size(),
+                font_size: crate::ui::TextRole::ShareUrl.font_size(),
                 ..default()
             },
             crate::ui::TextRole::ShareUrl,
         ),
         TextColor(render::palette::BONE),
-        TextLayout::new_with_justify(Justify::Center),
+        TextLayout::justify(Justify::Center),
         ScreenAnchor::new(0.0, -0.62, 0.0, 0.0),
         Transform::from_xyz(0.0, 0.0, crate::ui::z::MENU_TEXT),
     ));
@@ -511,13 +511,13 @@ fn spawn_overlay(commands: &mut Commands, images: &mut Assets<Image>, url: &str)
         Text2d::new("TAP TO CLOSE"),
         (
             TextFont {
-                font_size: crate::ui::TextRole::ShareDismiss.default_size(),
+                font_size: crate::ui::TextRole::ShareDismiss.font_size(),
                 ..default()
             },
             crate::ui::TextRole::ShareDismiss,
         ),
         TextColor(render::palette::COLD_STONE),
-        TextLayout::new_with_justify(Justify::Center),
+        TextLayout::justify(Justify::Center),
         ScreenAnchor::new(0.0, -0.76, 0.0, 0.0),
         Transform::from_xyz(0.0, 0.0, crate::ui::z::MENU_TEXT),
     ));

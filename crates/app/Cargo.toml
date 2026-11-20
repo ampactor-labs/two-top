@@ -41,7 +41,7 @@ gamepad = ["bevy/bevy_gilrs"]
 # in `wayland-client.pc` which most CI runners (and many dev boxes)
 # don't ship by default. Local Wayland users can rebuild with
 # `--features bevy/wayland`.
-bevy = { version = "=0.18.1", default-features = false, features = [
+bevy = { version = "=0.19.1", default-features = false, features = [
     "std",
     "bevy_log",
     "bevy_window",
@@ -65,7 +65,7 @@ bevy = { version = "=0.18.1", default-features = false, features = [
     "bevy_audio",
     "wav",
 ] }
-bevy_ggrs = "=0.21"
+bevy_ggrs = "=0.22"
 fixed_math = { path = "../fixed_math" }
 input_touch = { path = "../input_touch" }
 # Desktop keyboard input source (PC couch versus + PC online). Only its
@@ -166,7 +166,9 @@ assets = "../../assets"
 resources = "res"
 
 [package.metadata.android.sdk]
-min_sdk_version = 24
+# 26 (Android 8.0): Bevy 0.19's audio backend (cpal 0.17 over AAudio)
+# needs it; 24 was the floor before that upgrade.
+min_sdk_version = 26
 target_sdk_version = 34
 
 
@@ -266,7 +268,7 @@ winit = { version = "=0.30.13", default-features = false }
 # has none. WebGL2 is the reach choice (every mobile browser); WebGPU
 # can join later as a progressive upgrade. Cargo unifies this with the
 # main bevy dep whenever the wasm target builds.
-bevy = { version = "=0.18.1", default-features = false, features = [
+bevy = { version = "=0.19.1", default-features = false, features = [
     "webgl2",
 ] }
 replay_sync = { path = "../replay_sync", optional = true }
@@ -312,7 +314,7 @@ wasm-bindgen = "=0.2.121"
 # unresolved `env.now` import that broke the first browser boot. ggrs's
 # own wasm-bindgen feature turns the right knobs (instant/wasm-bindgen,
 # getrandom/js); cargo unifies it with net's default-features-off dep.
-ggrs = { version = "0.12", default-features = false, features = [
+ggrs = { version = "0.13", default-features = false, features = [
     "wasm-bindgen",
 ] }
 # A panic in wasm is a bare `RuntimeError: unreachable` unless something

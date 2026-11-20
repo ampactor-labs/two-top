@@ -11,7 +11,7 @@ rust-version.workspace = true
 # localhost real peers never mispredict (their latency is below the input
 # delay), so only this can drive a match into the prediction window.
 [dependencies]
-bevy = { version = "=0.18.1", default-features = false, features = ["std"] }
-bevy_ggrs = "=0.21"
+bevy = { version = "=0.19.1", default-features = false, features = ["std"] }
+bevy_ggrs = "=0.22"
 net = { path = "../net" }
 sim = { path = "../sim" }

@@ -280,7 +280,7 @@ fn spawn_pad(mut commands: Commands, netplay: Res<NetplayConfig>) {
             Text2d::new(String::new()),
             (
                 TextFont {
-                    font_size: crate::ui::TextRole::CodeGlyph.default_size(),
+                    font_size: crate::ui::TextRole::CodeGlyph.font_size(),
                     ..default()
                 },
                 crate::ui::TextRole::CodeGlyph,
@@ -520,7 +520,7 @@ fn update_join_qr(
             Text2d::new(QR_CAPTION.to_string()),
             (
                 TextFont {
-                    font_size: crate::ui::TextRole::QrCaption.default_size(),
+                    font_size: crate::ui::TextRole::QrCaption.font_size(),
                     ..default()
                 },
                 crate::ui::TextRole::QrCaption,

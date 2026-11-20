@@ -30,7 +30,7 @@ use sim::{ArenaId, GgrsCfg, NetAddr, PlayerInput, SimPlugin};
 struct Wire {
     now: u64,
     /// Packets in flight to peer 0 and to peer 1: (deliver at, bytes).
-    inbound: [VecDeque<(u64, Box<[u8]>)>; 2],
+    inbound: [VecDeque<(u64, net::Packet)>; 2],
     /// Packets sent so far in each direction (for drop_every).
     sent: [u64; 2],
 }

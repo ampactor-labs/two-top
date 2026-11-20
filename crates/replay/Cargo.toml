@@ -9,8 +9,8 @@ rust-version.workspace = true
 [dependencies]
 serde = { version = "1", default-features = false, features = ["derive", "alloc", "std"] }
 postcard = { version = "1", features = ["use-std"] }
-bevy = { version = "=0.18.1", default-features = false, features = ["std", "bevy_log"] }
-bevy_ggrs = "=0.21"
+bevy = { version = "=0.19.1", default-features = false, features = ["std", "bevy_log"] }
+bevy_ggrs = "=0.22"
 sim = { path = "../sim" }
 
 [dev-dependencies]

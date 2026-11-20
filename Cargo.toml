@@ -53,17 +53,10 @@ codegen-units = 1
 # does not touch.
 strip = "symbols"
 
-# One backported fix to bevy_render 0.18.1, which has no later 0.18.x
-# release to move to: a swapchain acquire that times out or reports the
-# surface lost skips the frame instead of panicking. On a phone that panic
-# was a launch crash one step removed (vendor/README.md has the chain).
-# Drop this table and `vendor/bevy_render` with the next Bevy upgrade.
-#
-# And one to ggrs 0.12.0 (vendor/README.md): a remote Input packet whose
-# start frame skips past what we have received tripped an `assert!` and
-# took the app down; it is dropped with a warning instead. The public room
-# pairs strangers, and no stranger's packet gets to crash the table.
-# Drop it with the next ggrs upgrade that carries the same fix.
+# One backported fix to bevy_render 0.19.1 (vendor/README.md): a lost
+# swapchain is rebuilt the way an outdated one is, instead of logging an
+# error every frame over a frozen screen — what an Android phone hits
+# coming back from screen-off or an app switch. Drop this table and
+# `vendor/bevy_render` once a Bevy release rebuilds a lost surface itself.
 [patch.crates-io]
 bevy_render = { path = "vendor/bevy_render" }
-ggrs = { path = "vendor/ggrs" }

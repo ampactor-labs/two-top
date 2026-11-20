@@ -306,7 +306,7 @@ on both phones (our settle and the peer's signature, at most 3 s) and is
 ignored for the summary's first 1.6 s.
 
 A pairing whose WebRTC handshake cannot connect (both phones behind
-carrier NAT with no relay) is never reported by matchbox 0.14: both
+carrier NAT with no relay) is never reported by matchbox (verified on 0.14; recheck on upgrades): both
 phones simply wait. So a phone that has waited 30 s (plus up to 4 s of
 per-install jitter) in its room dials again with a fresh socket
 (`netplay::redial_waiting`), which frees it to meet whoever comes next,
@@ -356,7 +356,7 @@ same-frame spawns go in handle order"). Run it after any change to the
 sim, the netplay driver or matchbox:
 
 ```sh
-cargo install matchbox_server --version 0.14.0 --locked
+cargo install matchbox_server --version 0.15.0 --locked
 cargo build -p app -p replay_sync
 VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/lvp_icd.json scripts/two_peer_smoke.sh
 ```
@@ -365,7 +365,7 @@ It passes when both peers decide a match with no desync, both tapes
 replay to the same per-frame checksums, and each attestation verifies.
 `STATE_LOG_DIR=<dir>` makes each peer write every frame's state there
 (`TWOTOP_STATE_LOG`) for diffing when it does not. The server is pinned
-at 0.14.0 (`deploy/matchbox/Dockerfile`), the client's matchbox line;
+at 0.15.0 (`deploy/matchbox/Dockerfile`), the client's matchbox line;
 bump the two together.
 
 A live session also logs its link every 5 s (`two_top::net::link`: ping,

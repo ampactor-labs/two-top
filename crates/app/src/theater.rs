@@ -319,13 +319,13 @@ fn enter_replays(
         Text2d::new("REPLAYS"),
         (
             TextFont {
-                font_size: crate::ui::TextRole::ScreenTitle.default_size(),
+                font_size: crate::ui::TextRole::ScreenTitle.font_size(),
                 ..default()
             },
             crate::ui::TextRole::ScreenTitle,
         ),
         TextColor(render::palette::HOT_BONE),
-        TextLayout::new_with_justify(Justify::Center),
+        TextLayout::justify(Justify::Center),
         ScreenAnchor::new(0.0, 0.78, 0.0, 0.0),
         Transform::from_xyz(0.0, 0.0, crate::ui::z::MENU_TEXT),
     ));
@@ -340,13 +340,13 @@ fn enter_replays(
         Text2d::new(sub),
         (
             TextFont {
-                font_size: crate::ui::TextRole::ScreenSubtitle.default_size(),
+                font_size: crate::ui::TextRole::ScreenSubtitle.font_size(),
                 ..default()
             },
             crate::ui::TextRole::ScreenSubtitle,
         ),
         TextColor(render::palette::BONE.with_alpha(0.7)),
-        TextLayout::new_with_justify(Justify::Center),
+        TextLayout::justify(Justify::Center),
         ScreenAnchor::new(0.0, 0.66, 0.0, 0.0),
         Transform::from_xyz(0.0, 0.0, crate::ui::z::MENU_TEXT),
     ));
@@ -358,13 +358,13 @@ fn enter_replays(
         Text2d::new(String::new()),
         (
             TextFont {
-                font_size: crate::ui::TextRole::Notice.default_size(),
+                font_size: crate::ui::TextRole::Notice.font_size(),
                 ..default()
             },
             crate::ui::TextRole::Notice,
         ),
         TextColor(render::palette::EMBER),
-        TextLayout::new_with_justify(Justify::Center),
+        TextLayout::justify(Justify::Center),
         TextBounds::new_horizontal(1080.0),
         ScreenAnchor::new(0.0, 0.66, 0.0, 0.0),
         Transform::from_xyz(0.0, 0.0, crate::ui::z::MENU_TEXT + 0.5),
@@ -384,13 +384,13 @@ fn enter_replays(
             Text2d::new(tape.line.clone()),
             (
                 TextFont {
-                    font_size: crate::ui::TextRole::ListRow.default_size(),
+                    font_size: crate::ui::TextRole::ListRow.font_size(),
                     ..default()
                 },
                 crate::ui::TextRole::ListRow,
             ),
             TextColor(color),
-            TextLayout::new_with_justify(Justify::Center),
+            TextLayout::justify(Justify::Center),
             ScreenAnchor::new(0.0, crate::ui::anchor_y(fy), 0.0, 0.0),
             Transform::from_xyz(0.0, 0.0, crate::ui::z::MENU_TEXT),
         ));
@@ -407,13 +407,13 @@ fn enter_replays(
             Text2d::new("tapes are files - swap them with a friend, they play here"),
             (
                 TextFont {
-                    font_size: crate::ui::TextRole::ListDetail.default_size(),
+                    font_size: crate::ui::TextRole::ListDetail.font_size(),
                     ..default()
                 },
                 crate::ui::TextRole::ListDetail,
             ),
             TextColor(render::palette::BONE.with_alpha(0.55)),
-            TextLayout::new_with_justify(Justify::Center),
+            TextLayout::justify(Justify::Center),
             ScreenAnchor::new(0.0, crate::ui::anchor_y(0.79), 0.0, 0.0),
             Transform::from_xyz(0.0, 0.0, crate::ui::z::MENU_TEXT),
         ));
@@ -422,13 +422,13 @@ fn enter_replays(
             Text2d::new(dir.display().to_string()),
             (
                 TextFont {
-                    font_size: crate::ui::TextRole::ListFine.default_size(),
+                    font_size: crate::ui::TextRole::ListFine.font_size(),
                     ..default()
                 },
                 crate::ui::TextRole::ListFine,
             ),
             TextColor(render::palette::BONE.with_alpha(0.4)),
-            TextLayout::new_with_justify(Justify::Center),
+            TextLayout::justify(Justify::Center),
             TextBounds::new_horizontal(1000.0),
             ScreenAnchor::new(0.0, crate::ui::anchor_y(0.825), 0.0, 0.0),
             Transform::from_xyz(0.0, 0.0, crate::ui::z::MENU_TEXT),
@@ -461,13 +461,13 @@ fn enter_replays(
         Text2d::new("BACK"),
         (
             TextFont {
-                font_size: crate::ui::TextRole::Back.default_size(),
+                font_size: crate::ui::TextRole::Back.font_size(),
                 ..default()
             },
             crate::ui::TextRole::Back,
         ),
         TextColor(render::palette::HOT_BONE),
-        TextLayout::new_with_justify(Justify::Center),
+        TextLayout::justify(Justify::Center),
         ScreenAnchor::new(0.0, back_anchor_y, 0.0, 0.0),
         Transform::from_xyz(0.0, 0.0, crate::ui::z::MENU_TEXT),
     ));
@@ -716,13 +716,13 @@ fn spawn_theater_ui(mut commands: Commands, theater: Res<TheaterMode>) {
         Text2d::new("BACK"),
         (
             TextFont {
-                font_size: crate::ui::TextRole::Back.default_size(),
+                font_size: crate::ui::TextRole::Back.font_size(),
                 ..default()
             },
             crate::ui::TextRole::Back,
         ),
         TextColor(render::palette::HOT_BONE),
-        TextLayout::new_with_justify(Justify::Center),
+        TextLayout::justify(Justify::Center),
         ScreenAnchor::new(0.0, exit_y, 0.0, 0.0),
         Transform::from_xyz(0.0, 0.0, crate::ui::z::MENU_TEXT + 1.0),
     ));
@@ -757,13 +757,13 @@ fn spawn_theater_ui(mut commands: Commands, theater: Res<TheaterMode>) {
             Text2d::new(format!("{speed}x")),
             (
                 TextFont {
-                    font_size: crate::ui::TextRole::Marquee.default_size(),
+                    font_size: crate::ui::TextRole::Marquee.font_size(),
                     ..default()
                 },
                 crate::ui::TextRole::Marquee,
             ),
             TextColor(render::palette::BONE),
-            TextLayout::new_with_justify(Justify::Center),
+            TextLayout::justify(Justify::Center),
             ScreenAnchor::new(
                 crate::ui::anchor_x(fx),
                 crate::ui::band_anchor_y(SPEED_BAND),

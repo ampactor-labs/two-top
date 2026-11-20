@@ -116,13 +116,13 @@ fn spawn_text(
         Text2d::new(text),
         (
             TextFont {
-                font_size: size.default_size(),
+                font_size: size.font_size(),
                 ..default()
             },
             size,
         ),
         TextColor(color),
-        TextLayout::new_with_justify(Justify::Center),
+        TextLayout::justify(Justify::Center),
         ScreenAnchor::new(anchor.0, anchor.1, 0.0, 0.0),
         Transform::from_xyz(0.0, 0.0, z),
     ));

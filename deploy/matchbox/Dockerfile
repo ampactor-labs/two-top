@@ -4,11 +4,11 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates pkg-config libssl-dev \
     && rm -rf /var/lib/apt/lists/*
 
-# Pinned to the client's matchbox_socket line (0.14): an unpinned install
+# Pinned to the client's matchbox_socket line (0.15): an unpinned install
 # took whatever the registry had that day, and a protocol change on the
 # server side would have stranded every shipped build at once. Bump it with
-# matchbox_socket, together. scripts/two_peer_smoke.sh runs against 0.14.0.
-RUN cargo install matchbox_server --version 0.14.0 --locked
+# matchbox_socket, together. scripts/two_peer_smoke.sh runs against 0.15.0.
+RUN cargo install matchbox_server --version 0.15.0 --locked
 
 FROM debian:bookworm-slim
 

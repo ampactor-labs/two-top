@@ -44,7 +44,7 @@ fn spawn_overlay(mut commands: Commands) {
         Text2d::new(String::new()),
         (
             TextFont {
-                font_size: crate::ui::TextRole::Debug.default_size(),
+                font_size: crate::ui::TextRole::Debug.font_size(),
                 ..default()
             },
             crate::ui::TextRole::Debug,

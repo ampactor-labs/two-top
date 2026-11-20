@@ -40,13 +40,13 @@ fn enter_roster(mut commands: Commands, asset_server: Res<AssetServer>) {
         Text2d::new("THE TABLES"),
         (
             TextFont {
-                font_size: crate::ui::TextRole::PageTitle.default_size(),
+                font_size: crate::ui::TextRole::PageTitle.font_size(),
                 ..default()
             },
             crate::ui::TextRole::PageTitle,
         ),
         TextColor(render::palette::HOT_BONE),
-        TextLayout::new_with_justify(Justify::Center),
+        TextLayout::justify(Justify::Center),
         ScreenAnchor::new(0.0, crate::ui::anchor_y(0.07), 0.0, 0.0),
         Transform::from_xyz(0.0, 0.0, crate::ui::z::MENU_TEXT),
     ));
@@ -70,13 +70,13 @@ fn enter_roster(mut commands: Commands, asset_server: Res<AssetServer>) {
             Text2d::new(render::arena::info(arena).title),
             (
                 TextFont {
-                    font_size: crate::ui::TextRole::RosterName.default_size(),
+                    font_size: crate::ui::TextRole::RosterName.font_size(),
                     ..default()
                 },
                 crate::ui::TextRole::RosterName,
             ),
             TextColor(render::palette::BONE),
-            TextLayout::new_with_justify(Justify::Center),
+            TextLayout::justify(Justify::Center),
             ScreenAnchor::new(0.10, ay + 0.030, 0.0, 0.0),
             Transform::from_xyz(0.0, 0.0, crate::ui::z::MENU_TEXT),
         ));
@@ -85,13 +85,13 @@ fn enter_roster(mut commands: Commands, asset_server: Res<AssetServer>) {
             Text2d::new(render::arena::info(arena).rule),
             (
                 TextFont {
-                    font_size: crate::ui::TextRole::RosterRule.default_size(),
+                    font_size: crate::ui::TextRole::RosterRule.font_size(),
                     ..default()
                 },
                 crate::ui::TextRole::RosterRule,
             ),
             TextColor(render::palette::BONE.with_alpha(0.6)),
-            TextLayout::new_with_justify(Justify::Center),
+            TextLayout::justify(Justify::Center),
             ScreenAnchor::new(0.10, ay - 0.032, 0.0, 0.0),
             Transform::from_xyz(0.0, 0.0, crate::ui::z::MENU_TEXT),
         ));
@@ -122,13 +122,13 @@ fn enter_roster(mut commands: Commands, asset_server: Res<AssetServer>) {
         Text2d::new("BACK"),
         (
             TextFont {
-                font_size: crate::ui::TextRole::Back.default_size(),
+                font_size: crate::ui::TextRole::Back.font_size(),
                 ..default()
             },
             crate::ui::TextRole::Back,
         ),
         TextColor(render::palette::HOT_BONE),
-        TextLayout::new_with_justify(Justify::Center),
+        TextLayout::justify(Justify::Center),
         ScreenAnchor::new(0.0, back_y, 0.0, 0.0),
         Transform::from_xyz(0.0, 0.0, crate::ui::z::MENU_TEXT),
     ));

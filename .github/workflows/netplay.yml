@@ -86,7 +86,7 @@ jobs:
         if: steps.gate.outputs.run == 'true'
         uses: taiki-e/install-action@v2
         with:
-          tool: matchbox_server@0.14.0
+          tool: matchbox_server@0.15.0
       - name: Build
         if: steps.gate.outputs.run == 'true'
         # Two builds: naming --example limits cargo to that target, so one

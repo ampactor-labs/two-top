@@ -15,7 +15,7 @@
 //! The bridge is a transparent wrapper around `WebRtcChannel` that
 //! impls `NonBlockingSocket<sim::NetAddr>` by:
 //!   1. bincode-serializing each outbound `ggrs::Message` to a
-//!      `Box<[u8]>` packet and forwarding to `WebRtcChannel::send`.
+//!      `Bytes` packet and forwarding to `WebRtcChannel::send`.
 //!   2. draining inbound `(PeerId, Packet)` pairs and
 //!      bincode-deserializing each packet back to `ggrs::Message`.
 //!
@@ -34,7 +34,8 @@
 
 use bevy::prelude::*;
 use ggrs::{Message, NonBlockingSocket};
-use matchbox_socket::{Packet, PeerId, WebRtcChannel};
+pub use matchbox_socket::Packet;
+use matchbox_socket::{PeerId, WebRtcChannel};
 use serde::{Deserialize, Serialize};
 use sim::NetAddr;
 use uuid::Uuid;
@@ -74,6 +75,9 @@ pub fn addr_to_peer(addr: NetAddr) -> PeerId {
 /// reference impl; we mirror the warning for parity).
 pub struct MatchboxBridge {
     channel: WebRtcChannel,
+    /// Bytes handed to the channel so far, shared with whoever wants the
+    /// link's bandwidth ([`MatchboxBridge::bytes_sent`]).
+    bytes_sent: std::sync::Arc<std::sync::atomic::AtomicU64>,
     /// The socket under the channel has ended; logged once, then quiet.
     link_lost_logged: bool,
     /// Debug builds only (`TWOTOP_FAULT`): drop this side's outgoing
@@ -104,6 +108,12 @@ pub fn is_checksum_report(bytes: &[u8]) -> bool {
 }
 
 impl MatchboxBridge {
+    /// A live count of the bytes this bridge has sent: the session owns the
+    /// bridge, so the counter is how the app still reads the link's rate.
+    pub fn bytes_sent(&self) -> std::sync::Arc<std::sync::atomic::AtomicU64> {
+        self.bytes_sent.clone()
+    }
+
     /// Construct a bridge over an already-connected `WebRtcChannel`.
     /// The caller is responsible for spinning up the matchbox socket
     /// and signaling exchange — this wrapper only handles the
@@ -121,6 +131,7 @@ impl MatchboxBridge {
         }
         Self {
             channel,
+            bytes_sent: Default::default(),
             link_lost_logged: false,
             #[cfg(debug_assertions)]
             mute_checksum_reports: false,
@@ -150,7 +161,7 @@ impl MatchboxBridge {
 pub fn encode_message(msg: &Message) -> Packet {
     bincode::serde::encode_to_vec(msg, bincode::config::standard())
         .expect("ggrs Message serialization must not fail — Message is Serialize-by-derive")
-        .into_boxed_slice()
+        .into()
 }
 
 // ---- Wire-format guard for ggrs channel 0 ----
@@ -447,7 +458,11 @@ impl NonBlockingSocket<NetAddr> for MatchboxBridge {
         if self.mute_checksum_reports && is_checksum_report(&packet) {
             return;
         }
-        if self.channel.try_send(packet, addr_to_peer(*addr)).is_err() && !self.link_lost_logged {
+        let len = packet.len() as u64;
+        if self.channel.try_send(packet, addr_to_peer(*addr)).is_ok() {
+            self.bytes_sent
+                .fetch_add(len, std::sync::atomic::Ordering::Relaxed);
+        } else if !self.link_lost_logged {
             self.link_lost_logged = true;
             tracing::warn!(target: "two_top::net", "ggrs channel closed under the session — link lost");
         }
@@ -598,7 +613,7 @@ pub enum EndReason {
 pub fn encode_net_msg(msg: &NetMsg) -> Packet {
     postcard::to_allocvec(msg)
         .expect("NetMsg postcard encoding cannot fail")
-        .into_boxed_slice()
+        .into()
 }
 
 /// Decode a side-channel message. Unlike the ggrs channel (where malformed
@@ -1370,7 +1385,7 @@ mod tests {
         // answers Err where matchbox's `send` panicked with "Send failed".
         assert!(
             channel
-                .try_send(vec![1u8, 2, 3].into_boxed_slice(), addr_to_peer(NetAddr(7)))
+                .try_send(vec![1u8, 2, 3].into(), addr_to_peer(NetAddr(7)))
                 .is_err()
         );
         let mut bridge = MatchboxBridge::new(channel);
@@ -1402,9 +1417,9 @@ mod tests {
     #[test]
     fn malformed_ggrs_packets_are_dropped_not_fatal() {
         let peer = PeerId(Uuid::from_u128(0xbad));
-        let garbage: Packet = vec![0xff; 7].into_boxed_slice();
+        let garbage: Packet = vec![0xffu8; 7].into();
         assert!(decode_packet((peer, garbage)).is_none());
-        let empty: Packet = Vec::new().into_boxed_slice();
+        let empty: Packet = Vec::<u8>::new().into();
         assert!(decode_packet((peer, empty)).is_none());
     }
 
@@ -1986,7 +2001,7 @@ mod input_stream_tests {
     fn packet(msg: &WireMessage) -> Packet {
         bincode::serde::encode_to_vec(msg, bincode::config::standard())
             .unwrap()
-            .into_boxed_slice()
+            .into()
     }
 
     /// The exact stream ggrs's delta encoder emits: a `u16` LE length per

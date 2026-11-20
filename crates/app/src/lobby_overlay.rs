@@ -44,13 +44,13 @@ fn spawn_summoning(mut commands: Commands) {
         Text2d::new(String::new()),
         (
             TextFont {
-                font_size: crate::ui::TextRole::Summoning.default_size(),
+                font_size: crate::ui::TextRole::Summoning.font_size(),
                 ..default()
             },
             crate::ui::TextRole::Summoning,
         ),
         TextColor(render::palette::HOT_BONE),
-        TextLayout::new_with_justify(Justify::Center),
+        TextLayout::justify(Justify::Center),
         // Wide bounds: without them Bevy wraps at awkward widths on the
         // phone ("the other / phone" mid-phrase breaks).
         bevy::text::TextBounds::new_horizontal(1080.0),
@@ -225,7 +225,7 @@ fn spawn_overlay(mut commands: Commands) {
         Text2d::new(String::new()),
         (
             TextFont {
-                font_size: crate::ui::TextRole::Debug.default_size(),
+                font_size: crate::ui::TextRole::Debug.font_size(),
                 ..default()
             },
             crate::ui::TextRole::Debug,

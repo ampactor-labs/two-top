@@ -407,6 +407,11 @@ impl TextRole {
     }
 
     /// The size under `tuning`: its override for this role, else the default.
+    /// [`Self::default_size`] as the `TextFont` field wants it.
+    pub const fn font_size(self) -> bevy::text::FontSize {
+        bevy::text::FontSize::Px(self.default_size())
+    }
+
     pub fn size(self, tuning: &render::tuning::Tuning) -> f32 {
         tuning
             .text
@@ -448,8 +453,8 @@ pub fn apply_text_roles(
             continue;
         }
         let size = role.size(&tuning);
-        if font.font_size != size {
-            font.font_size = size;
+        if !matches!(font.font_size, bevy::text::FontSize::Px(px) if px == size) {
+            font.font_size = bevy::text::FontSize::Px(size);
         }
     }
 }

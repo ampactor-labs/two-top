@@ -340,13 +340,13 @@ fn spawn_name_ui(mut commands: Commands, netplay: Res<NetplayConfig>) {
         Text2d::new(String::new()),
         (
             TextFont {
-                font_size: crate::ui::TextRole::TitleName.default_size(),
+                font_size: crate::ui::TextRole::TitleName.font_size(),
                 ..default()
             },
             crate::ui::TextRole::TitleName,
         ),
         TextColor(render::palette::HOT_BONE),
-        TextLayout::new_with_justify(Justify::Center),
+        TextLayout::justify(Justify::Center),
         ScreenAnchor::new(0.0, NAME_ANCHOR_Y, 0.0, 0.0),
         Transform::from_xyz(0.0, 0.0, crate::ui::z::MENU + 1.0),
         Visibility::Hidden,
@@ -357,7 +357,7 @@ fn spawn_name_ui(mut commands: Commands, netplay: Res<NetplayConfig>) {
         (
             TextFont {
                 // Sized so a full 12 glyphs still fit the width with margin.
-                font_size: crate::ui::TextRole::NameEntry.default_size(),
+                font_size: crate::ui::TextRole::NameEntry.font_size(),
                 ..default()
             },
             crate::ui::TextRole::NameEntry,
@@ -377,13 +377,13 @@ fn spawn_name_ui(mut commands: Commands, netplay: Res<NetplayConfig>) {
             Text2d::new(String::new()),
             (
                 TextFont {
-                    font_size: size.default_size(),
+                    font_size: size.font_size(),
                     ..default()
                 },
                 size,
             ),
             TextColor(color),
-            TextLayout::new_with_justify(Justify::Center),
+            TextLayout::justify(Justify::Center),
             ScreenAnchor::new(crate::ui::anchor_x(fx), crate::ui::anchor_y(fy), 0.0, 0.0),
             Transform::from_xyz(0.0, 0.0, crate::ui::z::MENU + 1.0),
             Visibility::Hidden,

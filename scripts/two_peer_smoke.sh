@@ -18,8 +18,8 @@
 # two deterministic bots sometimes orbit without a kill (raise TIMEOUT, or
 # change the tiers). ARENA=<tag> picks the table.
 #
-# Needs: matchbox_server 0.14 on PATH (`cargo install matchbox_server
-# --version ~0.14 --locked`), Xvfb, a Vulkan driver (lavapipe works:
+# Needs: matchbox_server 0.15 on PATH (`cargo install matchbox_server
+# --version ~0.15 --locked`), Xvfb, a Vulkan driver (lavapipe works:
 # VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/lvp_icd.json), and built
 # binaries (`cargo build -p app -p replay_sync`), xdotool for step 4.
 # Usage: scripts/two_peer_smoke.sh [app-binary]

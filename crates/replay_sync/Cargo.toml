@@ -7,8 +7,8 @@ publish.workspace = true
 rust-version.workspace = true
 
 [dependencies]
-bevy = { version = "=0.18.1", default-features = false, features = ["std", "bevy_log"] }
-bevy_ggrs = "=0.21"
+bevy = { version = "=0.19.1", default-features = false, features = ["std", "bevy_log"] }
+bevy_ggrs = "=0.22"
 fixed_math = { path = "../fixed_math" }
 # NORTH N2 — `--attest` verifies dual-signed results: net owns the
 # MatchStatement/Attestation types and the ed25519 helpers.

@@ -65,7 +65,7 @@ fn spawn_callout(mut commands: Commands) {
         Text2d::new(String::new()),
         (
             TextFont {
-                font_size: crate::ui::TextRole::Callout.default_size(),
+                font_size: crate::ui::TextRole::Callout.font_size(),
                 ..default()
             },
             crate::ui::TextRole::Callout,
