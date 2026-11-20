@@ -406,18 +406,62 @@ impl TextRole {
         format!("{self:?}")
     }
 
-    /// The size under `tuning`: its override for this role, else the default.
-    /// [`Self::default_size`] as the `TextFont` field wants it.
-    pub const fn font_size(self) -> bevy::text::FontSize {
+    /// [`Self::default_size`] as the `TextFont` field wants it at spawn;
+    /// [`apply_text_roles`] puts it on this screen's pixel grid.
+    pub fn font_size(self) -> bevy::text::FontSize {
         bevy::text::FontSize::Px(self.default_size())
     }
 
+    /// The design size under `tuning`: its override for this role, else
+    /// the default.
     pub fn size(self, tuning: &render::tuning::Tuning) -> f32 {
         tuning
             .text
             .get(&self.name())
             .copied()
             .unwrap_or(self.default_size())
+    }
+}
+
+/// The game's face (`assets/fonts/twotop_pixel.ttf`, built by
+/// `scripts/generate_pixel_font.py`): an em of 9 font pixels, glyphs 6 wide.
+pub const PIXEL_FONT: &[u8] = include_bytes!("../../../assets/fonts/twotop_pixel.ttf");
+
+/// Font pixels per em in [`PIXEL_FONT`].
+pub const PIXEL_EM: f32 = 9.0;
+
+/// A role's design size (world units) put on this screen's pixel grid:
+/// the world size at which every font pixel covers a whole number of
+/// screen pixels, at least one. Below one, an unsmoothed pixel face
+/// drops pixels ("S ace throw"); fractional, it smears. `px_per_world` is
+/// screen pixels per world unit at rest (it varies by device: ~0.47 on a
+/// 540-wide window, ~0.93 on a 1080-wide phone). The 0.85 keeps the layout
+/// the roles were tuned for: this face's glyphs run wider than the vector
+/// face's at the same size. Pure.
+pub fn pixel_size(design: f32, px_per_world: f32) -> f32 {
+    let ppw = px_per_world.max(1e-3);
+    let font_px = (design * 0.85 * ppw / PIXEL_EM).round().max(1.0);
+    font_px * PIXEL_EM / ppw
+}
+
+/// Unsmoothed once a font pixel covers two screen pixels or more: crisp,
+/// and wide enough that a glyph landing between pixels loses nothing. At
+/// one screen pixel a fractional landing drops strokes, so the smallest
+/// text keeps a light smoothing instead. Pure.
+pub fn smoothing_for(world_size: f32, px_per_world: f32) -> bevy::text::FontSmoothing {
+    if world_size * px_per_world / PIXEL_EM >= 1.5 {
+        bevy::text::FontSmoothing::None
+    } else {
+        bevy::text::FontSmoothing::AntiAliased
+    }
+}
+
+/// `Startup`: the pixel face becomes the default font, so every text in
+/// every build draws in it (a text with no role included).
+pub fn install_pixel_font(mut fonts: ResMut<Assets<Font>>) {
+    let font = Font::from_bytes(PIXEL_FONT.to_vec());
+    if let Err(e) = fonts.insert(&Handle::<Font>::default(), font) {
+        tracing::error!(target: "two_top::ui", error = ?e, "could not install the pixel face");
     }
 }
 
@@ -437,12 +481,25 @@ pub fn unknown_text_roles(tuning: &render::tuning::Tuning) -> Vec<String> {
 /// whenever `Tuning` changes (a live reload resizes text already shown).
 pub fn apply_text_roles(
     tuning: Option<Res<render::tuning::Tuning>>,
+    rect: Res<crate::anchor::ViewRect>,
+    window: Res<input_touch::WindowSize>,
+    mut last_ppw: Local<f32>,
     mut q: Query<(Ref<TextRole>, &mut TextFont)>,
 ) {
     let Some(tuning) = tuning else {
         return;
     };
-    let all = tuning.is_changed();
+    // Screen pixels per world unit with the camera at rest (anchored text
+    // is held at rest size through the kill-cam's zoom).
+    if rect.half.x <= 0.0 || window.0.x <= 0.0 || rect.scale <= 0.0 {
+        return;
+    }
+    let ppw = window.0.x / (rect.half.x * 2.0 / rect.scale);
+    let resized = (ppw - *last_ppw).abs() > *last_ppw * 0.01;
+    if resized {
+        *last_ppw = ppw;
+    }
+    let all = tuning.is_changed() || resized;
     if all {
         for key in unknown_text_roles(&tuning) {
             tracing::warn!(target: "two_top::tuning", key, "tuning names a text role that does not exist");
@@ -452,9 +509,13 @@ pub fn apply_text_roles(
         if !(all || role.is_added()) {
             continue;
         }
-        let size = role.size(&tuning);
+        let size = pixel_size(role.size(&tuning), *last_ppw);
         if !matches!(font.font_size, bevy::text::FontSize::Px(px) if px == size) {
             font.font_size = bevy::text::FontSize::Px(size);
+        }
+        let smoothing = smoothing_for(size, *last_ppw);
+        if font.font_smoothing != smoothing {
+            font.font_smoothing = smoothing;
         }
     }
 }
@@ -470,6 +531,29 @@ mod text_role_tests {
             assert!(role.default_size() > 0.0, "{role:?}");
             assert!(names.insert(role.name()), "{role:?} twice");
         }
+    }
+
+    #[test]
+    fn every_size_lands_on_whole_screen_pixels() {
+        for ppw in [0.47, 0.93, 1.6] {
+            for role in TextRole::ALL {
+                let world = pixel_size(role.default_size(), ppw);
+                let font_px_on_screen = world * ppw / PIXEL_EM;
+                assert!(
+                    font_px_on_screen >= 0.999,
+                    "{role:?} at {ppw}: {font_px_on_screen}"
+                );
+                assert!(
+                    (font_px_on_screen - font_px_on_screen.round()).abs() < 1e-3,
+                    "{role:?} at {ppw}: {font_px_on_screen}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_pixel_face_parses() {
+        assert!(PIXEL_FONT.len() > 1000 && &PIXEL_FONT[..4] == b"\x00\x01\x00\x00");
     }
 
     #[test]

@@ -359,7 +359,8 @@ pub fn run() {
     );
     #[cfg(not(any(target_os = "android", target_family = "wasm")))]
     app.add_systems(Update, platform::desktop::set_window_icon);
-    app.add_systems(Update, ui::apply_text_roles);
+    app.add_systems(Startup, ui::install_pixel_font);
+    app.add_systems(Update, ui::apply_text_roles.after(anchor::ScreenAnchorSet));
     // The nudges watch the local player's DASH presses where inputs are
     // made (a directionless press does nothing the sim could show).
     app.add_systems(
