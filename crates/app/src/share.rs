@@ -275,7 +275,7 @@ fn spawn_share_labels(
             ),
             TextColor(render::palette::SPARK),
             TextLayout::justify(Justify::Center),
-            ScreenAnchor::new(crate::ui::anchor_x(fx), crate::ui::anchor_y(fy), 0.0, 0.0),
+            ScreenAnchor::at(fx, fy),
             Transform::from_xyz(0.0, 0.0, crate::ui::z::MENU_TEXT - 5.0),
             Visibility::Hidden,
         ));

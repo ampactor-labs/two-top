@@ -70,6 +70,18 @@ pub struct ScreenAnchor {
 }
 
 impl ScreenAnchor {
+    /// Pinned at a window-fraction point, `fx` from the left and `fy_down`
+    /// from the top: the same coordinates every tap band is written in, so
+    /// what is drawn and what is tapped are one number.
+    pub fn at(fx: f32, fy_down: f32) -> Self {
+        Self::new(
+            crate::ui::anchor_x(fx),
+            crate::ui::anchor_y(fy_down),
+            0.0,
+            0.0,
+        )
+    }
+
     pub fn new(fx: f32, fy: f32, ox: f32, oy: f32) -> Self {
         Self {
             frac: Vec2::new(fx, fy),

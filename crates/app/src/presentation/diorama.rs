@@ -81,7 +81,7 @@ pub(crate) fn spawn_title_diorama(
             custom_size: Some(Vec2::splat(render::PLAYER_RENDER_SIZE * 1.9)),
             ..default()
         },
-        anchor::ScreenAnchor::new(0.0, crate::ui::anchor_y(0.26), 0.0, 0.0),
+        anchor::ScreenAnchor::at(0.5, 0.26),
         Transform::from_xyz(0.0, 0.0, 101.0),
         Visibility::Hidden,
     ));

@@ -76,7 +76,7 @@ fn spawn_intro_card(mut commands: Commands) {
                 render::palette::BONE.with_alpha(0.85)
             }),
             TextLayout::justify(Justify::Center),
-            ScreenAnchor::new(0.0, crate::ui::anchor_y(fy), 0.0, 0.0),
+            ScreenAnchor::at(0.5, fy),
             Transform::from_xyz(0.0, 0.0, crate::ui::z::MENU_TEXT - 5.0),
             Visibility::Hidden,
         ));

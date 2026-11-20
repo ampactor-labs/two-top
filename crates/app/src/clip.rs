@@ -43,12 +43,7 @@ fn spawn_label(mut commands: Commands) {
         ),
         TextColor(render::palette::SPARK),
         TextLayout::justify(Justify::Center),
-        crate::anchor::ScreenAnchor::new(
-            crate::ui::anchor_x(CLIP_ANCHOR.0),
-            crate::ui::anchor_y(CLIP_ANCHOR.1),
-            0.0,
-            0.0,
-        ),
+        crate::anchor::ScreenAnchor::at(CLIP_ANCHOR.0, CLIP_ANCHOR.1),
         Transform::from_xyz(0.0, 0.0, crate::ui::z::MENU_TEXT - 5.0),
         Visibility::Hidden,
     ));

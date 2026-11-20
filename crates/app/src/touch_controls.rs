@@ -257,12 +257,7 @@ const TAUNT_RING_SIZE: f32 = 96.0;
 fn taunt_anchor() -> ScreenAnchor {
     // Strip spans [0, TAUNT_ZONE_Y_FRAC] y-down; sit at its lower half so
     // a notch/status bar never covers the mark.
-    ScreenAnchor::new(
-        0.0,
-        crate::ui::anchor_y(input_touch::TAUNT_ZONE_Y_FRAC * 0.72),
-        0.0,
-        0.0,
-    )
+    ScreenAnchor::at(0.5, input_touch::TAUNT_ZONE_Y_FRAC * 0.72)
 }
 
 fn taunt_idle() -> Color {

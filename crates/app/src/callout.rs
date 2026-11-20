@@ -56,7 +56,7 @@ fn spawn_callout(mut commands: Commands) {
             custom_size: Some(Vec2::new(4000.0, PLATE_LINE_H + PLATE_PAD)),
             ..default()
         },
-        ScreenAnchor::new(0.0, crate::ui::anchor_y(LINE_FY), 0.0, 0.0),
+        ScreenAnchor::at(0.5, LINE_FY),
         Transform::from_xyz(0.0, 0.0, crate::ui::z::MENU_TEXT - 4.5),
         Visibility::Hidden,
     ));
@@ -76,7 +76,7 @@ fn spawn_callout(mut commands: Commands) {
             justify: Justify::Center,
             linebreak: bevy::text::LineBreak::NoWrap,
         },
-        ScreenAnchor::new(0.0, crate::ui::anchor_y(LINE_FY), 0.0, 0.0),
+        ScreenAnchor::at(0.5, LINE_FY),
         Transform::from_xyz(0.0, 0.0, crate::ui::z::MENU_TEXT - 4.0),
         Visibility::Hidden,
     ));

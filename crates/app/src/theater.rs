@@ -492,7 +492,7 @@ fn enter_replays(
             ),
             TextColor(color),
             TextLayout::justify(Justify::Center),
-            ScreenAnchor::new(0.0, crate::ui::anchor_y(fy), 0.0, 0.0),
+            ScreenAnchor::at(0.5, fy),
             Transform::from_xyz(0.0, 0.0, crate::ui::z::MENU_TEXT),
         ));
     }
@@ -515,7 +515,7 @@ fn enter_replays(
             ),
             TextColor(render::palette::BONE.with_alpha(0.55)),
             TextLayout::justify(Justify::Center),
-            ScreenAnchor::new(0.0, crate::ui::anchor_y(0.79), 0.0, 0.0),
+            ScreenAnchor::at(0.5, 0.79),
             Transform::from_xyz(0.0, 0.0, crate::ui::z::MENU_TEXT),
         ));
         commands.spawn((
@@ -531,7 +531,7 @@ fn enter_replays(
             TextColor(render::palette::BONE.with_alpha(0.4)),
             TextLayout::justify(Justify::Center),
             TextBounds::new_horizontal(1000.0),
-            ScreenAnchor::new(0.0, crate::ui::anchor_y(0.825), 0.0, 0.0),
+            ScreenAnchor::at(0.5, 0.825),
             Transform::from_xyz(0.0, 0.0, crate::ui::z::MENU_TEXT),
         ));
     }

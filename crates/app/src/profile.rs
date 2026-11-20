@@ -384,7 +384,7 @@ fn spawn_name_ui(mut commands: Commands, netplay: Res<NetplayConfig>) {
             ),
             TextColor(color),
             TextLayout::justify(Justify::Center),
-            ScreenAnchor::new(crate::ui::anchor_x(fx), crate::ui::anchor_y(fy), 0.0, 0.0),
+            ScreenAnchor::at(fx, fy),
             Transform::from_xyz(0.0, 0.0, crate::ui::z::MENU + 1.0),
             Visibility::Hidden,
         ));

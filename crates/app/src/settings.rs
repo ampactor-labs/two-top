@@ -316,7 +316,7 @@ fn spawn_setting_rows(mut commands: Commands) {
         ),
         TextColor(render::palette::HOT_BONE),
         TextLayout::justify(Justify::Center),
-        crate::anchor::ScreenAnchor::new(0.0, crate::ui::anchor_y(HEADING_FY), 0.0, 0.0),
+        crate::anchor::ScreenAnchor::at(0.5, HEADING_FY),
         Transform::from_xyz(0.0, 0.0, crate::ui::z::MENU_TEXT),
         Visibility::Hidden,
     ));
@@ -333,12 +333,7 @@ fn spawn_setting_rows(mut commands: Commands) {
             ),
             TextColor(render::palette::COLD_STONE),
             TextLayout::justify(Justify::Center),
-            crate::anchor::ScreenAnchor::new(
-                0.0,
-                crate::ui::anchor_y(l.header_centers[g]),
-                0.0,
-                0.0,
-            ),
+            crate::anchor::ScreenAnchor::at(0.5, l.header_centers[g]),
             Transform::from_xyz(0.0, 0.0, crate::ui::z::MENU_TEXT),
             Visibility::Hidden,
         ));

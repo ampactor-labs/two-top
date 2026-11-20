@@ -47,7 +47,7 @@ fn enter_roster(mut commands: Commands, asset_server: Res<AssetServer>) {
         ),
         TextColor(render::palette::HOT_BONE),
         TextLayout::justify(Justify::Center),
-        ScreenAnchor::new(0.0, crate::ui::anchor_y(0.07), 0.0, 0.0),
+        ScreenAnchor::at(0.5, 0.07),
         Transform::from_xyz(0.0, 0.0, crate::ui::z::MENU_TEXT),
     ));
     for (i, &arena) in ALL_ARENAS.iter().enumerate() {
