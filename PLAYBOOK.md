@@ -478,15 +478,31 @@ the intent filter ships in the APK manifest). No app camera, no
 permission, no typing; a phone without the app gets the APK link and
 dials by hand. Both phones then tap DUEL AT the same code as ever.
 
-**Deploying the tape drop (one-time, Railway).** The service lives in the
-two-top-matchbox project as `tape-drop`, deployed by CLI upload (this
-account has no Railway↔GitHub link, and buildpack heuristics auto-build
-the wrong workspace bin — the first attempt shipped ice_vendor). The
-recipe: temporarily point railway.json's `build.dockerfilePath` at
-`crates/tape_drop/Dockerfile`, `railway up --service tape-drop --detach`,
-then restore railway.json (the committed one stays generic because every
-service in this repo reads it). `.railwayignore` keeps the upload lean.
-The service domain feeds the `TWOTOP_DROP_URL` repo var, which both
+**Deploying the services (Railway).** The signaling server
+(`two-top-matchbox`), the TURN credential vendor (`ice-vendor`) and the
+tape drop (`tape-drop`) live in the two-top-matchbox Railway project, and
+`.railway/railway.ts` declares all three: each one's Dockerfile, health
+check and restart policy, plus the tape drop's `/data` volume and the
+`TAPE_DIR` that points at it. Secrets (the Cloudflare TURN key, the
+vendor's app key) stay on Railway; the file only says they exist. Railway
+never reads that file during a deploy, so a change to it lands in two
+steps: `npm ci --prefix .railway` once for the SDK, then from the
+repository root `railway config plan` to read the diff and
+`railway config apply` to write it into the services' settings (apply
+redeploys every service it changes). On a fresh clone, link first:
+`railway link --project two-top-matchbox --environment production`.
+
+A deploy is then one command from the repository root, the same for every
+service: `railway up --service <name> --detach`, then
+`railway deployment list --service <name> --json` until that deployment
+reads SUCCESS. Always upload the root, never a subdirectory: every
+Dockerfile path in the file is relative to it, and a service with no path
+set builds the root `Dockerfile`, which is ice_vendor's (the first tape
+drop deploy shipped exactly that). `.railwayignore` keeps the upload to
+what the builds read. `ice-vendor`'s source is this GitHub repository, so
+it can also deploy a commit from the Railway dashboard. The tape drop's
+startup log line ends `dir = Some("/data")` when the volume is mounted,
+and its service domain feeds the `TWOTOP_DROP_URL` repo var, which both
 apk.yml and web.yml bake.
 
 **Sharing a match (the watch link).** On a build with the share endpoints

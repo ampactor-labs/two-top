@@ -1,0 +1,9 @@
+{
+  "name": "two-top-railway",
+  "private": true,
+  "description": "The Railway IaC SDK that evaluates railway.ts. Install with `npm ci` in this directory.",
+  "type": "module",
+  "devDependencies": {
+    "railway": "3.17.0"
+  }
+}

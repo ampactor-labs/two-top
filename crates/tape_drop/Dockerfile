@@ -1,7 +1,7 @@
-# The tape drop's deploy image (NORTH N3). Railway builds this when the
-# service's config points build.dockerfilePath here — the workspace's
-# multi-bin layout confuses buildpack heuristics (the first attempt
-# auto-built ice_vendor instead), and a Dockerfile has no heuristics.
+# The tape drop's deploy image (NORTH N3). Railway builds this because
+# .railway/railway.ts names it as tape-drop's Dockerfile. Left to guess,
+# Railway builds the root Dockerfile instead, which is ice_vendor's: the
+# first deploy shipped exactly that.
 FROM rust:1.95 AS build
 WORKDIR /src
 COPY . .

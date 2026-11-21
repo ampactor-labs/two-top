@@ -401,8 +401,8 @@ fn main() {
 
     for request in server.incoming_requests() {
         // /healthz stays exempt from the key and the bucket: Railway's
-        // healthcheck (railway.json) must never be throttled into a restart
-        // loop, and it hands out nothing billable.
+        // healthcheck (.railway/railway.ts) must never be throttled into a
+        // restart loop, and it hands out nothing billable.
         // The browser build fetches /ice cross-origin (the Pages site is
         // not this host). Without CORS the page's fetch fails and the web
         // game silently falls back to STUN-only — the very gap a relay

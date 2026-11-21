@@ -1,7 +1,10 @@
-# railway up uploads the working tree; the drop needs cargo's inputs and
-# nothing else. Keeping the tarball lean keeps deploys fast.
+# railway up uploads the working tree, and every service uploads the
+# repository root (.railway/railway.ts names each one's Dockerfile). The
+# builds read cargo's inputs and the Dockerfiles, nothing else. Keeping
+# the tarball lean keeps deploys fast.
 target/
 .git/
+.railway/
 assets/
 docs/
 tests/

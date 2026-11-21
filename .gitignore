@@ -43,3 +43,6 @@ secrets.json
 # Ad-hoc device debug dumps / built APKs (never source of truth)
 logcat*.txt
 *.apk
+
+# The Railway IaC SDK, installed from .railway/package-lock.json (`npm ci --prefix .railway`)
+.railway/node_modules/

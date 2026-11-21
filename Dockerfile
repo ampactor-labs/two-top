@@ -1,5 +1,7 @@
-# The ice_vendor credential service, and nothing else — Railway builds
-# this on `railway up` / repo deploys. Multi-stage: the workspace compiles
+# The ice_vendor credential service, and nothing else — .railway/railway.ts
+# names this file as ice-vendor's Dockerfile. Because it sits at the root,
+# a Railway service with no Dockerfile path of its own would build it, so
+# every service there names its own. Multi-stage: the workspace compiles
 # in the rust image, the runtime ships one binary. ca-certificates covers
 # the vendor's outbound HTTPS call to Cloudflare's credential generator.
 # The game binaries never touch this file.
