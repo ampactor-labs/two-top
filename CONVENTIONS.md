@@ -93,6 +93,13 @@ Hard rules. Violations cause subtle bugs that are expensive to find. The CI and 
   reference frame, and clears any pending Java exception. A bare
   `attach_current_thread` + `call_method` leaks references on a thread that
   never returns to Java.
+- **No `AndroidApp` method that takes android-activity's write lock, from
+  anywhere in a frame.** winit runs every frame inside `AndroidApp::poll_events`,
+  which holds a read lock on the app state for the whole poll, so
+  `set_window_flags` (or `enable_motion_axis` / `disable_motion_axis`) called
+  from a system waits on its own thread forever. 0.16.0 froze at the first
+  frame of every match that way. Window flags go through JNI on the UI thread
+  (`android::keep_screen_on`); a test in `platform/mod.rs` fails on any such call.
 - **A Bevy task pool is not a background thread here.** `multi_threaded` is
   off, so `IoTaskPool::spawn` runs the task on the caller's thread until it
   first awaits. Anything that blocks (HTTP, DNS, large file I/O) goes through

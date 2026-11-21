@@ -251,4 +251,51 @@ mod tests {
         assert!(!p.has_share_sheet);
         assert!(!p.can_download_tapes);
     }
+
+    /// android-activity's `AndroidApp` methods that take a write lock on
+    /// its app state. winit runs every frame inside `AndroidApp::poll_events`,
+    /// which holds a read lock on that state for the whole poll, so any of
+    /// these called from a system deadlocks the game thread on itself (the
+    /// 0.16.0 freeze at the first frame of every match: `keep_screen_on`).
+    /// Window flags go through JNI on the UI thread instead.
+    const WRITE_LOCKING: [&str; 3] = [
+        "set_window_flags",
+        "enable_motion_axis",
+        "disable_motion_axis",
+    ];
+
+    #[test]
+    fn nothing_calls_an_android_app_method_that_takes_its_write_lock() {
+        let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let calls: Vec<String> = WRITE_LOCKING
+            .iter()
+            .map(|name| format!(".{name}("))
+            .collect();
+        let mut stray = Vec::new();
+        let mut stack = vec![src];
+        while let Some(dir) = stack.pop() {
+            for entry in std::fs::read_dir(&dir).unwrap().flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    stack.push(path);
+                    continue;
+                }
+                if path.extension().is_none_or(|e| e != "rs") {
+                    continue;
+                }
+                let text = std::fs::read_to_string(&path).unwrap();
+                for (i, line) in text.lines().enumerate() {
+                    let code = line.split("//").next().unwrap_or("");
+                    if calls.iter().any(|call| code.contains(call.as_str())) {
+                        stray.push(format!("{}:{}: {}", path.display(), i + 1, line.trim()));
+                    }
+                }
+            }
+        }
+        assert!(
+            stray.is_empty(),
+            "these AndroidApp methods deadlock when called from a frame (see WRITE_LOCKING):\n{}",
+            stray.join("\n")
+        );
+    }
 }

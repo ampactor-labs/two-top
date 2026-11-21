@@ -52,7 +52,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use bevy::android::ANDROID_APP;
-use bevy::android::android_activity::{AndroidApp, WindowManagerFlags};
+use bevy::android::android_activity::AndroidApp;
 use bevy::input::ButtonState;
 use bevy::input::keyboard::{Key, KeyboardInput};
 use bevy::prelude::*;
@@ -240,17 +240,32 @@ pub fn move_task_to_back() {
     });
 }
 
-/// Hold the screen on, or hand it back to the system's timeout.
+/// `WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON`.
+const FLAG_KEEP_SCREEN_ON: i32 = 0x0000_0080;
+
+/// Hold the screen on, or hand it back to the system's timeout: the
+/// window's `FLAG_KEEP_SCREEN_ON`, set on the Java UI thread.
+///
+/// Never through `AndroidApp::set_window_flags`. That takes a write lock on
+/// android-activity's app state, and winit runs every frame but the very
+/// first inside `AndroidApp::poll_events`, which holds a read lock on that
+/// same state for the whole poll. Called from a system, the write waits on
+/// its own thread's read forever. 0.16.0 froze exactly that way on the
+/// first frame of every match (the policy flips there), and the lifecycle
+/// watchdog queued up behind the stuck writer; Android's ANR dialog was the
+/// only way out, and First Blood re-entered the freeze on every relaunch.
 pub fn keep_screen_on(on: bool) {
-    let Some(app) = ANDROID_APP.get() else {
-        return;
-    };
-    let flag = WindowManagerFlags::KEEP_SCREEN_ON;
-    if on {
-        app.set_window_flags(flag, WindowManagerFlags::empty());
-    } else {
-        app.set_window_flags(WindowManagerFlags::empty(), flag);
-    }
+    let method = if on { "addFlags" } else { "clearFlags" };
+    on_ui_thread("keep screen on", move |env, activity| {
+        let window = env
+            .call_method(activity, "getWindow", "()Landroid/view/Window;", &[])?
+            .l()?;
+        if window.is_null() {
+            return Ok(());
+        }
+        env.call_method(&window, method, "(I)V", &[JValue::Int(FLAG_KEEP_SCREEN_ON)])?;
+        Ok(())
+    });
 }
 
 /// The URI this launch was opened with, if any (`twotop://join/...`).
