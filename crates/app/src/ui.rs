@@ -344,74 +344,75 @@ impl TextRole {
         TextRole::RivalTape,
     ];
 
-    /// The smallest design size a player ever reads: 2 font pixels to the
-    /// face's pixel on a 720-wide phone, 3 on a 1080-wide one. Below it
-    /// the pixel face renders at 1x on cheaper phones, a 9-pixel em, which
-    /// is where the QUIT button, the settings group headers and the
-    /// replays fine print all were. Only the developer's own overlays
+    /// The smallest design size a player ever reads: 4 screen pixels to
+    /// the face's pixel on a 1080-wide phone (a 36 px em, about 13 sp), 2
+    /// on a 720-wide one. The face steps in whole pixels, so 30-39 all draw
+    /// at 3 on that phone (a 27 px em, under 10 sp): the QUIT button, the
+    /// settings group headers, HOW TO PLAY and the replays fine print were
+    /// there or smaller. Only the developer's own overlays
     /// (`Debug`, the desktop `KeyLegend`) sit under it.
     #[cfg_attr(not(test), allow(dead_code))]
-    pub const MIN_READABLE: f32 = 30.0;
+    pub const MIN_READABLE: f32 = 40.0;
 
     /// The size this role is drawn at with no tuning override.
     pub const fn default_size(self) -> f32 {
         match self {
             TextRole::ScreenTitle => 84.0,
-            TextRole::ScreenSubtitle => 32.0,
+            TextRole::ScreenSubtitle => 40.0,
             TextRole::PageTitle => 72.0,
             TextRole::Back => 40.0,
             TextRole::Wordmark => 110.0,
             TextRole::TitleName => 44.0,
-            TextRole::TitleOverlay => 34.0,
+            TextRole::TitleOverlay => 40.0,
             TextRole::TitlePlay => 48.0,
-            TextRole::TitleMenu => 30.0,
+            TextRole::TitleMenu => 40.0,
             TextRole::SummaryCard => 56.0,
             TextRole::ButtonPrimary => 44.0,
-            TextRole::ButtonExit => 30.0,
-            TextRole::ButtonQuit => 30.0,
-            TextRole::PillLabel => 30.0,
+            TextRole::ButtonExit => 40.0,
+            TextRole::ButtonQuit => 40.0,
+            TextRole::PillLabel => 40.0,
             TextRole::CodeGlyph => 54.0,
-            TextRole::QrCaption => 30.0,
+            TextRole::QrCaption => 40.0,
             TextRole::NameEntry => 64.0,
             TextRole::NameKey => 46.0,
-            TextRole::NamePrompt => 34.0,
-            TextRole::NameSkip => 30.0,
-            TextRole::NameDel => 34.0,
+            TextRole::NamePrompt => 40.0,
+            TextRole::NameSkip => 40.0,
+            TextRole::NameDel => 40.0,
             TextRole::NameDone => 40.0,
             TextRole::Callout => 40.0,
             TextRole::TouchDash => 40.0,
-            TextRole::TouchTaunt => 30.0,
-            TextRole::TouchHint => 30.0,
-            TextRole::Notice => 30.0,
-            TextRole::ListRow => 34.0,
-            TextRole::ListDetail => 30.0,
-            TextRole::ListFine => 30.0,
-            TextRole::Marquee => 34.0,
+            TextRole::TouchTaunt => 40.0,
+            TextRole::TouchHint => 40.0,
+            TextRole::Notice => 40.0,
+            TextRole::ListRow => 40.0,
+            TextRole::ListDetail => 40.0,
+            TextRole::ListFine => 40.0,
+            TextRole::Marquee => 40.0,
             TextRole::RosterName => 44.0,
-            TextRole::RosterRule => 30.0,
+            TextRole::RosterRule => 40.0,
             TextRole::KeyLegend => 26.0,
-            TextRole::ShareLabel => 30.0,
-            TextRole::ShareUrl => 30.0,
-            TextRole::ShareDismiss => 30.0,
+            TextRole::ShareLabel => 40.0,
+            TextRole::ShareUrl => 40.0,
+            TextRole::ShareDismiss => 40.0,
             TextRole::Debug => 13.0,
-            TextRole::GroupHeader => 30.0,
+            TextRole::GroupHeader => 40.0,
             TextRole::SettingLabel => 40.0,
             TextRole::SettingValue => 46.0,
-            TextRole::SettingsHowTo => 30.0,
+            TextRole::SettingsHowTo => 40.0,
             TextRole::Summoning => 54.0,
-            TextRole::CrashNotice => 30.0,
+            TextRole::CrashNotice => 40.0,
             TextRole::IntroTitle => 56.0,
-            TextRole::IntroSub => 32.0,
-            TextRole::RivalsEmpty => 34.0,
+            TextRole::IntroSub => 40.0,
+            TextRole::RivalsEmpty => 40.0,
             TextRole::RivalRowName => 40.0,
-            TextRole::RivalRowDetail => 30.0,
-            TextRole::RivalRowSub => 34.0,
+            TextRole::RivalRowDetail => 40.0,
+            TextRole::RivalRowSub => 40.0,
             TextRole::RivalName => 64.0,
-            TextRole::RivalStanding => 36.0,
-            TextRole::RivalFact => 30.0,
-            TextRole::RivalShade => 32.0,
-            TextRole::RivalNoTapes => 30.0,
-            TextRole::RivalTape => 30.0,
+            TextRole::RivalStanding => 40.0,
+            TextRole::RivalFact => 40.0,
+            TextRole::RivalShade => 40.0,
+            TextRole::RivalNoTapes => 40.0,
+            TextRole::RivalTape => 40.0,
         }
     }
 
@@ -497,6 +498,7 @@ pub fn apply_text_roles(
     tuning: Option<Res<render::tuning::Tuning>>,
     rect: Res<crate::anchor::ViewRect>,
     window: Res<input_touch::WindowSize>,
+    primary: Query<&Window, With<bevy::window::PrimaryWindow>>,
     mut last_ppw: Local<f32>,
     mut q: Query<(Ref<TextRole>, &mut TextFont)>,
 ) {
@@ -508,7 +510,14 @@ pub fn apply_text_roles(
     if rect.half.x <= 0.0 || window.0.x <= 0.0 || rect.scale <= 0.0 {
         return;
     }
-    let ppw = window.0.x / (rect.half.x * 2.0 / rect.scale);
+    // `WindowSize` is logical pixels (the taps' space); the glyphs land on
+    // PHYSICAL ones. On a phone the two differ by its scale factor (2.81
+    // on a Galaxy A16), and snapping to logical pixels put nearly every
+    // size in the table on the same coarse step: FEEL, haptics on, HOW TO
+    // PLAY and GAUNTLET all drew at one small size, the design table
+    // meaning nothing there. Desktop (scale 1) never showed it.
+    let scale_factor = primary.single().map_or(1.0, |w| w.scale_factor());
+    let ppw = window.0.x * scale_factor / (rect.half.x * 2.0 / rect.scale);
     let resized = (ppw - *last_ppw).abs() > *last_ppw * 0.01;
     if resized {
         *last_ppw = ppw;
@@ -555,7 +564,7 @@ mod text_role_tests {
             let size = role.default_size();
             assert!(size >= TextRole::MIN_READABLE, "{role:?} is {size}");
             assert!(font_px(size, phone_720) >= 2.0, "{role:?} on a 720 phone");
-            assert!(font_px(size, phone_1080) >= 3.0, "{role:?} on a 1080 phone");
+            assert!(font_px(size, phone_1080) >= 4.0, "{role:?} on a 1080 phone");
         }
     }
 

@@ -432,11 +432,56 @@ const SUBLINE_RECT: ui::Band = ui::title::SUBLINE;
 const SUBLINE_ANCHOR_Y: f32 = ui::band_anchor_y(SUBLINE_RECT);
 const SECONDARY_ROW_RECT: ui::Band = ui::title::SECONDARY_ROW;
 const SECONDARY_ANCHOR_Y: f32 = ui::band_anchor_y(SECONDARY_ROW_RECT);
+/// The secondary row's fills (design units), left to right: PRACTICE
+/// (GAUNTLET n), RIVALS, REPLAYS, SETTINGS. Each is as wide as its label
+/// at the readable text size needs (GAUNTLET 10 is the longest), so no
+/// label crowds its border; the boxes and the tap splits below are both
+/// worked out from this one table.
+const SECONDARY_FILLS: [f32; 4] = [300.0, 200.0, 220.0, 230.0];
+/// Air between two boxes of the row (design units).
+const SECONDARY_GAP: f32 = 14.0;
+
+/// The row's total width, borders and gaps included (design units).
+const fn secondary_row_width() -> f32 {
+    let mut w = SECONDARY_GAP * 3.0;
+    let mut i = 0;
+    while i < 4 {
+        w += SECONDARY_FILLS[i] + BUTTON_BORDER;
+        i += 1;
+    }
+    w
+}
+
+/// The left edge of box `n` (design units from mid-screen).
+const fn secondary_left(n: usize) -> f32 {
+    let mut x = -secondary_row_width() * 0.5;
+    let mut i = 0;
+    while i < n {
+        x += SECONDARY_FILLS[i] + BUTTON_BORDER + SECONDARY_GAP;
+        i += 1;
+    }
+    x
+}
+
+/// Box `n`'s centre as a `ScreenAnchor` x. A portrait screen shows exactly
+/// `anchor::MIN_VIEW.x` across, so design units map to the window there.
+const fn secondary_anchor_x(n: usize) -> f32 {
+    let centre = secondary_left(n) + (SECONDARY_FILLS[n] + BUTTON_BORDER) * 0.5;
+    centre / (crate::anchor::MIN_VIEW.x * 0.5)
+}
+
+/// Where the row splits between box `n` and the next (window-x fraction):
+/// the middle of the gap between them.
+const fn secondary_split(n: usize) -> f32 {
+    let edge = secondary_left(n + 1) - SECONDARY_GAP * 0.5;
+    edge / crate::anchor::MIN_VIEW.x + 0.5
+}
+
 /// PRACTICE · RIVALS · REPLAYS · SETTINGS split the secondary row on
 /// window-x at these fractions.
-const SECONDARY_PRACTICE_X: f32 = 0.26;
-const SECONDARY_RIVALS_X: f32 = 0.50;
-const SECONDARY_REPLAYS_X: f32 = 0.74;
+const SECONDARY_PRACTICE_X: f32 = secondary_split(0);
+const SECONDARY_RIVALS_X: f32 = secondary_split(1);
+const SECONDARY_REPLAYS_X: f32 = secondary_split(2);
 pub const MODE_TOGGLE_RECT: ui::Band = ui::title::MODE_TOGGLE;
 pub const MODE_TOGGLE_ANCHOR_Y: f32 = ui::band_anchor_y(MODE_TOGGLE_RECT);
 pub const DIAL_RECT: ui::Band = ui::title::DIAL;
@@ -599,29 +644,29 @@ fn spawn_overlays(mut commands: Commands) {
     spawn_title_button(
         &mut commands,
         TitleAction::Practice,
-        Vec2::new(-0.72, SECONDARY_ANCHOR_Y),
-        Vec2::new(250.0, 92.0),
+        Vec2::new(secondary_anchor_x(0), SECONDARY_ANCHOR_Y),
+        Vec2::new(SECONDARY_FILLS[0], 92.0),
         crate::ui::TextRole::TitleMenu,
     );
     spawn_title_button(
         &mut commands,
         TitleAction::Rivals,
-        Vec2::new(-0.24, SECONDARY_ANCHOR_Y),
-        Vec2::new(230.0, 92.0),
+        Vec2::new(secondary_anchor_x(1), SECONDARY_ANCHOR_Y),
+        Vec2::new(SECONDARY_FILLS[1], 92.0),
         crate::ui::TextRole::TitleMenu,
     );
     spawn_title_button(
         &mut commands,
         TitleAction::Replays,
-        Vec2::new(0.24, SECONDARY_ANCHOR_Y),
-        Vec2::new(230.0, 92.0),
+        Vec2::new(secondary_anchor_x(2), SECONDARY_ANCHOR_Y),
+        Vec2::new(SECONDARY_FILLS[2], 92.0),
         crate::ui::TextRole::TitleMenu,
     );
     spawn_title_button(
         &mut commands,
         TitleAction::Settings,
-        Vec2::new(0.72, SECONDARY_ANCHOR_Y),
-        Vec2::new(240.0, 92.0),
+        Vec2::new(secondary_anchor_x(3), SECONDARY_ANCHOR_Y),
+        Vec2::new(SECONDARY_FILLS[3], 92.0),
         crate::ui::TextRole::TitleMenu,
     );
     // Summary overlay — screen-centered (the kill-cam holds zoomed-in on
@@ -1042,6 +1087,46 @@ fn update_title_overlay(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The secondary row fits a portrait screen, its taps split between
+    /// its boxes, and its longest label fits its box at the readable size.
+    #[test]
+    fn the_secondary_row_fits_and_splits_between_its_boxes() {
+        assert!(secondary_row_width() <= crate::anchor::MIN_VIEW.x - 40.0);
+        let splits = [
+            SECONDARY_PRACTICE_X,
+            SECONDARY_RIVALS_X,
+            SECONDARY_REPLAYS_X,
+        ];
+        for (n, split) in splits.iter().enumerate() {
+            let right = secondary_left(n) + SECONDARY_FILLS[n] + BUTTON_BORDER;
+            let next = secondary_left(n + 1);
+            let at = (split - 0.5) * crate::anchor::MIN_VIEW.x;
+            assert!(
+                right < at && at < next,
+                "split {n} at {at} between {right} and {next}"
+            );
+        }
+        // Advance is 6/9 of the em, a space 4/9; the em at the readable
+        // size lands near 0.97 of it on a phone's pixel grid.
+        let em = crate::ui::TextRole::TitleMenu.default_size() * 0.97;
+        let label = |glyphs: f32, spaces: f32| em * (glyphs * 6.0 + spaces * 4.0) / 9.0;
+        for (n, width) in [
+            label(10.0, 1.0),
+            label(6.0, 0.0),
+            label(7.0, 0.0),
+            label(8.0, 0.0),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            assert!(
+                width + 16.0 <= SECONDARY_FILLS[n],
+                "box {n}: {width} in {}",
+                SECONDARY_FILLS[n]
+            );
+        }
+    }
 
     #[test]
     fn watch_the_kill_sits_clear_of_the_other_summary_targets() {
