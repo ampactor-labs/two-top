@@ -457,19 +457,49 @@ pub fn apply_touch_events(
 /// finger [`MOUSE_TOUCH_ID`]). Frame counter advances even when no
 /// touches are active so future cycles can measure
 /// elapsed-frames-since-touch-start without interleaved gaps.
-pub fn update_touch_state(mut state: ResMut<TouchState>, bevy_touches: Res<Touches>) {
+pub fn update_touch_state(
+    mut state: ResMut<TouchState>,
+    bevy_touches: Res<Touches>,
+    mut claimed: ResMut<ClaimedTouches>,
+) {
     let frame = state.frame.wrapping_add(1);
+    let free = |id: u64| !claimed.0.contains(&id);
     apply_touch_events(
         &mut state,
         frame,
         bevy_touches
             .iter_just_pressed()
+            .filter(|t| free(t.id()))
             .map(|t| (t.id(), t.position())),
-        bevy_touches.iter_just_released().map(|t| t.id()),
-        bevy_touches.iter_just_canceled().map(|t| t.id()),
-        bevy_touches.iter().map(|t| (t.id(), t.position())),
+        bevy_touches
+            .iter_just_released()
+            .map(|t| t.id())
+            .filter(|id| free(*id)),
+        bevy_touches
+            .iter_just_canceled()
+            .map(|t| t.id())
+            .filter(|id| free(*id)),
+        bevy_touches
+            .iter()
+            .filter(|t| free(t.id()))
+            .map(|t| (t.id(), t.position())),
     );
+    // A claimed finger is the app's until it lifts, then it is nobody's.
+    for t in bevy_touches
+        .iter_just_released()
+        .chain(bevy_touches.iter_just_canceled())
+    {
+        claimed.0.remove(&t.id());
+    }
 }
+
+/// Fingers the app has claimed for something drawn over the game (a link
+/// card with its QR): [`update_touch_state`] never tracks them, from press
+/// to release, so the tap that closes a card is never also a stick, an aim
+/// or a throw, which at the summary is the rematch. The app adds a finger
+/// before `update_touch_state` sees its press; it leaves when it lifts.
+#[derive(Resource, Default, Debug)]
+pub struct ClaimedTouches(pub std::collections::BTreeSet<u64>);
 
 /// PreUpdate system: resolves the virtual stick after `update_touch_state`
 /// has synced the touch list. Reads `WindowSize` to gate the left half;
@@ -714,12 +744,17 @@ pub struct InputTouchPlugin;
 impl Plugin for InputTouchPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<TouchState>()
+            .init_resource::<ClaimedTouches>()
             .init_resource::<WindowSize>()
             .init_resource::<StickDeadzone>()
             .init_resource::<Southpaw>()
             .add_systems(
                 PreUpdate,
-                (update_touch_state, update_virtual_stick, update_throw_state).chain(),
+                // After Bevy's input systems: read this frame's touches, the
+                // same ones the app's `ClaimedTouches` claim was made from.
+                (update_touch_state, update_virtual_stick, update_throw_state)
+                    .chain()
+                    .after(bevy::input::InputSystems),
             );
     }
 }

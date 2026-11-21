@@ -9,6 +9,7 @@
 //! and (online) is what you offer the table handshake.
 
 use bevy::prelude::*;
+use bevy::text::TextBounds;
 use input_touch::WindowSize;
 use sim::{ALL_ARENAS, ArenaId, SelectedArena};
 
@@ -18,6 +19,13 @@ use crate::screen::AppScreen;
 /// Rows band (window-fraction, y-down).
 const LIST_TOP: f32 = 0.14;
 const LIST_PITCH: f32 = 0.085;
+/// Where a row's name and rule centre (anchor x): right of the thumbnail
+/// at -0.66, so a rule at the readable size never runs into it.
+const ROW_TEXT_X: f32 = 0.20;
+/// A rule's wrap width (design units): the room from the thumbnail's
+/// right edge to the screen's, around `ROW_TEXT_X`. The longest rule fits
+/// on one line on a phone; a coarser pixel grid wraps it, never clips it.
+const RULE_WIDTH: f32 = 860.0;
 /// The BACK band at the bottom — same gesture as every menu.
 const BACK_BAND: crate::ui::Band = crate::ui::BACK;
 
@@ -77,7 +85,7 @@ fn enter_roster(mut commands: Commands, asset_server: Res<AssetServer>) {
             ),
             TextColor(render::palette::BONE),
             TextLayout::justify(Justify::Center),
-            ScreenAnchor::new(0.10, ay + 0.030, 0.0, 0.0),
+            ScreenAnchor::new(ROW_TEXT_X, ay + 0.030, 0.0, 0.0),
             Transform::from_xyz(0.0, 0.0, crate::ui::z::MENU_TEXT),
         ));
         commands.spawn((
@@ -90,9 +98,10 @@ fn enter_roster(mut commands: Commands, asset_server: Res<AssetServer>) {
                 },
                 crate::ui::TextRole::RosterRule,
             ),
-            TextColor(render::palette::BONE.with_alpha(0.6)),
+            TextColor(render::palette::BONE.with_alpha(0.8)),
             TextLayout::justify(Justify::Center),
-            ScreenAnchor::new(0.10, ay - 0.032, 0.0, 0.0),
+            TextBounds::new_horizontal(RULE_WIDTH),
+            ScreenAnchor::new(ROW_TEXT_X, ay - 0.032, 0.0, 0.0),
             Transform::from_xyz(0.0, 0.0, crate::ui::z::MENU_TEXT),
         ));
     }

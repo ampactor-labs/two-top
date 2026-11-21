@@ -15,7 +15,9 @@ XVFB=$!
 trap 'kill $XVFB 2>/dev/null' EXIT
 sleep 2
 
-SIZES="540x1170 720x1280 1024x768 900x600"
+# 1080x2340 is the phone the game ships to (a Galaxy A16): the size a
+# text or layout change is judged at first.
+SIZES="1080x2340 540x1170 720x1280 1024x768 900x600"
 # name | extra environment | when to capture
 SCENES=(
   "title||@150"

@@ -124,9 +124,15 @@ impl Plugin for SettingsPlugin {
             .add_systems(
                 Update,
                 (
-                    adjust_settings.run_if(in_state(AppScreen::Settings)),
-                    settings_back.run_if(in_state(AppScreen::Settings)),
-                    settings_how_to_play.run_if(in_state(AppScreen::Settings)),
+                    adjust_settings
+                        .run_if(in_state(AppScreen::Settings))
+                        .run_if(crate::share::no_link_card),
+                    settings_back
+                        .run_if(in_state(AppScreen::Settings))
+                        .run_if(crate::share::no_link_card),
+                    settings_how_to_play
+                        .run_if(in_state(AppScreen::Settings))
+                        .run_if(crate::share::no_link_card),
                     update_setting_rows,
                 ),
             );

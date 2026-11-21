@@ -98,6 +98,23 @@ pub struct FullScreenSprite {
     pub cover: f32,
 }
 
+/// The world view the camera guarantees every device (`AutoMin`): the
+/// arena plus a margin, its height foreshortened as the table renders.
+/// Anchored UI is sized in these units at rest, so a design size `s`
+/// covers `s * screen_px_per_unit(window)` screen pixels.
+pub const MIN_VIEW: Vec2 = Vec2::new(
+    (2 * sim::ARENA_HALF_WIDTH_CM) as f32 + 2.0 * VIEW_MARGIN_CM,
+    (2 * sim::ARENA_HALF_HEIGHT_CM) as f32 * render::WORLD_TILT_Y + 2.0 * VIEW_MARGIN_CM,
+);
+
+/// World margin around the arena inside [`MIN_VIEW`].
+const VIEW_MARGIN_CM: f32 = 80.0;
+
+/// Screen pixels per design unit at rest for a window of this size. Pure.
+pub fn screen_px_per_unit(window: Vec2) -> f32 {
+    (window.x / MIN_VIEW.x).min(window.y / MIN_VIEW.y)
+}
+
 /// Visible world half-extents for a window + our orthographic projection.
 /// Replicates `AutoMin` by hand instead of trusting `ortho.area`, because
 /// Bevy only refreshes `area` on resize/projection-change events — the

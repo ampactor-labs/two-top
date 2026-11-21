@@ -505,7 +505,7 @@ fn enter_replays(
     if let Some(dir) = replays_dir() {
         commands.spawn((
             ReplayScreenText,
-            Text2d::new("tapes are files - swap them with a friend, they play here"),
+            Text2d::new("tapes are files - swap them\nwith a friend, they play here"),
             (
                 TextFont {
                     font_size: crate::ui::TextRole::ListDetail.font_size(),
@@ -513,9 +513,9 @@ fn enter_replays(
                 },
                 crate::ui::TextRole::ListDetail,
             ),
-            TextColor(render::palette::BONE.with_alpha(0.55)),
+            TextColor(render::palette::BONE.with_alpha(0.8)),
             TextLayout::justify(Justify::Center),
-            ScreenAnchor::at(0.5, 0.79),
+            ScreenAnchor::at(0.5, 0.772),
             Transform::from_xyz(0.0, 0.0, crate::ui::z::MENU_TEXT),
         ));
         commands.spawn((
@@ -528,10 +528,10 @@ fn enter_replays(
                 },
                 crate::ui::TextRole::ListFine,
             ),
-            TextColor(render::palette::BONE.with_alpha(0.4)),
+            TextColor(render::palette::BONE.with_alpha(0.65)),
             TextLayout::justify(Justify::Center),
             TextBounds::new_horizontal(1000.0),
-            ScreenAnchor::at(0.5, 0.825),
+            ScreenAnchor::at(0.5, 0.832),
             Transform::from_xyz(0.0, 0.0, crate::ui::z::MENU_TEXT),
         ));
     }
@@ -1404,7 +1404,11 @@ impl Plugin for TheaterPlugin {
                     // Ordered: the seek `theater_input` issues this frame must
                     // be consumed by `theater_drive_seek` this frame, not next,
                     // or the transport lags a frame behind every tap.
-                    (theater_input, theater_capture_snapshot, theater_drive_seek)
+                    (
+                        theater_input.run_if(crate::share::no_link_card),
+                        theater_capture_snapshot,
+                        theater_drive_seek,
+                    )
                         .chain()
                         .run_if(in_state(AppScreen::InMatch)),
                     theater_update_ui.after(ScreenAnchorSet),

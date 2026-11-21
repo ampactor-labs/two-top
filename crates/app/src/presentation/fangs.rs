@@ -95,7 +95,13 @@ pub(crate) fn ensure_boomerang_visuals(
     for (entity, pos) in &q {
         let (x, y) = pos.0.to_f32();
         let ty = render::tilt_y(y * flip.0);
-        commands.entity(entity).insert((
+        // `try_insert`: the sim world can be rewritten after this queues and
+        // before it lands. A theater seek and a resume's replay both run an
+        // exclusive `sim::fast_forward` (or a snapshot restore) mid-`Update`,
+        // and a fang caught in those ticks is gone by the time commands
+        // apply. A plain `insert` there is Bevy's fatal "Entity despawned"
+        // error: scrubbing a replay crashed the phone on exactly that.
+        commands.entity(entity).try_insert((
             Sprite {
                 image: image.clone(),
                 custom_size: Some(Vec2::new(size_px, size_px)),
@@ -113,5 +119,46 @@ pub(crate) fn ensure_boomerang_visuals(
             size_px * 0.7,
             Vec2::new(x, ty),
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bevy::ecs::system::SystemState;
+
+    /// The replay crash, in the order it happened: this system queues a
+    /// fang's dressing, a world rewrite in the same frame (the theater's
+    /// seek) despawns the fang, then the queued commands apply. They must
+    /// skip the fang, not end the app.
+    #[test]
+    fn a_fang_gone_before_its_dressing_lands_is_skipped() {
+        let mut world = World::new();
+        world.init_resource::<bevy_ggrs::RollbackOrdered>();
+        world.insert_resource(FangTextures {
+            fang: Handle::default(),
+            shadow: Handle::default(),
+        });
+        world.init_resource::<render::PerspectiveFlip>();
+        let fang = world
+            .spawn((
+                Boomerang {
+                    owner_handle: 0,
+                    state: sim::BoomerangState::Flying,
+                },
+                PositionF(fixed_math::Vec2F::ZERO),
+            ))
+            .id();
+        let mut state = SystemState::<(
+            Commands,
+            Res<FangTextures>,
+            Res<render::PerspectiveFlip>,
+            NewBoomerangs,
+        )>::new(&mut world);
+        let (commands, textures, flip, q) = state.get_mut(&mut world);
+        ensure_boomerang_visuals(commands, textures, flip, q);
+        world.despawn(fang);
+        state.apply(&mut world);
+        assert!(world.get_entity(fang).is_err());
     }
 }

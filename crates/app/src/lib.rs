@@ -507,11 +507,12 @@ fn setup(
     // now gets what the APK gets, and a desktop browser keeps the full
     // HLD glow exactly like the native desktop build.
     {
-        const VIEW_MARGIN_CM: f32 = 80.0;
-        let min_width = (2 * sim::ARENA_HALF_WIDTH_CM) as f32 + 2.0 * VIEW_MARGIN_CM;
-        // The arena renders Y-foreshortened, so frame the foreshortened height.
-        let min_height =
-            (2 * sim::ARENA_HALF_HEIGHT_CM) as f32 * render::WORLD_TILT_Y + 2.0 * VIEW_MARGIN_CM;
+        // The arena renders Y-foreshortened, so the view frames the
+        // foreshortened height (`anchor::MIN_VIEW`).
+        let Vec2 {
+            x: min_width,
+            y: min_height,
+        } = anchor::MIN_VIEW;
         let mut camera = commands.spawn((
             Camera2d,
             // MSAA does nothing for quad sprites; skip its fill cost.

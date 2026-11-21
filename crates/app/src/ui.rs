@@ -151,8 +151,13 @@ pub mod z {
     pub const COUNTDOWN: f32 = 150.0;
     /// A menu screen's boxes and plates (over the match).
     pub const MENU: f32 = 200.0;
-    /// A menu screen's text and the top of the stack.
+    /// A menu screen's text.
     pub const MENU_TEXT: f32 = 210.0;
+    /// A modal card's scrim: over every screen, so nothing under the card
+    /// shows through it (`share::spawn_link_card`).
+    pub const MODAL: f32 = 300.0;
+    /// A modal card's content, over its scrim: the top of the stack.
+    pub const MODAL_TEXT: f32 = 310.0;
 }
 
 // ---- Text roles: every text size in one table ----
@@ -339,6 +344,14 @@ impl TextRole {
         TextRole::RivalTape,
     ];
 
+    /// The smallest design size a player ever reads: 2 font pixels to the
+    /// face's pixel on a 720-wide phone, 3 on a 1080-wide one. Below it
+    /// the pixel face renders at 1x on cheaper phones, a 9-pixel em, which
+    /// is where the QUIT button, the settings group headers and the
+    /// replays fine print all were. Only the developer's own overlays
+    /// (`Debug`, the desktop `KeyLegend`) sit under it.
+    pub const MIN_READABLE: f32 = 30.0;
+
     /// The size this role is drawn at with no tuning override.
     pub const fn default_size(self) -> f32 {
         match self {
@@ -350,14 +363,14 @@ impl TextRole {
             TextRole::TitleName => 44.0,
             TextRole::TitleOverlay => 34.0,
             TextRole::TitlePlay => 48.0,
-            TextRole::TitleMenu => 22.0,
+            TextRole::TitleMenu => 30.0,
             TextRole::SummaryCard => 56.0,
             TextRole::ButtonPrimary => 44.0,
             TextRole::ButtonExit => 30.0,
-            TextRole::ButtonQuit => 24.0,
-            TextRole::PillLabel => 28.0,
+            TextRole::ButtonQuit => 30.0,
+            TextRole::PillLabel => 30.0,
             TextRole::CodeGlyph => 54.0,
-            TextRole::QrCaption => 26.0,
+            TextRole::QrCaption => 30.0,
             TextRole::NameEntry => 64.0,
             TextRole::NameKey => 46.0,
             TextRole::NamePrompt => 34.0,
@@ -366,38 +379,38 @@ impl TextRole {
             TextRole::NameDone => 40.0,
             TextRole::Callout => 40.0,
             TextRole::TouchDash => 40.0,
-            TextRole::TouchTaunt => 24.0,
-            TextRole::TouchHint => 26.0,
+            TextRole::TouchTaunt => 30.0,
+            TextRole::TouchHint => 30.0,
             TextRole::Notice => 30.0,
             TextRole::ListRow => 34.0,
-            TextRole::ListDetail => 24.0,
-            TextRole::ListFine => 18.0,
+            TextRole::ListDetail => 30.0,
+            TextRole::ListFine => 30.0,
             TextRole::Marquee => 34.0,
             TextRole::RosterName => 44.0,
-            TextRole::RosterRule => 26.0,
+            TextRole::RosterRule => 30.0,
             TextRole::KeyLegend => 26.0,
             TextRole::ShareLabel => 30.0,
-            TextRole::ShareUrl => 22.0,
-            TextRole::ShareDismiss => 20.0,
+            TextRole::ShareUrl => 30.0,
+            TextRole::ShareDismiss => 30.0,
             TextRole::Debug => 13.0,
-            TextRole::GroupHeader => 24.0,
+            TextRole::GroupHeader => 30.0,
             TextRole::SettingLabel => 40.0,
             TextRole::SettingValue => 46.0,
             TextRole::SettingsHowTo => 30.0,
             TextRole::Summoning => 54.0,
-            TextRole::CrashNotice => 26.0,
+            TextRole::CrashNotice => 30.0,
             TextRole::IntroTitle => 56.0,
             TextRole::IntroSub => 32.0,
             TextRole::RivalsEmpty => 34.0,
             TextRole::RivalRowName => 40.0,
-            TextRole::RivalRowDetail => 24.0,
+            TextRole::RivalRowDetail => 30.0,
             TextRole::RivalRowSub => 34.0,
             TextRole::RivalName => 64.0,
             TextRole::RivalStanding => 36.0,
-            TextRole::RivalFact => 28.0,
+            TextRole::RivalFact => 30.0,
             TextRole::RivalShade => 32.0,
-            TextRole::RivalNoTapes => 26.0,
-            TextRole::RivalTape => 28.0,
+            TextRole::RivalNoTapes => 30.0,
+            TextRole::RivalTape => 30.0,
         }
     }
 
@@ -523,6 +536,27 @@ pub fn apply_text_roles(
 #[cfg(test)]
 mod text_role_tests {
     use super::*;
+
+    /// Font pixels per face pixel a design size renders at (the rounding
+    /// in [`pixel_size`]).
+    fn font_px(design: f32, ppw: f32) -> f32 {
+        (design * 0.85 * ppw / PIXEL_EM).round().max(1.0)
+    }
+
+    #[test]
+    fn no_player_ever_reads_text_too_small() {
+        let phone_720 = crate::anchor::screen_px_per_unit(Vec2::new(720.0, 1600.0));
+        let phone_1080 = crate::anchor::screen_px_per_unit(Vec2::new(1080.0, 2340.0));
+        for role in TextRole::ALL {
+            if matches!(role, TextRole::Debug | TextRole::KeyLegend) {
+                continue;
+            }
+            let size = role.default_size();
+            assert!(size >= TextRole::MIN_READABLE, "{role:?} is {size}");
+            assert!(font_px(size, phone_720) >= 2.0, "{role:?} on a 720 phone");
+            assert!(font_px(size, phone_1080) >= 3.0, "{role:?} on a 1080 phone");
+        }
+    }
 
     #[test]
     fn every_role_is_listed_once_with_a_size() {

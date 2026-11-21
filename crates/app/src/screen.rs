@@ -201,13 +201,21 @@ impl Plugin for ScreenPlugin {
                     update_bot_offer.after(update_awaiting_peer),
                     pick_arena.run_if(in_state(AppScreen::Title)),
                     title_buttons_input.run_if(in_state(AppScreen::Title)),
-                    back_to_lobby.run_if(in_state(AppScreen::InMatch)),
-                    online_leave_input.run_if(in_state(AppScreen::InMatch)),
-                    summary_buttons_input.run_if(in_state(AppScreen::InMatch)),
+                    back_to_lobby
+                        .run_if(in_state(AppScreen::InMatch))
+                        .run_if(crate::share::no_link_card),
+                    online_leave_input
+                        .run_if(in_state(AppScreen::InMatch))
+                        .run_if(crate::share::no_link_card),
+                    summary_buttons_input
+                        .run_if(in_state(AppScreen::InMatch))
+                        .run_if(crate::share::no_link_card),
                     // After summary_buttons_input so the same tap can't
                     // double-fire: the summary sees the pre-practice state
                     // and stays inert on a fled opponent.
-                    bot_fallback_input.run_if(in_state(AppScreen::InMatch)),
+                    bot_fallback_input
+                        .run_if(in_state(AppScreen::InMatch))
+                        .run_if(crate::share::no_link_card),
                     update_victory_pose,
                     hide_absent_challenger,
                     update_title_overlay,
@@ -465,6 +473,10 @@ pub enum BtnRole {
     Label,
 }
 
+/// How much wider and taller than its fill a button's border box is
+/// (design units): an 11-unit frame on every side.
+pub const BUTTON_BORDER: f32 = 22.0;
+
 /// Spawn one piece of a bordered box button. `insert_marker` stamps the
 /// screen-specific marker (title vs summary vs the room pad) so each
 /// screen's update system finds only its own buttons.
@@ -480,7 +492,7 @@ pub fn spawn_button_part(
         BtnRole::Border => commands.spawn((
             Sprite {
                 color: render::palette::HOT_BONE,
-                custom_size: Some(fill + Vec2::splat(22.0)),
+                custom_size: Some(fill + Vec2::splat(BUTTON_BORDER)),
                 ..default()
             },
             ScreenAnchor::new(anchor.x, anchor.y, 0.0, 0.0),

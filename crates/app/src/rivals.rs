@@ -14,6 +14,7 @@
 //! has learned the other.
 
 use bevy::prelude::*;
+use bevy::text::TextBounds;
 use input_touch::WindowSize;
 
 use crate::anchor::ScreenAnchor;
@@ -123,6 +124,9 @@ fn spawn_text(
         ),
         TextColor(color),
         TextLayout::justify(Justify::Center),
+        // Wraps before it would leave the screen: twice the room from the
+        // anchor to the nearer edge (a scouting line has no fixed length).
+        TextBounds::new_horizontal((1.0 - anchor.0.abs()) * crate::anchor::MIN_VIEW.x * 0.95),
         ScreenAnchor::new(anchor.0, anchor.1, 0.0, 0.0),
         Transform::from_xyz(0.0, 0.0, z),
     ));

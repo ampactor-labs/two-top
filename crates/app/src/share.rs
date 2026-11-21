@@ -23,7 +23,7 @@ use sim::MatchState;
 use std::path::PathBuf;
 
 use crate::anchor::ScreenAnchor;
-use crate::screen::AppScreen;
+use crate::screen::{AppScreen, BtnRole};
 
 /// Where the SHARE label sits on the summary (window-fraction, y-down),
 /// and the tap band around it: the right-hand corner just BELOW the
@@ -39,15 +39,27 @@ use crate::screen::AppScreen;
 /// came up over the replay list and was gone a frame later); on the
 /// summary the top half of the label was also LOBBY, or online LEAVE,
 /// which says goodbye to the opponent and ends any rematch.
-const SUMMARY_ANCHOR: (f32, f32) = (0.80, 0.215);
+const SUMMARY_ANCHOR: (f32, f32) = band_center(SUMMARY_BAND);
 const SUMMARY_BAND: ((f32, f32), (f32, f32)) =
     ((0.62, 0.98), (0.17, input_touch::TAUNT_ZONE_Y_FRAC));
 /// Theater placement: the same corner, under the BACK box. A tape plays
 /// itself, so no touch zone reads here — but the theater reads a tap
 /// anywhere outside its strips as pause, and skips this band while the
 /// label is up ([`ShareTapBand`]).
-const THEATER_ANCHOR: (f32, f32) = (0.82, 0.215);
+const THEATER_ANCHOR: (f32, f32) = band_center(THEATER_BAND);
 const THEATER_BAND: ((f32, f32), (f32, f32)) = ((0.66, 0.98), (0.17, 0.26));
+
+/// The centre of a SHARE band (window fraction, y-down): where its button
+/// sits, so the box drawn and the target tapped cannot drift apart.
+const fn band_center(band: ((f32, f32), (f32, f32))) -> (f32, f32) {
+    ((band.0.0 + band.0.1) * 0.5, (band.1.0 + band.1.1) * 0.5)
+}
+
+/// The SHARE button's fill (design units). It used to be a bare word in
+/// the corner, too small to find; it is a bordered button now, the
+/// game's own, with the box (fill plus border) inside its band on every
+/// window the contact sheet renders (a test holds that).
+const SHARE_FILL: Vec2 = Vec2::new(340.0, 64.0);
 
 /// The SHARE band that is live this frame, if a label is showing: other
 /// screens' tap handlers leave a tap here to SHARE (the theater's
@@ -263,22 +275,18 @@ fn spawn_share_labels(
         return;
     }
     for (on_summary, (fx, fy)) in [(true, SUMMARY_ANCHOR), (false, THEATER_ANCHOR)] {
-        commands.spawn((
-            ShareLabel { on_summary },
-            Text2d::new(String::new()),
-            (
-                TextFont {
-                    font_size: crate::ui::TextRole::ShareLabel.font_size(),
-                    ..default()
+        for role in [BtnRole::Border, BtnRole::Fill, BtnRole::Label] {
+            crate::screen::spawn_button_part(
+                &mut commands,
+                role,
+                Vec2::new(crate::ui::anchor_x(fx), crate::ui::anchor_y(fy)),
+                SHARE_FILL,
+                crate::ui::TextRole::ButtonExit,
+                &mut |ec, _| {
+                    ec.insert(ShareLabel { on_summary });
                 },
-                crate::ui::TextRole::ShareLabel,
-            ),
-            TextColor(render::palette::SPARK),
-            TextLayout::justify(Justify::Center),
-            ScreenAnchor::at(fx, fy),
-            Transform::from_xyz(0.0, 0.0, crate::ui::z::MENU_TEXT - 5.0),
-            Visibility::Hidden,
-        ));
+            );
+        }
     }
 }
 
@@ -314,7 +322,7 @@ fn drive_share(
     window: Res<WindowSize>,
     mut images: ResMut<Assets<Image>>,
     mut state: ResMut<ShareState>,
-    mut labels: Query<(&ShareLabel, &mut Visibility, &mut Text2d)>,
+    mut labels: Query<(&ShareLabel, &mut Visibility, Option<&mut Text2d>)>,
     overlay: Query<Entity, With<ShareOverlayPiece>>,
     mut live_band: ResMut<ShareTapBand>,
     (shade, score, profile): (
@@ -351,7 +359,7 @@ fn drive_share(
             THEATER_BAND
         }
     });
-    for (label, mut vis, mut text) in &mut labels {
+    for (label, mut vis, text) in &mut labels {
         let on = !busy
             && can_share
                 .as_ref()
@@ -361,7 +369,11 @@ fn drive_share(
         } else {
             Visibility::Hidden
         };
-        // A link if there is a drop to post to; otherwise a file.
+        // A link if there is a drop to post to; otherwise a file. The
+        // button's border and fill carry no text.
+        let Some(mut text) = text else {
+            continue;
+        };
         text.0 = match (posts, spar.is_some() && label.on_summary) {
             (true, true) => "SEND RESULT",
             (true, false) => "SHARE",
@@ -508,8 +520,50 @@ fn spawn_overlay(commands: &mut Commands, images: &mut Assets<Image>, url: &str)
     spawn_link_card(commands, images, url, ShareOverlayPiece);
 }
 
-/// A link as a card: its QR, the link under it, the close hint. Each piece
-/// wears `marker`, so its owner closes it. Shared by SHARE and GO LIVE.
+/// Every piece of a link card, whoever opened it. While one is up the card
+/// is modal: [`no_link_card`] holds the screens' tap handlers off, and
+/// [`claim_touches_on_cards`] keeps a finger that lands on it out of the
+/// touch layer until it lifts.
+#[derive(Component)]
+pub(crate) struct LinkCard;
+
+/// Run condition: no link card is on screen. Screens whose taps could land
+/// under a card (Settings, the summary, the theater) wait on it, so the
+/// tap that closes a card does only that. It used to fall through: TAP TO
+/// CLOSE sat inside Settings' BACK band, and a row under the QR toggled.
+pub(crate) fn no_link_card(cards: Query<(), With<LinkCard>>) -> bool {
+    cards.is_empty()
+}
+
+/// `PreUpdate`: a finger that lands while a card is up belongs to the
+/// card, from press to release (`input_touch::ClaimedTouches`).
+fn claim_touches_on_cards(
+    touches: Res<Touches>,
+    cards: Query<(), With<LinkCard>>,
+    mut claimed: ResMut<input_touch::ClaimedTouches>,
+) {
+    if cards.is_empty() {
+        return;
+    }
+    for t in touches.iter_just_pressed() {
+        claimed.0.insert(t.id());
+    }
+}
+
+/// The card's QR side (design units): about half a portrait phone's
+/// width, which another phone's camera holds focus on at arm's length.
+/// It was 190, a postage stamp under the menu's own text.
+const CARD_QR_SIDE: f32 = 520.0;
+
+/// Where the card's QR sits (window fraction, y-down). The link and the
+/// close hint hang under it by fixed design offsets, so they keep clear
+/// of it at every aspect.
+const CARD_QR_AT: (f32, f32) = (0.5, 0.42);
+
+/// A link as a card: a scrim over the whole screen, the link's QR, the link
+/// under it, the close hint. Each piece wears `marker`, so its owner closes
+/// it, and [`LinkCard`], so the card is modal. Shared by SHARE, GO LIVE and
+/// SEND MY SHADE.
 pub(crate) fn spawn_link_card<M: Component + Clone>(
     commands: &mut Commands,
     images: &mut Assets<Image>,
@@ -522,21 +576,48 @@ pub(crate) fn spawn_link_card<M: Component + Clone>(
         return;
     };
     let handle = images.add(image);
-    // custom_size, never Transform::scale — the screen-anchor system owns
-    // anchored scale (see room_code's join QR for the incident report).
+    // The scrim: nothing under the card shows through it. The card used to
+    // share the menu's own layer with no backing, so Settings' rows drew
+    // across the QR (a camera could not read it) and the link ran through
+    // the row under it.
+    let mut scrim = render::palette::VOID;
+    scrim.set_alpha(0.96);
     commands.spawn((
         marker.clone(),
+        LinkCard,
         Sprite {
-            image: handle,
-            custom_size: Some(Vec2::splat(190.0)),
+            color: scrim,
             ..default()
         },
-        ScreenAnchor::new(0.0, 0.12, 0.0, 0.0),
-        Transform::from_xyz(0.0, 0.0, crate::ui::z::MENU_TEXT),
+        crate::anchor::FullScreenSprite { cover: 1.05 },
+        Transform::from_xyz(0.0, 0.0, crate::ui::z::MODAL),
     ));
-    let _ = side;
+    // custom_size, never Transform::scale — the screen-anchor system owns
+    // anchored scale (see room_code's join QR for the incident report).
+    let (qx, qy) = CARD_QR_AT;
     commands.spawn((
         marker.clone(),
+        LinkCard,
+        Sprite {
+            image: handle,
+            custom_size: Some(Vec2::splat(CARD_QR_SIDE)),
+            ..default()
+        },
+        ScreenAnchor::at(qx, qy),
+        Transform::from_xyz(0.0, 0.0, crate::ui::z::MODAL_TEXT),
+    ));
+    let _ = side;
+    let below = |gap: f32| {
+        ScreenAnchor::new(
+            crate::ui::anchor_x(qx),
+            crate::ui::anchor_y(qy),
+            0.0,
+            -(CARD_QR_SIDE * 0.5 + gap),
+        )
+    };
+    commands.spawn((
+        marker.clone(),
+        LinkCard,
         Text2d::new(url.to_string()),
         (
             TextFont {
@@ -545,13 +626,16 @@ pub(crate) fn spawn_link_card<M: Component + Clone>(
             },
             crate::ui::TextRole::ShareUrl,
         ),
-        TextColor(render::palette::BONE),
+        TextColor(render::palette::HOT_BONE),
         TextLayout::justify(Justify::Center),
-        ScreenAnchor::new(0.0, -0.62, 0.0, 0.0),
-        Transform::from_xyz(0.0, 0.0, crate::ui::z::MENU_TEXT),
+        // A long link wraps (at its slashes) rather than leave the screen.
+        bevy::text::TextBounds::new_horizontal(crate::anchor::MIN_VIEW.x * 0.95),
+        below(60.0),
+        Transform::from_xyz(0.0, 0.0, crate::ui::z::MODAL_TEXT),
     ));
     commands.spawn((
         marker.clone(),
+        LinkCard,
         Text2d::new("TAP TO CLOSE"),
         (
             TextFont {
@@ -562,8 +646,8 @@ pub(crate) fn spawn_link_card<M: Component + Clone>(
         ),
         TextColor(render::palette::COLD_STONE),
         TextLayout::justify(Justify::Center),
-        ScreenAnchor::new(0.0, -0.76, 0.0, 0.0),
-        Transform::from_xyz(0.0, 0.0, crate::ui::z::MENU_TEXT),
+        below(150.0),
+        Transform::from_xyz(0.0, 0.0, crate::ui::z::MODAL_TEXT),
     ));
     tracing::info!(target: "two_top::share", %url, "watch link on screen");
 }
@@ -577,6 +661,12 @@ impl Plugin for SharePlugin {
             .init_resource::<SharedTapePath>()
             .init_resource::<ShareTapBand>()
             .add_systems(Startup, spawn_share_labels)
+            .add_systems(
+                PreUpdate,
+                claim_touches_on_cards
+                    .after(bevy::input::InputSystems)
+                    .before(input_touch::update_touch_state),
+            )
             .add_systems(Update, drive_share);
     }
 }
@@ -636,6 +726,33 @@ mod tests {
                 (top..bottom).contains(&anchor.1) && (band.0.0..band.0.1).contains(&anchor.0),
                 "the label at {anchor:?} sits inside its own band {band:?}",
             );
+        }
+    }
+
+    /// The SHARE box (fill plus border) stays inside the band a tap must
+    /// land in, on the phones the game ships to and every window the
+    /// contact sheet renders: a box spilling out of its band has edges
+    /// that look tappable and are not.
+    #[test]
+    fn the_share_button_fits_inside_its_band() {
+        let boxed = SHARE_FILL + Vec2::splat(crate::screen::BUTTON_BORDER);
+        for window in [
+            Vec2::new(1080.0, 2340.0),
+            Vec2::new(720.0, 1600.0),
+            Vec2::new(540.0, 1170.0),
+            Vec2::new(720.0, 1280.0),
+            Vec2::new(1024.0, 768.0),
+            Vec2::new(900.0, 600.0),
+        ] {
+            let px = boxed * crate::anchor::screen_px_per_unit(window);
+            for band in [SUMMARY_BAND, THEATER_BAND] {
+                let w = (band.0.1 - band.0.0) * window.x;
+                let h = (band.1.1 - band.1.0) * window.y;
+                assert!(
+                    px.x <= w && px.y <= h,
+                    "a {px:?} px box in a {w}x{h} px band at {window:?}"
+                );
+            }
         }
     }
 

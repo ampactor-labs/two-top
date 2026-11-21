@@ -736,7 +736,10 @@ pub fn ensure_pickup_visuals(
     for (entity, pickup, pos) in &q {
         let (x, y) = pos.0.to_f32();
         let ty = tilt_y(y * flip.0);
-        commands.entity(entity).insert((
+        // `try_insert`: a pickup can be collected or expire inside a world
+        // rewrite that runs after this queues (the theater's seek, a
+        // resume's replay), and a plain `insert` on it is a fatal error.
+        commands.entity(entity).try_insert((
             Sprite {
                 image: image.clone(),
                 texture_atlas: Some(TextureAtlas {
