@@ -350,6 +350,7 @@ impl TextRole {
     /// is where the QUIT button, the settings group headers and the
     /// replays fine print all were. Only the developer's own overlays
     /// (`Debug`, the desktop `KeyLegend`) sit under it.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub const MIN_READABLE: f32 = 30.0;
 
     /// The size this role is drawn at with no tuning override.

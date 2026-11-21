@@ -155,7 +155,7 @@ mod tests {
             Res<render::PerspectiveFlip>,
             NewBoomerangs,
         )>::new(&mut world);
-        let (commands, textures, flip, q) = state.get_mut(&mut world);
+        let (commands, textures, flip, q) = state.get_mut(&mut world).unwrap();
         ensure_boomerang_visuals(commands, textures, flip, q);
         world.despawn(fang);
         state.apply(&mut world);

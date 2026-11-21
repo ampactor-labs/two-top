@@ -111,6 +111,7 @@ pub const MIN_VIEW: Vec2 = Vec2::new(
 const VIEW_MARGIN_CM: f32 = 80.0;
 
 /// Screen pixels per design unit at rest for a window of this size. Pure.
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn screen_px_per_unit(window: Vec2) -> f32 {
     (window.x / MIN_VIEW.x).min(window.y / MIN_VIEW.y)
 }
